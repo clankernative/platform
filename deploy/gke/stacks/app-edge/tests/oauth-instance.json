@@ -1,0 +1,68 @@
+{
+  "installation": "exampleco",
+  "environment": "production",
+  "identity": {"scheme": "google_iap", "hosted_domain": "example.com"},
+  "security_shell": {"origin": "https://security.tools.example.com", "iap_audience": "/projects/123456789012/global/backendServices/987654322"},
+  "oauth_shell_transport": {"service_account": "shell@example-tools.iam.gserviceaccount.com"},
+  "oauth_runtime": {
+    "version": 1,
+    "shell": {"project": "example-tools", "backend_service": "shell-backend", "url_map": "shell-map", "https_proxy": "shell-proxy", "forwarding_rule": "shell-rule", "kubernetes_service": "day2-security/security-shell"},
+    "apps": {"example": {"service_account": "app-native@example-tools.iam.gserviceaccount.com", "accounts": {"calendar": {"kind": "iap_subject"}}}}
+  },
+  "oauth_clients": {
+    "version": 2,
+    "reauthentication": {"client_id": "123-reauth.apps.googleusercontent.com", "credential": "reauth"},
+    "registrations": {"calendar_client": {"client": {"kind": "google", "client_id": "123-calendar.apps.googleusercontent.com", "credential": "calendar"}, "canary": {"qualification_subject": "accounts.google.com:112233", "provider_subject": "112233", "provider_tenant": "example.com"}}}
+  },
+  "apps": {
+    "example": {
+      "artifact": "artifacts/9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb",
+      "readers": ["qa@example.com"],
+      "writers": ["qa@example.com"],
+      "authority": {"version": 1, "admins": [], "operations": {"example.list": {"actors": ["qa@example.com"], "mode": {"kind": "read"}, "models": {}}}},
+      "runtime": {"kind": "linux_sqlite_single_v1", "resources": {"memory_mib": 512, "cpu_millis": 1000, "process_limit": 1024, "process_limit_enforced_by": "pod", "http_concurrency": 4, "shutdown_seconds": 30}},
+      "edge": {"origin": "https://example.test.example.com", "iap_audience": "/projects/123456789012/global/backendServices/987654321"},
+      "oauth_connections": {
+        "calendar": {
+          "namespace": {"installation": "exampleco", "environment": "production", "app": "example", "binding_generation": 1},
+          "requirement": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "profile": {"id": "google_calendar_mapped_v1", "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "registration": {"id": "calendar_client", "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+          "custody": {"id": "custody", "revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+          "security_shell": {"id": "shell", "revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+          "account_binding": {"id": "account", "revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+          "shell_attestation": {"id": "attestation", "revision": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+          "product_return": {"id": "return", "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "custody_verifier_secret": "verifier",
+          "custody_encryption_secret": "encryption",
+          "shell_attestation_secret": "attestation"
+        }
+      }
+    }
+  },
+  "control": {
+    "version": 1,
+    "state_directory": "/srv/day2/.state/control",
+    "operators": ["operator@example.com"],
+    "sources": {"example_source": {"kind": "remote_git", "host": "git.example.com", "namespace": "apps", "repository": "example"}},
+    "apps": {"example": {"source": "example_source"}},
+    "secrets": {
+      "attestation": {"kind": "gcp_version", "project_number": 123456789012, "secret": "shell_attestation", "version": 1},
+      "reauth": {"kind": "gcp_version", "project_number": 123456789012, "secret": "google_reauth", "version": 3},
+      "calendar": {"kind": "gcp_version", "project_number": 123456789012, "secret": "google_calendar", "version": 7},
+      "verifier": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_verifier", "version": 9},
+      "encryption": {"kind": "gcp_version", "project_number": 123456789012, "secret": "custody_encryption", "version": 11}
+    },
+    "security_epochs": {
+      "app_epoch": {
+        "scope": {"installation": "exampleco", "environment": "production", "app": "example"},
+        "provider": {
+          "kind": "firestore_native_v1", "project": "example-tools", "project_number": 123456789012,
+          "database": "security", "database_uid": "01234567-89ab-4cde-8fab-0123456789ab",
+          "iam_source": {"kind": "gke_workload_identity_v1", "service_account": "app-native@example-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}
+        },
+        "key_set": "sha256:ff814a63b7aba9dd129eae26e51c3b4aa444401095ed45554f25d8ceb4ec0b3c", "max_lease_seconds": 30
+      }
+    }
+  }
+}

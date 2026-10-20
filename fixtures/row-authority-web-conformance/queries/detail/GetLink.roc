@@ -48,7 +48,12 @@ GetLink :: [].{
 
 	verify_result : Str, LinkView.Value, Str -> Try(Bool, Str)
 	verify_result = |before, view, after| {
-		row = Data.snapshot(before)?.links.find_first(|item| item.id == view.id).map_err(|_| "missing row")?
+		row =
+			Data.verification_snapshot(before)?
+				.live
+				.links
+				.find_first(|item| item.id == view.id)
+				.map_err(|_| "missing row")?
 		Ok(before == after and row.version == view.version and row.value.title.to_str() == view.title.to_str())
 	}
 }

@@ -344,6 +344,7 @@ mod tests {
             ("app/App.roc", digest(app.as_bytes())),
         ]);
         let contract = serde_json::from_value(json!({"format":crate::artifact::CURRENT_FORMAT,
+            "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
             "roc_version":"reviewed-compiler","worker_digest":digest(app.as_bytes()),"schema_digest":digest(b"schema"),
             "schema":{"models":{},"inputs":{},"foreign_keys":[]},"operations":[],"sources":sources,"admission":"local-spike-only"})).unwrap();
         LoadedArtifact::from_contract_for_tests(

@@ -4,18 +4,19 @@
 use crate::{
     execution,
     host::{Host, WorkerAction},
+    host_inputs::Clock,
     protocol::{Phase, Request, Response},
     store::Runtime,
 };
 use anyhow::{Context, Result, ensure};
+use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     path::Path,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +27,7 @@ pub enum WorkerFailure {
 
 struct State {
     now_ms: i64,
+    monotonic: Duration,
     failures: VecDeque<WorkerFailure>,
     events: Vec<Value>,
 }
@@ -40,7 +42,7 @@ impl Host for Inputs {
         // Independent identities do not depend on incidental PRNG draw order.
         let encoded =
             serde_json::to_vec(&("day2-simulation-entropy-v1", self.seed, scope, invocation))?;
-        let seed: [u8; 32] = Sha256::digest(encoded).into();
+        let seed: [u8; 32] = digest(&SHA256, &encoded).as_ref().try_into()?;
         self.state
             .lock()
             .unwrap()
@@ -79,10 +81,20 @@ impl Host for Inputs {
         Ok(())
     }
 
-    fn deadline(&self, _phase: Phase, _started: Instant) -> Result<()> {
-        // Real watchdogs remain in Worker. A real adapter failure fails the
-        // campaign; modeled deadlines arrive through worker_action instead.
-        Ok(())
+    fn monotonic(&self) -> Duration {
+        Clock::monotonic(self)
+    }
+}
+
+impl Clock for Inputs {
+    fn wall_time(&self) -> Result<Duration> {
+        Ok(Duration::from_millis(
+            self.state.lock().unwrap().now_ms.try_into()?,
+        ))
+    }
+
+    fn monotonic(&self) -> Duration {
+        self.state.lock().unwrap().monotonic
     }
 }
 
@@ -158,12 +170,13 @@ impl Simulation {
             seed,
             state: Mutex::new(State {
                 now_ms,
+                monotonic: Duration::ZERO,
                 failures: VecDeque::new(),
                 events: Vec::new(),
             }),
         });
         Ok(Self {
-            runtime: runtime.with_host(inputs.clone()),
+            runtime: runtime.with_host(inputs.clone(), inputs.clone()),
             inputs,
         })
     }
@@ -180,6 +193,19 @@ impl Simulation {
         );
         state.now_ms = now_ms;
         state.events.push(json!({"time_ms":now_ms}));
+        Ok(())
+    }
+
+    /// Advance phase deadlines independently of wall/audit time. Native worker
+    /// watchdogs remain active even while this logical clock is stopped.
+    pub fn advance_monotonic(&self, elapsed: Duration) -> Result<()> {
+        let mut state = self.inputs.state.lock().unwrap();
+        let monotonic = state
+            .monotonic
+            .checked_add(elapsed)
+            .context("invalid_simulation_clock")?;
+        state.monotonic = monotonic;
+        state.events.push(json!({"monotonic":monotonic}));
         Ok(())
     }
 
@@ -393,6 +419,7 @@ mod tests {
             seed: [42; 32],
             state: Mutex::new(State {
                 now_ms: 7000,
+                monotonic: Duration::ZERO,
                 failures: VecDeque::new(),
                 events: vec![],
             }),

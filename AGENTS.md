@@ -58,7 +58,7 @@ associated methods with each signature adjacent to its implementation. Wrap Roc
 code at 120 columns, allowing unbreakable strings, URLs, comments and identifiers.
 The pinned native formatter patch enforces width and group separation through xtask fmt / fmt-check;
 bootstrap it with xtask bootstrap-formatter. Apple Silicon app compilation uses the
-unmodified official September 12 compiler pinned in toolchain.json. The historical
+unmodified official October 13 compiler pinned in toolchain.json. The historical
 reflection backport remains documented in tools/roc-compiler. Keep each native
 compiler paired with its reviewed ABI generator; Linux retains its separate pin. Review sealed
 module byte changes and refresh admission pins explicitly, never bypass the checks.
@@ -109,3 +109,9 @@ attributes; bind HTML form names to generated Roc command/input contracts.
 Company branding is an independent content-addressed instance input, not a
 global platform constant or a reason to rebuild the app. Never infer domain
 intent or presentation from form shape. The Roc business core remains pure.
+
+The experimental presentation ABI 1 is an independent opt-in request-time port:
+current authorized query data becomes checked scene records under separately
+approved executable bytes. It never invokes the UI build provider on requests or
+adds chart vocabulary to Platform. See docs/RUNTIME-PRESENTATIONS.md; declarations
+are metadata, not execution authority. No declaration means no runtime pin need.

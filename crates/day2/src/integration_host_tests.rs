@@ -9,7 +9,7 @@ use day2_capabilities::{
 };
 use rusqlite::TransactionBehavior;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     os::unix::fs::PermissionsExt,
     sync::{Mutex, atomic::AtomicU64},
 };
@@ -187,14 +187,16 @@ impl Fixture {
                 "resource_policies":[{"policy":{"id":"policy","revision":1},"operation":"run","bindings":{"resource":{"id":"resource","revision":1}}}]}}});
         fs::write(&path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(
-            json!({"format":crate::artifact::CURRENT_FORMAT,"roc_version":"host-test","worker_digest":"host-test",
+            json!({"format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"host-test","worker_digest":"host-test",
             "schema_digest":"host-test","schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"run","kind":"command","input_type":"input","output_type":""}],"sources":{},"admission":"local-spike-only"}),
         )?;
+        let inputs = crate::host_inputs::Inputs::default();
         let runtime = Runtime {
             integrations: Arc::new(integration_host::Host::local(&path)?),
             app_calls: None,
             credentials: None,
+            connections: None,
             instance_path: path,
             app: "app".into(),
             db: state.join("app.sqlite"),
@@ -205,7 +207,8 @@ impl Fixture {
                 artifact_directory,
                 contract,
             )),
-            host: Arc::new(crate::host::System),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
         }
         .with_integrations(integration_host::Host::injected(
             Arc::new(Resolver),
@@ -958,5 +961,532 @@ fn object_deletion_is_refused_to_an_application_that_was_granted_it() -> Result<
         "unexpected refusal: {error:?}"
     );
     assert_eq!(provider.count(), 0, "the store was reached anyway");
+    Ok(())
+}
+
+#[test]
+fn provider_mode_is_independent_from_delegation_simulation_mode() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("instance.json");
+    fs::create_dir_all(directory.path().join(".state"))?;
+    fs::write(&path, b"{}")?;
+    let local = integration_host::Host::local(&path)?;
+    assert!(!local.is_simulated());
+    assert!(!local.uses_simulated_providers());
+    let injected = integration_host::Host::injected(Arc::new(Resolver), Provider::new(vec![]));
+    assert!(!injected.is_simulated());
+    assert!(!injected.uses_simulated_providers());
+    let test_transport = integration_host::Host::with_test_transport(&path, Provider::new(vec![]))?;
+    assert!(!test_transport.is_simulated());
+    assert!(!test_transport.uses_simulated_providers());
+    let simulated =
+        integration_host::Host::simulated(&directory.path().join("app.sqlite"), "test/app");
+    assert!(simulated.is_simulated());
+    assert!(simulated.uses_simulated_providers());
+    let hybrid = integration_host::Host::simulated_providers_with_app_calls(
+        &directory.path().join("app.sqlite"),
+        "test/app",
+    );
+    assert!(!hybrid.is_simulated());
+    assert!(hybrid.uses_simulated_providers());
+    Ok(())
+}
+
+#[test]
+fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capability() -> Result<()>
+{
+    const ACTOR: &str = "directory-reader@coverage.test";
+    const CUSTOMER: &str = "Ccoverage";
+    const SCOPE: &str = "hybridco/test/app";
+    const NOW: i64 = 1_700_000_001;
+
+    fn fixture_runtime(
+        with_world: bool,
+        with_user: bool,
+        allow_hierarchy: bool,
+        response_limit: u64,
+    ) -> Result<(tempfile::TempDir, Runtime)> {
+        let directory = tempfile::tempdir()?;
+        let instance_path = directory.path().join("instance.json");
+        let state = directory.path().join(".state");
+        fs::create_dir_all(&state)?;
+        let artifact_directory = directory.path().join("hybrid-directory-contract");
+        fs::create_dir(&artifact_directory)?;
+        let live = serde_json::to_value(LiveConnection::WorkspaceDirectory {
+            service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
+            auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
+        })?;
+        let target = serde_json::to_value(ResourceTarget::WorkspaceDirectory {
+            customer_id: CUSTOMER.into(),
+        })?;
+        let mut actions = vec![Action::WorkspaceDirectoryCapture];
+        if allow_hierarchy {
+            actions.push(Action::WorkspaceDirectoryHierarchy);
+        }
+        let observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
+        let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":[ACTOR],
+            "mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]}}});
+        let catalog = json!({"version":1,
+            "connections":{"directory":{"revision":1,"provider":"workspace_directory","live":live}},
+            "resources":{"directory":{"revision":1,"connection":{"id":"directory","revision":1},"target":target}},
+            "policies":{"directory_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
+                "slots":{"directory":{"kind":"workspace_directory","allowed_resources":[{"id":"directory","revision":1}],
+                    "actions":actions,"limits":{"max_request_bytes":32768,"max_response_bytes":response_limit,"max_calls_per_invocation":5},
+                    "budgets":[{"id":"directory_budget","revision":1}]}}}},
+            "budgets":{"directory_budget":{"revision":1,"scope":"app","period_seconds":3600,
+                "limits":{"calls":100,"bytes":10000000,"concurrency":1}}}});
+        let instance = json!({"installation":"hybridco","environment":"test","resources":catalog,
+            "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
+                "resource_policies":[{"policy":{"id":"directory_read","revision":1},"operation":"run",
+                    "bindings":{"directory":{"id":"directory","revision":1}}}]}}});
+        fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
+        let contract = serde_json::from_value(json!({
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "roc_version":"hybrid-directory-test","worker_digest":"hybrid-directory-test","schema_digest":"hybrid-directory-test",
+            "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "operations":[{"name":"run","kind":"query","input_type":"input","output_type":"output"}],
+            "sources":{},"admission":"local-spike-only"}))?;
+        let inputs = crate::host_inputs::Inputs {
+            clock: Arc::new(crate::host_inputs::simulation::VirtualClock(
+                std::sync::Mutex::new((
+                    std::time::Duration::from_secs(NOW as u64),
+                    std::time::Duration::ZERO,
+                )),
+            )),
+            ..Default::default()
+        };
+        let runtime = Runtime {
+            integrations: Arc::new(integration_host::Host::local(&instance_path)?),
+            app_calls: None,
+            credentials: None,
+            connections: None,
+            instance_path,
+            app: "app".into(),
+            db: state.join("app.sqlite"),
+            scope: SCOPE.into(),
+            hosted_domain: None,
+            artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
+                "hybrid-directory-test".into(),
+                artifact_directory,
+                contract,
+            )),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
+        }
+        .with_integrations(integration_host::Host::simulated_providers_with_app_calls(
+            &state.join("app.sqlite"),
+            SCOPE,
+        ));
+        runtime.initialize()?;
+        let world = if with_world {
+            crate::integrations::simulated::WorkspaceDirectoryWorld {
+                customer_id: CUSTOMER.into(),
+                users: if with_user {
+                    BTreeMap::from([(
+                        ACTOR.into(),
+                        json!({"customerId":CUSTOMER,
+                        "orgUnitPath":"/Engineering","primaryEmail":ACTOR,"kind":"admin#directory#user"}),
+                    )])
+                } else {
+                    BTreeMap::new()
+                },
+                hierarchy: json!({"kind":"admin#directory#orgUnits","organizationUnits":[
+                    {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
+                    {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
+            }
+        } else {
+            Default::default()
+        };
+        crate::integrations::simulated::seed(
+            runtime.db(),
+            SCOPE,
+            &crate::integrations::simulated::SimulatedFixture {
+                workspace_directory: world,
+                slack: crate::integrations::simulated::SlackWorld {
+                    workspace_id: "THYBRID".into(),
+                    ..Default::default()
+                },
+                snowflake: crate::integrations::simulated::SnowflakeWorld {
+                    account: "hybrid-test".into(),
+                    ..Default::default()
+                },
+                openai: crate::integrations::simulated::OpenAiWorld {
+                    project_id: "proj_hybrid".into(),
+                    model: "model-hybrid".into(),
+                    max_input_tokens: 100_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )?;
+        if !with_world {
+            let world_path = runtime.db().with_file_name(crate::simulations::simulation(
+                day2_capabilities::resources::Provider::WorkspaceDirectory,
+            ));
+            fs::remove_file(world_path)?;
+        }
+        Ok((directory, runtime))
+    }
+
+    fn admitted_capture(
+        runtime: &Runtime,
+        invocation: &str,
+        capability_name: &str,
+        now: i64,
+        expect_cache_hit: bool,
+    ) -> Result<String> {
+        runtime.accept("run", ACTOR, invocation, &json!({}), now)?;
+        let mut connection = open(runtime.db())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request = Request {
+            operation: "run".into(),
+            input: "{}".into(),
+            context: crate::store::invocation_context(&tx, invocation)?,
+            observations: vec![],
+        };
+        let bound = crate::resources::host_operation(
+            &tx,
+            runtime,
+            &request,
+            &Instruction {
+                kind: "observe".into(),
+                model: crate::resources::BIND.into(),
+                data: json!({"binding":"directory","invocation":invocation}).to_string(),
+                ..Default::default()
+            },
+        )?
+        .context("directory resource binding")?;
+        let bound: Value = serde_json::from_str(&bound)?;
+        let handle = bound["token"]
+            .as_str()
+            .context("opaque directory handle")?
+            .to_owned();
+        let active = authority_state::current(&tx)?;
+        let instruction = Instruction {
+            kind: "observe".into(),
+            model: capability_name.into(),
+            data: json!({"handle":handle}).to_string(),
+            ..Default::default()
+        };
+        let capability = crate::capabilities::authorized(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            active.policy()?,
+            "ob_hybrid_directory",
+        )?;
+        crate::resources::record_use(&tx, invocation, capability.resource())?;
+        let reservation = crate::resources::reserve_in(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            invocation,
+            capability.resource(),
+            capability.quote(),
+        )?;
+        tx.commit()?;
+        let outcome = crate::capabilities::observe(runtime, capability, "hybrid-directory-test");
+        if expect_cache_hit {
+            assert_eq!(outcome.usage.calls, 0);
+            assert_eq!(outcome.usage.request_bytes, 0);
+            assert_eq!(outcome.usage.response_bytes, 0);
+            assert!(!outcome.usage.dispatched);
+        } else {
+            assert!(outcome.usage.calls > 0);
+            assert_eq!(
+                outcome.usage.response_bytes,
+                crate::workspace_directory::MAX_CAPTURE_RESPONSE_BYTES
+            );
+            assert_eq!(
+                outcome.usage.request_bytes,
+                crate::workspace_directory::MAX_CAPTURE_REQUEST_BYTES
+            );
+            assert!(outcome.usage.dispatched);
+        }
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
+        tx.commit()?;
+        outcome.result
+    }
+
+    let response_limit = crate::workspace_directory::MAX_RESPONSE_BYTES as u64;
+    let (_directory, runtime) = fixture_runtime(true, true, true, response_limit)?;
+    assert!(
+        !runtime.integrations().is_simulated(),
+        "delegation semantics changed"
+    );
+    assert!(runtime.integrations().uses_simulated_providers());
+    let capture: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "seeded",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )?)?;
+    assert_eq!(capture["customer_id"], CUSTOMER);
+    assert_eq!(capture["actor"], ACTOR);
+    assert_eq!(capture["user_path"], "/Engineering");
+    assert_eq!(capture["org_unit_count"], 2);
+    admitted_capture(
+        &runtime,
+        "second",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )?;
+    let exhausted = admitted_capture(
+        &runtime,
+        "budget-exhausted",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
+        "{exhausted}"
+    );
+
+    // Cache plans reserve and consume no provider traffic, even after another
+    // full provider envelope no longer fits. They still record current authority.
+    admitted_capture(
+        &runtime,
+        "cached-with-spent-budget",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        true,
+    )?;
+    assert!(
+        admitted_capture(
+            &runtime,
+            "cold-with-spent-budget",
+            "workspace_directory.hierarchy.v1",
+            NOW + crate::workspace_directory::SOURCE_TTL_SECONDS,
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .starts_with("budget_exhausted:")
+    );
+
+    let mut replay_traces = Vec::new();
+    for replay in 0..2 {
+        let (_directory, runtime) = fixture_runtime(true, true, true, response_limit)?;
+        use crate::integrations::simulated::{
+            ScheduledFault, SimulatedFault, schedule_faults, update_workspace_directory,
+        };
+        schedule_faults(
+            runtime.db(),
+            SCOPE,
+            day2_capabilities::resources::Provider::WorkspaceDirectory
+                .world()
+                .unwrap(),
+            vec![ScheduledFault {
+                endpoint: String::new(),
+                remaining: 1,
+                fault: SimulatedFault::Denied,
+            }],
+        )?;
+        assert_eq!(
+            admitted_capture(
+                &runtime,
+                "denied-cold",
+                "workspace_directory.hierarchy.v1",
+                NOW,
+                false
+            )
+            .unwrap_err()
+            .to_string(),
+            "workspace_directory_hierarchy_lookup_failed",
+            "replay {replay}"
+        );
+        let recovered: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered",
+            "workspace_directory.hierarchy.v1",
+            NOW + 1,
+            false,
+        )?)?;
+        assert_eq!(recovered["source_captured_at"], NOW + 1);
+        let cached: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            "recovered-cache",
+            "workspace_directory.hierarchy.v1",
+            NOW + 2,
+            true,
+        )?)?;
+        let world = update_workspace_directory(runtime.db(), SCOPE, |world| {
+            assert!(world.faults.is_empty());
+            assert_eq!(world.calls.len(), 2, "cache must not call the provider");
+            Ok(serde_json::to_value(world)?)
+        })?;
+        replay_traces.push(json!({"recovered":recovered,"cached":cached,"world":world}));
+    }
+    assert_eq!(replay_traces[0], replay_traces[1]);
+
+    let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
+    admitted_capture(
+        &runtime,
+        "before-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )?;
+    let refreshed: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "at-expiry",
+        "workspace_directory.hierarchy.v1",
+        NOW + 900,
+        false,
+    )?)?;
+    assert_eq!(refreshed["source_captured_at"], NOW + 900);
+    assert_eq!(refreshed["expires_at"], NOW + 1800);
+
+    let (_directory, runtime) = fixture_runtime(true, false, true, response_limit)?;
+    let cold: Value = serde_json::from_str(&admitted_capture(
+        &runtime,
+        "hierarchy-cold",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )?)?;
+    assert_eq!(cold["customer_id"], CUSTOMER);
+    assert_eq!(cold["actor"], ACTOR);
+    assert_eq!(cold["org_unit_count"], 2);
+    assert!(cold.get("user_path").is_none());
+    assert_eq!(cold["source_captured_at"], NOW);
+    assert_eq!(
+        cold["expires_at"],
+        NOW + crate::workspace_directory::SOURCE_TTL_SECONDS
+    );
+    for (invocation, now) in [("hierarchy-hit-1", NOW + 1), ("hierarchy-hit-2", NOW + 899)] {
+        let reused: Value = serde_json::from_str(&admitted_capture(
+            &runtime,
+            invocation,
+            "workspace_directory.hierarchy.v1",
+            now,
+            true,
+        )?)?;
+        assert_eq!(reused["captured_at"], now);
+        assert_eq!(reused["source_captured_at"], NOW);
+        assert_eq!(
+            reused["expires_at"],
+            NOW + crate::workspace_directory::SOURCE_TTL_SECONDS
+        );
+        assert!(reused.get("user_path").is_none());
+    }
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "membership-user-outage",
+            "workspace_directory.capture.v1",
+            NOW + 2,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        "workspace_directory_user_lookup_failed",
+        "a cached hierarchy must not establish membership during user lookup outage"
+    );
+    let (_directory, runtime) = fixture_runtime(false, true, true, response_limit)?;
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "hierarchy-missing-world",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false
+        )
+        .unwrap_err()
+        .to_string(),
+        "simulated_provider_unconfigured",
+        "missing simulated world must not fall through to live HTTP"
+    );
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "missing-world-second-failure",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false
+        )
+        .unwrap_err()
+        .to_string(),
+        "simulated_provider_unconfigured"
+    );
+    let exhausted = admitted_capture(
+        &runtime,
+        "failure-budget-exhausted",
+        "workspace_directory.hierarchy.v1",
+        NOW,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        exhausted.starts_with("budget_exhausted:") && exhausted.ends_with(":bytes"),
+        "{exhausted}"
+    );
+    let (_directory, runtime) = fixture_runtime(true, true, false, response_limit)?;
+    let mut simulated = crate::workspace_directory::SimulatedDirectoryPort::new(
+        runtime.db(),
+        SCOPE,
+        CUSTOMER,
+        ACTOR,
+        NOW,
+    )?;
+    let cached = crate::workspace_directory::collect_hierarchy(
+        crate::workspace_directory::CaptureInput {
+            customer_id: CUSTOMER.into(),
+            connection_id: "directory@1".into(),
+            actor: ACTOR.into(),
+            captured_at: NOW,
+        },
+        &mut simulated,
+    )?;
+    let cache_path = runtime.db().with_file_name("workspace_directory.sqlite");
+    let mut cache = crate::workspace_directory::open_store(&cache_path)?;
+    crate::workspace_directory::publish(&mut cache, &cached)?;
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "denied-hierarchy-action-with-cache",
+            "workspace_directory.hierarchy.v1",
+            NOW,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        crate::error::Failure::CapabilityForbidden.to_string(),
+        "a cached result must not bypass the operation's narrowed action grant"
+    );
+    assert!(
+        runtime
+            .accept(
+                "run",
+                "ungranted@coverage.test",
+                "denied-actor",
+                &json!({}),
+                NOW
+            )
+            .is_err()
+    );
+
+    let (_directory, runtime) = fixture_runtime(true, true, true, response_limit - 1)?;
+    assert_eq!(
+        admitted_capture(
+            &runtime,
+            "insufficient-response-allowance",
+            "workspace_directory.capture.v1",
+            NOW,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        crate::error::Failure::ResourceForbidden.to_string()
+    );
     Ok(())
 }

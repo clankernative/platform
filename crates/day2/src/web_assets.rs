@@ -130,6 +130,15 @@ impl Appearance {
             .then(|| self.resource_url(runtime, "app.js"))
             .transpose()
     }
+    /// Only a digest-checked package adapter can select automatic UI entries.
+    /// The generic loader imports admitted modules; it owns no component behavior.
+    pub fn component_script_url(&self, runtime: &Runtime) -> Result<Option<String>> {
+        let contract = runtime.artifact().contract();
+        (contract.sources.contains_key("ui-provider/executable")
+            && contract.web_resources.contains_key("ui-package.js"))
+        .then(|| self.resource_url(runtime, "ui-package.js"))
+        .transpose()
+    }
     pub fn image(&self, runtime: &Runtime, key: &str, alt: &str, icon: bool) -> Result<Markup> {
         let asset = runtime
             .artifact()
@@ -327,6 +336,10 @@ fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
         "/assets/platform/forms.js" => (
             "text/javascript",
             include_bytes!("../../../assets/forms.js"),
+        ),
+        "/assets/platform/navigation.js" => (
+            "text/javascript",
+            include_bytes!("../../../assets/navigation.js"),
         ),
         "/assets/platform/datastar-1.0.1.js" => (
             "text/javascript",

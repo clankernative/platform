@@ -82,8 +82,8 @@ TagThing :: [].{
 
 	verify_result : Str, ThingView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.things.len()
 				== old.things.len() + 1

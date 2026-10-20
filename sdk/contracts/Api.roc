@@ -77,6 +77,7 @@ Api :: [].{
 		credential_access : CredentialAccess,
 		errors : List(Str),
 		required_all_rows : List(Str),
+		observations : List(Str),
 	}
 
 	Presentation : { stylesheet : Str, script : Str }
@@ -96,9 +97,24 @@ Api :: [].{
 		recovery : Str,
 		operation : Target,
 		additional_operations : List(Target),
+		verification_actors : List({ operation : Str, actor : Str }),
 	}
 
-	ErrorExample : { operation : Target, input : (Str, U64 -> Try(Str, Str)) }
+	VerificationPrincipal : [Synthetic(Str)]
+
+	verification_principal : Str -> VerificationPrincipal
+	verification_principal = |actor| Synthetic(actor)
+
+	verification_principal_actor : VerificationPrincipal -> Str
+	verification_principal_actor = |principal| match principal {
+		Synthetic(actor) => actor
+	}
+
+	ErrorExample : {
+		operation : Target,
+		input : (Str, U64 -> Try(Str, Str)),
+		verification_actor : [None, Some(Str)],
+	}
 
 	ErrorDef : { description : Str, recovery : Str, verification : {} -> List(ErrorExample) }
 
@@ -116,15 +132,29 @@ Api :: [].{
 	error_cases = |definition| definition
 
 	error_metadata : Str, ErrorDef -> Try(ErrorMetadata, Str)
-	error_metadata = |code, definition| match (definition.verification)({}) {
-		[] => Err("application error requires a verification case")
-		[first, .. as rest] => Ok({
-			code,
-			description: definition.description,
-			recovery: definition.recovery,
-			operation: first.operation,
-			additional_operations: rest.map(|scenario| scenario.operation),
-		})
+	error_metadata = |code, definition| {
+		scenarios = (definition.verification)({})
+		# An explicit empty principal is invalid, not a request for the default.
+		if scenarios.any(|scenario| scenario.verification_actor == Some("")) {
+			return Err("verification principal must be nonempty")
+		}
+		match scenarios {
+			[] => Err("application error requires a verification case")
+			[first, .. as rest] => Ok({
+				code,
+				description: definition.description,
+				recovery: definition.recovery,
+				operation: first.operation,
+				additional_operations: rest.map(|scenario| scenario.operation),
+				verification_actors: scenarios.fold(
+					[],
+					|actors, scenario| match scenario.verification_actor {
+						None => actors
+						Some(actor) => actors.append({ operation: scenario.operation.operation, actor })
+					},
+				),
+			})
+		}
 	}
 
 	failed_command : Write(input, output), (Str, U64 -> Try(input, Str)) -> ErrorExample
@@ -132,6 +162,7 @@ Api :: [].{
 		codec = operation.input()
 		{
 			operation: write(operation),
+			verification_actor: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
@@ -139,16 +170,29 @@ Api :: [].{
 		}
 	}
 
+	failed_command_as : Write(input, output), VerificationPrincipal, (Str, U64 -> Try(input, Str)) -> ErrorExample
+	failed_command_as = |operation, principal, generate| {
+		..failed_command(operation, generate),
+		verification_actor: Some(verification_principal_actor(principal)),
+	}
+
 	failed_query : Read(input, output), (Str, U64 -> Try(input, Str)) -> ErrorExample
 	failed_query = |operation, generate| {
 		codec = operation.input()
 		{
 			operation: read(operation),
+			verification_actor: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
 			},
 		}
+	}
+
+	failed_query_as : Read(input, output), VerificationPrincipal, (Str, U64 -> Try(input, Str)) -> ErrorExample
+	failed_query_as = |operation, principal, generate| {
+		..failed_query(operation, generate),
+		verification_actor: Some(verification_principal_actor(principal)),
 	}
 
 	Effect : { kind : Str, model : Str, fields : List(Str), command : Str }
@@ -181,6 +225,22 @@ Api :: [].{
 
 	VerificationRequest : { action : Str, operation : Str, snapshot : Str, before : Str, output : Str, seed : U64 }
 
+	# The verification host supplies this independently of the handler's output.
+	# Input generators receive an empty input; checks receive the dispatched input.
+	VerificationContext : { actor : Str, input : Str }
+
+	verification_context : Str -> Try(VerificationContext, Str)
+	verification_context = |snapshot| {
+		decoded : Try({ verification : VerificationContext }, _)
+		decoded = Json.parse(snapshot)
+		context = decoded.map_err(|_| "missing_verification_context")?.verification
+		if context.actor.is_empty() {
+			Err("missing_verification_actor")
+		} else {
+			Ok(context)
+		}
+	}
+
 	ModelCheck(model) :: { witness : List(model), description : Str, check : Str -> Try(Bool, Str) }.{
 		description : ModelCheck(model) -> Str
 		description = |obligation| obligation.description
@@ -212,6 +272,7 @@ Api :: [].{
 		credential_access : CredentialAccess,
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
+		observations : List(Str),
 		export_version : U64,
 	}.{
 		cross_app :
@@ -337,6 +398,16 @@ Api :: [].{
 
 		required_all_rows : CommandDef(input, output, input_fields, output_fields) -> List(Str)
 		required_all_rows = |definition| definition.required_all_rows
+
+		# Declared read capabilities select disposable verification fixtures.
+		# Production authority remains an independent operator decision.
+		observes :
+			CommandDef(input, output, input_fields, output_fields),
+			Str -> CommandDef(input, output, input_fields, output_fields)
+		observes = |definition, capability| { ..definition, observations: definition.observations.append(capability) }
+
+		observations : CommandDef(input, output, input_fields, output_fields) -> List(Str)
+		observations = |definition| definition.observations
 	}
 
 	QueryDef(input, output, input_fields, output_fields) :: {
@@ -347,6 +418,7 @@ Api :: [].{
 		verification : Verification(input, output),
 		credential_access : CredentialAccess,
 		required_all_rows : List(Str),
+		observations : List(Str),
 		export_version : U64,
 	}.{
 		cross_app :
@@ -431,6 +503,14 @@ Api :: [].{
 
 		required_all_rows : QueryDef(input, output, input_fields, output_fields) -> List(Str)
 		required_all_rows = |definition| definition.required_all_rows
+
+		observes :
+			QueryDef(input, output, input_fields, output_fields),
+			Str -> QueryDef(input, output, input_fields, output_fields)
+		observes = |definition, capability| { ..definition, observations: definition.observations.append(capability) }
+
+		observations : QueryDef(input, output, input_fields, output_fields) -> List(Str)
+		observations = |definition| definition.observations
 	}
 
 	command :
@@ -464,6 +544,7 @@ Api :: [].{
 			},
 			verification: definition.verification,
 			required_all_rows: [],
+			observations: [],
 			export_version: 0,
 		}
 	}
@@ -497,6 +578,7 @@ Api :: [].{
 				interactive: handler.requires_interaction(),
 			},
 			required_all_rows: [],
+			observations: [],
 			export_version: 0,
 		}
 	}

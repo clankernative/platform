@@ -176,7 +176,26 @@ fn next(seed: &mut u64) -> u64 {
     value ^ (value >> 31)
 }
 
+impl crate::host_inputs::Clock for World {
+    fn wall_time(&self) -> Result<Duration> {
+        Ok(Duration::from_secs(u64::try_from(
+            *self.wall.lock().unwrap(),
+        )?))
+    }
+
+    fn monotonic(&self) -> Duration {
+        *self.ticks.lock().unwrap()
+    }
+}
+
 impl effects::Hooks for World {
+    fn provider_observation(
+        &self,
+        _: crate::oauth::shell_oidc::ProviderObservationData,
+    ) -> Result<()> {
+        anyhow::bail!("unscripted provider observation")
+    }
+
     fn domain(&self) -> u64 {
         self.domain
     }
@@ -274,7 +293,7 @@ impl std::error::Error for Divergence {}
 
 /// Complete bounded reserved-table snapshots. Blobs are fingerprints, not
 /// exported encrypted material. Every row and every column participates.
-fn snapshot(db: &Connection) -> Result<serde_json::Value> {
+pub(in crate::oauth) fn snapshot(db: &Connection) -> Result<serde_json::Value> {
     let mut tables = db.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'oauth_%' ORDER BY name",
     )?;
@@ -436,8 +455,12 @@ fn run(program: &Program) -> Result<Trace> {
                         if matches!(step, Step::WrongAccount) {
                             input_fixture.intent.owner = "other_human".into();
                         }
-                        let proof =
-                            shell.attest(&pending, Digest::of(&"fresh_session")?, now, now)?;
+                        let proof = shell.attest_fixture(
+                            &pending,
+                            Digest::of(&"fresh_session")?,
+                            now,
+                            now,
+                        )?;
                         external::approve_external(
                             &mut db,
                             input_fixture.input(),
@@ -786,6 +809,7 @@ pub(super) fn registration_codes(target: &registration::Target) -> Result<regist
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("state", &state)
             .append_pair("code", value)
+            .append_pair("iss", &target.reviewed().issuer_url)
             .finish();
         authorization.complete(query.as_bytes(), &human)
     };

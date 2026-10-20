@@ -126,8 +126,8 @@ NotifyReady :: [].{
 	# is stable, and no report's announced flag moved from true back to false.
 	verify_result : Str, Notifications.Receipt, Str -> Try(Bool, Str)
 	verify_result = |before, receipt, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		announced = |state| state.reports.keep_if(|row| row.value.announced).len()
 		Ok(
 			(receipt.status == "accepted" or receipt.status == "skipped")

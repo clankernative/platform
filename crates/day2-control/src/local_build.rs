@@ -63,6 +63,7 @@ impl PreparedBuild {
             Path::new(rust),
             Path::new(registry),
         )?;
+        let runner = runner.with_platform_inputs(Path::new(platform_root))?;
         let platform = PlatformInputs::capture(Path::new(platform_root), Path::new(toolchains))?;
         let DurabilityProvider::TemporalLocal {
             endpoint,

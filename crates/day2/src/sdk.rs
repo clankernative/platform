@@ -20,6 +20,11 @@ struct Module {
 // admitted merely because their basename happens to match an existing module.
 const MODULES: &[Module] = &[
     Module {
+        file: "Connection.roc",
+        source: "contracts/Connection.roc",
+        app_export: true,
+    },
+    Module {
         file: "ConnectionAccess.roc",
         source: "contracts/ConnectionAccess.roc",
         app_export: false,
@@ -72,6 +77,11 @@ const MODULES: &[Module] = &[
     Module {
         file: "GoogleDirectory.roc",
         source: "contracts/GoogleDirectory.roc",
+        app_export: true,
+    },
+    Module {
+        file: "WorkspaceDirectory.roc",
+        source: "contracts/WorkspaceDirectory.roc",
         app_export: true,
     },
     Module {

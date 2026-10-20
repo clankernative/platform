@@ -58,7 +58,7 @@ VisitLink :: [].{
 
 	verify_input : Str, U64 -> Try(VisitLinkTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		state = Data.snapshot(snapshot)?
+		state = Data.verification_snapshot(snapshot)?.live
 		row = state.links.find_first(|item| !item.value.deleted and item.value.name.split_on("%s").len() == 1)
 			.map_err(|_| "seed an active exact link first")?
 		Ok({ path: row.value.name })
@@ -66,8 +66,18 @@ VisitLink :: [].{
 
 	verify_result : Str, LinkView.Visit, Str -> Try(Bool, Str)
 	verify_result = |before, visit, after| {
-		old = Data.snapshot(before)?.links.find_first(|row| row.id == visit.id).map_err(|_| "visited link missing")?
-		saved = Data.snapshot(after)?.links.find_first(|row| row.id == visit.id).map_err(|_| "visited link missing")?
+		old =
+			Data.verification_snapshot(before)?
+				.live
+				.links
+				.find_first(|row| row.id == visit.id)
+				.map_err(|_| "visited link missing")?
+		saved =
+			Data.verification_snapshot(after)?
+				.live
+				.links
+				.find_first(|row| row.id == visit.id)
+				.map_err(|_| "visited link missing")?
 		Ok(saved.value.visits == old.value.visits + 1 and visit.visits == saved.value.visits and !old.value.deleted)
 	}
 

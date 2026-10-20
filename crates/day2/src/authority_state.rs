@@ -734,6 +734,16 @@ pub(crate) fn authorize_in(
         Failure::InstallationChanged
     );
     active.document.validate(runtime.artifact())?;
+    ensure!(
+        !runtime
+            .artifact()
+            .contract()
+            .app_contract
+            .as_ref()
+            .is_some_and(|definition| definition.is_verification_actor(operation, actor))
+            || runtime.integrations().is_simulated(),
+        Failure::Forbidden
+    );
     if let Some(requirements) = &active.document.security {
         requirements.require_runtime()?;
     }

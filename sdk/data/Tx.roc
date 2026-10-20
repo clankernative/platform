@@ -109,6 +109,21 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 		}
 	}
 
+	# Count the complete visible selection, independent of pagination. The host
+	# applies the same predicate, owner policy and deletion scope as row reads.
+	count : Selection(a) -> Tx(U64)
+	count = |selection| {
+		complete = selection.paginate(Cursor.start, PageSize.default)
+		request({ ..Wire.empty, kind: "count", model: complete.model().name(), data: complete.encode() })
+			.and_then(
+				|raw| {
+					parsed : Try(U64, _)
+					parsed = Json.parse(raw)
+					from_host(parsed.map_err(|_| "invalid_storage_count"))
+				},
+			)
+	}
+
 	# Pagination never narrows the host's visible-row cardinality check.
 	find : Selection(a) -> Tx([Some(Model.Entity(a)), None])
 	find = |selection| {

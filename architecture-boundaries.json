@@ -7,184 +7,183 @@
       "role": "runtime",
       "dependencies": [
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "anyhow",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "axum",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "base64",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "cookie",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "crc32c",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "cssparser",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": "crates/day2-assets",
           "name": "day2-assets",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": "crates/day2-assets"
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": "crates/day2-capabilities",
           "name": "day2-capabilities",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": "crates/day2-capabilities"
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": "crates/day2-contracts",
           "name": "day2-contracts",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": "crates/day2-contracts"
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": "crates/day2-sandbox",
           "name": "day2-sandbox",
-          "kind": "normal",
-          "target": "cfg(target_os = \"linux\")",
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": "crates/day2-sandbox"
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "ego-tree",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "getrandom",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "hmac",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "html5ever",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "html5gum",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "image",
-          "kind": "dev",
-          "target": null,
+          "default_features": true,
+          "features": [
+            "tokio"
+          ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "hyper-util",
+          "optional": false,
           "rename": null,
+          "target": "cfg(target_os = \"linux\")"
+        },
+        {
+          "default_features": false,
           "features": [
             "jpeg",
             "png",
             "webp"
           ],
-          "default_features": false,
+          "kind": "dev",
+          "local_path": null,
+          "name": "image",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "maud",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "maud",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "minijinja",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": false,
           "features": [
             "debug",
             "fuel",
@@ -192,246 +191,270 @@
             "serde",
             "unstable_machinery"
           ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "minijinja",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
           "default_features": false,
+          "features": [
+            "poll",
+            "socket"
+          ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "nix",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": "cfg(target_os = \"linux\")"
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "oxc_allocator",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "oxc_ast",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "oxc_ast_visit",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "oxc_parser",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "oxc_span",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "percent-encoding",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "dev",
+          "local_path": null,
           "name": "proc-macro2",
-          "kind": "dev",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": false,
+          "features": [
+            "std"
+          ],
+          "kind": "dev",
+          "local_path": null,
           "name": "proptest",
-          "kind": "dev",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "reqwest",
-          "kind": "dev",
-          "target": null,
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "prost",
+          "optional": false,
           "rename": null,
+          "target": "cfg(target_os = \"linux\")"
+        },
+        {
+          "default_features": false,
           "features": [
             "blocking",
             "cookies"
           ],
-          "default_features": false,
+          "kind": "dev",
+          "local_path": null,
+          "name": "reqwest",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "reqwest",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": false,
           "features": [
             "blocking",
             "rustls-tls"
           ],
-          "default_features": false,
+          "kind": "normal",
+          "local_path": null,
+          "name": "reqwest",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "ring",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "ring",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "rusqlite",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": true,
           "features": [
             "bundled",
             "hooks",
-            "limits"
+            "limits",
+            "serialize"
           ],
-          "default_features": true,
+          "kind": "normal",
+          "local_path": null,
+          "name": "rusqlite",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "rustix",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": true,
           "features": [
-            "fs"
+            "event",
+            "fs",
+            "net",
+            "process",
+            "stdio",
+            "time"
           ],
-          "default_features": true,
+          "kind": "normal",
+          "local_path": null,
+          "name": "rustix",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": false,
+          "features": [
+            "errors"
+          ],
+          "kind": "normal",
+          "local_path": null,
           "name": "scraper",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "serde",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": true,
           "features": [
             "derive"
           ],
-          "default_features": true,
+          "kind": "normal",
+          "local_path": null,
+          "name": "serde",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "sha2",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "syn",
-          "kind": "dev",
-          "target": null,
-          "rename": null,
           "features": [
             "full",
             "visit"
           ],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "tempfile",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "time",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [
-            "formatting"
-          ],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "tokio",
           "kind": "dev",
-          "target": null,
+          "local_path": null,
+          "name": "syn",
+          "optional": false,
           "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "tempfile",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [
+            "formatting",
+            "parsing"
+          ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "time",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
           "features": [
             "test-util"
           ],
-          "default_features": true,
+          "kind": "dev",
+          "local_path": null,
+          "name": "tokio",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "tokio",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
+          "default_features": true,
           "features": [
             "macros",
             "net",
@@ -440,79 +463,144 @@
             "sync",
             "time"
           ],
-          "default_features": true,
+          "kind": "normal",
+          "local_path": null,
+          "name": "tokio",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "tokio-stream",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": null
         },
         {
-          "name": "url",
+          "default_features": false,
+          "features": [
+            "codegen",
+            "transport"
+          ],
           "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
+          "local_path": null,
+          "name": "tonic",
           "optional": false,
-          "local_path": null
+          "rename": null,
+          "target": "cfg(target_os = \"linux\")"
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "tonic-prost",
+          "optional": false,
+          "rename": null,
+          "target": "cfg(target_os = \"linux\")"
+        },
+        {
+          "default_features": true,
+          "features": [
+            "util"
+          ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "tower",
+          "optional": false,
+          "rename": null,
+          "target": "cfg(target_os = \"linux\")"
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "unicode-segmentation",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "url",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "zeroize",
+          "optional": false,
+          "rename": null,
+          "target": null
         }
       ],
       "production_targets": [
         {
-          "name": "day2",
           "kind": [
             "bin"
           ],
+          "name": "day2",
           "source": "crates/day2/src/main.rs"
         },
         {
-          "name": "day2",
           "kind": [
             "lib"
           ],
+          "name": "day2",
           "source": "crates/day2/src/lib.rs"
         },
         {
-          "name": "day2-health",
           "kind": [
             "bin"
           ],
+          "name": "day2-health",
           "source": "crates/day2/src/bin/day2-health.rs"
         },
         {
-          "name": "day2-inspect",
           "kind": [
             "bin"
           ],
+          "name": "day2-inspect",
           "source": "crates/day2/src/bin/day2-inspect.rs"
         },
         {
-          "name": "day2-package",
           "kind": [
             "bin"
           ],
+          "name": "day2-native-enrollment",
+          "source": "crates/day2/src/bin/day2-native-enrollment.rs"
+        },
+        {
+          "kind": [
+            "bin"
+          ],
+          "name": "day2-package",
           "source": "crates/day2/src/bin/day2-package.rs"
         },
         {
-          "name": "day2-security-shell",
           "kind": [
             "bin"
           ],
+          "name": "day2-security-shell",
           "source": "crates/day2/src/bin/day2-security-shell.rs"
         },
         {
-          "name": "sandbox_probe",
           "kind": [
             "bin"
           ],
+          "name": "sandbox_probe",
           "source": "crates/day2/src/bin/sandbox_probe.rs"
         }
       ]
@@ -567,6 +655,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "roxmltree",
           "kind": "normal",
           "target": null,
@@ -584,16 +682,6 @@
           "features": [
             "derive"
           ],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
           "default_features": true,
           "optional": false,
           "local_path": null
@@ -625,6 +713,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "serde",
           "kind": "normal",
           "target": null,
@@ -638,16 +736,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -860,22 +948,14 @@
           "local_path": "crates/durable-temporal"
         },
         {
-          "name": "hmac",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "proptest",
           "kind": "dev",
           "target": null,
           "rename": null,
-          "features": [],
-          "default_features": true,
+          "features": [
+            "std"
+          ],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },
@@ -929,36 +1009,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "serde_yaml",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha1",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -1199,6 +1249,16 @@
           "local_path": null
         },
         {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "rusqlite",
           "kind": "normal",
           "target": null,
@@ -1237,16 +1297,6 @@
         },
         {
           "name": "serde_json",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
-          "name": "sha2",
           "kind": "normal",
           "target": null,
           "rename": null,
@@ -1650,6 +1700,16 @@
           "local_path": "crates/day2-ops"
         },
         {
+          "name": "flate2",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "proc-macro2",
           "kind": "normal",
           "target": null,
@@ -1670,12 +1730,47 @@
           "local_path": null
         },
         {
+          "name": "reqwest",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "blocking",
+            "rustls-tls"
+          ],
+          "default_features": false,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "ring",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
           "name": "rusqlite",
           "kind": "normal",
           "target": null,
           "rename": null,
           "features": [
             "bundled"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "rustix",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [
+            "fs"
           ],
           "default_features": true,
           "optional": false,
@@ -1704,16 +1799,6 @@
           "local_path": null
         },
         {
-          "name": "sha2",
-          "kind": "normal",
-          "target": null,
-          "rename": null,
-          "features": [],
-          "default_features": true,
-          "optional": false,
-          "local_path": null
-        },
-        {
           "name": "syn",
           "kind": "normal",
           "target": null,
@@ -1723,6 +1808,16 @@
             "visit"
           ],
           "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tar",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": false,
           "optional": false,
           "local_path": null
         },

@@ -2,16 +2,17 @@
 //! main database file without its WAL, overwrite an instance, or resume commands.
 use anyhow::{Context, Result, bail, ensure};
 use day2::{artifact::Instance, authority_state, store::Runtime};
+use ring::digest::{Context as DigestContext, SHA256};
 use rusqlite::{
     Connection, ErrorCode, OpenFlags,
     backup::{Backup, StepResult},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::c_int,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -112,6 +113,9 @@ fn historical_projection(
         return instance;
     }
     if let Some(control) = &mut instance.control {
+        // A backup preserves selector history, never an executable initial
+        // bootstrap intent for an existing or restored app database.
+        control.security_bootstraps.clear();
         control.apps.retain(|name, _| name.as_str() == app);
         control
             .sources
@@ -145,9 +149,26 @@ fn database_digest(path: &Path) -> Result<String> {
         fs::symlink_metadata(path)?.file_type().is_file(),
         "regular database file required"
     );
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    let mut hasher = DigestContext::new(&SHA256);
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = match file.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let hex: String = hasher
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("sha256:{hex}"))
 }
 
 fn copy_tree(source: &Path, target: &Path, budget: &mut u64, depth: u32) -> Result<()> {
@@ -493,6 +514,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn database_digest_matches_known_answers_across_read_boundaries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("snapshot");
+        for (bytes, expected) in [
+            (
+                Vec::new(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".to_vec(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                vec![0; 131_073],
+                "d281209cc72d47b090175b22621840d9eb8267d09cc05dc122bfaa759a82830f",
+            ),
+        ] {
+            fs::write(&path, &bytes)?;
+            assert_eq!(database_digest(&path)?, format!("sha256:{expected}"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn target_runtime_selection_is_preserved_but_foreign_only_runtime_does_not_secure_target()
     -> Result<()> {
         let name = |value: &str| day2_capabilities::Name::try_from(value.to_owned()).unwrap();
@@ -603,7 +648,7 @@ mod tests {
                 "scope":{"installation":instance.installation,"environment":instance.environment,"app":app},
                 "provider":{"kind":"firestore_native_v1","project":"example-tools","project_number":123456789012_u64,
                     "database":"security","database_uid":"01234567-89ab-4cde-8fab-0123456789ab",
-                    "iam_source":{"kind":"gke_workload_identity_v1","service_account":selected.service_account}},
+                    "iam_source":{"kind":"gke_workload_identity_v1","service_account":selected.service_account,"service_account_uid":"100000000000000000007"}},
                 "key_set":instance.security_key_set(app)?,"max_lease_seconds":30,
             }))?;
             let control = instance.control.as_mut().unwrap();
@@ -740,17 +785,43 @@ mod tests {
         let mut epoch = serde_json::json!({"scope":{"installation":"company","environment":"staging","app":"primary"},
             "provider":{"kind":"firestore_native_v1","project":"company-tools","project_number":7,"database":"security",
                 "database_uid":"01234567-89ab-4cde-8fab-0123456789ab","iam_source":{"kind":"gke_workload_identity_v1",
-                    "service_account":"epochs@company-tools.iam.gserviceaccount.com"}},"key_set":digest,"max_lease_seconds":30});
+                    "service_account":"epochs@company-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}},"key_set":digest,"max_lease_seconds":30});
         let mut other_epoch = epoch.clone();
         other_epoch["scope"]["app"] = "other".into();
         let family = serde_json::json!({"verifier_secret":"verify","custody":{"kind":"verifier_only"},"max_active_lineages":12});
         let runtime = serde_json::json!({"service_account":"app@company-tools.iam.gserviceaccount.com",
             "attestation":pin,"attestation_secret":"attest","families":{"agents":family}});
+        let store: day2_capabilities::security_epoch::EpochStore =
+            serde_json::from_value(epoch.clone())?;
+        let selected_epoch =
+            serde_json::json!({"id":"primary","revision":day2_capabilities::Digest::of(&store)?});
+        let role = |name: &str, uid: &str| {
+            serde_json::json!({
+                "namespace":{"name":"native","uid":"namespace-uid"},
+                "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
+                "google_service_account":{"kind":"gke_workload_identity_v1",
+                    "service_account":format!("{name}@company-tools.iam.gserviceaccount.com"),"service_account_uid":uid},
+                "workload_kind":"deployment_v1","workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "container":{"name":name,"image":digest},
+                "token_review_audience":"https://kubernetes.default.svc"
+            })
+        };
+        let bootstrap = serde_json::json!({
+            "scope":store.scope,"epoch_store":selected_epoch,
+            "cluster":{"project":"company-tools","location":"us-central1","name":"native","uid":"cluster-uid",
+                "api_origin":"https://10.0.0.1","certificate_authority":digest},
+            "controller":role("controller","200000000000000000007"),"app":role("epochs","100000000000000000007"),
+            "shell":role("shell","300000000000000000007"),
+            "control_store":{"kind":"firestore_authority_database_v1","epoch_store":selected_epoch},
+            "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":digest,"controller_code":digest,"app_host_code":digest,"security_shell_code":digest,"app_artifact":digest},
+            "fresh_storage":{"provider_volume_uid":"volume-uid","mount_binding":digest,"schema_contract":digest,"marker_format":"initial-v1"}
+        });
         let instance: Instance = serde_json::from_value(
             serde_json::json!({"installation":"company","environment":"staging",
                 "apps":{"primary":{"artifact":"original","readers":[],"writers":[]},"other":{"artifact":"other","readers":[],"writers":[]}},
                 "control":{"version":1,"state_directory":"/control","operators":["operator"],"sources":{},"apps":{},
                     "security_epochs":{"primary":epoch,"other":other_epoch},
+                    "security_bootstraps":{"initial":bootstrap},
                     "secrets":{"verify":{"kind":"gcp_version","project_number":7,"secret":"verifier","version":3}}},
                 "credential_runtime":{"version":1,"apps":{"primary":runtime,"other":runtime}},
                 "oauth_runtime":{"version":1,"shell":{"project":"company-tools","backend_service":"shell-backend","url_map":"shell-map",
@@ -767,6 +838,11 @@ mod tests {
         );
         assert_eq!(projected.apps.len(), 1);
         let selected = projected.control.as_ref().unwrap();
+        assert_eq!(
+            instance.control.as_ref().unwrap().security_bootstraps.len(),
+            1
+        );
+        assert!(selected.security_bootstraps.is_empty());
         assert_eq!(selected.security_epochs.len(), 1);
         assert_eq!(
             serde_json::to_value(&selected.security_epochs[&primary])?,

@@ -63,6 +63,59 @@ fn budget_status(runtime: &Runtime) -> Result<day2::budget::LedgerStatus> {
 }
 
 #[test]
+fn reopen_for_rejects_non_disposable_scope_without_reseeding_or_changing_authority() -> Result<()> {
+    let (_directory, _platform, options) = setup()?;
+    let root = tempfile::tempdir()?;
+    let runtime = day2::development::create_for(
+        &artifact()?,
+        &root.path().join("instance"),
+        None,
+        &options.actor,
+    )?;
+    let path = runtime.instance_path().to_path_buf();
+    day2::integrations::simulated::update_workspace_directory(
+        runtime.db(),
+        runtime.scope(),
+        |state| {
+            state.world.hierarchy["description"] = json!("retained custom fixture source");
+            Ok(())
+        },
+    )?;
+    let provider_state = day2::integrations::simulated::update_workspace_directory(
+        runtime.db(),
+        runtime.scope(),
+        |state| Ok(state.world.hierarchy.clone()),
+    )?;
+    let authority = {
+        let mut db = rusqlite::Connection::open(runtime.db())?;
+        let tx = db.transaction()?;
+        day2::authority_state::current(&tx)?.stamp
+    };
+    let reopened = day2::development::reopen_for(&path)?;
+    assert!(day2::development::uses_simulated_providers(&reopened));
+    let after_state = day2::integrations::simulated::update_workspace_directory(
+        reopened.db(),
+        reopened.scope(),
+        |state| Ok(state.world.hierarchy.clone()),
+    )?;
+    assert_eq!(after_state, provider_state);
+    let mut after = rusqlite::Connection::open(reopened.db())?;
+    let tx = after.transaction()?;
+    assert_eq!(day2::authority_state::current(&tx)?.stamp, authority);
+    drop(tx);
+    drop(after);
+
+    let mut instance: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    instance["installation"] = json!("production");
+    fs::write(&path, serde_json::to_vec(&instance)?)?;
+    let error = day2::development::reopen_for(&path)
+        .err()
+        .context("non-disposable scope was admitted")?;
+    assert!(error.to_string().contains("disposable scope"));
+    Ok(())
+}
+
+#[test]
 fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cleanly() -> Result<()>
 {
     let (_directory, platform, mut options) = setup()?;
@@ -86,8 +139,62 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     let first = call(&mut session, "local-status", json!({}))?;
     assert_eq!(first["actor"], options.actor);
     assert_eq!(first["state"], "ready");
+    assert_eq!(first["simulated_providers"], true);
+    let contracts_path = PathBuf::from(
+        first["contracts"]["path"]
+            .as_str()
+            .context("contracts path")?,
+    );
+    let contracts_bytes = fs::read(&contracts_path)?;
+    assert_eq!(first["contracts"]["artifact"], first["artifact"]);
+    assert_eq!(
+        first["contracts"]["sha256"],
+        day2::digest(&contracts_bytes)[7..]
+    );
+    let contracts: Value = serde_json::from_slice(&contracts_bytes)?;
+    assert_eq!(contracts["artifact"], first["artifact"]);
+    assert_eq!(contracts["queries"]["reports.list"]["api"]["method"], "GET");
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["api"]["method"],
+        "POST"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.submit"]["inputSchema"]["properties"]["title"]["kind"],
+        "string"
+    );
+    assert_eq!(
+        contracts["commands"]["reports.revise"]["edit"]["version_field"],
+        "expected_version"
+    );
+    assert_eq!(contracts["routes"]["reports"]["query"], "reports.list");
+    assert_eq!(contracts["schedules"]["sweep"]["command"], "reports.sweep");
+    assert!(
+        contracts["forms"]
+            .as_array()
+            .context("exported forms")?
+            .iter()
+            .any(|form| {
+                form["command"] == "reports.submit"
+                    && form["fields"]
+                        .as_array()
+                        .is_some_and(|fields| fields.iter().any(|field| field["name"] == "title"))
+            })
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&contracts_path)?.permissions().mode() & 0o777,
+        0o600
+    );
     let instance = PathBuf::from(first["instance"].as_str().context("instance")?);
     let runtime = Runtime::load(&instance, "app")?;
+    let retained_directory = day2::integrations::simulated::update_workspace_directory(
+        runtime.db(),
+        runtime.scope(),
+        |state| {
+            state.world.hierarchy["description"] = json!("retained managed fixture source");
+            Ok(state.world.hierarchy.clone())
+        },
+    )?;
     let snapshot = runtime.inspect()?;
     assert_eq!(snapshot["reports"].as_array().context("reports")?.len(), 2);
     for row in snapshot["reports"].as_array().context("reports")? {
@@ -109,6 +216,7 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     );
     call(&mut session, "local-recover", json!({}))?;
     let recovered = call(&mut session, "local-status", json!({}))?;
+    assert_eq!(recovered["simulated_providers"], true);
     assert_eq!(recovered["port"], first["port"]);
     assert_eq!(recovered["instance"], first["instance"]);
     assert_eq!(runtime.inspect()?, snapshot);
@@ -123,6 +231,17 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     call(&mut session, "local-properties", json!({}))?;
     call(&mut session, "local-activate", json!({}))?;
     let next = call(&mut session, "local-status", json!({}))?;
+    assert_eq!(next["simulated_providers"], true);
+    let migrated =
+        day2::development::reopen_for(Path::new(next["instance"].as_str().context("instance")?))?;
+    assert_eq!(
+        day2::integrations::simulated::update_workspace_directory(
+            migrated.db(),
+            migrated.scope(),
+            |state| Ok(state.world.hierarchy.clone())
+        )?,
+        retained_directory
+    );
     assert_eq!(next["port"], first["port"]);
     assert_ne!(next["instance"], first["instance"]);
     assert_eq!(
@@ -152,6 +271,18 @@ fn native_session_preserves_data_and_port_recovers_failed_candidate_and_stops_cl
     call(&mut resumed, "local-properties", json!({}))?;
     call(&mut resumed, "local-activate", json!({}))?;
     let current = call(&mut resumed, "local-status", json!({}))?;
+    assert_eq!(current["simulated_providers"], true);
+    let reopened = day2::development::reopen_for(Path::new(
+        current["instance"].as_str().context("instance")?,
+    ))?;
+    assert_eq!(
+        day2::integrations::simulated::update_workspace_directory(
+            reopened.db(),
+            reopened.scope(),
+            |state| Ok(state.world.hierarchy.clone())
+        )?,
+        retained_directory
+    );
     assert_eq!(current["port"], first["port"]);
     assert_eq!(
         Runtime::load(

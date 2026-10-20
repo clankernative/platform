@@ -281,6 +281,15 @@ The campaign evaluates these Roc predicates at the initial state, after every
 transition, and after pre-commit interruptions before recovery. They complement,
 not replace, the independent Rust model and SQLite integrity checks.
 
+Ordinary property evaluation captures live rows itself; retained inspection is
+reserved for storage comparisons. Operation generators and before/after checks
+use `Data.verification_snapshot`, whose explicit `live` and `deleted` model
+lists come from one consistent bounded read transaction. This permits generated
+restore cases without leaking tombstones into ordinary invariants. The
+[lifecycle fixture](../fixtures/lifecycle-conformance/README.md) exercises these
+contracts through admitted Roc operations, current row authority, transaction
+rollback, duplicate delivery and artifact-bound replay.
+
 Inspection holds one read transaction across all tables and rejects more than
 256 rows per model instead of silently truncating. The property worker receives
 only that snapshot, fixed verifier context, and no observations. There is no

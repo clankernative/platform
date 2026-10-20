@@ -163,6 +163,18 @@ pub struct OpenAiWorld {
     pub max_input_tokens: u64,
 }
 
+/// Google Directory wire responses committed by the offline provider. Keeping
+/// the response bodies in the provider world lets native capture exercise the
+/// same strict DTO parser and attribution checks as the live adapter.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceDirectoryWorld {
+    /// Provider tenant independent of whether any user lookup is configured.
+    pub customer_id: String,
+    pub users: BTreeMap<String, Value>,
+    pub hierarchy: Value,
+}
+
 /// One stored object, as the store reports it.
 ///
 /// No bytes. An application never holds an object's contents: it asks for an
@@ -410,6 +422,7 @@ pub struct SimulatedFixture {
     pub slack: SlackWorld,
     pub snowflake: SnowflakeWorld,
     pub openai: OpenAiWorld,
+    pub workspace_directory: WorkspaceDirectoryWorld,
 }
 
 /// What another application answers, for a campaign that is not running it.
@@ -606,7 +619,13 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
     seed_world(database, scope, SLACK_WORLD, &fixture.slack)?;
     seed_world(database, scope, SNOWFLAKE_WORLD, &fixture.snowflake)?;
     seed_world(database, scope, OPENAI_WORLD, &fixture.openai)?;
-    seed_world(database, scope, DELEGATION_WORLD, &fixture.delegation)
+    seed_world(database, scope, DELEGATION_WORLD, &fixture.delegation)?;
+    seed_world(
+        database,
+        scope,
+        crate::simulations::simulation(Provider::WorkspaceDirectory),
+        &fixture.workspace_directory,
+    )
 }
 
 /// The answer this campaign recorded for one delegated read.
@@ -788,6 +807,108 @@ fn read_world<W: serde::de::DeserializeOwned>(
     crate::json::decode(encoded.as_bytes())
 }
 
+/// Validate a selected world without making a provider request. This cannot
+/// establish membership; only the user endpoint can do that.
+pub(crate) fn workspace_directory_check(
+    database: &Path,
+    scope: &str,
+    customer_id: &str,
+) -> Result<()> {
+    let path =
+        database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));
+    ensure!(path.is_file(), "simulated_provider_unconfigured");
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let state: World<WorkspaceDirectoryWorld> = read_world(&connection, scope)?;
+    ensure!(
+        state.world.customer_id == customer_id,
+        "workspace_directory_customer_mismatch"
+    );
+    Ok(())
+}
+
+pub const DIRECTORY_USER_ENDPOINT: &str = "workspace_directory.users.get";
+pub const DIRECTORY_HIERARCHY_ENDPOINT: &str = "workspace_directory.orgunits.list";
+
+pub(crate) enum DirectoryRead<'a> {
+    User(&'a str),
+    Hierarchy,
+}
+
+/// Provider source state is independent of capture time and adapter caching.
+/// Commit request/fault bookkeeping even when the request itself fails.
+pub(crate) fn workspace_directory_read(
+    database: &Path,
+    scope: &str,
+    customer_id: &str,
+    read: DirectoryRead<'_>,
+) -> Result<Vec<u8>> {
+    let path =
+        database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory));
+    let (endpoint, max) = match read {
+        DirectoryRead::User(_) => (
+            DIRECTORY_USER_ENDPOINT,
+            crate::workspace_directory::MAX_USER_RESPONSE_BYTES,
+        ),
+        DirectoryRead::Hierarchy => (
+            DIRECTORY_HIERARCHY_ENDPOINT,
+            crate::workspace_directory::MAX_RESPONSE_BYTES,
+        ),
+    };
+    with_world::<WorkspaceDirectoryWorld, _, _>(&path, scope, |state| {
+        ensure!(
+            state.world.customer_id == customer_id,
+            "workspace_directory_customer_mismatch"
+        );
+        ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+        state.calls.push(match read {
+            DirectoryRead::User(actor) => format!("{endpoint}:{customer_id}:{actor}"),
+            DirectoryRead::Hierarchy => format!("{endpoint}:{customer_id}"),
+        });
+        let fault = take_fault_named(state, endpoint);
+        Ok((|| {
+            if let Some(fault) = fault {
+                let response = fault_response(fault, max as u64)
+                    .context("workspace_directory_simulated_fault_unsupported")?
+                    .map_err(|_| anyhow::anyhow!("workspace_directory_provider_unavailable"))?;
+                ensure!(
+                    (200..300).contains(&response.status),
+                    "workspace_directory_provider_refused"
+                );
+                ensure!(
+                    response.body.len() <= max,
+                    "workspace_directory_response_too_large"
+                );
+                return Ok(response.body);
+            }
+            let response = match read {
+                DirectoryRead::User(actor) => state
+                    .world
+                    .users
+                    .get(actor)
+                    .context("simulated_directory_user_unconfigured")?,
+                DirectoryRead::Hierarchy => &state.world.hierarchy,
+            };
+            let bytes = serde_json::to_vec(response)?;
+            ensure!(bytes.len() <= max, "workspace_directory_response_too_large");
+            Ok(bytes)
+        })())
+    })?
+}
+
+/// Scenario changes affect later requests through the same provider world.
+pub fn update_workspace_directory<T>(
+    database: &Path,
+    scope: &str,
+    act: impl FnOnce(&mut World<WorkspaceDirectoryWorld>) -> Result<T>,
+) -> Result<T> {
+    with_world(
+        &database.with_file_name(crate::simulations::simulation(Provider::WorkspaceDirectory)),
+        scope,
+        act,
+    )
+}
+
 fn write_world<W: Serialize>(
     connection: &rusqlite::Connection,
     scope: &str,
@@ -823,10 +944,14 @@ where
 
 /// Remove one queued fault matching this endpoint, if any.
 fn take_fault<W>(state: &mut World<W>, endpoint: Endpoint) -> Option<SimulatedFault> {
+    take_fault_named(state, endpoint.name())
+}
+
+fn take_fault_named<W>(state: &mut World<W>, endpoint: &str) -> Option<SimulatedFault> {
     let index = state
         .faults
         .iter()
-        .position(|fault| fault.endpoint.is_empty() || fault.endpoint == endpoint.name())?;
+        .position(|fault| fault.endpoint.is_empty() || fault.endpoint == endpoint)?;
     let fault = state.faults[index].fault;
     state.faults[index].remaining = state.faults[index].remaining.saturating_sub(1);
     if state.faults[index].remaining == 0 {

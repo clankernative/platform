@@ -1,0 +1,879 @@
+//! Optional provider-neutral UI assembly capability.
+//!
+//! The host owns locked capture, admission and staging. Providers own expansion.
+//! Execution requires an operator-trusted executable pin; an app lock grants no authority.
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use day2::ui_lock::{Input, Lock, LockedPackage, manifest_digest, safe_rel, valid_digest};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+mod port;
+mod publication;
+use port::{AssemblyFailure, ProcessAssembler, UiAssembler};
+use publication::{FilePublication, PublicationPlan, UiPublication, UiSnapshot};
+
+const MAX_FILE: usize = 1_048_576;
+const MAX_FILES: usize = 512;
+const MAX_INPUTS: usize = 4096;
+const MAX_UI_FILE: usize = 8 * 1024 * 1024;
+const MAX_TOTAL: usize = 32 * 1024 * 1024;
+const MAX_STDOUT: usize = 32 * 1024 * 1024;
+const MAX_STDERR: usize = 1024 * 1024;
+const PACKAGE_KEY: &str = "ui/package";
+const LOCK: &str = "ui/ui.lock.json";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestPackage {
+    name: String,
+    version: String,
+    path: String,
+    digest: String,
+    inputs: Vec<Input>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Pin {
+    schema_version: u32,
+    provider: String,
+    assembly_protocol: u32,
+    binding_abi: u32,
+    targets: BTreeMap<String, TargetPin>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssemblyRequest {
+    schema_version: u32,
+    assembly_protocol: u32,
+    provider: String,
+    target: AssemblyTarget,
+    package: RequestPackage,
+    ui: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssemblyTarget {
+    binding_abi: u32,
+    template_engine: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetPin {
+    executable: String,
+    digest: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Envelope {
+    schema_version: u32,
+    ok: bool,
+    command: String,
+    data: Bundle,
+    diagnostics: Vec<serde_json::Value>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Bundle {
+    schema_version: u32,
+    runtime_abi: u32,
+    template_engine: String,
+    package_digest: String,
+    templates: BTreeMap<String, String>,
+    resources: Vec<Resource>,
+    inputs: Vec<Input>,
+    consumed_inputs: Vec<String>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Resource {
+    path: String,
+    source: Option<String>,
+    content: Option<String>,
+    digest: String,
+    bytes: usize,
+    kind: String,
+}
+
+fn sha(bytes: &[u8]) -> String {
+    day2::digest(bytes)
+}
+fn checked(root: &Path, rel: &str) -> Result<Vec<u8>> {
+    ensure!(safe_rel(rel), "unsafe input path: {rel}");
+    let mut p = root.to_path_buf();
+    for (i, part) in rel.split('/').enumerate() {
+        p.push(part);
+        let m = fs::symlink_metadata(&p).with_context(|| format!("inspect {}", p.display()))?;
+        ensure!(
+            !m.file_type().is_symlink(),
+            "symlink input forbidden: {}",
+            p.display()
+        );
+        if i + 1 < rel.split('/').count() {
+            ensure!(m.is_dir(), "invalid input parent: {}", p.display());
+        }
+    }
+    let m = fs::symlink_metadata(&p)?;
+    ensure!(
+        m.is_file() && m.len() <= MAX_FILE as u64,
+        "invalid/oversized input: {}",
+        p.display()
+    );
+    let b = day2_assets::read_regular(&p, MAX_FILE as u64)?;
+    ensure!(
+        b.len() <= MAX_FILE,
+        "input grew beyond file limit: {}",
+        p.display()
+    );
+    Ok(b)
+}
+fn parse_lock(path: &Path) -> Result<Lock> {
+    let m = fs::symlink_metadata(path).context("read captured UI lock")?;
+    ensure!(
+        m.is_file() && !m.file_type().is_symlink() && m.len() <= MAX_FILE as u64,
+        "invalid captured UI lock"
+    );
+    let lock: Lock = serde_json::from_slice(&day2_assets::read_regular(path, MAX_FILE as u64)?)?;
+    validate_lock(&lock)?;
+    Ok(lock)
+}
+fn validate_lock(lock: &Lock) -> Result<()> {
+    day2::ui_lock::validate(lock)
+}
+
+fn package_inputs(root: &Path, package: &LockedPackage) -> Result<BTreeMap<String, Vec<u8>>> {
+    ensure!(
+        manifest_digest(&package.inputs)? == package.digest,
+        "locked input manifest mismatch"
+    );
+    package
+        .inputs
+        .iter()
+        .map(|input| {
+            let bytes = checked(root, &input.path)?;
+            ensure!(
+                bytes.len() == input.bytes && sha(&bytes) == input.digest,
+                "locked input changed: {}",
+                input.path
+            );
+            Ok((input.path.clone(), bytes))
+        })
+        .collect()
+}
+
+fn capture_package(inputs: &BTreeMap<String, Vec<u8>>, target: &Path) -> Result<()> {
+    fs::create_dir(target)?;
+    for (path, bytes) in inputs {
+        let output = target.join(path);
+        fs::create_dir_all(output.parent().context("locked input parent")?)?;
+        fs::write(output, bytes)?;
+    }
+    Ok(())
+}
+fn target_key() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("macos-aarch64"),
+        ("macos", "x86_64") => Ok("macos-x86_64"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
+        _ => bail!("unsupported UI adapter host target"),
+    }
+}
+fn pin_digest(pin: &Pin, path: &Path) -> Result<(Vec<u8>, String)> {
+    ensure!(
+        pin.schema_version == 1 && pin.assembly_protocol == 2 && pin.binding_abi == 2,
+        "unsupported UI adapter pin protocol/runtime ABI"
+    );
+    let target = pin
+        .targets
+        .get(target_key()?)
+        .context("UI adapter pin has no target executable")?;
+    ensure!(
+        valid_digest(&target.digest),
+        "invalid UI adapter executable digest"
+    );
+    let meta = fs::symlink_metadata(path)?;
+    ensure!(
+        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_FILE as u64 * 64,
+        "invalid UI adapter executable"
+    );
+    let bytes = day2_assets::read_regular(path, MAX_FILE as u64 * 64)?;
+    ensure!(
+        sha(&bytes) == target.digest,
+        "UI adapter executable digest mismatch"
+    );
+    Ok((bytes, target.digest.clone()))
+}
+
+fn lock_present(captured: &Path) -> Result<bool> {
+    match fs::symlink_metadata(captured.join(LOCK)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Production entry point; only Platform's installed trusted bundle can authorize assembly.
+pub fn expand(
+    platform_root: &Path,
+    captured: &Path,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    if !lock_present(captured)? {
+        return Ok(());
+    }
+    let bundle = day2::build_dependencies::installed(platform_root)?;
+    let lock = parse_lock(&captured.join(LOCK))?;
+    let identity = bundle.identity();
+    ensure!(
+        identity["provider"] == lock.provider
+            && identity["package"]["name"] == lock.package.name
+            && identity["package"]["version"] == lock.package.version
+            && identity["package"]["digest"] == lock.package.digest,
+        "app UI lock differs from the Platform bundled dependency; select a matching reviewed Platform release"
+    );
+    expand_with_pin(
+        captured,
+        hashes,
+        &bundle.provider_pin_path,
+        &bundle.package_root,
+    )
+}
+
+/// Explicit trusted bundle seam for tests and external conformance fixtures.
+fn expand_with_pin(
+    captured: &Path,
+    hashes: &mut BTreeMap<String, String>,
+    pin_path: &Path,
+    package_root: &Path,
+) -> Result<()> {
+    let lock_path = captured.join(LOCK);
+    if !lock_present(captured)? {
+        // Ordinary apps are unchanged. Their existing HTML/template admission
+        // rejects unsupported tags; this port must not inspect unrelated JS/images.
+        return Ok(());
+    }
+    let lock = parse_lock(&lock_path)?;
+    let actual_inputs = package_inputs(package_root, &lock.package)?;
+    let pin_meta = fs::symlink_metadata(pin_path).context("inspect explicit UI adapter pin")?;
+    ensure!(
+        pin_meta.is_file()
+            && !pin_meta.file_type().is_symlink()
+            && pin_meta.len() <= MAX_FILE as u64,
+        "invalid/oversized UI adapter pin"
+    );
+    let pin_bytes = day2_assets::read_regular(pin_path, MAX_FILE as u64)
+        .context("read explicit UI adapter pin")?;
+    ensure!(
+        pin_bytes.len() <= MAX_FILE,
+        "UI adapter pin grew beyond limit"
+    );
+    let pin: Pin = serde_json::from_slice(&pin_bytes).context("parse strict UI adapter pin")?;
+    ensure!(
+        pin.provider == lock.provider,
+        "UI provider pin identity mismatch"
+    );
+    let target = pin
+        .targets
+        .get(target_key()?)
+        .context("UI adapter pin has no target executable")?;
+    let declared_exe = PathBuf::from(&target.executable);
+    ensure!(
+        !target.executable.is_empty(),
+        "empty UI adapter executable path"
+    );
+    let exe_path = if declared_exe.is_absolute() {
+        declared_exe
+    } else {
+        pin_path
+            .parent()
+            .context("adapter pin has no parent directory")?
+            .join(declared_exe)
+    };
+    let (exe, exe_digest) = pin_digest(&pin, &exe_path)?;
+    let temp = tempfile::Builder::new()
+        .prefix("day2-ui-adapter-")
+        .tempdir()
+        .context("create private adapter directory")?;
+    let private_exe = temp.path().join("adapter");
+    fs::write(&private_exe, exe)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&private_exe, fs::Permissions::from_mode(0o700))?;
+    }
+    let private_ui = temp.path().join("ui");
+    copy_tree_checked(&captured.join("ui"), &private_ui)?;
+    let private_package = temp.path().join("package");
+    capture_package(&actual_inputs, &private_package)?;
+    let request_package = RequestPackage {
+        name: lock.package.name.clone(),
+        version: lock.package.version.clone(),
+        path: private_package
+            .to_str()
+            .context("private package path is not UTF-8")?
+            .into(),
+        digest: lock.package.digest.clone(),
+        inputs: lock.package.inputs.clone(),
+    };
+    let request = AssemblyRequest {
+        schema_version: 1,
+        assembly_protocol: 2,
+        provider: lock.provider.clone(),
+        target: AssemblyTarget {
+            binding_abi: 2,
+            template_engine: "minijinja-2.12.0".into(),
+        },
+        package: request_package,
+        ui: private_ui
+            .to_str()
+            .context("private UI path is not UTF-8")?
+            .into(),
+    };
+    // The released compiler owns its private input contract. Translate the
+    // authored path-free lock without changing the captured app source.
+    fs::write(
+        private_ui.join("ui.lock.json"),
+        serde_json::to_vec(&provider_lock(&lock))?,
+    )?;
+    let adapter = ProcessAssembler {
+        executable: &private_exe,
+        timeout: Duration::from_secs(60),
+    };
+    let mut publication = FilePublication { captured };
+    assemble_and_stage(
+        &adapter,
+        &mut publication,
+        &request,
+        &lock,
+        &actual_inputs,
+        hashes,
+    )?;
+    hashes.insert("ui-provider/executable".into(), exe_digest);
+    Ok(())
+}
+
+fn provider_lock(lock: &Lock) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "provider": lock.provider,
+        "package": {
+            "name": lock.package.name,
+            "version": lock.package.version,
+            "path": "../package",
+            "digest": lock.package.digest,
+            "inputs": lock.package.inputs,
+        },
+    })
+}
+
+/// Application boundary shared by production and deterministic port simulations.
+/// Capture and publication are replaceable effects; admission and planning are pure.
+fn assemble_and_stage(
+    adapter: &dyn UiAssembler,
+    publication: &mut dyn UiPublication,
+    request: &AssemblyRequest,
+    lock: &Lock,
+    actual_inputs: &BTreeMap<String, Vec<u8>>,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    validate_lock(lock)?;
+    let captured = publication.capture()?;
+    captured.validate()?;
+    let captured_lock: Lock = serde_json::from_slice(captured.input("ui.lock.json")?)?;
+    ensure!(
+        serde_json::to_value(&captured_lock)? == serde_json::to_value(lock)?,
+        "captured UI lock changed"
+    );
+    let env = adapter.assemble(request)?;
+    ensure!(
+        env.schema_version == 1
+            && env.ok
+            && env.command == "assemble"
+            && env.diagnostics.is_empty(),
+        "invalid UI assembly outcome"
+    );
+    let current = publication.capture()?;
+    ensure!(current == captured, "UI source changed after assembly");
+    validate_bundle(&env.data, lock, actual_inputs, &current, hashes)?;
+    let plan = plan_bundle(&env.data, actual_inputs, &current)?;
+    publication.publish(&current, &plan)?;
+    hashes.insert(PACKAGE_KEY.into(), lock.package.digest.clone());
+    for input in &env.data.inputs {
+        if input.path == LOCK {
+            hashes.insert("ui-provider/input-lock".into(), input.digest.clone());
+        } else if input.path.starts_with("ui/") {
+            hashes.insert(
+                format!("ui-source/app/{}", input.path),
+                input.digest.clone(),
+            );
+        }
+    }
+    for t in env.data.templates.keys() {
+        hashes.insert(format!("app/ui/{t}"), sha(env.data.templates[t].as_bytes()));
+    }
+    for r in &env.data.resources {
+        hashes.insert(format!("app/{}", r.path), r.digest.clone());
+    }
+    Ok(())
+}
+
+fn copy_tree_checked(source: &Path, target: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(source).context("captured UI directory missing")?;
+    ensure!(
+        meta.is_dir() && !meta.file_type().is_symlink(),
+        "invalid captured UI root"
+    );
+    fs::create_dir(target)?;
+    let mut stack = vec![(source.to_path_buf(), target.to_path_buf())];
+    let mut count = 0usize;
+    let mut total = 0usize;
+    while let Some((src, dst)) = stack.pop() {
+        for e in publication::ordered_entries(&src, &mut count)? {
+            let ty = e.file_type()?;
+            ensure!(!ty.is_symlink(), "captured UI symlink forbidden");
+            let out = dst.join(e.file_name());
+            if ty.is_dir() {
+                fs::create_dir(&out)?;
+                stack.push((e.path(), out));
+            } else {
+                ensure!(ty.is_file(), "special UI input forbidden");
+                let meta = fs::symlink_metadata(e.path())?;
+                ensure!(
+                    meta.is_file() && meta.len() <= MAX_UI_FILE as u64,
+                    "captured UI file exceeds limit"
+                );
+                let b = day2_assets::read_regular(&e.path(), MAX_UI_FILE as u64)?;
+                ensure!(b.len() <= MAX_UI_FILE, "captured UI file grew beyond limit");
+                total += b.len();
+                ensure!(total <= MAX_TOTAL, "captured UI byte budget exceeded");
+                fs::write(out, b)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn run_adapter_with_timeout(
+    exe: &Path,
+    request: &Path,
+    ui: &Path,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("assemble")
+        .arg("--request")
+        .arg(request)
+        .current_dir(ui)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("start pinned UI adapter")?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let out_thread = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stdout.take((MAX_STDOUT + 1) as u64).read_to_end(&mut b);
+        b
+    });
+    let err_thread = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stderr.take((MAX_STDERR + 1) as u64).read_to_end(&mut b);
+        b
+    });
+    let start = Instant::now();
+    let mut status = None;
+    loop {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        // A provider descendant may keep inherited pipes open after the direct child exits.
+        // The same deadline must cover output draining; joining early would bypass it.
+        if let Some(status) = status
+            && out_thread.is_finished()
+            && err_thread.is_finished()
+        {
+            let out = out_thread
+                .join()
+                .map_err(|_| anyhow!("adapter stdout reader failed"))?;
+            let err = err_thread
+                .join()
+                .map_err(|_| anyhow!("adapter stderr reader failed"))?;
+            if out.len() > MAX_STDOUT || err.len() > MAX_STDERR {
+                return Err(
+                    AssemblyFailure::InvalidResponse("output budget exceeded".into()).into(),
+                );
+            }
+            if !status.success() {
+                return Err(AssemblyFailure::ProviderRejected(adapter_failure(&out, &err)).into());
+            }
+            return Ok(out);
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Never block on inherited pipes at this point. Their readers retain bounded
+            // buffers; operator-approved provider execution is not hostile-code containment.
+            return Err(AssemblyFailure::Timeout.into());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+/// The adapter reports structured diagnostics on stdout; stderr is often empty.
+fn adapter_failure(out: &[u8], err: &[u8]) -> String {
+    let mut parts: Vec<String> = serde_json::from_slice::<serde_json::Value>(out)
+        .ok()
+        .and_then(|v| v["diagnostics"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .take(20)
+        .map(|d| {
+            format!(
+                "{} {}",
+                d["code"].as_str().unwrap_or(""),
+                d["message"].as_str().unwrap_or("")
+            )
+            .trim()
+            .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    let stderr = String::from_utf8_lossy(err).trim().to_string();
+    if !stderr.is_empty() {
+        parts.push(stderr);
+    }
+    if parts.is_empty() {
+        "no diagnostics".into()
+    } else {
+        parts.join("; ")
+    }
+}
+
+fn validate_bundle(
+    b: &Bundle,
+    lock: &Lock,
+    package: &BTreeMap<String, Vec<u8>>,
+    captured: &UiSnapshot,
+    captured_hashes: &BTreeMap<String, String>,
+) -> Result<()> {
+    captured.validate()?;
+    ensure!(
+        manifest_digest(&lock.package.inputs)? == lock.package.digest
+            && package.len() == lock.package.inputs.len(),
+        "locked input manifest mismatch"
+    );
+    for input in &lock.package.inputs {
+        let bytes = package
+            .get(&input.path)
+            .context("missing locked input snapshot")?;
+        ensure!(
+            bytes.len() == input.bytes && sha(bytes) == input.digest,
+            "locked input changed"
+        );
+    }
+    for (key, digest) in captured_hashes {
+        if let Some(rel) = key.strip_prefix("app/ui/") {
+            let bytes = captured
+                .files
+                .get(rel)
+                .context("incomplete captured UI snapshot")?;
+            ensure!(
+                sha(bytes) == *digest,
+                "captured source hash differs from snapshot manifest: {key}"
+            );
+        }
+    }
+    ensure!(
+        b.schema_version == 1
+            && b.runtime_abi == 2
+            && b.template_engine == "minijinja-2.12.0"
+            && b.package_digest == lock.package.digest,
+        "UI adapter package digest/schema/runtime ABI/template engine mismatch"
+    );
+    let mut inputmap = BTreeMap::new();
+    let mut total = 0usize;
+    ensure!(b.inputs.len() <= MAX_INPUTS, "input count exceeded");
+    for i in &b.inputs {
+        ensure!(
+            i.bytes <= MAX_FILE && valid_digest(&i.digest) && safe_rel(&i.path),
+            "invalid bundle input"
+        );
+        ensure!(
+            inputmap.insert(i.path.clone(), i).is_none(),
+            "duplicate bundle input"
+        );
+        let bytes = if i.path == LOCK {
+            serde_json::to_vec(&provider_lock(lock))?
+        } else if let Some(p) = i.path.strip_prefix("package/") {
+            package
+                .get(p)
+                .cloned()
+                .context("input is not a locked package source")?
+        } else if let Some(p) = i.path.strip_prefix("ui/") {
+            captured.input(p)?.to_vec()
+        } else {
+            bail!("unsupported bundle input source")
+        };
+        ensure!(
+            bytes.len() == i.bytes && sha(&bytes) == i.digest,
+            "bundle input bytes/digest mismatch: {}",
+            i.path
+        );
+        total += bytes.len();
+        ensure!(total <= MAX_TOTAL, "bundle input byte budget exceeded");
+    }
+    for path in package.keys() {
+        ensure!(
+            inputmap.contains_key(&format!("package/{path}")),
+            "adapter omitted a locked package input: {path}"
+        );
+    }
+    let template_names = b.templates.keys().cloned().collect::<BTreeSet<_>>();
+    let mut output_names = BTreeSet::new();
+    for path in b
+        .templates
+        .keys()
+        .map(|path| format!("ui/{path}"))
+        .chain(b.resources.iter().map(|resource| resource.path.clone()))
+    {
+        ensure!(
+            path.to_ascii_lowercase() != LOCK,
+            "UI lock is not a provider output"
+        );
+        ensure!(
+            output_names.insert(path.to_ascii_lowercase()),
+            "case-colliding UI outputs"
+        );
+    }
+    for path in &output_names {
+        for ancestor in path.match_indices('/').map(|(offset, _)| &path[..offset]) {
+            ensure!(
+                !output_names.contains(ancestor),
+                "overlapping UI output paths"
+            );
+        }
+    }
+    ensure!(b.templates.len() <= MAX_FILES, "invalid template set");
+    let expanded_bytes = b
+        .templates
+        .values()
+        .try_fold(0usize, |total, html| total.checked_add(html.len()))
+        .context("expanded template byte count overflow")?;
+    ensure!(
+        expanded_bytes <= MAX_TOTAL,
+        "expanded template byte budget exceeded"
+    );
+    for (p, html) in &b.templates {
+        ensure!(
+            safe_rel(p)
+                && (p.starts_with("pages/") || p.starts_with("components/"))
+                && p.ends_with(".html")
+                && html.len() <= MAX_FILE,
+            "invalid expanded template"
+        );
+        ensure!(
+            inputmap.contains_key(&format!("ui/{p}")),
+            "template source was not captured: {p}"
+        );
+        // These are symbolic templates, not rendered HTML. Ordinary Native
+        // template/type/form admission follows staging; rendered-HTML checks
+        // cannot run here without rejecting valid route/asset expressions.
+    }
+    let mut outs = BTreeSet::new();
+    ensure!(b.resources.len() <= MAX_FILES, "resource count exceeded");
+    let mut resource_total = 0usize;
+    for r in &b.resources {
+        ensure!(
+            safe_rel(&r.path)
+                && r.path.starts_with("ui/")
+                && r.bytes <= MAX_FILE
+                && valid_digest(&r.digest),
+            "invalid resource"
+        );
+        ensure!(
+            ["stylesheet", "module", "font", "metadata"].contains(&r.kind.as_str()),
+            "unknown resource kind"
+        );
+        ensure!(
+            r.source.is_some() != r.content.is_some(),
+            "resource needs exactly one source/content"
+        );
+        let bytes = if let Some(src) = &r.source {
+            let k = format!("package/{src}");
+            ensure!(safe_rel(src), "unsafe resource source");
+            ensure!(
+                inputmap.contains_key(&k),
+                "resource source absent from bundle inputs"
+            );
+            package
+                .get(src)
+                .cloned()
+                .context("resource source outside verified package")?
+        } else {
+            r.content.as_ref().unwrap().as_bytes().to_vec()
+        };
+        ensure!(
+            bytes.len() == r.bytes && sha(&bytes) == r.digest,
+            "resource digest/length mismatch: {}",
+            r.path
+        );
+        ensure!(outs.insert(r.path.clone()), "duplicate resource path");
+        resource_total = resource_total.saturating_add(bytes.len());
+        ensure!(resource_total <= MAX_TOTAL, "resource byte budget exceeded");
+    }
+    for a in &outs {
+        for c in &outs {
+            if a != c {
+                ensure!(
+                    !a.starts_with(&format!("{c}/")) && !c.starts_with(&format!("{a}/")),
+                    "overlapping resource paths"
+                );
+            }
+        }
+    }
+    for template in &template_names {
+        let path = format!("ui/{template}");
+        for resource in &outs {
+            ensure!(
+                path != *resource
+                    && !path.starts_with(&format!("{resource}/"))
+                    && !resource.starts_with(&format!("{path}/")),
+                "template/resource output collision: {path} / {resource}"
+            );
+        }
+    }
+    let mut consumed = BTreeSet::new();
+    for p in &b.consumed_inputs {
+        ensure!(
+            p.starts_with("ui/")
+                && p.to_ascii_lowercase() != LOCK
+                && inputmap.contains_key(p)
+                && consumed.insert(p.clone()),
+            "invalid/duplicate consumed input"
+        );
+    }
+    // Every template and claimed adapter UI input must match the original host
+    // snapshot. Unused app resources are left to normal resource admission.
+    for (rel, source) in &captured.files {
+        let original = captured_hashes.get(&format!("app/ui/{rel}"));
+        ensure!(
+            original.is_some_and(|digest| *digest == sha(source)),
+            "captured source absent/different in snapshot manifest: ui/{rel}"
+        );
+        if rel == "ui.lock.json" {
+            continue;
+        }
+        if (rel.starts_with("pages/") || rel.starts_with("components/")) && rel.ends_with(".html") {
+            ensure!(
+                template_names.contains(rel),
+                "CLI omitted captured template {rel}"
+            );
+        }
+        let key = format!("ui/{rel}");
+        let Some(input) = inputmap.get(&key) else {
+            continue;
+        };
+        ensure!(
+            source.len() == input.bytes && sha(source) == input.digest,
+            "UI source changed after capture: {key}"
+        );
+        ensure!(
+            captured_hashes
+                .get(&format!("app/{key}"))
+                .is_some_and(|d| d == &input.digest),
+            "captured source hash differs from snapshot manifest: {key}"
+        );
+    }
+    Ok(())
+}
+fn plan_bundle(
+    b: &Bundle,
+    package: &BTreeMap<String, Vec<u8>>,
+    captured: &UiSnapshot,
+) -> Result<PublicationPlan> {
+    let mut writes = BTreeMap::<String, Vec<u8>>::new();
+    for (p, html) in &b.templates {
+        writes.insert(p.clone(), html.as_bytes().to_vec());
+    }
+    for r in &b.resources {
+        let bytes = if let Some(content) = &r.content {
+            content.as_bytes().to_vec()
+        } else {
+            package
+                .get(r.source.as_deref().context("missing resource source")?)
+                .context("missing verified resource snapshot")?
+                .clone()
+        };
+        let rel = r.path.strip_prefix("ui/").context("output outside ui")?;
+        writes.insert(rel.into(), bytes);
+    }
+    for (rel, bytes) in &writes {
+        captured.check_output(rel)?;
+        if captured.files.contains_key(rel) {
+            // Existing overwrite inputs retain the original MAX_FILE bound.
+            let existing = captured.input(rel)?;
+            if b.templates.contains_key(rel) || rel == "app.css" {
+                let input_path = format!("ui/{rel}");
+                let input = b
+                    .inputs
+                    .iter()
+                    .find(|i| i.path == input_path)
+                    .context("overwrite is not a captured input")?;
+                ensure!(
+                    sha(existing) == input.digest,
+                    "captured input changed before overwrite: {rel}"
+                );
+            } else {
+                ensure!(existing == bytes, "managed resource collision: ui/{rel}");
+            }
+        }
+    }
+    let mut removes = BTreeSet::new();
+    for p in &b.consumed_inputs {
+        let rel = p.strip_prefix("ui/").context("consumed input outside ui")?;
+        let source = captured.input(rel)?;
+        let input = b
+            .inputs
+            .iter()
+            .find(|i| i.path == *p)
+            .context("missing consumed input")?;
+        ensure!(sha(source) == input.digest, "consumed input changed: {p}");
+        ensure!(
+            !writes.contains_key(rel),
+            "consumed input collides with output: {p}"
+        );
+        removes.insert(rel.into());
+    }
+    Ok(PublicationPlan { writes, removes })
+}
+
+#[cfg(test)]
+#[path = "ui_assembly/tests.rs"]
+mod isolatedtests;
+
+#[cfg(test)]
+#[path = "ui_assembly/manifest_tests.rs"]
+mod manifest_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/port_tests.rs"]
+mod port_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/external_tests.rs"]
+mod external_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/simulation_tests.rs"]
+mod simulation_tests;
+
+#[cfg(test)]
+#[path = "ui_assembly/publication_tests.rs"]
+mod publication_tests;

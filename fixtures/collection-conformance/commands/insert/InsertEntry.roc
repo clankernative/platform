@@ -47,8 +47,8 @@ InsertEntry :: [].{
 
 	verify_result : Str, EntryView.Value, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		Ok(next.entries.len() == old.entries.len() + 1 and next.entries.any(|row| row.id == output.id))
 	}
 }

@@ -1,0 +1,427 @@
+//! Bounded shared-slot operations under opaque current execution authority.
+//! The authority's production factory remains absent until the actual original
+//! CreatorFD/P3, role, app key/channel and runtime producers qualify. DATA-only
+//! codec proposals and stored MayHaveBeenSent never enter the counter writer.
+
+use super::{
+    control_slot::{AttemptCore, LogicalCore, RearmCore, SettlementCore, Slot, SlotState},
+    control_slot_firestore::{self as codec, VersionedSlot},
+    firestore::{Budget, EpochObservation, Port},
+    journal::{AuthorizedDispatch, CurrentBootstrapExecution, Purpose, snapshot_digest},
+    kernel::{self, Outcome, Request, UpdateTime},
+};
+use anyhow::{Context, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{EpochProvider, EpochStore},
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{marker::PhantomData, rc::Rc, time::Duration};
+
+fn endpoint(selection: &EpochStore, operation: &str) -> String {
+    let EpochProvider::FirestoreNativeV1 {
+        project, database, ..
+    } = &selection.provider;
+    format!(
+        "https://firestore.googleapis.com/v1/projects/{}/databases/{}/documents:{operation}",
+        project.as_str(),
+        database.as_str()
+    )
+}
+
+pub(crate) struct SlotObservation {
+    selection: Digest,
+    logical: Digest,
+    value: Option<VersionedSlot>,
+    budget: Budget,
+    valid: bool,
+    local: PhantomData<Rc<()>>,
+}
+
+impl SlotObservation {
+    pub(super) fn remaining(
+        &mut self,
+        selection: &EpochStore,
+        core: &LogicalCore,
+        port: &mut impl Port,
+    ) -> Result<Duration> {
+        ensure!(self.valid, "control_slot_observation_refused");
+        let result = (|| {
+            ensure!(
+                self.selection == Digest::of(selection)? && self.logical == core.digest()?,
+                "control_slot_observation_binding"
+            );
+            self.budget.remaining(port)
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    pub(super) fn into_data(self) -> Option<VersionedSlot> {
+        self.value
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadEntry {
+    transaction: Option<String>,
+    read_time: Option<String>,
+    found: Option<Value>,
+    missing: Option<String>,
+}
+
+pub(super) fn read_with_budget(
+    selection: &EpochStore,
+    core: &LogicalCore,
+    port: &mut impl Port,
+    mut budget: Budget,
+) -> Result<SlotObservation> {
+    let name = codec::name(selection, core)?;
+    let body = serde_json::to_vec(&json!({"documents":[name],"newTransaction":{"readOnly":{}}}))?;
+    let bytes = budget.call(port, &endpoint(selection, "batchGet"), &body)?;
+    let mut entries: Vec<ReadEntry> = crate::json::decode(&bytes)?;
+    ensure!(
+        !entries.is_empty() && entries.len() <= 2,
+        "control_slot_batch_shape"
+    );
+    let token = entries[0]
+        .transaction
+        .take()
+        .context("control_slot_transaction_missing")?;
+    let decoded = STANDARD.decode(&token)?;
+    ensure!(
+        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
+        "control_slot_transaction_shape"
+    );
+    let result = (|| {
+        if entries[0].found.is_none() && entries[0].missing.is_none() {
+            ensure!(entries[0].read_time.is_none(), "control_slot_header_fields");
+            entries.remove(0);
+        }
+        ensure!(entries.len() == 1, "control_slot_batch_shape");
+        let entry = entries.pop().unwrap();
+        ensure!(
+            entry.transaction.is_none(),
+            "control_slot_duplicate_transaction"
+        );
+        let read_time = entry.read_time.context("control_slot_read_time_missing")?;
+        time::OffsetDateTime::parse(&read_time, &time::format_description::well_known::Rfc3339)?;
+        match (entry.found, entry.missing) {
+            (Some(document), None) => Ok(Some(codec::decode(
+                selection,
+                core,
+                &serde_json::to_vec(&document)?,
+            )?)),
+            (None, Some(missing)) => {
+                ensure!(missing == name, "control_slot_unrequested_document");
+                Ok(None)
+            }
+            _ => anyhow::bail!("control_slot_batch_shape"),
+        }
+    })();
+    // Semantic failure still closes the actual provider read transaction.
+    let rollback = serde_json::to_vec(&json!({"transaction":token}))?;
+    let cleanup = budget.call(port, &endpoint(selection, "rollback"), &rollback)?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+    let _: Empty = crate::json::decode(&cleanup)?;
+    budget.remaining(port)?;
+    Ok(SlotObservation {
+        selection: Digest::of(selection)?,
+        logical: core.digest()?,
+        value: result?,
+        budget,
+        valid: true,
+        local: PhantomData,
+    })
+}
+
+pub(crate) struct Mutation {
+    core: LogicalCore,
+    after: Slot,
+    write: Value,
+    counter: EpochObservation,
+    slot: SlotObservation,
+    context: CurrentBootstrapExecution,
+    purpose: Purpose,
+}
+
+impl Mutation {
+    fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        self.core.validate(selection)?;
+        self.counter.remaining(selection, port)?;
+        self.slot.remaining(selection, &self.core, port)?;
+        self.context.check(
+            selection,
+            &self.core.counter,
+            self.counter.snapshot(),
+            self.purpose,
+            port,
+        )?;
+        Ok(())
+    }
+
+    fn send(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Self, UpdateTime)> {
+        self.check(selection, port)?;
+        let mut budget = self.context.budget(port)?;
+        let body = serde_json::to_vec(&json!({"writes":[self.write]}))?;
+        let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
+        let version = commit_version(&bytes)?;
+        self.check(selection, port)?;
+        Ok((self, version))
+    }
+}
+
+fn commit_version(bytes: &[u8]) -> Result<UpdateTime> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Reply {
+        write_results: Vec<WriteResult>,
+        commit_time: UpdateTime,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct WriteResult {
+        update_time: UpdateTime,
+    }
+    let mut reply: Reply = crate::json::decode(bytes)?;
+    ensure!(
+        reply.write_results.len() == 1,
+        "control_slot_commit_result_count"
+    );
+    let version = reply.write_results.remove(0).update_time;
+    let updated = time::OffsetDateTime::parse(
+        &String::from(version.clone()),
+        &time::format_description::well_known::Rfc3339,
+    )?;
+    let committed = time::OffsetDateTime::parse(
+        &String::from(reply.commit_time),
+        &time::format_description::well_known::Rfc3339,
+    )?;
+    ensure!(updated <= committed, "control_slot_commit_time_order");
+    Ok(version)
+}
+
+pub(crate) struct SlotMaintenanceMutation {
+    mutation: Mutation,
+}
+
+pub(crate) struct SlotClaimMutation {
+    mutation: Mutation,
+}
+
+/// Only a known claim commit while all original authority remains valid can
+/// construct this. Readback of a matching stored May never does. Consumption
+/// permits one local send attempt, not a once-only remote application claim.
+pub(crate) struct KnownClaim {
+    mutation: Mutation,
+}
+
+fn checked(
+    mut mutation: Mutation,
+    selection: &EpochStore,
+    port: &mut impl Port,
+    expected: Outcome,
+) -> Result<Mutation> {
+    mutation.check(selection, port)?;
+    ensure!(
+        kernel::reconcile(
+            selection,
+            &mutation.core.counter,
+            mutation.counter.snapshot()
+        )? == expected,
+        "control_slot_counter_outcome"
+    );
+    Ok(mutation)
+}
+
+pub(super) fn accept(
+    selection: &EpochStore,
+    core: LogicalCore,
+    counter: EpochObservation,
+    slot: SlotObservation,
+    context: CurrentBootstrapExecution,
+    port: &mut impl Port,
+) -> Result<SlotMaintenanceMutation> {
+    ensure!(slot.value.is_none(), "control_slot_already_reserved");
+    let after = Slot::prepared(core.clone());
+    let write = codec::create_data(selection, &after)?;
+    Ok(SlotMaintenanceMutation {
+        mutation: checked(
+            Mutation {
+                core,
+                after,
+                write,
+                counter,
+                slot,
+                context,
+                purpose: Purpose::Dispatch,
+            },
+            selection,
+            port,
+            Outcome::NotApplied,
+        )?,
+    })
+}
+
+pub(super) fn claim(
+    selection: &EpochStore,
+    core: LogicalCore,
+    counter: EpochObservation,
+    slot: SlotObservation,
+    context: CurrentBootstrapExecution,
+    attempt: AttemptCore,
+    port: &mut impl Port,
+) -> Result<SlotClaimMutation> {
+    let before = slot
+        .value
+        .as_ref()
+        .context("control_slot_reservation_missing")?;
+    ensure!(
+        before.slot.logical == core,
+        "control_slot_reservation_replaced"
+    );
+    let after = before
+        .slot
+        .claim_data(selection, &before.version, attempt)?;
+    let write = codec::cas_data(selection, before, &after)?;
+    Ok(SlotClaimMutation {
+        mutation: checked(
+            Mutation {
+                core,
+                after,
+                write,
+                counter,
+                slot,
+                context,
+                purpose: Purpose::Dispatch,
+            },
+            selection,
+            port,
+            Outcome::NotApplied,
+        )?,
+    })
+}
+
+pub(super) fn rearm(
+    selection: &EpochStore,
+    core: LogicalCore,
+    counter: EpochObservation,
+    slot: SlotObservation,
+    context: CurrentBootstrapExecution,
+    rearm: RearmCore,
+    port: &mut impl Port,
+) -> Result<SlotMaintenanceMutation> {
+    ensure!(
+        rearm.not_applied_observation == snapshot_digest(counter.snapshot())?,
+        "control_slot_rearm_observation_mismatch"
+    );
+    let before = slot
+        .value
+        .as_ref()
+        .context("control_slot_reservation_missing")?;
+    ensure!(
+        before.slot.logical == core,
+        "control_slot_reservation_replaced"
+    );
+    let after = before.slot.rearm_data(selection, &before.version, rearm)?;
+    let write = codec::cas_data(selection, before, &after)?;
+    Ok(SlotMaintenanceMutation {
+        mutation: checked(
+            Mutation {
+                core,
+                after,
+                write,
+                counter,
+                slot,
+                context,
+                purpose: Purpose::Reconcile,
+            },
+            selection,
+            port,
+            Outcome::NotApplied,
+        )?,
+    })
+}
+
+pub(super) fn settle(
+    selection: &EpochStore,
+    core: LogicalCore,
+    counter: EpochObservation,
+    slot: SlotObservation,
+    context: CurrentBootstrapExecution,
+    settlement: SettlementCore,
+    port: &mut impl Port,
+) -> Result<SlotMaintenanceMutation> {
+    let before = slot
+        .value
+        .as_ref()
+        .context("control_slot_reservation_missing")?;
+    ensure!(
+        before.slot.logical == core,
+        "control_slot_reservation_replaced"
+    );
+    let expected = core.counter.receipt()?;
+    let after =
+        before
+            .slot
+            .settle_data(selection, &before.version, settlement, expected.clone())?;
+    let write = codec::cas_data(selection, before, &after)?;
+    Ok(SlotMaintenanceMutation {
+        mutation: checked(
+            Mutation {
+                core,
+                after,
+                write,
+                counter,
+                slot,
+                context,
+                purpose: Purpose::Reconcile,
+            },
+            selection,
+            port,
+            Outcome::Applied(Box::new(expected)),
+        )?,
+    })
+}
+
+impl SlotMaintenanceMutation {
+    pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<UpdateTime> {
+        let (_, version) = self.mutation.send(selection, port)?;
+        // Historical acknowledgement only; never a counter-send permit.
+        Ok(version)
+    }
+}
+
+impl SlotClaimMutation {
+    pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<KnownClaim> {
+        let (mutation, _) = self.mutation.send(selection, port)?;
+        ensure!(
+            matches!(mutation.after.state, SlotState::MayHaveBeenSent { .. }),
+            "control_slot_claim_state"
+        );
+        Ok(KnownClaim { mutation })
+    }
+}
+
+impl KnownClaim {
+    pub(super) fn prepare(
+        mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<(Request, Budget)> {
+        self.mutation.check(selection, port)?;
+        let budget = self.mutation.context.budget(port)?;
+        Ok((self.mutation.core.counter, budget))
+    }
+
+    pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        super::firestore::commit(port, selection, AuthorizedDispatch::Shared(Box::new(self)))
+    }
+}

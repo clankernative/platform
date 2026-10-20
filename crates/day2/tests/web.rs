@@ -39,6 +39,282 @@ fn apply_desired_authority(runtime: &Runtime) -> Result<()> {
 }
 
 #[test]
+fn html_and_json_pages_preserve_admitted_query_failure_statuses() -> Result<()> {
+    let artifact = std::env::var_os("DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT")
+        .map(PathBuf::from)
+        .context("build fixtures/verification-actor-conformance or run xtask verify")?;
+    let directory = tempfile::tempdir()?;
+    let authority = json!({
+        "version": 1,
+        "admins": [],
+        "operations": {
+            "verifiers.create_note": {
+                "actors": ["operation-denied"],
+                "mode": {"kind": "current_state"},
+                "models": {}
+            },
+            "verifiers.count_notes": {
+                "actors": ["developer", "page-query-denied"],
+                "mode": {"kind": "read"},
+                "models": {"notes": {"read": true, "rows": {"kind": "all"}}}
+            }
+        },
+        "constraints": {}
+    });
+    let path = directory.path().join("instance.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "installation": "verification_actor_web",
+            "environment": "test",
+            "apps": {
+                "verifiers": {
+                    "artifact": artifact,
+                    "readers": ["developer", "page-query-denied"],
+                    "writers": ["operation-denied"],
+                    "authority": authority
+                }
+            }
+        }))?,
+    )?;
+    let runtime = Runtime::load(&path, "verifiers")?;
+    runtime.initialize()?;
+    let db = || rusqlite::Connection::open(runtime.db()).map_err(anyhow::Error::from);
+    let notes_before: i64 = db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))?;
+    let changes_before: i64 =
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| {
+            row.get(0)
+        })?;
+
+    let developer_server =
+        Server::start(runtime.clone(), "developer", 0).context("developer server")?;
+    let developer = developer_server.client()?;
+    let denied_server =
+        Server::start(runtime.clone(), "page-query-denied", 0).context("app-denied server")?;
+    let denied = denied_server.client()?;
+    // A different operation admits this session, without granting the page query or any model writes.
+    let excluded_server =
+        Server::start(runtime.clone(), "operation-denied", 0).context("host-denied server")?;
+    let excluded = excluded_server.client()?;
+
+    let html_success = developer
+        .get(format!("{}/", developer_server.origin))
+        .send()?;
+    assert_eq!(html_success.status(), StatusCode::OK);
+    assert!(html_success.text()?.contains("Notes: 0"));
+    let json_success = developer
+        .get(format!(
+            "{}/api/verifiers.count_notes",
+            developer_server.origin
+        ))
+        .send()?;
+    assert_eq!(json_success.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&json_success.text()?)?["count"],
+        0
+    );
+
+    let html_denied = denied.get(format!("{}/", denied_server.origin)).send()?;
+    assert_eq!(html_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html_body = html_denied.text()?;
+    let json_denied = denied
+        .get(format!(
+            "{}/api/verifiers.count_notes",
+            denied_server.origin
+        ))
+        .send()?;
+    assert_eq!(json_denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json_body = json_denied.text()?;
+    for body in [&html_body, &json_body] {
+        for private_detail in [
+            "CountNotes.roc",
+            "failed_query_as",
+            "page-query-denied",
+            "stack backtrace",
+        ] {
+            assert!(
+                !body.contains(private_detail),
+                "leaked {private_detail}: {body}"
+            );
+        }
+    }
+
+    assert_eq!(
+        excluded
+            .get(format!("{}/", excluded_server.origin))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        excluded
+            .get(format!(
+                "{}/api/verifiers.count_notes",
+                excluded_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        developer
+            .get(format!("{}/missing-page", developer_server.origin))
+            .send()?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        developer
+            .get(format!(
+                "{}/api/verifiers.count_notes?extra=1",
+                developer_server.origin
+            ))
+            .send()?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM notes", [], |row| row.get::<_, i64>(0))?,
+        notes_before
+    );
+    assert_eq!(
+        db()?.query_row("SELECT count(*) FROM day2_audit_changes", [], |row| row
+            .get::<_, i64>(0))?,
+        changes_before
+    );
+    Ok(())
+}
+
+#[test]
+fn admitted_committed_form_keeps_receipt_when_page_refresh_is_rejected() -> Result<()> {
+    let Some(artifact) = std::env::var_os("DAY2_TEST_FREETOOL_ARTIFACT").map(PathBuf::from) else {
+        eprintln!("set DAY2_TEST_FREETOOL_ARTIFACT to run the committed-form receipt test");
+        return Ok(());
+    };
+    let actor = "developer";
+    let verification: Value =
+        serde_json::from_slice(&fs::read(artifact.join("verification.json"))?)?;
+    let mut authority = verification["traces"][0]["guard"]["policy"].clone();
+    authority["admins"] = json!([actor]);
+    for grant in authority["operations"]
+        .as_object_mut()
+        .context("admitted operation policy")?
+        .values_mut()
+    {
+        grant["actors"] = json!([actor]);
+        grant["observations"] = json!([]);
+        grant["effects"] = json!([]);
+    }
+    let directory = tempfile::tempdir()?;
+    let instance_path = directory.path().join("instance.json");
+    fs::write(
+        &instance_path,
+        serde_json::to_vec(&json!({
+            "installation":"freetool_receipt_test", "environment":"test",
+            "apps":{"freetool":{"artifact":artifact,"readers":[actor],"writers":[actor],"authority":authority}}
+        }))?,
+    )?;
+    let runtime = Runtime::load(&instance_path, "freetool")?;
+    runtime.initialize()?;
+    let invoke = |operation: &str, id: &str, input: Value| -> Result<Value> {
+        let outcome = runtime.invoke(operation, actor, id, &input, 100, Fault::None)?;
+        assert_eq!(outcome.status, "success", "{}", outcome.error);
+        Ok(outcome.result)
+    };
+    invoke(
+        "freetool.bootstrap_administrator",
+        "receipt-bootstrap",
+        json!({"email":"admin@example.com","name":"Synthetic admin"}),
+    )?;
+    let moderator = invoke(
+        "freetool.invite_user",
+        "receipt-moderator",
+        json!({"email":"moderator@example.com"}),
+    )?;
+    let space = invoke(
+        "freetool.create_space",
+        "receipt-space",
+        json!({"name":"Before commit","moderator":moderator["id"],"members":[]}),
+    )?;
+    let db = rusqlite::Connection::open(runtime.db())?;
+    // Inject domain-access loss after the write in this disposable database.
+    // The normal signed HTTP path still performs all native admission checks.
+    db.execute_batch("CREATE TRIGGER revoke_after_rename AFTER UPDATE OF name ON spaces
+        WHEN NEW.name = 'After commit'
+        BEGIN UPDATE administrators SET deleted_at=1,version=version+1 WHERE actor='developer'; END")?;
+    let server = Server::start(runtime.clone(), actor, 0)?;
+    let client = server.client()?;
+    let path = format!(
+        "/spaces/{}/settings",
+        space["id"].as_str().context("space reference")?
+    );
+    let page = client.get(format!("{}{path}", server.origin)).send()?;
+    assert_eq!(page.status(), StatusCode::OK);
+    let mut fields = selected_form(&page.text()?, "form[data-command='freetool.rename_space']")?;
+    fields.insert("name".into(), "After commit".into());
+    let submit = || -> Result<Response> {
+        Ok(client
+            .post(format!("{}/actions", server.origin))
+            .header("Origin", &server.origin)
+            .header("Datastar-Request", "true")
+            .form(&fields)
+            .send()?)
+    };
+    let response = submit()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-day2-command-status"], "200");
+    assert!(
+        response.headers()["content-type"]
+            .to_str()?
+            .starts_with("text/event-stream")
+    );
+    let receipt = response
+        .headers()
+        .get("x-day2-invocation")
+        .context("committed receipt")?
+        .to_str()?
+        .to_owned();
+    let patch = response.text()?;
+    assert!(patch.contains("Saved.") && patch.contains("Reload page"));
+    assert!(patch.contains(&receipt) && !patch.contains("_ticket"));
+    let (recorded, outcome): (String, String) = db.query_row(
+        "SELECT id,outcome FROM day2_invocations WHERE operation='freetool.rename_space'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(receipt, recorded);
+    assert_eq!(
+        serde_json::from_str::<Value>(&outcome)?["status"],
+        "success"
+    );
+    assert_eq!(
+        db.query_row("SELECT name FROM spaces", [], |row| row.get::<_, String>(0))?,
+        "After commit"
+    );
+    let repeated = submit()?;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    assert_eq!(repeated.headers()["x-day2-invocation"], receipt.as_str());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM day2_invocations WHERE operation='freetool.rename_space'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    // The follow-up query really is denied; this is not a successful refresh.
+    assert_eq!(
+        client
+            .get(format!("{}{path}", server.origin))
+            .send()?
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    Ok(())
+}
+
+#[test]
 fn openapi_docs_and_json_queries_share_the_admitted_contract() -> Result<()> {
     let world = World::new()?;
     world.seed("api-docs-seed")?;
@@ -763,6 +1039,10 @@ impl World {
         let artifact = std::env::var_os("DAY2_TEST_HTTP_ARTIFACT")
             .map(PathBuf::from)
             .context("run xtask verify or set DAY2_TEST_HTTP_ARTIFACT")?;
+        Self::named_artifact(installation, &artifact)
+    }
+
+    fn named_artifact(installation: &str, artifact: &std::path::Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let instance = Instance {
             installation: installation.into(),
@@ -1195,6 +1475,108 @@ fn repeated_controls_decode_as_an_ordered_list_with_an_explicit_empty() -> Resul
 }
 
 #[test]
+fn native_list_checkbox_fanout_preserves_signed_choices_and_empty_selection() -> Result<()> {
+    let world = World::repeated_fields()?;
+    let server = Server::start(world.runtime.clone(), "alice", 0)?;
+    let client = server.client()?;
+    let empty_page = client
+        .get(format!("{}/native-controls", server.origin))
+        .send()?;
+    assert_eq!(empty_page.status(), StatusCode::OK);
+    assert_eq!(
+        claims(&selected_form(
+            &empty_page.text()?,
+            "#native-controls-form"
+        )?)?["bound"]["tags"],
+        json!([])
+    );
+    for index in 0..100 {
+        let result = world.runtime.invoke(
+            "things.tag",
+            "alice",
+            &format!("native-choice-{index}"),
+            &json!({
+                "name": format!("choice-{index:03}"), "tags": [],
+                "attributes": {"entries": []}, "groups": {"members": []}
+            }),
+            100,
+            Fault::None,
+        )?;
+        assert_eq!(result.status, "success", "{}", result.error);
+    }
+    let fresh = || -> Result<(BTreeMap<String, String>, Vec<String>)> {
+        let response = client
+            .get(format!("{}/native-controls", server.origin))
+            .send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = response.text()?;
+        let document = Html::parse_document(&page);
+        let choices = document
+            .select(&selector("input[type=checkbox][name=tags]"))
+            .map(|input| input.value().attr("value").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 100);
+        Ok((selected_form(&page, "#native-controls-form")?, choices))
+    };
+    let send =
+        |fields: &BTreeMap<String, String>, name: &str, tags: &[&str]| -> Result<StatusCode> {
+            let mut body = url::form_urlencoded::Serializer::new(String::new());
+            for (key, value) in [
+                ("_csrf", fields["_csrf"].as_str()),
+                ("_ticket", fields["_ticket"].as_str()),
+                ("name", name),
+                ("attributes.role", "reader"),
+                ("groups", "eng"),
+            ] {
+                body.append_pair(key, value);
+            }
+            for tag in tags {
+                body.append_pair("tags", tag);
+            }
+            Ok(client
+                .post(format!("{}/actions", server.origin))
+                .header("Origin", &server.origin)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(body.finish())
+                .send()?
+                .status())
+        };
+    let (fields, _) = fresh()?;
+    assert_eq!(
+        send(&fields, "selected", &["choice-099", "choice-000"])?,
+        StatusCode::SEE_OTHER
+    );
+    let (fields, choices) = fresh()?;
+    assert_eq!(
+        send(
+            &fields,
+            "all",
+            &choices.iter().map(String::as_str).collect::<Vec<_>>()
+        )?,
+        StatusCode::SEE_OTHER
+    );
+    let (fields, _) = fresh()?;
+    assert_eq!(send(&fields, "empty", &[])?, StatusCode::SEE_OTHER);
+    let stored = |name: &str| -> Result<String> {
+        Ok(world.db()?.query_row(
+            "SELECT tags_joined FROM things WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    assert_eq!(stored("selected")?, "choice-099,choice-000");
+    assert_eq!(stored("all")?, choices.join(","));
+    assert_eq!(stored("empty")?, "");
+    let (fields, _) = fresh()?;
+    assert_eq!(
+        send(&fields, "unoffered", &["not-offered"])?,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(world.count("things")?, 103);
+    Ok(())
+}
+
+#[test]
 fn keyed_and_unique_controls_decode_to_canonical_maps_and_sets() -> Result<()> {
     // A map carries its key in the control name, so one control is always one
     // complete entry and a half-populated pair cannot be expressed. A set repeats
@@ -1518,11 +1900,7 @@ fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
     );
     replay(world.runtime.artifact(), &world.runtime.trace(&id)?)?;
     let evidence = world.directory.path().join("properties");
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &evidence,
-    )?;
+    day2::properties::require(&world.runtime, &evidence)?;
     assert!(
         world
             .runtime
@@ -1756,6 +2134,81 @@ fn path_and_query_errors_fail_closed_without_implicit_routes() -> Result<()> {
         );
     }
     assert_eq!(world.count("day2_audit_changes")?, 1);
+    Ok(())
+}
+
+#[test]
+fn assembled_component_entry_is_loaded_and_served_only_with_provider_provenance() -> Result<()> {
+    let original = World::new()?;
+    let root = tempfile::tempdir()?;
+    for approved in [false, true] {
+        let staging = root.path().join("staging");
+        copy_artifact(original.runtime.artifact().directory(), &staging)?;
+        let ui = root.path().join("ui");
+        fs::create_dir_all(&ui)?;
+        fs::write(ui.join("ui-package.js"), "import './component.js';")?;
+        fs::write(
+            ui.join("component.js"),
+            "document.documentElement.dataset.component = 'ready';",
+        )?;
+        let resources = day2::web_resources::package(&ui, &staging)?;
+        let mut contract: Value =
+            serde_json::from_slice(&fs::read(staging.join("artifact.json"))?)?;
+        contract["web_resources"]
+            .as_object_mut()
+            .context("resources")?
+            .extend(
+                serde_json::to_value(&resources)?
+                    .as_object()
+                    .context("resources")?
+                    .clone(),
+            );
+        if approved {
+            contract["sources"]["ui-provider/executable"] =
+                json!(day2::digest(b"approved test provider"));
+        }
+        let bytes = serde_json::to_vec(&contract)?;
+        let artifact = root
+            .path()
+            .join(day2_assets::hash_part(&day2::digest(&bytes))?);
+        fs::write(staging.join("artifact.json"), &bytes)?;
+        fs::rename(staging, &artifact)?;
+        let world = World::named_artifact("componentco", &artifact)?;
+        let server = Server::start(world.runtime.clone(), "alice", 0)?;
+        let client = server.client()?;
+        let response = client.get(&server.origin).send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()["content-security-policy"]
+            .to_str()?
+            .to_owned();
+        let page = response.text()?;
+        let document = Html::parse_document(&page);
+        let entries = document
+            .select(&selector("script[src$='/ui-package.js']"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), usize::from(approved));
+        if let Some(entry) = entries.first() {
+            assert_eq!(entry.value().attr("type"), Some("module"));
+            let url = entry.value().attr("src").context("component entry URL")?;
+            let prefix = url.strip_suffix("ui-package.js").context("UI prefix")?;
+            assert!(csp.contains(&format!("{}{prefix}", server.origin)));
+            for (path, resource) in resources {
+                let response = client
+                    .get(format!("{}{prefix}{path}", server.origin))
+                    .send()?;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["content-type"], resource.media_type);
+                assert_eq!(day2::digest(&response.bytes()?), resource.digest);
+            }
+            assert_eq!(
+                Client::new()
+                    .get(format!("{}{url}", server.origin))
+                    .send()?
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2242,14 +2695,9 @@ fn admission_refuses_when_common_audit_is_unavailable_and_receipts_fail_closed()
 }
 
 #[test]
-fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Result<()> {
+fn current_host_reopen_is_repeatable_and_does_not_invent_event_metadata() -> Result<()> {
     let world = World::new()?;
-    world.seed("legacy-receipt")?;
-    world.db()?.execute_batch(
-        "DROP TRIGGER day2_receipt_event; DROP TRIGGER day2_web_audit_event;
-        DROP TRIGGER day2_audit_no_replace; DROP TRIGGER day2_changes_no_replace; DROP TRIGGER day2_events_no_replace;
-        UPDATE day2_meta SET value='1' WHERE key='host_schema';",
-    )?;
+    world.seed("prior-receipt")?;
     let before = world.count("day2_audit_events")?;
     world.runtime.initialize()?;
     world.runtime.initialize()?;
@@ -2260,13 +2708,6 @@ fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Res
             [],
             |row| row.get::<_, String>(0)
         )?,
-        // Schema 3 recorded the cause of each invocation; 4 widened its
-        // constraint from an enumeration to a shape; 5 gave every application
-        // table its deletion column; 6 added the record of removals; 7 recorded
-        // which applications a call passed through; 8 separated who
-        // authenticated from whom the work is for; 9 bound each address to
-        // the account behind it; 10 let a completed invocation keep a receipt
-        // in place of its trace.
         "10"
     );
     world.seed("new-receipt")?;
@@ -2274,31 +2715,25 @@ fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Res
     Ok(())
 }
 
-/// An instance that predates soft deletion gains the column with its rows intact.
-///
-/// The migration is the only reason existing instances can adopt a platform
-/// rule they were not built under. It has to reach every application table —
-/// discovered from the database, not from the current artifact, because an
-/// instance can hold tables the app no longer declares — and it has to leave
-/// every existing row live, since a default of anything but zero would delete
-/// the entire fleet's data on upgrade.
 #[test]
-fn a_pre_deletion_instance_gains_the_column_with_every_row_still_live() -> Result<()> {
+fn current_instance_deletion_columns_and_live_rows_survive_reopen() -> Result<()> {
     let world = World::new()?;
-    world.seed("legacy-row")?;
-    let before = world.count("links")?;
-    assert!(before > 0, "the fixture holds a row to migrate");
-    // A table the current artifact does not declare, to prove the migration
-    // reads the database rather than the schema.
-    world.db()?.execute_batch(
-        "ALTER TABLE links DROP COLUMN deleted_at;
-        CREATE TABLE retired_model(id INTEGER PRIMARY KEY, version INTEGER NOT NULL,
-            created_at INTEGER NOT NULL);
-        INSERT INTO retired_model VALUES(1,1,100);
-        UPDATE day2_meta SET value='4' WHERE key='host_schema';",
-    )?;
-    world.runtime.initialize()?;
-
+    world.seed("current-row")?;
+    let links = || -> Result<Vec<Vec<rusqlite::types::Value>>> {
+        let db = world.db()?;
+        let mut statement = db.prepare("SELECT * FROM links ORDER BY id")?;
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    };
+    let before = links()?;
+    assert!(!before.is_empty(), "the fixture holds a current live row");
     let column = |table: &str| -> Result<i64> {
         Ok(world.db()?.query_row(
             "SELECT count(*) FROM pragma_table_info(?1) WHERE name='deleted_at'",
@@ -2306,25 +2741,88 @@ fn a_pre_deletion_instance_gains_the_column_with_every_row_still_live() -> Resul
             |row| row.get(0),
         )?)
     };
-    assert_eq!(column("links")?, 1, "the declared table did not migrate");
-    assert_eq!(
-        column("retired_model")?,
-        1,
-        "a table the artifact no longer declares was skipped"
-    );
-    assert_eq!(column("day2_invocations")?, 0, "a platform table migrated");
-    assert_eq!(
-        world.db()?.query_row(
-            "SELECT count(*) FROM links WHERE deleted_at = 0",
-            [],
-            |row| row.get::<_, i64>(0)
-        )?,
-        before,
-        "migrating deleted rows that existed before deletion did"
-    );
-    // Running it again is a no-op rather than an error on the existing column.
-    world.runtime.initialize()?;
-    assert_eq!(column("links")?, 1);
+    for _ in 0..2 {
+        world.runtime.initialize()?;
+        assert_eq!(column("links")?, 1);
+        for table in [
+            "day2_invocations",
+            "native_fresh_schema_version",
+            "native_fresh_owners",
+        ] {
+            assert_eq!(
+                column(table)?,
+                0,
+                "platform table {table} gained deletion state"
+            );
+        }
+        assert_eq!(
+            world.db()?.query_row(
+                "SELECT count(*) FROM links WHERE deleted_at = 0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            i64::try_from(before.len())?
+        );
+        assert_eq!(links()?, before, "reopen changed persisted link contents");
+    }
+    Ok(())
+}
+
+#[test]
+fn current_native_identity_marker_extra_column_refuses_without_repair() -> Result<()> {
+    let world = World::new()?;
+    world.seed("preserved-row")?;
+    world.db()?.execute_batch(
+        "ALTER TABLE native_fresh_schema_version ADD COLUMN deleted_at INTEGER NOT NULL
+         DEFAULT 0 CHECK(deleted_at >= 0)",
+    )?;
+    let snapshot = || -> Result<Vec<(String, Vec<Vec<rusqlite::types::Value>>)>> {
+        let mut db = world.db()?;
+        let tx = db.transaction()?;
+        let mut captured = Vec::new();
+        for query in [
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
+            "SELECT * FROM day2_meta ORDER BY key",
+            "SELECT * FROM native_fresh_schema_version ORDER BY version",
+            "SELECT * FROM native_fresh_owners ORDER BY original",
+            "SELECT * FROM links ORDER BY id",
+            "SELECT * FROM day2_invocations ORDER BY id",
+            "SELECT * FROM day2_audit ORDER BY rowid",
+            "SELECT * FROM day2_audit_changes ORDER BY invocation,ordinal",
+            "SELECT * FROM day2_audit_events_meta ORDER BY version",
+            "SELECT * FROM day2_audit_events ORDER BY sequence",
+            "SELECT * FROM day2_retention_removals ORDER BY sequence",
+            "SELECT * FROM day2_audit_cursors ORDER BY token",
+            "SELECT * FROM day2_web_events ORDER BY sequence",
+        ] {
+            let mut statement = tx.prepare(query)?;
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            captured.push((query.to_owned(), rows));
+        }
+        tx.commit()?;
+        Ok(captured)
+    };
+    let before = snapshot()?;
+    for _ in 0..2 {
+        let error = world.runtime.initialize().unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("table shape") && message.contains("native_fresh_schema_version"),
+            "{message}"
+        );
+        assert_eq!(
+            snapshot()?,
+            before,
+            "refusal repaired or changed stored state"
+        );
+    }
     Ok(())
 }
 
@@ -2431,11 +2929,7 @@ fn audit_is_atomic_append_only_redacted_and_fault_replayable() -> Result<()> {
             .to_string(),
         "forbidden"
     );
-    day2::properties::require(
-        world.runtime.artifact(),
-        &world.runtime.inspect()?,
-        &world.directory.path().join("properties"),
-    )?;
+    day2::properties::require(&world.runtime, &world.directory.path().join("properties"))?;
     Ok(())
 }
 
@@ -2755,28 +3249,29 @@ fn asset_cache_revalidation_requires_current_authority_and_session() -> Result<(
     Ok(())
 }
 
+fn copy_artifact(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_artifact(&entry.path(), &target.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn asset_cache_validators_do_not_bypass_blob_integrity_or_brand_binding() -> Result<()> {
     let mut world = World::new()?;
     // Keep corruption confined to this test's artifact copy.
-    fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
-        fs::create_dir_all(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                copy_tree(&entry.path(), &target.join(entry.file_name()))?;
-            } else {
-                fs::copy(entry.path(), target.join(entry.file_name()))?;
-            }
-        }
-        Ok(())
-    }
     let artifact = world
         .directory
         .path()
         .join("artifacts")
         .join(day2_assets::hash_part(world.runtime.artifact().id())?);
-    copy_tree(world.runtime.artifact().directory(), &artifact)?;
+    copy_artifact(world.runtime.artifact().directory(), &artifact)?;
     let mut instance = Instance::load(world.runtime.instance_path())?;
     instance.apps.get_mut("links").unwrap().artifact = artifact.to_string_lossy().into();
     fs::write(

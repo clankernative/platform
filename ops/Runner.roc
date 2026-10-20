@@ -1,5 +1,5 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.22.0/F1JVZPYfWP71s8vk6tHcV1Qx1Ef6CZkwswGoCn8VHZmL.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0-rc2/Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
 	ops: "main.roc",
 }
 
@@ -21,6 +21,7 @@ import ops.OAuthRegistration
 import ops.Release
 import ops.GkeRelease
 import ops.SecretRetirement
+import ops.UiDependency
 
 # Only the native supervisor launches this executable. Its stdout is a bounded
 # request/response pipe, never a terminal or an app-accessible effect channel.
@@ -67,10 +68,19 @@ run! = |args| match args {
 	["gke-release"] => GkeRelease.run!(call!)
 	["gke-release-build"] => GkeRelease.build!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
+	["ui-dependency"] => UiDependency.install!(call!)
 	["cli"] => Verify.cli!(call!)
 	["verify-fast"] => Verify.fast!(call!)
 	["verify-reports"] => Verify.reports!(call!)
 	["verify"] => Verify.all!(call!)
+	["verify-prepare"] => Verify.prepare!(call!)
+	["verify-prepare-part", part] => Verify.prepare_part!(part, call!)
+	["verify-prepare-join"] => Verify.prepare_join!(call!)
+	["verify-shard", shard] => Verify.shard!(shard, call!)
+	["verify-compose"] => Verify.compose!(call!)
+	["verify-mac"] => Verify.mac!(call!)
+	["verify-queue-find"] => Verify.queue_find!(call!)
+	["verify-queue-admit"] => Verify.queue_admit!(call!)
 	["qualify-linux"] => Linux.run!(call!)
 	["strict-linux"] => Linux.strict!(call!)
 	["provision-linux"] => Provision.smoke!(call!)
@@ -80,7 +90,7 @@ run! = |args| match args {
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
-	outcome = run!(args.drop_first(1).map(OsStr.display))
+	outcome = run!(args.map(OsStr.display))
 	message = match outcome {
 		Ok(result) => { protocol: 1.U32, action: "complete", input: result }
 		Err(error) => { protocol: 1.U32, action: "failed", input: error }

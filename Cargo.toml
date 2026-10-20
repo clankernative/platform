@@ -8,6 +8,10 @@ version = "0.1.0"
 license = "MIT"
 rust-version = "1.98"
 
+[patch.crates-io]
+# Own every kernel-installed sender pidfd before validating ancillary messages.
+rustix = { git = "https://github.com/clankernative/rustix", rev = "6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0" }
+
 [profile.release]
 panic = "abort"
 
@@ -15,7 +19,7 @@ panic = "abort"
 # is platform CPU rather than compilation. Unoptimized hashing and JSON decoding
 # dominated the campaign suites: People Ops' four-cycle campaign ran 1301s at
 # opt-level 0 and 130s here, with identical assertions. `test` inherits this.
-# Dependencies such as sha2 and serde_json build once at opt-level 2; workspace
+# Dependencies such as ring and serde_json build once at opt-level 2; workspace
 # crates rebuild on every edit, so they use opt-level 1 to keep recompiles short.
 # Debug assertions and overflow checks are deliberately left enabled.
 [profile.dev]

@@ -57,6 +57,15 @@ activation remains valid, and ordinary filtered operations remain available.
 The requirements also appear in generated docs and OpenAPI. See the
 [application contract guide](../docs/APP-CONTRACT.md) for inheritance and paging.
 
+Chain `.observes("workspace_directory.hierarchy.v1")` onto a command or query
+definition to declare a read dependency for disposable verification. Declare
+`workspace_directory.page.v1` when paging the capture, or
+`workspace_directory.capture.v1` when establishing membership. Build verification
+and local development derive synthetic Directory bindings from these declarations,
+independent of operation names. Admission checks capability names and rejects
+writes and duplicates. Production grants remain operator-owned. See
+[Directory reads](../docs/LIVE-INTEGRATIONS.md#workspace-directory-hierarchy-reads).
+
 All SDK execution values describe pure computation. Rust interprets database and
 command requests, enforces current company policy, and owns auditing and effects.
 Company-specific source, CI, identity and secret providers are host capabilities,
@@ -69,6 +78,11 @@ and compound uniqueness enforced on inserts and updates.
 
 Every operation requires typed verification callbacks. Every model
 requires a named invariant; every declared operation/failure pair requires a scenario.
+Operation callbacks decode `Data.verification_snapshot(raw)` and select its
+explicit `live` or `deleted` model lists. This allows restore generators to use
+retained rows while ordinary invariants continue to decode live state through
+`Data.snapshot`. Both verification scopes are complete and bounded, captured in
+one database read transaction. See [lifecycle conformance](../fixtures/lifecycle-conformance/README.md).
 `Api.error` supplies one typed failing example. `Api.error_cases` lets several
 commands or queries share one error identity while supplying a typed failing
 example for each operation that declares it.

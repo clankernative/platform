@@ -164,15 +164,23 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         )?;
         let mut admitted_attempt = None;
         let mut provider_usage = None;
+        let mut connection_attempt = None;
         let result = if matches!(step, Step::Database(_)) {
             let result = store::effect(
                 &tx,
-                &runtime.artifact().contract().schema,
+                store::StorageContract {
+                    schema: &runtime.artifact().contract().schema,
+                    domains: &crate::domain::Catalog::new(),
+                },
                 runtime.scope(),
                 &request,
                 &instruction,
-                &policy,
-                &registered_operation,
+                store::EffectContext {
+                    scope: runtime.scope(),
+                    policy: &policy,
+                    operation: &registered_operation,
+                    entropy: runtime.inputs().entropy.as_ref(),
+                },
             );
             tx.commit()?;
             result
@@ -190,6 +198,34 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             let result = crate::managed_credentials::observe(&tx, runtime, &request, &instruction);
             tx.commit()?;
             result
+        } else if matches!(step, Step::Observe { .. })
+            && crate::oauth::usage::observation(&instruction.model)
+        {
+            let ordinal = i64::try_from(request.observations.len())?;
+            let prior: i64 = tx.query_row(
+                "SELECT coalesce(max(attempt),0) FROM day2_observation_attempts WHERE invocation=?1 AND ordinal=?2",
+                params![id, ordinal], |row| row.get(0),
+            )?;
+            if prior >= 3 {
+                tx.commit()?;
+                Ok(serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string())
+            } else {
+                let attempt = prior + 1;
+                tx.execute(
+                    "INSERT INTO day2_observation_attempts VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+                    params![
+                        id,
+                        ordinal,
+                        attempt,
+                        serde_json::to_string(&instruction)?,
+                        active.stamp.epoch,
+                        i64::try_from(active.stamp.revision)?
+                    ],
+                )?;
+                tx.commit()?;
+                connection_attempt = Some((ordinal, attempt));
+                crate::oauth::usage::execute(runtime, &request, &instruction)
+            }
         } else if matches!(step, Step::Observe { .. }) && instruction.model == crate::audit::HISTORY
         {
             // The application's own history: host data under the same write
@@ -294,6 +330,15 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             encoded.len() <= MAX_OBSERVATION_BYTES,
             "preparation_result_budget"
         );
+        if let Some((ordinal, attempt)) = connection_attempt {
+            let tx = crate::write_queue::immediate(&mut connection)?;
+            crate::execution::check_settlement_binding(&tx, runtime, id, &active.stamp)?;
+            tx.execute(
+                "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
+                params![encoded, id, ordinal, attempt],
+            )?;
+            tx.commit()?;
+        }
         if let Some((ordinal, attempt, reservation, _, identity, correlation)) = admitted_attempt {
             // Retain provider knowledge even if policy changed during the call.
             // A separate reauthorization below gates use by application code.
@@ -363,17 +408,24 @@ pub(crate) fn validate_local(
         if observation.error.is_empty()
             && matches!(
                 observation.instruction.kind.as_str(),
-                "get" | "page" | "find" | "select_page"
+                "get" | "page" | "find" | "select_page" | "count"
             )
         {
             let current = store::effect(
                 connection,
-                &runtime.artifact().contract().schema,
+                store::StorageContract {
+                    schema: &runtime.artifact().contract().schema,
+                    domains: &crate::domain::Catalog::new(),
+                },
                 runtime.scope(),
                 request,
                 &observation.instruction,
-                policy,
-                operation,
+                store::EffectContext {
+                    scope: runtime.scope(),
+                    policy,
+                    operation,
+                    entropy: runtime.inputs().entropy.as_ref(),
+                },
             )?;
             ensure!(
                 current == observation.result,

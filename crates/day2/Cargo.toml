@@ -9,14 +9,15 @@ autotests = false
 [dependencies]
 day2-assets = { path = "../day2-assets" }
 day2-contracts = { path = "../day2-contracts" }
+day2-sandbox = { path = "../day2-sandbox" }
+unicode-segmentation = "=1.13.3"
 day2-capabilities = { path = "../day2-capabilities" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits", "serialize"] }
 tempfile = "3.27"
-rustix = { version = "=1.1.4", features = ["fs"] }
+rustix = { version = "=1.1.5", features = ["fs", "time", "net", "event", "process", "stdio"] }
 axum = "0.8.9"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
 tokio-stream = "0.1.19"
@@ -25,13 +26,13 @@ url = "2.5"
 percent-encoding = "2.3"
 base64 = "0.22"
 crc32c = "0.6"
-hmac = "0.12"
 # Already in the lock through rustls. Named directly to verify identity
 # assertions at the edge, rather than adding a second signature library.
 ring = "=0.17.14"
 getrandom = "0.3"
+zeroize = "=1.9.0"
 cookie = "0.18"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 cssparser = "=0.35.0"
 oxc_allocator = "=0.148.0"
 oxc_ast = "=0.148.0"
@@ -40,17 +41,24 @@ oxc_parser = "=0.148.0"
 oxc_span = "=0.148.0"
 minijinja = { version = "=2.12.0", default-features = false, features = ["debug", "multi_template", "serde", "fuel", "unstable_machinery"] }
 html5gum = "=0.8.4"
-scraper = "0.24"
+# Use the library and parse errors without scraper's command-line interface.
+scraper = { version = "0.24", default-features = false, features = ["errors"] }
 html5ever = "=0.35.0"
 ego-tree = "=0.10.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-day2-sandbox = { path = "../day2-sandbox" }
+nix = { version = "=0.31.3", default-features = false, features = ["socket", "poll"] }
+prost = "=0.14.4"
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "=0.14.6"
+hyper-util = { version = "=0.1.20", features = ["tokio"] }
+tower = { version = "=0.5.3", features = ["util"] }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
-proptest = "=1.11.0"
+# Keep in-process generators without optional subprocess or bit-set dependencies.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 proc-macro2 = "=1.0.107"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
 syn = { version = "=2.0.119", features = ["full", "visit"] }

@@ -1100,7 +1100,20 @@ mod tests {
         let versions = source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%schema_version' ORDER BY name")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions.len(), 6);
+        let expected = [
+            "native_fresh_schema_version",
+            "oauth_callback_schema_version",
+            "oauth_connect_schema_version",
+            "oauth_custody_schema_version",
+            "oauth_exchange_schema_version",
+            "oauth_inbound_schema_version",
+            "oauth_management_schema_version",
+            "oauth_schema_version",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert_eq!(versions, expected);
         for table in versions {
             for operation in ["old", "empty", "multiple"] {
                 let db = current_connect()?;

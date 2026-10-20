@@ -44,6 +44,11 @@ const FACTORIES: &[(&str, &str)] = &[
 
 const SEALED: &[(&str, &str, &str)] = &[
     (
+        "Connection.roc",
+        "resolve",
+        "b79b6f5f2d789837920c6c3102877b3ef61479415a3d85a4f1ea5c60994fb54b",
+    ),
+    (
         "ConnectionAccess.roc",
         "define",
         "3afad645a9729ae965fbb91acc17ee529e5f940464418b9a5eaa010c8a8838bb",
@@ -55,8 +60,8 @@ const SEALED: &[(&str, &str, &str)] = &[
     ),
     (
         "GoogleCalendar.roc",
-        "",
-        "4c3316dd010c2c67cd4331fb2b7cd397dd054cdd7cec2abd776e97cbf66adfe4",
+        "list_events",
+        "0cf174ecd525ca29728b55be4a6386d0feaaf98443e31ded535c62c51932ed67",
     ),
     (
         "GitlabProjects.roc",
@@ -109,6 +114,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "412a00e9ffc8988c224efb3da3fb96ed3f00e3fb0c58bfa966461687ee355767",
     ),
     (
+        "WorkspaceDirectory.roc",
+        "",
+        "d5984457bf3d3485496f62983948c7be153654ddab1a69a852dfcac5090bd26d",
+    ),
+    (
         "Linear.roc",
         "",
         "f8695efa1f64c52898737f7369afead1fe4d298547fad77cbdca722623fae729",
@@ -126,7 +136,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Carta.roc",
         "",
-        "755e423d88a45f0d282412100df605e18b53e8cc8d1df3c609e37a62fe73bcce",
+        "a8f2cf34b3edccc3d56b298e13a1d403669c6bbc26913ca20a9e6470154a7c88",
     ),
     (
         "Audit.roc",
@@ -166,12 +176,12 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Selection.roc",
         "indexed",
-        "2c1549a162acdef2f08bb09bf130c83fbf4f5a6b6158c891be7afe3c35548969",
+        "9b3a52cf8baa7f91cc4f90cb3c2f1b71757df07f3ebfb336014e5b0c8174b104",
     ),
     (
         "Api.roc",
         "",
-        "44584a59c8411fceb3bb8989e79ef0be2dca128920416428897fc50cebcede88",
+        "8772d3906775f231f0231649beeeb865d6197f6aab1df8ebf8d6790762366f6e",
     ),
     (
         "Effects.roc",
@@ -241,7 +251,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "f0b63e65441932e9d60d4efacc1c36e492bb47e240bb69dfecd2bfe4f0c28813",
+        "510664a26964d768a2b081d12cc98115251c278396f67e95aba52abf2d799cea",
     ),
     (
         "Operation.roc",
@@ -517,7 +527,12 @@ pub fn prepare(
     if stage.join("registry.json").exists() {
         let catalog: crate::registry::Catalog =
             serde_json::from_slice(&fs::read(stage.join("registry.json"))?)?;
-        for (module, source) in catalog.modules(schema, outputs, true)? {
+        let connections = if catalog.connections.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(&fs::read(stage.join("connections.json"))?)?
+        };
+        for (module, source) in catalog.modules(schema, outputs, &connections, true)? {
             fs::write(target.join("app").join(module), source)?;
         }
         fs::write(

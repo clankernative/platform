@@ -64,6 +64,14 @@ establish an account-wide zero-retention guarantee; provider account data contro
 remain a separate deployment requirement. See the [Responses API](https://developers.openai.com/api/reference/typescript/resources/responses/methods/create)
 and [data controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint).
 
+## Workspace Directory hierarchy reads
+
+`workspace_directory.hierarchy.v1` reads and validates the complete organizational-unit hierarchy without looking up the current user or claiming a membership path. Its capture reports both publication time and original source capture/expiry; reusing cached hierarchy facts never renews their source TTL. Cold hierarchy reads request only the organizational-unit OAuth scope. The separate membership capture remains fail-closed on user lookup and requests both user and hierarchy scopes.
+
+Applications own membership-cache validity, ancestry decisions and reconciliation. The platform supplies bounded, customer/connection/actor-bound hierarchy facts; operators own real identity and provider grants. Declare read dependencies on the operation definition, for example `Api.query({...}).observes("workspace_directory.hierarchy.v1").observes("workspace_directory.page.v1")`. Admission rejects unknown capabilities, writes and duplicate declarations. The generated artifact carries those declarations into the disposable build-verification and local-development policy. That policy selects synthetic Directory bindings for any application namespace; an operation without a Directory declaration receives no default Directory authority. Explicit disposable policies may narrow or supply the observations used by a scenario. Production loading never infers authority from these declarations. Home's real identity and cache/reconciliation integration remain unfinished.
+
+Authorization freezes a validated cache or provider-fetch plan before reserving provider traffic. A cached hierarchy needs no provider call/byte budget and cannot fall through to the network; membership still requires a user lookup. Both live and simulated adapters share this cache policy. The simulator records requests and consumes scheduled endpoint faults in its SQLite world, while fresh reads use the injected capture time. Provider world data carries no adapter-cache timestamp. The Directory regression campaign checks expiry, failed refresh, recovery, membership, cache reuse during provider outage, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
+
 ## Credentials and transport
 
 This illustrative `Instance.resources` catalog allows the `reports` app to post

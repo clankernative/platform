@@ -60,7 +60,7 @@ CheckOwnership :: [].{
 
 	verify_result : Str, CheckOwnershipTypes.Output, Str -> Try(Bool, Str)
 	verify_result = |before, output, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		Ok(
 			before == after and output.app_id == "demo" and (
 				!output.allowed or state.ownerships.any(

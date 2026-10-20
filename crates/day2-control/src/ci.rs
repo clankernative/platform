@@ -7,9 +7,8 @@ use crate::{
     source::{CHECK_NAME, GithubBinding},
 };
 use anyhow::{Context, Result, ensure};
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use serde_json::Value;
-use sha2::Sha256;
 
 pub struct Receiver {
     installation_id: u64,
@@ -93,10 +92,9 @@ impl Receiver {
             .step_by(2)
             .map(|index| u8::from_str_radix(&hex[index..index + 2], 16))
             .collect::<std::result::Result<_, _>>()?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret)?;
-        mac.update(body);
-        mac.verify_slice(&bytes)
-            .context("webhook authentication failed")?;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
+        hmac::verify(&key, body, &bytes)
+            .map_err(|_| anyhow::anyhow!("webhook authentication failed"))?;
         let payload: Value = day2::json::decode(body)?;
         ensure!(
             payload["installation"]["id"].as_u64() == Some(self.installation_id),

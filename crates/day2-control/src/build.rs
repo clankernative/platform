@@ -1,5 +1,10 @@
 //! Fixed local build recipe. The trusted runner is an operator capability, not app input.
 
+mod cargo_sources;
+mod ui_assembly;
+use cargo_sources::OfflineCargoSources;
+use ui_assembly::{UiAssemblyInputs, validate_ui_activation};
+
 use crate::{
     BindingRef, BuildPlan, Digest, Name,
     kernel::{CredentialPresence, VerificationEvidence},
@@ -17,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RECIPE: &str = "day2-local-build-v4:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:offline-cargo:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
+const RECIPE: &str = "day2-local-build-v5:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:locked-offline-cargo-sources:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
 const MAX_FILES: usize = 100_000;
 const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -29,6 +34,8 @@ pub fn recipe_digest() -> Digest {
         &[
             RECIPE.as_bytes(),
             include_bytes!("build.rs"),
+            include_bytes!("build/ui_assembly.rs"),
+            include_bytes!("build/cargo_sources.rs"),
             include_bytes!("simulation_campaign.rs"),
             day2::automation::source_digest().as_bytes(),
         ]
@@ -135,6 +142,7 @@ impl PlatformInputs {
             files.insert(format!("platform/{name}"), file);
         }
         for name in [
+            "build-dependencies",
             "crates",
             "sdk",
             "tools",
@@ -223,6 +231,8 @@ pub struct TrustedRunner {
     system_ssl: Option<InputFile>,
     rust: PinnedTree,
     registry: PinnedTree,
+    offline_sources: Option<OfflineCargoSources>,
+    ui_assembly: Option<UiAssemblyInputs>,
 }
 
 pub struct BuildRequest {
@@ -404,19 +414,36 @@ impl TrustedRunner {
             },
             rust,
             registry,
+            offline_sources: None,
+            ui_assembly: None,
         })
     }
 
+    /// Bind UI and all locked Cargo sources to the selected Platform installation.
+    pub fn with_platform_inputs(mut self, platform_root: &Path) -> Result<Self> {
+        self.ui_assembly = Some(UiAssemblyInputs::capture(platform_root)?);
+        self.offline_sources = Some(OfflineCargoSources::capture(
+            &self.rust.root.join("bin/cargo"),
+            &self.registry.root,
+            platform_root,
+        )?);
+        Ok(self)
+    }
+
     pub fn binding(&self) -> Result<BindingRef> {
-        BindingRef::pin(
-            self.identity.clone(),
-            &json!({
+        let mut identity = json!({
             "recipe":recipe_digest(), "executable":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
-                "simulation":crate::simulation::implementation_digest()?,
-                "rust":self.rust.digest(), "registry":self.registry.digest(),
-                "containment":"macos-arm64-local-sandbox-v1", "system_tools":"trusted-host-OS-and-Xcode"
-            }),
-        )
+            "simulation":crate::simulation::implementation_digest()?,
+            "rust":self.rust.digest(), "registry":self.registry.digest(),
+            "containment":"macos-arm64-local-sandbox-v1", "system_tools":"trusted-host-OS-and-Xcode"
+        });
+        if let Some(ui) = &self.ui_assembly {
+            identity["ui_assembly"] = ui.binding_identity()?;
+        }
+        if let Some(sources) = &self.offline_sources {
+            identity["offline_cargo_sources"] = sources.identity();
+        }
+        BindingRef::pin(self.identity.clone(), &identity)
     }
 
     pub fn validate_request(
@@ -441,6 +468,7 @@ impl TrustedRunner {
             request.plan.profile.builder == self.binding()?,
             "trusted builder binding changed"
         );
+        validate_ui_activation(&request.source, self.ui_assembly.as_ref())?;
         Ok(())
     }
 
@@ -537,12 +565,23 @@ impl TrustedRunner {
     }
 
     fn input_manifest(&self, request: &BuildRequest, platform: &PlatformInputs) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec_pretty(&json!({
+        let mut manifest = json!({
             "source_commit":request.source.commit(),
             "source":request.source.files().iter().map(|(path,bytes)| (path,Digest::new(bytes))).collect::<BTreeMap<_,_>>(),
             "platform":platform.files(), "runner":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
             "rust":self.rust.files(), "cargo_registry":self.registry.files()
-        }))?)
+        });
+        if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
+            manifest["ui_assembly"] = self
+                .ui_assembly
+                .as_ref()
+                .context("UI capability disappeared")?
+                .input_manifest()?;
+        }
+        if let Some(sources) = &self.offline_sources {
+            manifest["offline_cargo_sources"] = sources.manifest();
+        }
+        Ok(serde_json::to_vec_pretty(&manifest)?)
     }
 
     fn run_recipe(
@@ -607,9 +646,19 @@ impl TrustedRunner {
                     ensure!(!materialized, "CI inputs already materialized");
                     platform.materialize(job)?;
                     request.source.materialize(&job.join("app"))?;
+                    if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
+                        self.ui_assembly
+                            .as_ref()
+                            .context("UI capability disappeared")?
+                            .materialize(job)?;
+                    }
                     self.rust.materialize(&job.join("rust"))?;
                     private_directory(&job.join("cargo"))?;
-                    self.registry.materialize(&job.join("cargo/registry"))?;
+                    if let Some(sources) = &self.offline_sources {
+                        sources.materialize(&job.join("cargo"))?;
+                    } else {
+                        self.registry.materialize(&job.join("cargo/registry"))?;
+                    }
                     write_pinned(&self.executable, &job.join("xtask"), &self.executable_pin)?;
                     for name in ["home", "tmp"] {
                         private_directory(&job.join(name))?;
@@ -763,6 +812,7 @@ impl TrustedRunner {
                         None,
                         input.seed.parse()?,
                         input.count,
+                        day2::development::CampaignTime::Verification,
                     )?);
                 }
                 "ci-evidence" => {
@@ -1125,6 +1175,8 @@ fn collect_cli(
         ]
         .iter()
         .any(|excluded| name == *excluded)
+            || (name == "build-dependencies"
+                && directory.strip_prefix(root)?.components().count() == 1)
         {
             continue;
         }

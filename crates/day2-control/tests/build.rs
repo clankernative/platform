@@ -100,6 +100,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
         write(&root.join(name), b"approved platform input", false)?;
     }
     for name in [
+        "build-dependencies",
         "crates",
         "sdk",
         "tools",
@@ -115,7 +116,17 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     ] {
         fs::create_dir_all(root.join(name))?;
     }
+    write(
+        &root.join("build-dependencies/clanker-ui.json"),
+        b"reviewed catalog",
+        false,
+    )?;
     write(&root.join("cli/main.roc"), b"approved CLI", false)?;
+    write(
+        &day2::build_dependencies::installation_path(&root)?.join("manifest.json"),
+        b"installed managed bundle",
+        false,
+    )?;
     write(
         &root.join("ops/Workflow.roc"),
         b"approved operations",
@@ -321,6 +332,17 @@ fn platform_snapshot_excludes_mutable_shared_outputs_but_pins_policy_and_toolcha
     for name in ["cli/main.roc", "ops/Workflow.roc", "infra/Stack.roc"] {
         assert!(approved.files().contains_key(&format!("platform/{name}")));
     }
+    assert!(
+        approved
+            .files()
+            .contains_key("platform/build-dependencies/clanker-ui.json")
+    );
+    assert!(
+        !approved
+            .files()
+            .keys()
+            .any(|name| name.starts_with("platform/cli/build-dependencies/"))
+    );
     assert_eq!(
         approved
             .files()
@@ -351,7 +373,16 @@ fn platform_snapshot_excludes_mutable_shared_outputs_but_pins_policy_and_toolcha
     fs::create_dir(&private)?;
     approved.materialize(&private)?;
     assert!(!private.join("platform/artifacts").exists());
+    assert!(
+        !day2::build_dependencies::installation_path(&private.join("platform"))?
+            .join("manifest.json")
+            .exists()
+    );
     assert!(!private.join("platform/crates/worker/generated").exists());
+    assert_eq!(
+        fs::read(private.join("platform/build-dependencies/clanker-ui.json"))?,
+        b"reviewed catalog"
+    );
     assert_eq!(
         fs::read(private.join("platform/fixtures/authority-policies/owned.json"))?,
         b"approved policy"
@@ -567,7 +598,7 @@ fn cargo_stage_sandbox_starts_the_real_cargo_binary() -> Result<()> {
 }
 
 #[test]
-#[ignore = "explicit operator-pinned macOS runner smoke; requires DAY2_TEST_BUILD_* paths"]
+#[ignore = "explicit operator-pinned macOS runner smoke; requires DAY2_TEST_BUILD_* paths and installed managed UI dependency"]
 fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -583,25 +614,39 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
         &path("DAY2_TEST_BUILD_RUST")?,
         &path("DAY2_TEST_BUILD_REGISTRY")?,
     )?;
+    let runner = runner.with_platform_inputs(&root)?;
     let platform = PlatformInputs::capture(&root, &root.join("../.toolchains"))?;
-    let source_tree = PinnedTree::capture(&root.join("fixtures/row-authority-web-conformance"))?;
+    let external_source = std::env::var_os("DAY2_TEST_BUILD_APP");
+    let source_root = external_source
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("fixtures/row-authority-web-conformance"));
+    let source_commit = if external_source.is_some() {
+        GitOid::try_from(
+            std::env::var("DAY2_TEST_BUILD_APP_COMMIT")
+                .context("external app source needs its exact commit")?,
+        )?
+    } else {
+        commit('a')
+    };
+    // External sources must be a source export without repository metadata or private state.
+    let source_tree = PinnedTree::capture(&source_root)?;
     let source = SourceSnapshot::from_files(
-        commit('a'),
+        source_commit.clone(),
         source_tree
             .files()
             .keys()
-            .map(|name| {
-                Ok((
-                    name.clone(),
-                    fs::read(
-                        root.join("fixtures/row-authority-web-conformance")
-                            .join(name),
-                    )?,
-                ))
-            })
+            .map(|name| Ok((name.clone(), fs::read(source_root.join(name))?)))
             .collect::<Result<_>>()?,
     )?;
     let mut request = request(&runner, &platform)?;
+    request.plan.commit = source_commit;
+    if external_source.is_some() {
+        request.plan.app = Name::try_from(
+            std::env::var("DAY2_TEST_BUILD_APP_NAME")
+                .context("external app source needs its app name")?,
+        )?;
+    }
     request.source = source;
     let directory = EvidenceDirectory::new()?;
     let evidence = runner.execute(&request, &platform, directory.path())?;

@@ -3,7 +3,7 @@
 //! macro expansion, and transitive dependency effects still require review.
 
 use anyhow::{Context, Result, bail, ensure};
-use sha2::{Digest, Sha256};
+use ring::digest::{Context as DigestContext, SHA256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -163,15 +163,20 @@ fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
     // Keep those artifacts separate from any different primary package set.
     // Names have already passed the bounded, unique inventory check above.
     let names: BTreeSet<_> = packages.iter().map(|package| package.name).collect();
-    let mut digest = Sha256::new();
+    let mut digest = DigestContext::new(&SHA256);
     digest.update(b"day2-strict-clippy-selection-v1\0");
     for name in names {
-        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(&(name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
     }
-    root.join("target")
-        .join("strict-clippy")
-        .join(format!("{:x}", digest.finalize()))
+    root.join("target").join("strict-clippy").join(
+        digest
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
 }
 
 fn pin_lint_flags(command: &mut Command) {
@@ -688,6 +693,51 @@ mod tests {
             ),
         )?;
         Ok(directory)
+    }
+
+    #[test]
+    fn real_clippy_admits_ring_digest_but_rejects_ambient_entropy() -> Result<()> {
+        let fixture = fixture()?;
+        fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nring = { version = \"=0.17.14\", default-features = false }\n",
+        )?;
+        let source = fixture.path().join("src/lib.rs");
+        let pure = format!(
+            "{ATTRIBUTES}pub fn hash(bytes: &[u8]) -> ring::digest::Digest {{ ring::digest::digest(&ring::digest::SHA256, bytes) }}"
+        );
+        fs::write(&source, &pure)?;
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(fixture.path())
+            .output()?;
+        ensure!(
+            lock.status.success(),
+            "Ring fixture lock: {}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let packages = [StrictCrate {
+            name: "boundary-fixture",
+            source: "src/lib.rs",
+            kernel: false,
+        }];
+        check(fixture.path(), &packages)?;
+        for body in [
+            "pub fn ambient() { let _ = ring::rand::SystemRandom::new(); }",
+            "use ring::rand::SystemRandom as Random; pub fn ambient() { let _ = Random::new(); }",
+            "pub fn ambient(rng: &dyn ring::rand::SecureRandom) { let _ = rng.fill(&mut [0; 8]); }",
+            "pub fn ambient(rng: &dyn ring::rand::SecureRandom) { let _ = ring::rand::generate::<[u8; 8]>(rng); }",
+        ] {
+            fs::write(&source, format!("{pure}\n{body}"))?;
+            let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+            ensure!(
+                rejection.contains("clippy::disallowed_types")
+                    || rejection.contains("clippy::disallowed_methods"),
+                "wrong Ring entropy rejection for {body}: {rejection}"
+            );
+        }
+        fs::write(&source, pure)?;
+        check(fixture.path(), &packages)
     }
 
     #[test]

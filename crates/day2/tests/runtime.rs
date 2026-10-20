@@ -127,8 +127,7 @@ impl World {
     fn assert_state(&self, stage: Id, version: i64, history: usize) -> Result<()> {
         let state = self.runtime.inspect()?;
         let evidence = day2::properties::require(
-            self.runtime.artifact(),
-            &state,
+            &self.runtime,
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/property-failures"),
         )?;
         self.property_checks
@@ -521,7 +520,8 @@ fn typed_additive_migration_preserves_rows_and_fails_closed() -> Result<()> {
     assert_eq!(result.status, "success", "{result:?}");
     replay(migrated.artifact(), &migrated.trace("after-migration")?)?;
     let state = migrated.inspect()?;
-    let evidence = day2::properties::evaluate(migrated.artifact(), &state)?;
+    let snapshot = migrated.application_snapshot()?;
+    let evidence = day2::properties::evaluate(migrated.artifact(), snapshot.as_value())?;
     assert!(
         evidence.checks.iter().all(|check| check.passed),
         "{evidence:?}"
@@ -775,7 +775,8 @@ fn generated_indexed_query_is_bounded_paginated_and_projects_domain_values() -> 
             "invalid pagination must fail before app execution"
         );
     }
-    let report = day2::properties::evaluate(world.runtime.artifact(), &world.runtime.inspect()?)?;
+    let snapshot = world.runtime.application_snapshot()?;
+    let report = day2::properties::evaluate(world.runtime.artifact(), snapshot.as_value())?;
     assert!(report.checks.iter().all(|check| check.passed));
     replay(
         world.runtime.artifact(),
@@ -789,7 +790,7 @@ fn app_properties_detect_corruption_and_persist_replayable_evidence() -> Result<
     use day2::properties;
     let world = World::new()?;
     world.move_deal("move", world.target, 1, Fault::None)?;
-    let state = world.runtime.inspect()?;
+    let state = world.runtime.application_snapshot()?.as_value().clone();
     let report = properties::evaluate(world.runtime.artifact(), &state)?;
     assert_eq!(report.checks.len(), 3);
     assert!(report.checks.iter().all(|check| check.passed), "{report:?}");
@@ -834,7 +835,8 @@ fn app_properties_detect_corruption_and_persist_replayable_evidence() -> Result<
                 .unwrap()
                 .passed
         );
-        let error = properties::require(world.runtime.artifact(), &broken, evidence_dir.path())
+        let error = properties::evaluate(world.runtime.artifact(), &broken)?
+            .require(evidence_dir.path())
             .unwrap_err()
             .to_string();
         assert!(
@@ -888,7 +890,9 @@ fn app_properties_detect_corruption_and_persist_replayable_evidence() -> Result<
     let mut oversized = state.clone();
     oversized["deals"] = json!(vec![
         state["deals"][0].clone();
-        properties::MAX_ROWS_PER_MODEL + 1
+        day2::artifact::VerificationLimits::QUALIFIED
+            .rows_per_model
+            + 1
     ]);
     assert!(
         properties::evaluate(world.runtime.artifact(), &oversized)
@@ -920,7 +924,7 @@ fn inspection_refuses_to_check_a_truncated_world() -> Result<()> {
     let world = World::new()?;
     let mut connection = rusqlite::Connection::open(world.runtime.db())?;
     let tx = connection.transaction()?;
-    for ordinal in 1..=day2::properties::MAX_ROWS_PER_MODEL as u64 {
+    for ordinal in 1..=day2::artifact::VerificationLimits::QUALIFIED.rows_per_model as u64 {
         let id = identity::generate(&[9; 32], 200_000, "deals", ordinal)?;
         tx.execute(
             "INSERT INTO deals(id,version,created_at,title,stage_id) VALUES(?1,1,100,?2,?3)",
@@ -938,13 +942,13 @@ fn inspection_refuses_to_check_a_truncated_world() -> Result<()> {
             .inspect()
             .unwrap_err()
             .to_string()
-            .contains("inspection_limit")
+            .contains("verification_rows_per_model_budget")
     );
     // Operational storage validation streams every row and remains available
     // when the deliberately bounded app-property snapshot cannot be produced.
     world.runtime.validate_storage()?;
     connection.pragma_update(None, "ignore_check_constraints", true)?;
-    connection.execute("UPDATE deals SET version=0 WHERE title='Fixture 256'", [])?;
+    connection.execute("UPDATE deals SET version=0 WHERE title='Fixture 10000'", [])?;
     assert!(world.runtime.validate_storage().is_err());
     Ok(())
 }

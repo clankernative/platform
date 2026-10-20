@@ -10,11 +10,10 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::resources::{
     Action, BudgetDefinition, BudgetScope, Limits, ResolvedGrant, ResourceTarget, TopicScope,
 };
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
 use std::collections::BTreeSet;
 
 pub const BIND: &str = "resources.bind.v1";
@@ -269,17 +268,11 @@ fn issue(connection: &Connection, claims: Claims) -> Result<String> {
         [&claims.invocation],
         |row| row.get(0),
     )?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&seed).context("resource_handle_key")?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &seed);
+    let mut mac = hmac::Context::with_key(&key);
     mac.update(b"day2-resource-handle-v1\0");
     mac.update(encoded.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    let token = format!(
-        "resource_{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
+    let token = format!("resource_{}", crate::hex(mac.sign().as_ref()));
     connection.execute(
         "INSERT OR IGNORE INTO day2_resource_handles VALUES(?1,?2,?3)",
         params![token, claims.invocation, encoded],
@@ -633,7 +626,9 @@ pub(crate) fn record_use(
         params![resource.handle,resource.grant.resource.id,resource.grant.policy.id],|row|row.get(0),
     )?;
     ensure!(
-        resource.planned_calls > 0
+        // A validated local cache plan consumes no provider calls. Local work
+        // remains bounded by the host's observation/transaction budgets.
+        (resource.planned_calls > 0 || resource.action == Action::WorkspaceDirectoryHierarchy)
             && u64::try_from(count)?
                 .checked_add(resource.planned_calls)
                 .is_some_and(|total| total <= resource.grant.limits.max_calls_per_invocation),
@@ -788,6 +783,10 @@ pub(crate) fn reserve_in(
             organization_id,
             ..
         }) => format!("linear_work/{organization_id}"),
+        Some(day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
+            service_account,
+            ..
+        }) => format!("workspace_directory/{service_account}"),
         None => format!("{:?}", resource.grant.provider),
     };
     crate::budget::reserve_in(
@@ -807,7 +806,7 @@ pub(crate) fn reserve_in(
                 calls: resource.planned_calls,
                 bytes: quote
                     .request_bytes
-                    .checked_add(resource.grant.limits.max_response_bytes)
+                    .checked_add(quote.response_bytes)
                     .context("resource_byte_overflow")?,
                 cost_microunits: quote.cost_microunits.unwrap_or(0),
                 concurrency: 1,
@@ -819,6 +818,9 @@ pub(crate) fn reserve_in(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProviderQuote {
     pub request_bytes: u64,
+    /// Aggregate response allowance for the whole adapter call, including
+    /// authentication exchanges. Individual responses still obey grant limits.
+    pub response_bytes: u64,
     /// None means this adapter does not provide a monetary bound. Such a call
     /// cannot use any money-metered binding or inherited root obligation.
     pub cost_microunits: Option<u64>,
@@ -884,6 +886,9 @@ pub(crate) fn validate_cached(
             request,
             &observation.instruction,
         );
+    }
+    if crate::oauth::usage::observation(&observation.instruction.model) {
+        return crate::oauth::usage::validate_cached(connection, runtime, request, observation);
     }
     if observation.instruction.model == crate::audit::HISTORY {
         // A recorded history page carries no resource. What must still hold is

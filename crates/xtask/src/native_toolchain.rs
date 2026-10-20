@@ -13,7 +13,7 @@ const SEMANTIC_VERSION: &str = "nightly-2026-09-05-b195f5b";
 /// The official release every native target compiles applications with. One
 /// release for all targets, so an artifact's language semantics do not depend on
 /// the machine that built it.
-const OFFICIAL_VERSION: &str = "nightly-2026-09-12-220fd47";
+const OFFICIAL_VERSION: &str = "nightly-2026-10-13-b17d287";
 const DERIVED_VERSION: &str = "nightly-2026-09-05-b195f5b-day2-glue11254";
 const UPSTREAM_MAC_SHA256: &str =
     "47dba6e951a246c08aa51926c52566922276db2401b6ffb015150905598da01b";
@@ -172,30 +172,30 @@ impl Pin {
             if let Some((binary, archive)) = match target {
                 Target::MacArm64 => None,
                 Target::LinuxArm64 => Some((
-                    "93d5397a18d52ff3e4357c886ce9ed9c434f9d1ed5b4bf3506adb8c3b102def5",
-                    "51ae658f7dfaf16713d7610b6a421769e3c9f94740d222f7ea2a17e8dbb731ca",
+                    "cc8c9f51444a7e7a9b60301045d2e092d250c7682f4b74eafd7812399b80d149",
+                    "44208d5598ec53cd23d4194bbbd63ac47e69293d5193acc318f816346b218030",
                 )),
                 Target::LinuxX64 => Some((
-                    "c0033dc4ec3b95624bdb26f672c98c3ddb2e581869781389b09e7d2861a01a22",
-                    "c2ba90f59bedf0b3617c085f5aec7854cf5fe8127a7cdca6d0509c3525a73b78",
+                    "f66853c2b19e2a6371786e32a869c7281aaf94454b5a5df5da97cc17e230e0c3",
+                    "3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b",
                 )),
             } {
                 ensure!(
                     value["roc_binary_sha256"] == binary
                         && value["roc_archive_sha256"] == archive
                         && value["roc_source_archive_sha256"]
-                            == "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d",
+                            == "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986",
                     "official compiler must retain reviewed upstream inputs"
                 );
             }
             if target == Target::MacArm64 {
                 ensure!(
                     value["roc_binary_sha256"]
-                        == "b4f197fde4836ab8ae19f8d427d38d721ade9bd43323ca793c7411a9f11d1cc6"
+                        == "8b26c3b95889ad232c5dc114f8250139f8c62839d7da2adc0777bda2f18bd860"
                         && value["roc_archive_sha256"]
-                            == "fd302798ddb15356744384761a2c23b318880e96c052aad6966cfb34e226af8f"
+                            == "2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1"
                         && value["roc_source_archive_sha256"]
-                            == "d25cbd3f9cf012a08d734daf1c6d917b9d997e3943376103943109be01570b4d"
+                            == "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986"
                         && value["libsystem_sha256"]
                             == "4f96f1402e1950b1764ac6accd0d2b9c1ca197b7783caae5e838fd0a4b474028",
                     "official compiler must retain reviewed upstream inputs"
@@ -523,7 +523,7 @@ pub fn stage_link_inputs(
 ) -> Result<BTreeMap<String, String>> {
     let directory = stage.join("sdk/targets").join(target.roc_target());
     fs::create_dir_all(&directory)?;
-    let mut hashes = BTreeMap::new();
+    let mut hashes = stage_system_link_inputs(target, stage)?;
     let host = fs::read(archive)?;
     ensure!(
         host.starts_with(b"!<arch>\n"),
@@ -534,6 +534,16 @@ pub fn stage_link_inputs(
         format!("native/{}/libhost.a", target.roc_target()),
         digest(&host),
     );
+    Ok(hashes)
+}
+
+/// Re-capture the current image's fixed Linux linker inputs for both ordinary
+/// builds and cached fixture admission. The native host archive is an output;
+/// these DSOs and loader are independently checked source inputs.
+pub fn stage_system_link_inputs(target: Target, stage: &Path) -> Result<BTreeMap<String, String>> {
+    let directory = stage.join("sdk/targets").join(target.roc_target());
+    fs::create_dir_all(&directory)?;
+    let mut hashes = BTreeMap::new();
     if let Some((library, loader, _)) = target.linux_abi() {
         for name in LINUX_INPUTS.iter().copied().chain([loader]) {
             let path = format!("{library}/{name}");

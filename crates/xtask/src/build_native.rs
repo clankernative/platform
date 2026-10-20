@@ -34,6 +34,7 @@ struct Bound {
     identities: day2::identity::Registry,
     outputs: day2::output_schema::Catalog,
     declarations: day2::registry::Catalog,
+    connections: Vec<day2::connection_declaration::ConnectionDeclaration>,
 }
 
 fn prepare(
@@ -64,6 +65,7 @@ fn prepare(
     if let Some(overrides) = overrides {
         snapshot(overrides, &captured, &mut hashes, "app")?;
     }
+    ui_assembly::expand(root, &captured, &mut hashes)?;
     let modules = day2::app_sources::stage(&captured, &stage.join("app"))?;
     fs::write(
         stage.join("app-modules.json"),
@@ -215,6 +217,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
         identities,
         outputs,
         declarations: day2::registry::Catalog::default(),
+        connections: Vec::new(),
     })
 }
 
@@ -269,9 +272,10 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
     )?;
-    for (name, source) in bound
-        .declarations
-        .modules(&bound.schema, &bound.outputs, false)?
+    for (name, source) in
+        bound
+            .declarations
+            .modules(&bound.schema, &bound.outputs, &bound.connections, false)?
     {
         fs::write(stage.join("app").join(name), source)?;
     }
@@ -312,6 +316,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         identities,
         outputs,
         declarations,
+        connections,
     } = bound;
     let mut worker = Worker::start(&stage.join("worker"))?;
     let raw_manifest = worker.exchange(b"manifest")?;
@@ -357,6 +362,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "roc_version": pin["roc_version"], "worker_digest": worker_digest,
         "schema_digest": schema_digest, "schema": schema, "operations": manifest.operations,
         "properties": manifest.properties,
+        "verification_limits": day2::artifact::VerificationLimits::QUALIFIED,
         "pages": manifest.pages,
         "schedules": manifest.schedules,
         "ingress": manifest.ingress,
@@ -379,12 +385,14 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         artifact["credential_manifest"] =
             serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
     }
-    if !declarations.connections.is_empty() {
-        artifact["connection_declarations"] =
-            serde_json::to_value(day2::connection_declaration::decode(
-                &worker.exchange(b"connection-contract")?,
-                &checked,
-            )?)?;
+    let final_connections =
+        day2::connection_declaration::decode(&worker.exchange(b"connection-contract")?, &checked)?;
+    ensure!(
+        final_connections == *connections,
+        "connection requirements changed after SDK binding"
+    );
+    if !connections.is_empty() {
+        artifact["connection_declarations"] = serde_json::to_value(connections)?;
     }
     artifact["export_manifest"] = serde_json::to_value(
         day2::operation_contract::Manifest::from_checked_artifact(&checked)?,
@@ -416,6 +424,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "rust-toolchain.toml",
         "toolchain.json",
         ".dockerignore",
+        "build-dependencies/clanker-ui.json",
     ] {
         hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
     }
@@ -432,6 +441,78 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         hash_tree(root, &root.join(directory), &mut hashes)?;
     }
     Ok(hashes)
+}
+
+/// Re-capture through the ordinary build adapter before selecting a cached fixture.
+/// The complete platform recipe and its runtime campaigns still run on this checkout.
+pub(super) fn admit_cached_fixture(
+    root: &Path,
+    app: &Path,
+    overrides: Option<&Path>,
+    imports: Option<&BuildImportContext>,
+    directory: &Path,
+) -> Result<()> {
+    let mut prepared = prepare(root, app, overrides, imports)?;
+    let loaded = day2::artifact::LoadedArtifact::load(directory)?;
+    loaded.require_current_api()?;
+    native_toolchain::verify_executable_target(
+        prepared.target,
+        loaded.materialize_worker()?.as_ref(),
+    )?;
+    let contract = loaded.contract();
+    ensure!(
+        contract.namespace == prepared.namespace && contract.imports == prepared.imports,
+        "cached fixture namespace or consumed import contract changed"
+    );
+    // Build.data allocates identities against these same retained checked types.
+    // Re-derive that ledger instead of trusting the cache's original input index.
+    let schema = Schema::from_checked_types(&fs::read(directory.join("checked-types.json"))?)?;
+    let identities = day2::identity::prepare(&prepared.stage.join("app"), &schema, true)?;
+    ensure!(
+        serde_json::to_value(&identities)? == serde_json::to_value(&contract.identities)?,
+        "cached fixture identity ledger changed"
+    );
+    prepared.hashes.insert(
+        format!("app/{}", day2::identity::REGISTRY_FILE),
+        digest(&fs::read(
+            prepared
+                .stage
+                .join("app")
+                .join(day2::identity::REGISTRY_FILE),
+        )?),
+    );
+    prepared.hashes.extend(prepared.platform_hashes);
+    prepared
+        .hashes
+        .extend(native_toolchain::stage_system_link_inputs(
+            prepared.target,
+            &prepared.stage,
+        )?);
+    admit_fixture_sources(prepared.target, &prepared.hashes, &contract.sources)
+}
+
+fn admit_fixture_sources(
+    target: native_toolchain::Target,
+    expected: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut actual = sources.clone();
+    // The release host archive is an output, admitted by the artifact's worker
+    // digest and the separate exact compiler/profile/source cache identity.
+    let archive = actual
+        .remove(&format!("native/{}/libhost.a", target.roc_target()))
+        .context("cached fixture native archive identity missing")?;
+    ensure!(
+        archive.len() == 71
+            && archive.starts_with("sha256:")
+            && archive[7..].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "cached fixture native archive identity invalid"
+    );
+    ensure!(
+        actual == *expected,
+        "cached fixture closed source inputs changed"
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -552,11 +633,16 @@ pub fn execute(
             match request.action.as_str() {
                 "build-schema" => run(
                     root,
-                    day2::sandbox::compiler(root, stage, roc)?
-                        .arg("glue")
-                        .arg(root.join("tools/SchemaGlue.roc"))
-                        .arg(stage)
-                        .arg(stage.join("app/schema-platform.roc")),
+                    day2::sandbox::glue_compiler(
+                        root,
+                        stage,
+                        roc,
+                        day2::sandbox::CompilerCache::SchemaGlue,
+                    )?
+                    .arg("glue")
+                    .arg(root.join("tools/SchemaGlue.roc"))
+                    .arg(stage)
+                    .arg(stage.join("app/schema-platform.roc")),
                 )?,
                 "build-data" => {
                     ensure!(done.contains("build-schema"), "checked types required");
@@ -574,11 +660,16 @@ pub fn execute(
                     );
                     run(
                         root,
-                        day2::sandbox::compiler(root, stage, roc)?
-                            .arg("glue")
-                            .arg(root.join("tools/SchemaGlue.roc"))
-                            .arg(stage)
-                            .arg(stage.join("app/app-platform.roc")),
+                        day2::sandbox::glue_compiler(
+                            root,
+                            stage,
+                            roc,
+                            day2::sandbox::CompilerCache::SchemaGlue,
+                        )?
+                        .arg("glue")
+                        .arg(root.join("tools/SchemaGlue.roc"))
+                        .arg(stage)
+                        .arg(stage.join("app/app-platform.roc")),
                     )?;
                     if request.action == "build-app-check" {
                         let bound = bound.as_mut().context("bound app required")?;
@@ -610,13 +701,46 @@ pub fn execute(
                 }
                 "build-bind" => {
                     ensure!(
-                        done.contains("build-app-types"),
-                        "checked callback types required"
+                        done.contains("build-connection-contract"),
+                        "checked connection metadata required"
                     );
                     bind(
                         root,
                         prepared,
                         bound.as_mut().context("bound data required")?,
+                    )?;
+                }
+                "build-connection-contract" => {
+                    ensure!(
+                        done.contains("build-app-types") && done.contains("build-host"),
+                        "checked registration inventory and pure host required"
+                    );
+                    let bound = bound.as_mut().context("bound data required")?;
+                    let (_, catalog) = checked_app(prepared, bound)?;
+                    if !catalog.connections.is_empty() {
+                        let source = stage.join("app/connection-probe.roc");
+                        let executable = stage.join("connection-probe");
+                        fs::write(&source, day2::connection_codegen::probe(&catalog))?;
+                        run(
+                            root,
+                            day2::sandbox::compiler(root, stage, roc)?
+                                .arg("build")
+                                .arg(&source)
+                                .arg(format!("--output={}", executable.display())),
+                        )?;
+                        // This worker can only evaluate the pure projection.
+                        // No runtime, authority provider or effect dispatcher
+                        // participates in declaration discovery.
+                        let raw = Worker::start(&executable)?.exchange(b"connection-contract")?;
+                        bound.connections =
+                            day2::connection_declaration::decode_catalog(&raw, &catalog)?;
+                        fs::remove_file(source)?;
+                        fs::remove_file(executable)?;
+                    }
+                    day2::connection_declaration::validate_catalog(&bound.connections, &catalog)?;
+                    fs::write(
+                        stage.join("connections.json"),
+                        serde_json::to_vec(&bound.connections)?,
                     )?;
                 }
                 "build-admission" => {
@@ -634,18 +758,38 @@ pub fn execute(
                 }
                 "build-glue" => {
                     ensure!(
-                        done.contains("build-admission"),
-                        "admission required before ABI generation"
+                        done.contains("build-app-types"),
+                        "checked app types required before pure ABI generation"
                     );
+                    // The pure ABI is always Str -> Str and does not import
+                    // authored App code. Product linking still requires both
+                    // final native admission profiles below.
+                    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
                     fs::create_dir_all(root.join("crates/worker/generated"))?;
+                    let output = tempfile::tempdir_in(stage)?;
                     run(
                         root,
-                        day2::sandbox::compiler(root, stage, roc)?.args([
-                            "glue",
-                            prepared.rust_glue,
-                            "crates/worker/generated",
-                            "sdk/main.roc",
-                        ]),
+                        day2::sandbox::glue_compiler(
+                            root,
+                            stage,
+                            roc,
+                            day2::sandbox::CompilerCache::RustGlue,
+                        )?
+                        .arg("glue")
+                        .arg(prepared.rust_glue)
+                        .arg(output.path())
+                        .arg("sdk/main.roc"),
+                    )?;
+                    let generated = output.path().join("roc_platform_abi.rs");
+                    let metadata = fs::symlink_metadata(&generated)
+                        .context("Rust glue did not emit the required worker ABI")?;
+                    ensure!(
+                        metadata.is_file() && metadata.len() <= 2 * 1024 * 1024,
+                        "invalid generated worker ABI"
+                    );
+                    fs::write(
+                        root.join("crates/worker/generated/roc_platform_abi.rs"),
+                        fs::read(generated)?,
                     )?;
                 }
                 "build-host" => {
@@ -667,6 +811,7 @@ pub fn execute(
                     )?);
                 }
                 "build-check" => {
+                    ensure!(done.contains("build-admission"), "final admission required");
                     ensure!(bound.is_some(), "bound schema required");
                     run(
                         root,
@@ -677,7 +822,9 @@ pub fn execute(
                 }
                 "build-link" => {
                     ensure!(
-                        done.contains("build-host") && done.contains("build-check"),
+                        done.contains("build-host")
+                            && done.contains("build-check")
+                            && done.contains("build-admission"),
                         "checked app and native host required"
                     );
                     run(
@@ -783,6 +930,7 @@ mod platform_input_tests {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         fs::create_dir(root.join("architecture"))?;
+        fs::create_dir(root.join("build-dependencies"))?;
         for name in [
             "Cargo.toml",
             "Cargo.lock",
@@ -793,6 +941,7 @@ mod platform_input_tests {
             "rust-toolchain.toml",
             "toolchain.json",
             ".dockerignore",
+            "build-dependencies/clanker-ui.json",
         ] {
             fs::write(root.join(name), b"approved input")?;
         }
@@ -815,6 +964,7 @@ mod platform_input_tests {
             "architecture-boundaries.json",
             "architecture-proofs.json",
             "architecture/clippy.toml",
+            "build-dependencies/clanker-ui.json",
         ] {
             assert_eq!(approved[policy], digest(b"approved input"));
             fs::write(root.join(policy), b"weakened restrictions")?;
@@ -824,6 +974,102 @@ mod platform_input_tests {
             fs::remove_file(root.join(policy))?;
             assert!(platform_sources(root).is_err());
             fs::write(root.join(policy), b"approved input")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fixture_cache_admission_tests {
+    use super::*;
+
+    #[test]
+    fn cached_fixture_requires_exact_closed_source_set_and_native_output() -> Result<()> {
+        let expected: BTreeMap<String, String> = [
+            "app/App.roc",
+            "app/ui/page.html",
+            "app/model-identities.json",
+            "sdk/contracts/Api.roc",
+            "toolchain.json",
+            "ui/package",
+            "ui-provider/executable",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), digest(name.as_bytes())))
+        .collect();
+        let mut artifact = expected.clone();
+        artifact.insert("native/arm64mac/libhost.a".into(), digest(b"host archive"));
+        admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact)?;
+        for name in expected.keys() {
+            let mut changed = artifact.clone();
+            changed.insert(name.clone(), digest(b"changed input"));
+            assert!(
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &changed)
+                    .is_err(),
+                "{name}"
+            );
+            let mut missing = artifact.clone();
+            missing.remove(name);
+            assert!(
+                admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing)
+                    .is_err(),
+                "{name}"
+            );
+        }
+        let mut extra = artifact.clone();
+        extra.insert("app/deleted.roc".into(), digest(b"old input"));
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &extra).is_err()
+        );
+        let mut missing_host = artifact.clone();
+        missing_host.remove("native/arm64mac/libhost.a");
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &missing_host)
+                .is_err()
+        );
+        artifact.insert("native/arm64mac/libhost.a".into(), "not a digest".into());
+        assert!(
+            admit_fixture_sources(native_toolchain::Target::MacArm64, &expected, &artifact)
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn cached_fixture_linker_inputs_and_native_archive_are_target_bound() -> Result<()> {
+        for target in [
+            native_toolchain::Target::LinuxX64,
+            native_toolchain::Target::LinuxArm64,
+        ] {
+            let prefix = format!("native/{}", target.roc_target());
+            let expected = BTreeMap::from([
+                ("app/App.roc".into(), digest(b"app")),
+                (
+                    format!("{prefix}/libc.so.6"),
+                    digest(b"current reviewed image libc"),
+                ),
+                (
+                    format!("{prefix}/loader"),
+                    digest(b"current reviewed image loader"),
+                ),
+            ]);
+            let host = format!("{prefix}/libhost.a");
+            let mut sources = expected.clone();
+            sources.insert(host.clone(), digest(b"native output"));
+            admit_fixture_sources(target, &expected, &sources)?;
+            for name in expected.keys() {
+                let mut changed = sources.clone();
+                changed.insert(name.clone(), digest(b"foreign source or image"));
+                assert!(admit_fixture_sources(target, &expected, &changed).is_err());
+                let mut missing = sources.clone();
+                missing.remove(name);
+                assert!(admit_fixture_sources(target, &expected, &missing).is_err());
+            }
+            sources.remove(&host);
+            sources.insert(
+                "native/arm64mac/libhost.a".into(),
+                digest(b"foreign host output"),
+            );
+            assert!(admit_fixture_sources(target, &expected, &sources).is_err());
         }
         Ok(())
     }

@@ -10,9 +10,9 @@
     "apps": {"example_app": {"service_account": "app-native@example-tools.iam.gserviceaccount.com", "accounts": {"calendar": {"kind": "iap_subject"}}}}
   },
   "oauth_clients": {
-    "version": 1,
+    "version": 2,
     "reauthentication": {"client_id": "123-reauth.apps.googleusercontent.com", "credential": "reauth"},
-    "registrations": {"calendar_client": {"client": {"client_id": "123-calendar.apps.googleusercontent.com", "credential": "calendar"}, "canary_subject": "112233", "canary_tenant": "example.com"}}
+    "registrations": {"calendar_client": {"client": {"kind": "google", "client_id": "123-calendar.apps.googleusercontent.com", "credential": "calendar"}, "canary": {"qualification_subject": "accounts.google.com:112233", "provider_subject": "112233", "provider_tenant": "example.com"}}}
   },
   "apps": {
     "example_app": {
@@ -59,7 +59,7 @@
         "provider": {
           "kind": "firestore_native_v1", "project": "example-tools", "project_number": 123456789012,
           "database": "security", "database_uid": "01234567-89ab-4cde-8fab-0123456789ab",
-          "iam_source": {"kind": "gke_workload_identity_v1", "service_account": "app-native@example-tools.iam.gserviceaccount.com"}
+          "iam_source": {"kind": "gke_workload_identity_v1", "service_account": "app-native@example-tools.iam.gserviceaccount.com","service_account_uid":"100000000000000000007"}
         },
         "key_set": "sha256:ff814a63b7aba9dd129eae26e51c3b4aa444401095ed45554f25d8ceb4ec0b3c", "max_lease_seconds": 30
       }

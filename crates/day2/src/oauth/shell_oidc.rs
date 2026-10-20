@@ -1,9 +1,13 @@
-//! Google OIDC step-up for the OAuth security shell. IAP identifies every
-//! incoming request; this separate code flow proves a new authentication event.
+//! Google OIDC for the security shell. IAP identifies incoming requests; the
+//! owned two-phase flow verifies issuer ordering. Genuine native original
+//! lifetime/current role/epoch/final settlement are still required, and the
+//! production post-Pending proof guard remains closed until qualified.
 
 use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
-    fresh_auth::FreshIntent,
+    fresh_auth::{FreshIntent, FreshPurpose},
+    fresh_owner::{AllocationData, CallData, GoogleBundleData, OutcomeData},
+    google_begin::{Begins, Original, Payload},
     security_shell::{FreshAuthenticator, ReauthStart},
 };
 use crate::iap;
@@ -12,12 +16,14 @@ use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::Digest;
+use ring::digest::{SHA256, digest};
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
-use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Mutex,
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -25,6 +31,8 @@ const AUTHORIZATION_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const JWK_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 const ISSUER: &str = "https://accounts.google.com";
+pub(super) const MANUAL_PREFIX: &str = "/_day2/reauth/manual/";
+#[cfg(test)]
 const MAX_ATTEMPTS: usize = 1024;
 const ATTEMPT_SECONDS: i64 = 300;
 
@@ -61,6 +69,12 @@ impl KeySource for GoogleKeys {
 }
 
 pub(crate) trait CodeExchange: Send + Sync {
+    /// Exact selected reference DATA, never secret bytes or current authority.
+    /// Parser-only adapters cannot supply a production bundle by default.
+    fn profile_binding(&self) -> Result<Digest> {
+        anyhow::bail!("Google client profile binding unavailable")
+    }
+
     fn exchange(
         &self,
         code: &str,
@@ -148,6 +162,16 @@ impl GoogleCodeExchange {
 }
 
 impl CodeExchange for GoogleCodeExchange {
+    fn profile_binding(&self) -> Result<Digest> {
+        Digest::of(&(
+            "google-code-client-reference-v1",
+            self.version.project_number,
+            &self.version.secret,
+            self.version.version,
+            self.endpoint.as_str(),
+        ))
+    }
+
     fn exchange(
         &self,
         code: &str,
@@ -162,6 +186,7 @@ impl CodeExchange for GoogleCodeExchange {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 struct Pending {
     intent: FreshIntent,
@@ -174,6 +199,234 @@ struct Pending {
     location: String,
 }
 
+/// The original, unchanged signature/claim verifier creates this wrapper.
+/// Deserializing claims or a durable row cannot construct it.
+struct VerifiedIdToken {
+    issuer: GoogleIssuer,
+    claims: Claims,
+    nonce: Digest,
+    profile: Digest,
+}
+
+// Both spellings accepted by the existing Google verifier denote its one
+// fixed issuer/key source. No arbitrary issuer string can enter this wrapper.
+#[derive(PartialEq, Eq)]
+enum GoogleIssuer {
+    Accounts,
+}
+
+struct GoogleFlow {
+    state: Digest,
+    nonce: String,
+    verifier: String,
+    challenge: String,
+    location: String,
+}
+
+/// One indivisible pair of distinct phase tuples, allocated once only after
+/// the original app Claim commits. The second URL remains private until the
+/// baseline has been verified; the app sees one immutable bundle commitment.
+pub(super) struct GoogleBundle {
+    baseline: GoogleFlow,
+    fresh: GoogleFlow,
+    profile: Digest,
+    publication: String,
+    manual: ManualBinding,
+}
+
+pub(super) struct GoogleFresh {
+    baseline: VerifiedIdToken,
+    fresh: GoogleFlow,
+    profile: Digest,
+    publication: String,
+    manual: ManualBinding,
+}
+
+/// UI navigation DATA, not a Google authentication event or native proof.
+pub(crate) struct ManualView {
+    pub(in crate::oauth) location: String,
+    pub(in crate::oauth) csrf: String,
+    pub(in crate::oauth) human: String,
+    pub(in crate::oauth) deadline: i64,
+}
+
+struct ManualBinding {
+    handle: String,
+    csrf: String,
+    tuples: Digest,
+}
+
+impl ManualBinding {
+    // Exact UTF-8 JSON tuple framing, with explicit version and distinct ASCII
+    // purpose labels. The tuple bundle commits both private Google phases;
+    // the final immutable publication aggregates that bundle plus both UI MAC
+    // commitments, avoiding a self-referential hash/MAC definition.
+    fn frame(
+        label: &str,
+        original: &Original,
+        profile: &Digest,
+        tuples: &Digest,
+    ) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&(
+            "day2-google-manual-hmac-v1",
+            label,
+            original.intent.commitment()?,
+            &original.owner,
+            profile,
+            tuples,
+        ))?)
+    }
+
+    fn new(original: &Original, profile: &Digest, tuples: Digest, verifier: &str) -> Result<Self> {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, verifier.as_bytes());
+        let handle = URL_SAFE_NO_PAD.encode(
+            ring::hmac::sign(&key, &Self::frame("handle", original, profile, &tuples)?).as_ref(),
+        );
+        let csrf = URL_SAFE_NO_PAD.encode(
+            ring::hmac::sign(&key, &Self::frame("csrf", original, profile, &tuples)?).as_ref(),
+        );
+        Ok(Self {
+            handle,
+            csrf,
+            tuples,
+        })
+    }
+
+    fn verify(
+        &self,
+        csrf: &str,
+        original: &Original,
+        profile: &Digest,
+        verifier: &str,
+    ) -> Result<()> {
+        ensure!(token_shape(csrf), "Google manual CSRF shape refused");
+        let bytes = URL_SAFE_NO_PAD.decode(csrf)?;
+        ensure!(
+            URL_SAFE_NO_PAD.encode(&bytes) == csrf,
+            "Google manual CSRF encoding refused"
+        );
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, verifier.as_bytes());
+        ring::hmac::verify(
+            &key,
+            &Self::frame("csrf", original, profile, &self.tuples)?,
+            &bytes,
+        )
+        .map_err(|_| anyhow::anyhow!("Google manual CSRF refused"))
+    }
+}
+
+/// Actual issuer-order evidence only. Native original lifetime/current role,
+/// security epoch and final app settlement remain separate mandatory guards.
+struct GoogleOrder {
+    baseline: VerifiedIdToken,
+    fresh: VerifiedIdToken,
+    original: Digest,
+    owner: Digest,
+    publication: Digest,
+    observation_correlation: Digest,
+}
+
+pub(super) const PRODUCER_UNAVAILABLE: &str =
+    "OAuth post-pending authentication producer unavailable";
+
+/// Private diagnostic DATA, never an authentication or authorization witness.
+/// Only the normal signed owned callback can supply the private ordering input.
+#[derive(Serialize)]
+pub(crate) struct ProviderObservationData {
+    version: u8,
+    kind: &'static str,
+    outcome: &'static str,
+    baseline_iat: i64,
+    fresh_auth_time: i64,
+    profile: Digest,
+    correlation: Digest,
+}
+
+struct ProviderObservationUnavailable(ProviderObservationData);
+
+impl std::fmt::Debug for ProviderObservationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PRODUCER_UNAVAILABLE)
+    }
+}
+
+impl std::fmt::Display for ProviderObservationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(PRODUCER_UNAVAILABLE)
+    }
+}
+
+impl std::error::Error for ProviderObservationUnavailable {}
+
+fn observation_profile(profile: &Digest) -> Result<Digest> {
+    Digest::of(&("google-provider-profile-observation-v1", profile))
+}
+
+fn manual_observation_correlation(profile_observation: &Digest, handle: &str) -> Result<Digest> {
+    Digest::of(&(
+        "google-provider-manual-observation-v1",
+        profile_observation,
+        handle,
+    ))
+}
+
+/// The blocking request owner consumes this error exactly once. Other error
+/// types and their contexts pass through without any diagnostic effect.
+pub(super) fn take_provider_observation(
+    error: anyhow::Error,
+) -> std::result::Result<ProviderObservationData, anyhow::Error> {
+    error
+        .downcast::<ProviderObservationUnavailable>()
+        .map(|value| value.0)
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    assert_not_impl!(ProviderObservationData, Clone);
+    assert_not_impl!(ProviderObservationData, Copy);
+    assert_not_impl!(ProviderObservationData, Default);
+    assert_not_impl!(ProviderObservationData, std::fmt::Debug);
+    assert_not_impl!(ProviderObservationData, serde::Deserialize<'static>);
+    assert_not_impl!(ProviderObservationUnavailable, Clone);
+};
+
+impl GoogleBundle {
+    pub(super) fn baseline_state(&self) -> &Digest {
+        &self.baseline.state
+    }
+
+    pub(super) fn baseline_location(&self) -> &str {
+        &self.baseline.location
+    }
+}
+
+impl GoogleFresh {
+    pub(super) fn state(&self) -> &Digest {
+        &self.fresh.state
+    }
+
+    pub(super) fn location(&self) -> &str {
+        &self.fresh.location
+    }
+
+    pub(super) fn manual_handle(&self) -> &str {
+        &self.manual.handle
+    }
+
+    pub(super) fn manual_location(&self) -> String {
+        format!("{MANUAL_PREFIX}{}", self.manual.handle)
+    }
+}
+
 pub(crate) struct Reauthenticated {
     intent: FreshIntent,
     human: String,
@@ -183,6 +436,7 @@ pub(crate) struct Reauthenticated {
     started_at: i64,
     started: effects::Instant,
     lifetime: Mutex<Lifetime>,
+    ordering: Option<GoogleOrder>,
     #[cfg(test)]
     isolated_fixture: bool,
 }
@@ -194,6 +448,22 @@ struct Lifetime {
 }
 
 impl Reauthenticated {
+    /// Observation DATA only; this never exports the private token pair or
+    /// constructs a current-role/original-clock/fresh-human proof.
+    pub(in crate::oauth) fn owned_ordering_data(
+        &self,
+    ) -> Option<(i64, i64, Digest, Digest, Digest)> {
+        self.ordering.as_ref().map(|value| {
+            (
+                value.baseline.claims.iat,
+                value.fresh.claims.auth_time,
+                value.original.clone(),
+                value.owner.clone(),
+                value.publication.clone(),
+            )
+        })
+    }
+
     pub(in crate::oauth) fn intent(&self) -> &FreshIntent {
         &self.intent
     }
@@ -210,6 +480,45 @@ impl Reauthenticated {
         self.authenticated_at
     }
 
+    /// Signed timestamps alone do not establish authentication after the local
+    /// pending request. No production causal producer is admitted yet.
+    pub(in crate::oauth) fn require_post_pending_authentication(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.isolated_fixture {
+            // Only the explicit per-proof isolated fixture constructor sets it;
+            // real signed Google parser fixtures leave this false.
+            return Ok(());
+        }
+        if let Some((baseline_iat, auth_time, original, _, _)) = self.owned_ordering_data() {
+            ensure!(
+                original == self.intent.commitment()?
+                    && auth_time == self.authenticated_at
+                    && auth_time > baseline_iat,
+                "Google original ordering context changed"
+            );
+        }
+        if matches!(
+            self.intent.purpose(),
+            FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+        ) && let Some(order) = &self.ordering
+        {
+            return Err(ProviderObservationUnavailable(ProviderObservationData {
+                version: 1,
+                kind: "google_provider_prerequisite",
+                outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+                baseline_iat: order.baseline.claims.iat,
+                fresh_auth_time: order.fresh.claims.auth_time,
+                profile: observation_profile(&order.fresh.profile)?,
+                correlation: order.observation_correlation.clone(),
+            })
+            .into());
+        }
+        // An owned issuer-order observation is necessary but not a factory for
+        // genuine original lifetime/current role/epoch or final app settlement.
+        // No production success branch is installed before those are supplied.
+        anyhow::bail!(PRODUCER_UNAVAILABLE)
+    }
+
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
         let deadline = self
             .authenticated_at
@@ -221,10 +530,7 @@ impl Reauthenticated {
                     .context("OIDC attempt time overflow")?,
             )
             .min(self.provider_expires_at);
-        Ok(self
-            .intent
-            .deadline()
-            .map_or(deadline, |pending| deadline.min(pending)))
+        Ok(deadline.min(self.intent.deadline()))
     }
 
     pub(in crate::oauth) fn require_current(&self, now: i64) -> Result<()> {
@@ -316,8 +622,48 @@ impl Reauthenticated {
                 observed: started,
                 refused: false,
             }),
+            ordering: None,
             isolated_fixture: true,
         }
+    }
+
+    /// A distinct isolated witness, with the original attempt's clock anchors.
+    /// This constructor cannot accept or upgrade a parsed signed Google proof.
+    #[cfg(test)]
+    pub(in crate::oauth) fn isolated_fixture_with_original_start(
+        intent: FreshIntent,
+        human: String,
+        subject: String,
+        authenticated_at: i64,
+        started_at: i64,
+        started: effects::Instant,
+    ) -> Result<Self> {
+        let observed = effects::Instant::now();
+        ensure!(
+            started_at >= intent.created_at()
+                && authenticated_at > intent.created_at()
+                && authenticated_at >= started_at
+                && observed.checked_duration_since(started).is_some(),
+            "isolated witness changed the original authentication clock"
+        );
+        Ok(Self {
+            intent,
+            human,
+            subject,
+            authenticated_at,
+            provider_expires_at: authenticated_at
+                .checked_add(ATTEMPT_SECONDS)
+                .context("isolated witness provider expiry overflow")?,
+            started_at,
+            started,
+            lifetime: Mutex::new(Lifetime {
+                wall: authenticated_at,
+                observed,
+                refused: false,
+            }),
+            ordering: None,
+            isolated_fixture: true,
+        })
     }
 }
 
@@ -342,7 +688,15 @@ pub(crate) struct GoogleOidc {
     exchange: Box<dyn CodeExchange>,
     key_source: Box<dyn KeySource>,
     keys: Mutex<KeyCache>,
+    begins: Begins,
+    #[cfg(test)]
     pending: Mutex<HashMap<String, Pending>>,
+}
+
+enum BeginTransport {
+    Remote(Arc<super::shell_transport::RemoteApprovals>),
+    #[cfg(test)]
+    ParserOnly,
 }
 
 /// Production shell adapter: a signed IAP assertion is required for every
@@ -351,6 +705,7 @@ pub(crate) struct GoogleOidc {
 pub(crate) struct GoogleFreshAuthenticator {
     iap: iap::Verifier,
     oidc: GoogleOidc,
+    begin_transport: BeginTransport,
 }
 
 impl GoogleFreshAuthenticator {
@@ -360,6 +715,7 @@ impl GoogleFreshAuthenticator {
         shell_origin: &str,
         client_id: String,
         exchange: Box<dyn CodeExchange>,
+        owners: Arc<super::shell_transport::RemoteApprovals>,
     ) -> Result<Self> {
         Ok(Self {
             iap: iap::Verifier::new(iap_audience, hosted_domain, Box::new(iap::GoogleKeys))?,
@@ -370,6 +726,7 @@ impl GoogleFreshAuthenticator {
                 exchange,
                 Box::new(GoogleKeys),
             )?,
+            begin_transport: BeginTransport::Remote(owners),
         })
     }
 }
@@ -387,14 +744,104 @@ impl FreshAuthenticator for GoogleFreshAuthenticator {
         &self,
         identity: &iap::Verified,
         intent: FreshIntent,
+        headers: &HeaderMap,
         now: i64,
     ) -> Result<ReauthStart> {
+        let location = match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .begin_owned(owners, identity, intent, headers, now)?,
+            #[cfg(test)]
+            BeginTransport::ParserOnly => self.oidc.begin(identity, intent, now)?,
+        };
+        Ok(ReauthStart::Redirect(location))
+    }
+
+    fn complete(
+        &self,
+        query: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<super::security_shell::ReauthCallback> {
+        match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .complete_owned(owners, query, identity, headers, now),
+            #[cfg(test)]
+            BeginTransport::ParserOnly => Ok(super::security_shell::ReauthCallback::Observed(
+                Box::new(self.oidc.complete(query, identity, now)?),
+            )),
+        }
+    }
+
+    fn manual_view(
+        &self,
+        handle: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<ManualView> {
+        match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .manual_view_owned(owners, handle, identity, headers, now),
+            #[cfg(test)]
+            BeginTransport::ParserOnly => {
+                anyhow::bail!("parser-only Google has no manual checkpoint")
+            }
+        }
+    }
+
+    fn resume_manual(
+        &self,
+        handle: &str,
+        csrf: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<String> {
+        match &self.begin_transport {
+            BeginTransport::Remote(owners) => self
+                .oidc
+                .resume_manual_owned(owners, handle, csrf, identity, headers, now),
+            #[cfg(test)]
+            BeginTransport::ParserOnly => {
+                anyhow::bail!("parser-only Google cannot resume an owned checkpoint")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl GoogleFreshAuthenticator {
+    /// Explicit standalone parser adapter. No app-owner/native/live admission
+    /// is established, and the production post-Pending guard remains closed.
+    pub(in crate::oauth) fn begin_parser(
+        &self,
+        identity: &iap::Verified,
+        intent: FreshIntent,
+        now: i64,
+    ) -> Result<ReauthStart> {
+        ensure!(
+            matches!(self.begin_transport, BeginTransport::ParserOnly),
+            "owned Google Begin cannot use parser adapter"
+        );
         Ok(ReauthStart::Redirect(
             self.oidc.begin(identity, intent, now)?,
         ))
     }
 
-    fn complete(&self, query: &str, identity: &iap::Verified, now: i64) -> Result<Reauthenticated> {
+    pub(in crate::oauth) fn complete_parser(
+        &self,
+        query: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<Reauthenticated> {
+        ensure!(
+            matches!(self.begin_transport, BeginTransport::ParserOnly),
+            "owned Google callback cannot use parser adapter"
+        );
         self.oidc.complete(query, identity, now)
     }
 }
@@ -428,6 +875,8 @@ impl GoogleOidc {
             exchange,
             key_source,
             keys: Mutex::new(KeyCache::default()),
+            begins: Begins::new(),
+            #[cfg(test)]
             pending: Mutex::new(HashMap::new()),
         })
     }
@@ -436,14 +885,418 @@ impl GoogleOidc {
         "/_day2/reauth/callback"
     }
 
-    /// Starts a new provider authentication after the account was quarantined.
-    /// State, nonce and PKCE verifier never enter the app or provider callback URL.
-    pub(crate) fn begin(
+    fn owned_profile(&self) -> Result<Digest> {
+        Digest::of(&(
+            "google-two-phase-profile-v1",
+            AUTHORIZATION_URL,
+            TOKEN_URL,
+            JWK_URL,
+            ISSUER,
+            &self.client_id,
+            &self.redirect_uri,
+            &self.hosted_domain,
+            self.exchange.profile_binding()?,
+            Digest::new(include_bytes!("shell_oidc.rs")),
+            Digest::new(include_bytes!("google_begin.rs")),
+            Digest::new(include_bytes!("fresh_owner.rs")),
+            Digest::new(include_bytes!("../../../../Cargo.lock")),
+        ))
+    }
+
+    fn flow(&self, human: &str) -> Result<GoogleFlow> {
+        let state = effects::random()?;
+        let nonce = effects::random()?;
+        let verifier = effects::random()?;
+        let challenge = URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref());
+        let mut url = url::Url::parse(AUTHORIZATION_URL)?;
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email")
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &self.redirect_uri)
+            .append_pair("state", &state)
+            .append_pair("nonce", &nonce)
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("max_age", "0")
+            .append_pair("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#)
+            .append_pair("hd", &self.hosted_domain)
+            .append_pair("login_hint", human);
+        // Account selection is not proof. The authenticated expected identity
+        // is verified in both signed responses, not inferred from a URL hint.
+        let location: String = url.into();
+        ensure!(location.len() <= 4096, "Google authorization capacity");
+        Ok(GoogleFlow {
+            state: Digest::new(state.as_bytes()),
+            nonce,
+            verifier,
+            challenge,
+            location,
+        })
+    }
+
+    fn bundle(&self, original: &Original) -> Result<GoogleBundle> {
+        let profile = self.owned_profile()?;
+        let baseline = self.flow(original.intent.human())?;
+        let fresh = self.flow(original.intent.human())?;
+        ensure!(
+            baseline.state != fresh.state
+                && baseline.nonce != fresh.nonce
+                && baseline.verifier != fresh.verifier,
+            "Google phase tuples must be distinct"
+        );
+        let original_id = original.intent.commitment()?;
+        let tuples = Digest::of(&(
+            "google-two-phase-private-tuples-v1",
+            &original_id,
+            &original.owner,
+            &profile,
+            &baseline.state,
+            Digest::new(baseline.nonce.as_bytes()),
+            &baseline.challenge,
+            &fresh.state,
+            Digest::new(fresh.nonce.as_bytes()),
+            &fresh.challenge,
+        ))?;
+        let manual = ManualBinding::new(original, &profile, tuples.clone(), &fresh.verifier)?;
+        let bundle = Digest::of(&(
+            "google-two-phase-private-bundle-v2",
+            &tuples,
+            Digest::new(manual.handle.as_bytes()),
+            Digest::new(manual.csrf.as_bytes()),
+        ))?;
+        let publication = serde_json::to_string(&GoogleBundleData::from_native_parts(
+            original_id,
+            profile.clone(),
+            bundle,
+        ))?;
+        Ok(GoogleBundle {
+            baseline,
+            fresh,
+            profile,
+            publication,
+            manual,
+        })
+    }
+
+    /// These existing clock observations only tighten the original operation.
+    /// They do not map Google's issuer clock or replace the missing genuine
+    /// native continuous-original-lifetime factory for production acceptance.
+    fn owned_now(original: &Original, entry: i64) -> Result<i64> {
+        let now = effects::wall_time()?;
+        let ceiling = original
+            .started_at
+            .checked_add(ATTEMPT_SECONDS)
+            .context("Google original attempt overflow")?
+            .min(original.intent.deadline());
+        let seconds = ceiling
+            .checked_sub(original.started_at)
+            .and_then(|v| u64::try_from(v).ok())
+            .context("Google original lifetime invalid")?;
+        ensure!(
+            now >= entry
+                && now >= original.started_at
+                && now < ceiling
+                && effects::Instant::now()
+                    .checked_duration_since(original.started)
+                    .is_some_and(|elapsed| elapsed < Duration::from_secs(seconds)),
+            "Google original attempt expired or changed clock"
+        );
+        Ok(now)
+    }
+
+    fn publish_owned(
         &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        flight: &super::google_begin::Flight<'_>,
+        headers: &HeaderMap,
+        entry: i64,
+    ) -> Result<()> {
+        let (publication, profile) = match flight.payload()? {
+            Payload::Publication(bundle)
+            | Payload::Baseline(bundle)
+            | Payload::BaselineCallback(bundle) => (&bundle.publication, &bundle.profile),
+            Payload::Manual(fresh) | Payload::Fresh(fresh) | Payload::FreshCallback(fresh) => {
+                (&fresh.publication, &fresh.profile)
+            }
+            _ => anyhow::bail!("Google immutable bundle publication required"),
+        };
+        ensure!(
+            *profile == self.owned_profile()?,
+            "Google original bundle profile changed"
+        );
+        Self::owned_now(&flight.original, entry)?;
+        let call = CallData::publication(
+            &flight.original.intent,
+            flight.original.owner.clone(),
+            publication.clone(),
+        )?;
+        let reply = owners.fresh_owner(&flight.original.intent, call.clone(), headers)?;
+        reply.require_call(&call, &flight.original.intent)?;
+        ensure!(
+            matches!(reply.outcome, OutcomeData::Published { .. }),
+            "Google bundle publication refused"
+        );
+        Self::owned_now(&flight.original, entry)?;
+        Ok(())
+    }
+
+    fn begin_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
         identity: &iap::Verified,
         intent: FreshIntent,
+        headers: &HeaderMap,
         now: i64,
     ) -> Result<String> {
+        intent.require_identity(identity)?;
+        intent.require_shell_origin(
+            &url::Url::parse(&self.redirect_uri)?
+                .origin()
+                .ascii_serialization(),
+        )?;
+        let mut flight = self.begins.reserve(&intent, now)?;
+        Self::owned_now(&flight.original, now)?;
+        if matches!(flight.payload()?, Payload::Claim) {
+            let call = CallData::claim(&intent, flight.original.owner.clone())?;
+            let reply = owners.fresh_owner(&intent, call.clone(), headers)?;
+            reply.require_call(&call, &intent)?;
+            if !matches!(
+                reply.outcome,
+                OutcomeData::Allocation {
+                    state: AllocationData::Allocated | AllocationData::ExistingOwner,
+                }
+            ) {
+                flight.terminal()?;
+                anyhow::bail!("Google original app owner refused");
+            }
+            Self::owned_now(&flight.original, now)?;
+            // After this take, any failure is terminal. The two-tuples are
+            // allocated ONCE, only after the actual app Claim returned committed.
+            ensure!(
+                matches!(flight.take()?, Payload::Claim),
+                "Google original allocation changed"
+            );
+            let bundle = self.bundle(&flight.original)?;
+            flight.retain_publication(bundle)?;
+        }
+        self.publish_owned(owners, &flight, headers, now)?;
+        flight.offered()
+    }
+
+    fn verified_owned_token(
+        &self,
+        token: &str,
+        nonce: &str,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<VerifiedIdToken> {
+        let claims = self.verify_id_token(token, nonce, identity, now)?;
+        ensure!(claims.iat > 0, "Google issuer timestamp missing");
+        Ok(VerifiedIdToken {
+            issuer: GoogleIssuer::Accounts,
+            claims,
+            nonce: Digest::new(nonce.as_bytes()),
+            profile: self.owned_profile()?,
+        })
+    }
+
+    fn manual_view_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        handle: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<ManualView> {
+        ensure!(token_shape(handle), "Google manual handle refused");
+        let flight = self.begins.manual(handle)?;
+        flight.original.intent.require_identity(identity)?;
+        self.publish_owned(owners, &flight, headers, now)?;
+        let fresh = match flight.payload()? {
+            Payload::Manual(fresh) | Payload::Fresh(fresh) => fresh,
+            _ => anyhow::bail!("Google manual checkpoint phase refused"),
+        };
+        let deadline = flight
+            .original
+            .started_at
+            .checked_add(ATTEMPT_SECONDS)
+            .context("Google original checkpoint overflow")?
+            .min(flight.original.intent.deadline());
+        Ok(ManualView {
+            location: fresh.manual_location(),
+            csrf: fresh.manual.csrf.clone(),
+            human: flight.original.intent.human().into(),
+            deadline,
+        })
+    }
+
+    fn resume_manual_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        handle: &str,
+        csrf: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<String> {
+        ensure!(token_shape(handle), "Google manual handle refused");
+        let flight = self.begins.manual(handle)?;
+        flight.original.intent.require_identity(identity)?;
+        Self::owned_now(&flight.original, now)?;
+        let fresh = match flight.payload()? {
+            Payload::Manual(fresh) | Payload::Fresh(fresh) => fresh,
+            _ => anyhow::bail!("Google manual resume phase refused"),
+        };
+        fresh.manual.verify(
+            csrf,
+            &flight.original,
+            &fresh.profile,
+            &fresh.fresh.verifier,
+        )?;
+        self.publish_owned(owners, &flight, headers, now)?;
+        flight.resumed()
+    }
+
+    fn complete_owned(
+        &self,
+        owners: &super::shell_transport::RemoteApprovals,
+        raw_query: &str,
+        identity: &iap::Verified,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<super::security_shell::ReauthCallback> {
+        ensure!(raw_query.len() <= 4096, "OIDC callback too large");
+        let mut fields = BTreeMap::new();
+        for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+            ensure!(
+                fields
+                    .insert(key.into_owned(), value.into_owned())
+                    .is_none(),
+                "duplicate OIDC callback field"
+            );
+        }
+        ensure!(
+            fields.get("iss").map(String::as_str) == Some(ISSUER),
+            "invalid OIDC callback issuer"
+        );
+        let state = fields.get("state").context("OIDC state missing")?;
+        ensure!(token_shape(state), "invalid OIDC state");
+        let code = fields.get("code").context("OIDC code missing")?;
+        ensure!(!code.is_empty() && code.len() <= 2048, "invalid OIDC code");
+        let mut flight = self.begins.callback(state)?;
+        flight.original.intent.require_identity(identity)?;
+        Self::owned_now(&flight.original, now)?;
+        let expected_profile = self.owned_profile()?;
+        // Re-read the actual original Pending/current app authority before any
+        // provider credential read or code exchange in either callback phase.
+        self.publish_owned(owners, &flight, headers, now)?;
+        // Taking the phase precedes external exchange. Failure, cancellation or
+        // ambiguous exchange can never retry a code, baseline or native bundle.
+        match flight.take()? {
+            Payload::BaselineCallback(bundle) => {
+                ensure!(
+                    bundle.profile == expected_profile,
+                    "Google baseline profile changed"
+                );
+                let token = self.exchange.exchange(
+                    code,
+                    &bundle.baseline.verifier,
+                    &self.redirect_uri,
+                    &self.client_id,
+                )?;
+                let at = Self::owned_now(&flight.original, now)?;
+                let baseline =
+                    self.verified_owned_token(&token, &bundle.baseline.nonce, identity, at)?;
+                ensure!(
+                    baseline.profile == bundle.profile
+                        && baseline.nonce == Digest::new(bundle.baseline.nonce.as_bytes()),
+                    "Google baseline binding changed"
+                );
+                let fresh = GoogleFresh {
+                    baseline,
+                    fresh: bundle.fresh,
+                    profile: bundle.profile,
+                    publication: bundle.publication,
+                    manual: bundle.manual,
+                };
+                flight.retain_manual(fresh)?;
+                self.publish_owned(owners, &flight, headers, now)?;
+                Ok(super::security_shell::ReauthCallback::Manual(
+                    flight.offered()?,
+                ))
+            }
+            Payload::FreshCallback(pending) => {
+                ensure!(
+                    pending.profile == expected_profile,
+                    "Google fresh profile changed"
+                );
+                let token = self.exchange.exchange(
+                    code,
+                    &pending.fresh.verifier,
+                    &self.redirect_uri,
+                    &self.client_id,
+                )?;
+                let at = Self::owned_now(&flight.original, now)?;
+                let fresh =
+                    self.verified_owned_token(&token, &pending.fresh.nonce, identity, at)?;
+                // Trust the documented issuer meanings of signed NumericDate
+                // values. No local/Google clock subtraction or skew margin
+                // establishes this ordering. Equality never proves a new event.
+                ensure!(
+                    fresh.profile == pending.baseline.profile
+                        && fresh.issuer == pending.baseline.issuer
+                        && fresh.claims.sub == pending.baseline.claims.sub
+                        && fresh.claims.aud == pending.baseline.claims.aud
+                        && fresh.nonce == Digest::new(pending.fresh.nonce.as_bytes())
+                        && fresh.claims.auth_time > pending.baseline.claims.iat
+                        && fresh.claims.auth_time <= fresh.claims.iat,
+                    "Google authentication did not advance past the original baseline"
+                );
+                let authenticated_at = fresh.claims.auth_time;
+                let provider_expires_at = fresh.claims.exp.min(pending.baseline.claims.exp);
+                let observation_correlation = manual_observation_correlation(
+                    &observation_profile(&fresh.profile)?,
+                    &pending.manual.handle,
+                )?;
+                let ordering = GoogleOrder {
+                    baseline: pending.baseline,
+                    fresh,
+                    original: flight.original.intent.commitment()?,
+                    owner: flight.original.owner.clone(),
+                    publication: Digest::new(pending.publication.as_bytes()),
+                    observation_correlation,
+                };
+                let observed = Reauthenticated {
+                    intent: flight.original.intent.clone(),
+                    human: identity.email.clone(),
+                    subject: identity.subject.clone(),
+                    authenticated_at,
+                    provider_expires_at,
+                    started_at: flight.original.started_at,
+                    started: flight.original.started,
+                    lifetime: Mutex::new(Lifetime {
+                        wall: at,
+                        observed: effects::Instant::now(),
+                        refused: false,
+                    }),
+                    ordering: Some(ordering),
+                    #[cfg(test)]
+                    isolated_fixture: false,
+                };
+                flight.terminal()?;
+                Ok(super::security_shell::ReauthCallback::Observed(Box::new(
+                    observed,
+                )))
+            }
+            _ => anyhow::bail!("Google callback phase refused"),
+        }
+    }
+
+    /// Starts a new provider authentication after the account was quarantined.
+    /// State, nonce and PKCE verifier never enter the app or provider callback URL.
+    #[cfg(test)]
+    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, now: i64) -> Result<String> {
         intent.require_identity(identity)?;
         let origin = url::Url::parse(&self.redirect_uri)?
             .origin()
@@ -453,7 +1306,7 @@ impl GoogleOidc {
             intent.attempt().len() <= 128
                 && !intent.attempt().is_empty()
                 && now >= intent.created_at()
-                && intent.deadline().is_none_or(|deadline| now < deadline),
+                && now < intent.deadline(),
             "invalid OIDC attempt"
         );
         let started = effects::Instant::now();
@@ -483,7 +1336,7 @@ impl GoogleOidc {
         let state = effects::random()?;
         let nonce = effects::random()?;
         let verifier = effects::random()?;
-        let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let code_challenge = URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref());
         let mut url = url::Url::parse(AUTHORIZATION_URL)?;
         url.query_pairs_mut()
             .append_pair("response_type", "code")
@@ -517,7 +1370,8 @@ impl GoogleOidc {
 
     /// Callback state is consumed before the code exchange. A failed exchange or
     /// verification cannot be retried with the same provider code or nonce.
-    pub(crate) fn complete(
+    #[cfg(test)]
+    fn complete(
         &self,
         raw_query: &str,
         identity: &iap::Verified,
@@ -578,6 +1432,7 @@ impl GoogleOidc {
                 observed: effects::Instant::now(),
                 refused: false,
             }),
+            ordering: None,
             #[cfg(test)]
             isolated_fixture: false,
         })
@@ -750,6 +1605,9 @@ pub(in crate::oauth) use signed_fixtures::fixture_login;
 pub(in crate::oauth) use signed_fixtures::{ReplayLogin, ReplayProviderCounts};
 
 #[cfg(test)]
+pub(in crate::oauth) use signed_fixtures::ProviderInputSigner;
+
+#[cfg(test)]
 mod signed_fixtures {
     use super::*;
     use ring::{
@@ -759,6 +1617,53 @@ mod signed_fixtures {
         },
     };
     use std::sync::Arc;
+
+    /// Synthetic provider INPUT only. It returns signed bytes, never a native
+    /// observed/proof object. The real unchanged verifier consumes those bytes.
+    pub(in crate::oauth) struct ProviderInputSigner {
+        key: RsaKeyPair,
+        jwks: String,
+    }
+
+    impl ProviderInputSigner {
+        pub(in crate::oauth) fn new() -> Result<Self> {
+            let key = RsaKeyPair::from_pkcs8(TEST_PKCS8)
+                .map_err(|_| anyhow::anyhow!("public provider input key invalid"))?;
+            let mut bytes = key.public_key().as_ref();
+            let mut sequence = der(&mut bytes, 0x30)?;
+            let n = der(&mut sequence, 0x02)?;
+            let e = der(&mut sequence, 0x02)?;
+            ensure!(
+                bytes.is_empty() && sequence.is_empty(),
+                "provider input key shape"
+            );
+            let jwks = serde_json::json!({"keys":[{"kid":"owned-google-input","kty":"RSA","alg":"RS256","use":"sig",
+                "n":URL_SAFE_NO_PAD.encode(n.strip_prefix(&[0]).unwrap_or(n)),"e":URL_SAFE_NO_PAD.encode(e)}]}).to_string();
+            Ok(Self { key, jwks })
+        }
+
+        pub(in crate::oauth) fn jwks(&self) -> &str {
+            &self.jwks
+        }
+
+        pub(in crate::oauth) fn sign(&self, claims: &serde_json::Value) -> Result<String> {
+            let signed = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"owned-google-input"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?)
+            );
+            let mut signature = vec![0; self.key.public_key().modulus_len()];
+            self.key
+                .sign(
+                    &RSA_PKCS1_SHA256,
+                    &SystemRandom::new(),
+                    signed.as_bytes(),
+                    &mut signature,
+                )
+                .map_err(|_| anyhow::anyhow!("provider input signing failed"))?;
+            Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
+        }
+    }
 
     // Public, test-only 2048-bit RSA fixture from the previously reviewed Google
     // parser control. It is not an enrollment, provider or production key.
@@ -934,7 +1839,7 @@ mod signed_fixtures {
                 .take()
                 .context("replay authorization already consumed")?;
             ensure!(
-                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+                URL_SAFE_NO_PAD.encode(digest(&SHA256, verifier.as_bytes()).as_ref())
                     == authorization.challenge,
                 "replay original PKCE changed"
             );
@@ -1063,6 +1968,7 @@ mod signed_fixtures {
                     }),
                 )?,
                 oidc,
+                begin_transport: BeginTransport::ParserOnly,
             });
             let claim_identity = Digest::of(&(
                 "signed-replay-claim-inputs-v1",
@@ -1196,6 +2102,16 @@ mod signed_fixtures {
                 "replay needs exactly one original Google intent"
             );
             Ok(pending.values().next().unwrap().intent.clone())
+        }
+
+        pub fn pending_clock(&self) -> Result<(i64, effects::Instant)> {
+            let pending = self.authenticator.oidc.pending.lock().unwrap();
+            ensure!(
+                pending.len() == 1,
+                "replay needs exactly one original Google clock"
+            );
+            let pending = pending.values().next().unwrap();
+            Ok((pending.started_at, pending.started))
         }
 
         /// Unsigned original claim inputs remain exact; random signatures and
@@ -1417,6 +2333,7 @@ mod signed_fixtures {
         let authenticator = Arc::new(GoogleFreshAuthenticator {
             iap: iap::Verifier::new(audience, "example.com", Box::new(Keys(iap_keys)))?,
             oidc,
+            begin_transport: BeginTransport::ParserOnly,
         });
         Ok((authenticator, headers, callback))
     }
@@ -1427,6 +2344,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parser_approval_and_isolated_fixture_cannot_supply_provider_observation_data() -> Result<()>
+    {
+        let clock = crate::oauth::simulation::World::new(315);
+        clock.advance(95);
+        effects::scope(clock.clone(), || -> Result<()> {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "no-observation-parser",
+                &Digest::new(b"parser only"),
+                "https://security.example.com/",
+                0,
+                400,
+            )?;
+            assert!(intent.purpose() == FreshPurpose::OAuthApproval);
+            let (authenticator, _, callback) =
+                fixture_login(&identity, intent.clone(), 100, 101, 101)?;
+            clock.advance(1);
+            let parsed = authenticator.complete_parser(&callback, &identity, 101)?;
+            assert!(parsed.ordering.is_none());
+            let error = parsed
+                .require_post_pending_authentication()
+                .err()
+                .context("parser authorized")?;
+            assert!(take_provider_observation(error).is_err());
+            let isolated = Reauthenticated::fixture(intent, identity.email, identity.subject, 101);
+            assert!(isolated.ordering.is_none());
+            isolated.require_post_pending_authentication()?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn provider_observation_frame_matches_independent_browser_vectors_and_error_is_opaque()
+    -> Result<()> {
+        // Fixed independently computed ASCII compact-JSON vectors from the
+        // operator capture calibration, not a Google or native witness.
+        let profile = Digest::try_from(format!("sha256:{}", "1".repeat(64)))?;
+        let handle = "A".repeat(43);
+        let correlation = manual_observation_correlation(&profile, &handle)?;
+        assert_eq!(
+            correlation.as_str(),
+            "sha256:5abfd5d0eb3d5e6488e1a1c6fe748e849b9d8425e130a66500541917d06dc552"
+        );
+        let other = Digest::try_from(format!("sha256:{}", "0".repeat(64)))?;
+        assert_eq!(
+            manual_observation_correlation(&other, &format!("{}8", "_".repeat(42)))?.as_str(),
+            "sha256:b815019280129fbe4bf021261bfaf6efbfef1f24355fde52f57e6e75d5846e9a"
+        );
+        assert_ne!(
+            manual_observation_correlation(&other, &handle)?,
+            correlation
+        );
+        assert_ne!(
+            manual_observation_correlation(&profile, &format!("{}E", "A".repeat(42)))?,
+            correlation
+        );
+        let data = ProviderObservationData {
+            version: 1,
+            kind: "google_provider_prerequisite",
+            outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+            baseline_iat: 101,
+            fresh_auth_time: 102,
+            profile,
+            correlation,
+        };
+        let error = ProviderObservationUnavailable(data);
+        assert_eq!(format!("{error}"), PRODUCER_UNAVAILABLE);
+        assert_eq!(format!("{error:?}"), PRODUCER_UNAVAILABLE);
+        let data = take_provider_observation(error.into())
+            .map_err(|_| anyhow::anyhow!("typed refusal lost"))?;
+        let value = serde_json::to_value(&data)?;
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        assert_eq!(value["baseline_iat"], 101);
+        assert_eq!(value["fresh_auth_time"], 102);
+        assert!(!serde_json::to_string(&data)?.contains(&handle));
+        let ordinary = anyhow::anyhow!("ordinary refusal").context("unchanged context");
+        let ordinary = take_provider_observation(ordinary)
+            .err()
+            .context("ordinary error consumed")?;
+        assert_eq!(
+            format!("{ordinary:#}"),
+            "unchanged context: ordinary refusal"
+        );
+        // A scoped but unscripted observer cannot silently use ambient stderr.
+        effects::scope(crate::oauth::simulation::World::new(314), || {
+            assert_eq!(
+                effects::provider_observation(data).unwrap_err().to_string(),
+                "unscripted provider observation"
+            );
+        });
+        Ok(())
+    }
+
+    #[test]
     fn signed_original_google_intent_reuse_completion_and_lifetime_are_owned() -> Result<()> {
         struct FixedClock {
             domain: u64,
@@ -1434,6 +2446,13 @@ mod tests {
             ticks: Duration,
         }
         impl effects::Hooks for FixedClock {
+            fn provider_observation(
+                &self,
+                _: crate::oauth::shell_oidc::ProviderObservationData,
+            ) -> Result<()> {
+                anyhow::bail!("unscripted provider observation")
+            }
+
             fn domain(&self) -> u64 {
                 self.domain
             }
@@ -1459,17 +2478,19 @@ mod tests {
                 "original-purpose-attempt",
                 &Digest::new(b"complete original challenge"),
                 "https://security.example.com/",
+                0,
+                400,
             )?;
             let (authenticator, headers, callback) =
                 fixture_login(&identity, intent.clone(), 100, 101, 101)?;
             let ReauthStart::Redirect(original) =
-                authenticator.begin(&identity, intent.clone(), 100)?
+                authenticator.begin_parser(&identity, intent.clone(), 100)?
             else {
                 anyhow::bail!("Google begin bypassed actual authorization");
             };
             clock.advance(1);
             let ReauthStart::Redirect(reopened) =
-                authenticator.begin(&identity, intent.clone(), 101)?
+                authenticator.begin_parser(&identity, intent.clone(), 101)?
             else {
                 anyhow::bail!("Google reuse bypassed actual authorization");
             };
@@ -1479,24 +2500,30 @@ mod tests {
                 intent.attempt(),
                 &Digest::new(b"changed complete original challenge"),
                 "https://security.example.com/",
+                0,
+                400,
             )?;
-            assert!(authenticator.begin(&identity, changed, 101).is_err());
+            assert!(authenticator.begin_parser(&identity, changed, 101).is_err());
             let verified = authenticator.identify(&headers, 101)?;
             let proof = super::super::fresh_auth::VerifiedAuthTime::from_google(
-                authenticator.complete(&callback, &verified, 101)?,
+                authenticator.complete_parser(&callback, &verified, 101)?,
             );
             proof.require_intent(&intent, &identity)?;
             proof.require_current(101)?;
             assert_eq!(proof.authenticated_at(), 101);
             assert_eq!(proof.subject(), identity.subject);
             assert_eq!(proof.deadline()?, 400); // Original begin, not completion +300.
-            assert!(authenticator.complete(&callback, &verified, 101).is_err());
+            assert!(
+                authenticator
+                    .complete_parser(&callback, &verified, 101)
+                    .is_err()
+            );
             let independent_proof = || -> Result<super::super::fresh_auth::VerifiedAuthTime> {
                 let (authenticator, headers, callback) =
                     fixture_login(&identity, intent.clone(), 100, 101, 101)?;
                 let verified = authenticator.identify(&headers, 101)?;
                 Ok(super::super::fresh_auth::VerifiedAuthTime::from_google(
-                    authenticator.complete(&callback, &verified, 101)?,
+                    authenticator.complete_parser(&callback, &verified, 101)?,
                 ))
             };
             let predating_entry = independent_proof()?;
@@ -1587,6 +2614,8 @@ mod tests {
                 "signed-current-owner",
                 &Digest::new(b"signed current context"),
                 "https://security.example.com/",
+                0,
+                400,
             )?;
             let (authenticator, _, callback) = fixture_login(&identity, intent, 100, 101, 101)?;
             let current = if expired {
@@ -1599,12 +2628,49 @@ mod tests {
             };
             assert!(
                 authenticator
-                    .complete(&callback, &current, if expired { 401 } else { 101 })
+                    .complete_parser(&callback, &current, if expired { 401 } else { 101 })
                     .is_err()
             );
-            assert!(authenticator.complete(&callback, &identity, 101).is_err());
+            assert!(
+                authenticator
+                    .complete_parser(&callback, &identity, 101)
+                    .is_err()
+            );
         }
         Ok(())
+    }
+
+    #[test]
+    fn signed_google_original_pending_expiry_is_a_strict_ceiling() -> Result<()> {
+        let clock = crate::oauth::simulation::World::new(904);
+        clock.advance(95);
+        effects::scope(clock.clone(), || {
+            let identity = identity();
+            let intent = FreshIntent::fixture_oauth(
+                &identity,
+                "original-pending-expiry",
+                &Digest::new(b"original pending expires before provider and shell"),
+                "https://security.example.com/",
+                99,
+                102,
+            )?;
+            let (authenticator, headers, callback) =
+                fixture_login(&identity, intent.clone(), 100, 101, 101)?;
+            clock.advance(1);
+            let verified = authenticator.identify(&headers, 101)?;
+            let observed = authenticator.complete_parser(&callback, &verified, 101)?;
+            assert_eq!(observed.deadline()?, 102);
+            observed.require_current(101)?;
+            assert!(observed.require_post_pending_authentication().is_err());
+            clock.advance(1);
+            // The original app expiry wins over the otherwise later signed
+            // provider expiry and original Google begin+300. Stale entry time
+            // cannot defer the exact boundary, and refusal never becomes proof.
+            assert!(observed.require_current(101).is_err());
+            assert!(observed.require_current(102).is_err());
+            assert!(observed.require_post_pending_authentication().is_err());
+            Ok(())
+        })
     }
 
     #[test]
@@ -1618,6 +2684,8 @@ mod tests {
                 "short-signed-proof",
                 &Digest::new(b"short original proof"),
                 "https://security.example.com/",
+                0,
+                400,
             )?;
             let (authenticator, headers, callback) = signed_fixtures::fixture_login_with_expiry(
                 &identity,
@@ -1630,7 +2698,7 @@ mod tests {
             clock.advance(1);
             let identity = authenticator.identify(&headers, 101)?;
             let proof = super::super::fresh_auth::VerifiedAuthTime::from_google(
-                authenticator.complete(&callback, &identity, 101)?,
+                authenticator.complete_parser(&callback, &identity, 101)?,
             );
             proof.require_intent(&intent, &identity)?;
             assert_eq!(proof.deadline()?, 103);
@@ -1790,6 +2858,8 @@ mod tests {
                                 "attempt",
                                 &Digest::of(&"pending")?,
                                 "https://security.example/",
+                                0,
+                                305,
                             )?,
                             5,
                         )?;
@@ -1844,14 +2914,16 @@ mod tests {
 
     #[test]
     fn shell_requires_iap_assertion_before_starting_google_step_up() {
-        let authenticator = GoogleFreshAuthenticator::new(
-            "/projects/123/global/backendServices/456",
-            "example.com",
-            "https://security.example/",
-            "123.apps.googleusercontent.com".into(),
-            Box::new(NoExchange),
-        )
-        .unwrap();
+        let authenticator = GoogleFreshAuthenticator {
+            iap: iap::Verifier::new(
+                "/projects/123/global/backendServices/456",
+                "example.com",
+                Box::new(iap::GoogleKeys),
+            )
+            .unwrap(),
+            oidc: oidc(),
+            begin_transport: BeginTransport::ParserOnly,
+        };
         assert!(
             authenticator
                 .identify(&HeaderMap::new(), 1_700_000_001)
@@ -1895,6 +2967,26 @@ mod tests {
     }
 
     #[test]
+    fn google_begin_refuses_exact_original_expiry_before_allocating_state() -> Result<()> {
+        let oidc = oidc();
+        let intent = FreshIntent::fixture_oauth(
+            &identity(),
+            "expired-original",
+            &Digest::new(b"immutable expired original pending"),
+            "https://security.example/",
+            99,
+            100,
+        )?;
+        let error = oidc
+            .begin(&identity(), intent, 100)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expired original allocated Google state"))?;
+        assert!(error.to_string().contains("invalid OIDC attempt"));
+        assert!(oidc.pending.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn authorization_request_uses_one_use_nonce_pkce_and_fresh_authentication_request() {
         let oidc = oidc();
         let url = oidc
@@ -1905,6 +2997,8 @@ mod tests {
                     "attempt_1",
                     &Digest::of(&"pending").unwrap(),
                     "https://security.example/",
+                    1_699_999_999,
+                    1_700_000_300,
                 )
                 .unwrap(),
                 1_700_000_000,
@@ -1959,6 +3053,8 @@ mod tests {
                     "attempt_1",
                     &Digest::of(&"pending").unwrap(),
                     "https://security.example/",
+                    1_699_999_999,
+                    1_700_000_300,
                 )
                 .unwrap(),
                 1_700_000_000,

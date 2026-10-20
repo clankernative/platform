@@ -15,7 +15,13 @@ fn native_campaign_cannot_receipt_omitted_checks_or_invented_commands() -> Resul
     let scratch = tempfile::tempdir()?;
     let runtime = development::create(&artifact()?, &scratch.path().join("instance"), None)?;
     let before = runtime.inspect()?;
-    let mut campaign = development::Campaign::new(runtime.clone(), None, 42, 8)?;
+    let mut campaign = development::Campaign::new(
+        runtime.clone(),
+        None,
+        42,
+        8,
+        development::CampaignTime::Local,
+    )?;
     let request = |action: &str, input: Value| day2::automation::Request {
         protocol: 1,
         action: action.into(),
@@ -30,7 +36,11 @@ fn native_campaign_cannot_receipt_omitted_checks_or_invented_commands() -> Resul
         campaign
             .effect(request(
                 "dev-invoke",
-                serde_json::json!({"operation":"reports.submit","input":"{}"})
+                serde_json::json!({
+                    "kind":"command",
+                    "operation":"reports.submit",
+                    "payload":"{}"
+                })
             ))
             .is_err()
     );
@@ -55,6 +65,9 @@ fn reports_examples_and_generated_commands_replay_with_independent_statistics() 
     );
     let scratch = tempfile::tempdir()?;
     let first = development::verify(&artifact_path, &scratch.path().join("first"), 42, 8)?;
+    for (index, trace) in first.traces.iter().enumerate() {
+        assert_eq!(trace.request.context.now, 1_700_000_000 + index as i64);
+    }
     let second = development::verify(&artifact_path, &scratch.path().join("second"), 42, 8)?;
     // Generator inputs and business results are repeatable. Fresh databases
     // have independent identity seeds, so their UUIDs must be valid and distinct.
@@ -121,6 +134,56 @@ fn reports_examples_and_generated_commands_replay_with_independent_statistics() 
     )?)?;
     assert!(evidence["failure"].is_string());
     assert_eq!(evidence["artifact"], artifact.id());
+    Ok(())
+}
+
+#[test]
+fn directory_fixtures_keep_verification_repeatable_and_local_serving_fresh() -> Result<()> {
+    use day2::workspace_directory::{
+        CaptureInput, DirectoryReadPort, SOURCE_TTL_SECONDS, SimulatedDirectoryPort,
+        collect_complete,
+    };
+    let artifact_path = artifact()?;
+    let scratch = tempfile::tempdir()?;
+    let verified = development::create_verification_for(
+        &artifact_path,
+        &scratch.path().join("verification"),
+        None,
+        development::ACTOR,
+    )?;
+    let port = |runtime: &Runtime, now: i64| {
+        SimulatedDirectoryPort::new(
+            runtime.db(),
+            runtime.scope(),
+            "synthetic-customer-1",
+            development::ACTOR,
+            now,
+        )
+    };
+    let input = |captured_at| CaptureInput {
+        customer_id: "synthetic-customer-1".into(),
+        connection_id: "workspace_directory".into(),
+        actor: development::ACTOR.into(),
+        captured_at,
+    };
+    let epoch = 1_700_000_000;
+    let capture = collect_complete(input(epoch), &mut port(&verified, epoch)?)?;
+    assert_eq!(capture.metadata().captured_at, epoch);
+    assert_eq!(capture.metadata().expires_at, epoch + SOURCE_TTL_SECONDS);
+    let expired = epoch + SOURCE_TTL_SECONDS;
+    let refreshed = collect_complete(input(expired), &mut port(&verified, expired)?)?;
+    assert_eq!(refreshed.metadata().source_captured_at, expired);
+    assert_eq!(
+        refreshed.metadata().expires_at,
+        expired + SOURCE_TTL_SECONDS
+    );
+
+    let local = development::create(&artifact_path, &scratch.path().join("local"), None)?;
+    let after = epoch + 86_400;
+    let hierarchy = port(&local, after)?.list_org_units()?;
+    assert_eq!(hierarchy.hierarchy_captured_at, after);
+    let capture = collect_complete(input(after), &mut port(&local, after)?)?;
+    assert_eq!(capture.metadata().captured_at, after);
     Ok(())
 }
 

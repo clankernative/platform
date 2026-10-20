@@ -6,8 +6,8 @@
 #
 # Named TextMap rather than Map because Map shadows a Roc builtin.
 TextMap(value) :: { entries : List({ key : Str, value : value }) }.{
-	empty : TextMap(value)
-	empty = { entries: [] }
+	empty : {} -> TextMap(value)
+	empty = |{}| { entries: [] }
 
 	from_entries : List({ key : Str, value : value }) -> Try(TextMap(value), [DuplicateKey, BlankKey])
 	from_entries = |raw| {

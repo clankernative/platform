@@ -8,6 +8,7 @@ use std::{
     process::Command,
 };
 
+mod app_contracts;
 mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
@@ -22,6 +23,8 @@ mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
 mod tooling;
+mod ui_assembly;
+mod ui_dependency;
 mod verification;
 mod workflows;
 
@@ -52,27 +55,47 @@ fn run(root: &Path, command: &mut Command) -> Result<()> {
 
 fn run_with_budget(root: &Path, command: &mut Command, budget: std::time::Duration) -> Result<()> {
     let display = format!("{command:?}");
+    let status = match command_status_with_budget(root, command, budget) {
+        Ok(status) => status,
+        Err(CommandStatusError::Spawn(error)) => return Err(error).with_context(|| display),
+        Err(CommandStatusError::Wait(error)) => return Err(error.into()),
+        Err(CommandStatusError::Timeout) => bail!(
+            "subprocess exceeded {} second campaign budget: {display}",
+            budget.as_secs()
+        ),
+    };
+    ensure!(status.success(), "{display} failed: {status}");
+    Ok(())
+}
+
+enum CommandStatusError {
+    Spawn(std::io::Error),
+    Wait(std::io::Error),
+    Timeout,
+}
+
+fn command_status_with_budget(
+    root: &Path,
+    command: &mut Command,
+    budget: std::time::Duration,
+) -> std::result::Result<std::process::ExitStatus, CommandStatusError> {
     let mut child = command
         .current_dir(root)
         .spawn()
-        .with_context(|| display.clone())?;
+        .map_err(CommandStatusError::Spawn)?;
     let started = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.try_wait().map_err(CommandStatusError::Wait)? {
             break status;
         }
         if started.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
-            bail!(
-                "subprocess exceeded {} second campaign budget: {display}",
-                budget.as_secs()
-            );
+            return Err(CommandStatusError::Timeout);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    ensure!(status.success(), "{display} failed: {status}");
-    Ok(())
+    Ok(status)
 }
 
 fn snapshot(
@@ -99,8 +122,13 @@ fn snapshot(
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid filename"))?;
         // Version-control metadata is never app input: an app that lives in its
-        // own repository carries it beside its sources.
-        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str()) {
+        // own repository carries it beside its sources. `.clanker` holds design
+        // tool data (Studio fake-data scenes and canvas layout) committed with
+        // the app; it is never compiled, served or admitted. Only the app root
+        // may carry it. UI build dependencies belong to the Platform distribution.
+        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str())
+            || (prefix == "app" && name == ".clanker")
+        {
             continue;
         }
         let kind = entry.file_type()?;
@@ -145,6 +173,7 @@ fn snapshot(
                         "AppContract.roc",
                         "ImportedContracts.roc",
                         "Credentials.roc",
+                        "Connections.roc",
                         "SecurityActions.roc",
                         "ProductReturns.roc",
                         "Registry.roc",
@@ -240,6 +269,8 @@ fn main() -> Result<()> {
         "architecture-proof-candidate-inventory",
     ]
     .contains(&action.as_str())
+        || action == "app-contracts"
+        || action == "verify-linux-context"
     {
         None
     } else {
@@ -255,6 +286,10 @@ fn main() -> Result<()> {
         Some(lock)
     };
     match action.as_str() {
+        "verify-linux-context" => {
+            ensure!(args.next().is_none(), "CI context accepts no overrides");
+            verification::linux_context(&root)?;
+        }
         "architecture-check" => {
             ensure!(
                 args.next().is_none(),
@@ -467,6 +502,23 @@ fn main() -> Result<()> {
                 None,
             )?;
         }
+        "app-contracts" => {
+            let artifact =
+                PathBuf::from(args.next().context(
+                    "usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]",
+                )?);
+            let output = match args.next() {
+                None => None,
+                Some(flag) if flag == "--output" => Some(PathBuf::from(
+                    args.next().context("missing JSON output path")?,
+                )),
+                Some(_) => {
+                    bail!("usage: xtask app-contracts ARTIFACT_DIRECTORY [--output JSON_FILE]")
+                }
+            };
+            ensure!(args.next().is_none(), "unexpected app-contracts argument");
+            app_contracts::export_file(&artifact, output.as_deref())?;
+        }
         "build" => {
             let app = args
                 .next()
@@ -640,6 +692,25 @@ fn main() -> Result<()> {
             ensure!(args.next().is_none(), "xtask cli accepts no arguments");
             build_cli(&root)?;
         }
+        "bootstrap-ui" => {
+            ensure!(args.next().is_none(), "bootstrap-ui accepts no arguments");
+            let runner = workflows::build(&root)?;
+            let mut session = ui_dependency::Session::new(&root)?;
+            let receipt = day2::automation::run(&runner, &["ui-dependency"], |request| {
+                session.effect(request)
+            })?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        "ui-lock" => {
+            let source = PathBuf::from(args.next().context("usage: ui-lock SOURCE")?);
+            ensure!(args.next().is_none(), "usage: ui-lock SOURCE");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&day2::build_dependencies::write_lock(
+                    &root, &source
+                )?)?
+            );
+        }
         "build-migration-fixture" => {
             build_migration_fixture(&root)?;
         }
@@ -712,6 +783,35 @@ fn main() -> Result<()> {
         "verify" => {
             ensure!(args.next().is_none(), "verify accepts no arguments");
             verification::execute(&root, "verify")?;
+        }
+        "verify-queue-find" | "verify-queue-admit" => {
+            ensure!(
+                args.next().is_none(),
+                "queue receipt admission accepts no overrides"
+            );
+            verification::queue_receipt(&root, &action)?;
+        }
+        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac" => {
+            ensure!(
+                args.next().is_none(),
+                "verification stage accepts no arguments"
+            );
+            verification::execute(&root, &action)?;
+        }
+        "verify-prepare-part" => {
+            let part = args
+                .next()
+                .context("usage: xtask verify-prepare-part PART")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask verify-prepare-part PART"
+            );
+            verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
+        }
+        "verify-shard" => {
+            let shard = args.next().context("usage: xtask verify-shard SHARD")?;
+            ensure!(args.next().is_none(), "usage: xtask verify-shard SHARD");
+            verification::execute(&root, &format!("verify-shard-{shard}"))?;
         }
         "qualify-linux" => {
             let output = PathBuf::from(
@@ -974,7 +1074,19 @@ fn build_cli(root: &Path) -> Result<()> {
     let roc = native_pin.verified_compiler(root)?;
     let pin = native_pin.value;
     let mut completed = std::collections::BTreeSet::new();
+    let mut ui_dependency = ui_dependency::Session::new(root)?;
     day2::automation::run(&runner, &["cli"], |request| {
+        if request.action.starts_with("ui-dependency-") {
+            let receipt = request.action == "ui-dependency-receipt";
+            let response = ui_dependency.effect(request)?;
+            if receipt {
+                ensure!(
+                    completed.insert("ui".to_owned()),
+                    "duplicate UI dependency receipt"
+                );
+            }
+            return Ok(response);
+        }
         let args: BTreeMap<String, String> = request.decode()?;
         let effect = match request.action.as_str() {
             "cli-native" => {
@@ -1047,7 +1159,7 @@ fn build_cli(root: &Path) -> Result<()> {
             }
             "cli-receipt" => {
                 ensure!(
-                    ["native", "check", "test", "build", "workflows"]
+                    ["ui", "native", "check", "test", "build", "workflows"]
                         .iter()
                         .all(|step| completed.contains(*step)),
                     "CLI distribution incomplete"
@@ -1074,7 +1186,7 @@ fn build_cli(root: &Path) -> Result<()> {
                 fs::write(
                     root.join("cli/distribution.json"),
                     serde_json::to_vec_pretty(
-                        &serde_json::json!({"format":1,"protocol":1,"toolchain":pin,"workflow":day2::automation::source_digest(),"binaries":binaries,"kind":"local-source-distribution"}),
+                        &serde_json::json!({"format":1,"protocol":1,"toolchain":pin,"workflow":day2::automation::source_digest(),"binaries":binaries,"ui_dependency":day2::build_dependencies::installed(root)?.identity(),"kind":"local-source-distribution"}),
                     )?,
                 )?;
                 return Ok(serde_json::json!({}));
@@ -1092,7 +1204,9 @@ fn control_verify(root: &Path) -> Result<()> {
 }
 
 fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String>) -> Result<()> {
-    if directory == root.join("crates/worker/generated") {
+    if directory == root.join("crates/worker/generated")
+        || directory == root.join("cli/build-dependencies")
+    {
         return Ok(());
     }
     for entry in fs::read_dir(directory)? {
@@ -1106,8 +1220,8 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
             hash_tree(root, &path, hashes)?;
         } else {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if ["rs", "roc", "toml"].contains(&extension)
-                || ["assets", "deploy", "toolchains"]
+            if ["rs", "roc", "toml", "mjs"].contains(&extension)
+                || ["assets", "deploy", "toolchains", "build-dependencies"]
                     .iter()
                     .any(|directory| path.starts_with(root.join(directory)))
             {
@@ -1216,13 +1330,32 @@ mod tests {
         fs::write(source.join(".gitignore"), "artifacts/\n")?;
         fs::write(source.join(".gitattributes"), "* text=auto\n")?;
         fs::write(source.join("App.roc"), "App :: [].{}\n")?;
+        fs::create_dir_all(source.join(".clanker/scenes"))?;
+        fs::write(source.join(".clanker/scenes/home.json"), "{}\n")?;
+        fs::write(source.join(".clanker/canvas.json"), "{}\n")?;
         let target = directory.path().join("stage");
         let mut hashes = BTreeMap::new();
         snapshot(&source, &target, &mut hashes, "app")?;
         assert_eq!(hashes.keys().collect::<Vec<_>>(), ["app/App.roc"]);
-        for name in [".git", ".gitignore", ".gitattributes"] {
+        for name in [".git", ".gitignore", ".gitattributes", ".clanker"] {
             assert!(!target.join(name).exists(), "{name} was captured");
         }
+        // Design data is skipped only at the app root, never inside sources.
+        fs::create_dir_all(source.join("ui/.clanker"))?;
+        fs::write(source.join("ui/.clanker/x.json"), "{}\n")?;
+        fs::create_dir_all(source.join("commands/.clanker"))?;
+        fs::write(source.join("commands/.clanker/x.json"), "{}\n")?;
+        assert!(
+            snapshot(
+                &source,
+                &directory.path().join("nested"),
+                &mut BTreeMap::new(),
+                "app"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(source.join("ui"))?;
+        fs::remove_dir_all(source.join("commands"))?;
         // Any other dotfile is still refused.
         fs::write(source.join(".env"), "SECRET=1\n")?;
         assert!(

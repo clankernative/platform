@@ -21,7 +21,10 @@ needed. The platform supplies the development identity (`developer` by default).
 The foreground session watches Roc modules, UI files and assets. After a successful
 build it pauses requests and command execution, checkpoints the database, applies an admitted
 migration to a candidate copy, checks app properties, and serves that candidate on
-the same port. Refresh the browser to see the change. Compiler failures keep the
+the same port. Each served build writes `app-contracts.json` in the session directory;
+`--status` binds its path and digest to the served artifact, or reports an export error.
+Do not trust stale files after an error. Refresh the browser to see the change.
+Compiler failures keep the
 working server available. Migration/property failures return to the previous
 instance. Destructive schema changes require an explicit reset or migration work;
 they do not silently discard local data. Checkpoint restore clears authentication
@@ -46,9 +49,32 @@ reuses a running session. Use explicit data options to initialize a fresh sessio
 ./cli/day2 platform local-dev examples/reports --reset --empty
 ```
 
+App examples use `Example.Step.command(handle, input)` for concrete typed inputs.
+Use `Example.Step.generated(handle, seed)` when input needs the state produced by
+preceding steps, such as checked references to newly created records. At that
+position the recipe runs the command's declared verification generator against
+the current bounded snapshot, then validates and executes its input normally.
+The handle must name a command; a generated step grants no extra authority and
+accepts no arbitrary callback. It is not interpolation of earlier command results.
+
 Examples and generated commands go through the shared Roc check recipe, normal
-app transactions, durable commands, replay and property checks. Artifact-owned
-examples may include internal scheduled commands when the provider host is
+app transactions, durable commands, replay and property checks. When generated-example
+preparation (including typed-input validation) or a generated operation check fails,
+the campaign saves protected `verification-failure.json` in its evidence directory.
+It retains the exact request, seed, actor/input context, failure, returned invalid
+input when applicable, and fingerprints of both callback replies. Evidence can contain
+application data; keep it private. Replay it with:
+
+```console
+cargo run --locked -p day2 -- replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
+```
+
+This re-evaluates only the artifact-bound pure callback and typed-input validation,
+checking the recorded failure and reply fingerprints without changing the saved file.
+It does not execute commands or invoke providers. Wrong artifacts, malformed contracts,
+nonregular files and oversized evidence are refused. A failure that no longer reproduces
+is reported as divergence, not a pass. Artifact-owned examples may include internal
+scheduled commands when the provider host is
 simulated; attempts to run those examples with live providers are refused. Internal
 commands remain unavailable through HTTP, CLI and MCP. Seeding happens once;
 restarts and rebuilds do not duplicate it. `--reset` selects a new managed instance

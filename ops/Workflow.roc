@@ -8,11 +8,13 @@ import Infra
 import Authority
 import Provision
 import Maintain
+import UiDependency
 
 Workflow :: [].{
 	Request := [
 		Help,
 		Build(Str),
+		UiLock(Str),
 		Check(Str, U64, U64),
 		LocalDev(List(Str)),
 		Backup(Str, Str, Str),
@@ -35,6 +37,7 @@ Workflow :: [].{
 	parse = |args| match args {
 		[] | ["--help"] => Ok(Help)
 		["build", source] => Ok(Build(source))
+		["ui-lock", source] => Ok(UiLock(source))
 		["check", source] | ["test", source] => Ok(Check(source, 3_664_912_422, 16))
 		["check", source, seed, count] | ["test", source, seed, count] => {
 			checked_seed = U64.from_str(seed).map_err(|_| "seed must be a U64")?
@@ -94,7 +97,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated REQUEST_JSON_FILE",
 		)
 	}
 
@@ -105,6 +108,7 @@ Workflow :: [].{
 				protocol: 1.U32,
 				commands: [
 					"build SOURCE",
+					"ui-lock SOURCE",
 					"check SOURCE [SEED CASES]",
 					"local-dev [SOURCE] [OPTIONS]",
 					"backup INSTANCE APP NEW_DIRECTORY",
@@ -125,6 +129,7 @@ Workflow :: [].{
 			receipt = Build.source!(source, host!)?
 			Ok(Json.to_str(receipt))
 		}
+		UiLock(source) => UiDependency.lock!(source, host!)
 		Check(source, seed, count) => Check.run!(source, seed, count, host!)
 		LocalDev(args) => LocalDev.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)

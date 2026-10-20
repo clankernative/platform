@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[test]
@@ -16,7 +17,7 @@ fn native_error_cases_preserve_typed_command_query_inputs_and_singleton_authorin
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
@@ -59,6 +60,32 @@ expect match (shared.verification)({}) {
     _ => Bool.False
 }
 expect Api.error_metadata("invalid", Api.error_cases({description: "Invalid.", recovery: "Correct it.", verification: |_| []})).is_err()
+actors = Api.error_cases({description: "Denied.", recovery: "Use an authorized principal.", verification: |_| [
+    Api.failed_command_as(write, Api.verification_principal("command-synthetic"), |_snapshot, _seed| Ok({reason: "denied"})),
+    Api.failed_query_as(read, Api.verification_principal("query-synthetic"), |_snapshot, _seed| Ok({path: "/denied"})),
+]})
+expect match Api.error_metadata("denied", actors) {
+    Ok(metadata) => metadata.verification_actors == [{operation: "example.create", actor: "command-synthetic"}, {operation: "example.preview", actor: "query-synthetic"}]
+    Err(_) => Bool.False
+}
+expect match (actors.verification)({}) {
+    [command, query] => (command.input)("{}", 1) == Ok("{\"reason\":\"denied\"}") and (query.input)("{}", 1) == Ok("{\"path\":\"/denied\"}")
+    _ => Bool.False
+}
+expect match Api.error_metadata("invalid", shared) {
+    Ok(metadata) => metadata.verification_actors.is_empty()
+    Err(_) => Bool.False
+}
+mixed = Api.error_cases({description: "Denied.", recovery: "Correct it.", verification: |_| [
+    Api.failed_command(write, |_snapshot, _seed| Ok({reason: ""})),
+    Api.failed_query_as(read, Api.verification_principal("query-synthetic"), |_snapshot, _seed| Ok({path: "/denied"})),
+]})
+expect match Api.error_metadata("denied", mixed) {
+    Ok(metadata) => metadata.verification_actors == [{operation: "example.preview", actor: "query-synthetic"}]
+    Err(_) => Bool.False
+}
+expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery: "Correct it.", verification: |_| Api.failed_command_as(write, Api.verification_principal(""), |_snapshot, _seed| Ok({reason: ""}))})).is_err()
+expect Api.error_metadata("denied", Api.error({description: "Denied.", recovery: "Correct it.", verification: |_| Api.failed_query_as(read, Api.verification_principal(""), |_snapshot, _seed| Ok({path: ""}))})).is_err()
 "#,
     )?;
     let output = day2::sandbox::compiler(
@@ -75,8 +102,382 @@ expect Api.error_metadata("invalid", Api.error_cases({description: "Invalid.", r
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (4) tests passed"),
+        output.status.success() && diagnostics.contains("All (10) tests passed"),
         "native error cases: {diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
+fn example_step_generated_is_typed_and_has_an_explicit_wire_tag() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let stage = crate::support::compiler::stage(&root)?;
+    day2::sdk::stage(&root.join("sdk"), &stage.path().join("sdk"))?;
+    fs::write(stage.path().join("sdk/main.roc"), day2::sdk::app_platform())?;
+    fs::write(
+        stage.path().join("app.roc"),
+        r#"app [step] { pf: platform "sdk/main.roc" }
+import pf.Example
+import pf.Input
+import pf.Output
+import pf.Write
+step : Str -> Str
+step = |raw| raw
+input : Input({ name : Str })
+input = Input.define("input", |raw| Json.parse(raw).map_err(|_| "invalid"), |value| Json.to_str(value))
+output : Output(Str)
+output = Output.define("output", |value| value)
+create : Write({ name : Str }, Str)
+create = Write.define("app.create", input, output)
+generated = Example.define("later", Ok([Example.Step.generated(create, 0)]))
+static = Example.define("first", Ok([Example.Step.command(create, {name: "known"})]))
+encoded = Example.encode([generated, static])
+expect encoded.contains("\"kind\":\"generated\"") and encoded.contains("\"kind\":\"command\"")
+expect encoded.contains("\"operation\":\"app.create\"") and encoded.contains("\"payload\":\"0\"")
+"#,
+    )?;
+    let compiler = root.join("../.toolchains/roc").canonicalize()?;
+    let output = day2::sandbox::compiler(&root, stage.path(), &compiler)?
+        .arg("test")
+        .arg(stage.path().join("app.roc"))
+        .output()?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (2) tests passed"),
+        "generated example SDK contract: {diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    fs::create_dir(stage.join("app"))?;
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let units = day2::workspace_directory::parse_org_unit_response(br#"{"organizationUnits":[{"orgUnitId":"root","name":"Root","orgUnitPath":"/"},{"orgUnitId":"eng","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}"#)?;
+    let page = serde_json::to_string(&day2::workspace_directory::page(&units, 0)?)?;
+    let empty = serde_json::to_string(&day2::workspace_directory::page(&units, 2)?)?;
+    struct NativeFixturePort(Vec<day2::workspace_directory::OrgUnit>);
+    impl day2::workspace_directory::DirectoryReadPort for NativeFixturePort {
+        fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+            Ok("/Engineering".into())
+        }
+        fn list_org_units(&mut self) -> Result<day2::workspace_directory::ProviderPage> {
+            Ok(day2::workspace_directory::ProviderPage {
+                units: self.0.clone(),
+                response_bytes: 256,
+                hierarchy_captured_at: 100,
+            })
+        }
+    }
+    let input = day2::workspace_directory::CaptureInput {
+        customer_id: "customer-1".into(),
+        connection_id: "directory-connection/1".into(),
+        actor: "alice@example.test".into(),
+        captured_at: 200,
+    };
+    let membership = day2::workspace_directory::collect_complete(
+        input.clone(),
+        &mut NativeFixturePort(units.clone()),
+    )?;
+    let hierarchy =
+        day2::workspace_directory::collect_hierarchy(input, &mut NativeFixturePort(units))?;
+    let membership_json = serde_json::to_string(membership.metadata())?;
+    let hierarchy_json = serde_json::to_string(hierarchy.metadata())?;
+    let source = r#"app [step] { pf: platform "../sdk/main.roc" }
+import pf.WorkspaceDirectory
+import pf.Resource
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+read_page = |raw, offset| {
+    program = Resource.decode("{\"token\":\"fixture-handle\"}")
+        .and_then(|resource| WorkspaceDirectory.page_with(resource, "fixture-capture", offset))
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_membership = |raw, resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+read_hierarchy = |raw, resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => Tx.evaluate(program, [{instruction: request.instruction, result: raw, error: ""}])
+        other => other
+    }
+}
+requested_hierarchy_action = |resource_json| {
+    program = Resource.decode(resource_json)
+        .and_then(WorkspaceDirectory.capture_hierarchy_with)
+        .program()
+    match Tx.evaluate(program, []) {
+        Pending(request) => request.instruction.model == HIERARCHY_CAPABILITY
+        _ => Bool.False
+    }
+}
+expect requested_hierarchy_action("{\"token\":\"fixture-handle\"}")
+expect match read_page(PAGE_JSON, 0) {
+    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2
+        and result.value.items.len() == 2
+        and result.value.items.any(|unit| unit.id == "root" and unit.parent_id == None and unit.parent_path == None)
+        and result.value.items.any(|unit| unit.id == "eng" and unit.parent_id == Some("root") and unit.parent_path == Some("/"))
+    _ => Bool.False
+}
+expect match read_page(EMPTY_JSON, 2) {
+    Done(result) => result.consumed == 1 and result.value.done and result.value.next == 2 and result.value.items.is_empty()
+    _ => Bool.False
+}
+expect match read_membership(MEMBERSHIP_JSON, "{\"token\":\"fixture-handle\"}") {
+    Done(result) => result.consumed == 1 and result.value.user_path == "/Engineering"
+        and result.value.source_captured_at == 100 and result.value.expires_at == 1000
+    _ => Bool.False
+}
+expect match read_hierarchy(HIERARCHY_JSON, "{\"token\":\"fixture-handle\"}") {
+    Done(result) => result.consumed == 1 and result.value.customer_id == "customer-1"
+        and result.value.actor == "alice@example.test" and result.value.source_captured_at == 100
+        and result.value.expires_at == 1000
+    _ => Bool.False
+}
+"#
+        .replace("PAGE_JSON", &serde_json::to_string(&page)?)
+        .replace("EMPTY_JSON", &serde_json::to_string(&empty)?)
+        .replace("MEMBERSHIP_JSON", &serde_json::to_string(&membership_json)?)
+        .replace("HIERARCHY_JSON", &serde_json::to_string(&hierarchy_json)?)
+        .replace(
+            "HIERARCHY_CAPABILITY",
+            &serde_json::to_string(&day2_capabilities::registry::Action::WorkspaceDirectoryHierarchy.capability())?,
+        );
+    fs::write(stage.join("app/main.roc"), source)?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .arg("test")
+        .arg(stage.join("app/main.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (5) tests passed"),
+        "native Directory contracts ({}): {diagnostics}",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
+fn admitted_failure_principals_are_atomic_replayable_and_simulation_only() -> Result<()> {
+    let artifact_path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT")
+            .context("build fixtures/verification-actor-conformance or run xtask verify")?,
+    );
+    let loaded = LoadedArtifact::load(&artifact_path)?;
+    let definition = loaded
+        .contract()
+        .app_contract
+        .as_ref()
+        .context("app contract")?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    // Retain both successful and failing histories under unique directories.
+    let directory = tempfile::Builder::new()
+        .prefix("verification-actors-")
+        .tempdir_in(root.join("artifacts"))?
+        .keep();
+    let runtime = development::create(&artifact_path, &directory.join("instance"), None)?;
+    let evidence = development::exercise(&runtime, None, 42, 2)?;
+    assert!(evidence.failure.is_none());
+    assert!(evidence.verification_complete);
+    assert_eq!(evidence.generated, 4);
+    assert_eq!(evidence.error_traces.len(), 4);
+    assert_eq!(evidence.obligations.len(), 4);
+    assert!(evidence.obligations.values().all(|count| *count == 2));
+    let after = runtime.inspect()?;
+    let expected = [
+        (
+            "verifiers.create_note",
+            "command-denied-synthetic",
+            "app:verifiers.create_denied",
+        ),
+        (
+            "verifiers.count_notes",
+            "query-denied-synthetic",
+            "app:verifiers.count_denied",
+        ),
+    ];
+    for (operation, actor, code) in expected {
+        let failure = definition.errors.get(code).context("declared failure")?;
+        assert_eq!(failure.verification_actor(&failure.operation), Some(actor));
+        let traces: Vec<_> = evidence
+            .error_traces
+            .iter()
+            .filter(|trace| trace.request.operation == operation)
+            .collect();
+        assert_eq!(traces.len(), 2);
+        for (index, trace) in traces.into_iter().enumerate() {
+            assert_eq!(trace.request.context.actor, actor);
+            assert_eq!(trace.artifact, loaded.id());
+            assert_eq!(trace.outcome.status, "failure");
+            assert_eq!(trace.outcome.error, code);
+            assert!(
+                trace
+                    .request
+                    .observations
+                    .iter()
+                    .all(|observation| observation.instruction.kind != "external")
+            );
+            replay(&loaded, trace)?;
+            let id = &trace.request.context.invocation_id;
+            runtime.accept(
+                operation,
+                actor,
+                id,
+                &serde_json::from_str(&trace.request.input)?,
+                trace.request.context.now,
+            )?;
+            assert_eq!(runtime.execute(id, Fault::None)?, trace.outcome);
+            assert_eq!(runtime.inspect()?, after);
+            let saved = directory.join(format!("{operation}-{index}.json"));
+            let bytes = serde_json::to_vec_pretty(trace)?;
+            fs::write(&saved, &bytes)?;
+            eprintln!(
+                "Replay: cargo run --locked -p day2 -- replay {} {}",
+                artifact_path.display(),
+                saved.display()
+            );
+            let replayed = Command::new(env!("CARGO_BIN_EXE_day2"))
+                .arg("replay")
+                .arg(&artifact_path)
+                .arg(&saved)
+                .output()?;
+            ensure!(
+                replayed.status.success(),
+                "saved failure replay: {}",
+                String::from_utf8_lossy(&replayed.stderr)
+            );
+            assert_eq!(fs::read(&saved)?, bytes);
+            let mut changed_actor = trace.clone();
+            changed_actor.request.context.actor = development::ACTOR.into();
+            assert!(replay(&loaded, &changed_actor).is_err());
+            let mut changed_artifact = trace.clone();
+            changed_artifact.artifact = format!("sha256:{}", "0".repeat(64));
+            assert!(replay(&loaded, &changed_artifact).is_err());
+        }
+    }
+    for (operation, actor, input) in [
+        (
+            "verifiers.create_note",
+            "query-denied-synthetic",
+            json!({"text":"cross-target"}),
+        ),
+        (
+            "verifiers.count_notes",
+            "command-denied-synthetic",
+            json!({}),
+        ),
+    ] {
+        assert_eq!(
+            runtime
+                .accept(operation, actor, "wrong-target", &input, 100)
+                .unwrap_err()
+                .to_string(),
+            "forbidden"
+        );
+        assert_eq!(runtime.inspect()?, after);
+    }
+    let mut narrowed = development::local_policy(&loaded)?;
+    narrowed
+        .operations
+        .get_mut("verifiers.create_note")
+        .context("command policy")?
+        .actors
+        .remove("command-denied-synthetic");
+    assert_eq!(
+        narrowed.admins,
+        std::collections::BTreeSet::from([development::ACTOR.into()])
+    );
+    let narrowed_runtime =
+        development::create(&artifact_path, &directory.join("narrowed"), Some(narrowed))?;
+    let empty = narrowed_runtime.inspect()?;
+    assert_eq!(
+        narrowed_runtime
+            .accept(
+                "verifiers.create_note",
+                "command-denied-synthetic",
+                "narrowed",
+                &json!({"text":"denied"}),
+                100
+            )
+            .unwrap_err()
+            .to_string(),
+        "forbidden"
+    );
+    assert_eq!(narrowed_runtime.inspect()?, empty);
+    let live = day2::store::Runtime::load(runtime.instance_path(), runtime.app())?;
+    for (operation, actor, input) in [
+        (
+            "verifiers.create_note",
+            "command-denied-synthetic",
+            json!({"text":"denied"}),
+        ),
+        ("verifiers.count_notes", "query-denied-synthetic", json!({})),
+    ] {
+        assert_eq!(
+            live.accept(operation, actor, "nonsimulated", &input, 100)
+                .unwrap_err()
+                .to_string(),
+            "forbidden"
+        );
+        assert_eq!(live.inspect()?, after);
+    }
+    live.accept(
+        "verifiers.create_note",
+        development::ACTOR,
+        "live-allowed",
+        &json!({"text":"allowed"}),
+        100,
+    )?;
+    assert_eq!(live.execute("live-allowed", Fault::None)?.status, "success");
+    live.accept(
+        "verifiers.count_notes",
+        development::ACTOR,
+        "live-read",
+        &json!({}),
+        100,
+    )?;
+    assert_eq!(
+        live.execute("live-read", Fault::None)?.result,
+        json!({"count":3})
     );
     Ok(())
 }
@@ -148,7 +549,7 @@ fn native_required_all_rows_builders_preserve_typed_definitions() -> Result<()> 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir(stage.join("app"))?;
     day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
@@ -196,6 +597,9 @@ command_program = command.command_program()
 query_program : Context, { path : Str } -> Tx({ count : U64 })
 query_program = query.query_program()
 expect command_base.required_all_rows().is_empty() and query_base.required_all_rows().is_empty()
+expect command_base.observations().is_empty() and query_base.observations().is_empty()
+expect command_base.observes("workspace_directory.capture.v1").observations() == ["workspace_directory.capture.v1"]
+expect query_base.observes("workspace_directory.hierarchy.v1").observes("workspace_directory.page.v1").observations() == ["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"]
 expect command.required_all_rows() == ["rows", "logs"] and query.required_all_rows() == ["logs", "rows"]
 expect (command.contract().example)({}) == Ok({input: {reason: "example"}, output: {accepted: Bool.True}}) and (command.verification().input)("{}", 1) == Ok({reason: "generated"})
 expect (query.contract().example)({}) == Ok({input: {path: "/root"}, output: {count: 5}}) and (query.verification().input)("{}", 1) == Ok({path: "/generated"})
@@ -221,7 +625,7 @@ expect query_base.credentials(Credential.metadata_access(Credential.client_famil
         String::from_utf8_lossy(&output.stderr)
     );
     ensure!(
-        output.status.success() && diagnostics.contains("All (10) tests passed"),
+        output.status.success() && diagnostics.contains("All (13) tests passed"),
         "native read requirements: {diagnostics}"
     );
     Ok(())
@@ -460,7 +864,8 @@ fn internal_examples_are_offline_only_and_do_not_expose_public_commands() -> Res
         "unknown_operation"
     );
     let live = day2::store::Runtime::load(runtime.instance_path(), runtime.app())?;
-    let mut campaign = development::Campaign::new(live, Some("demo"), 42, 0)?;
+    let mut campaign =
+        development::Campaign::new(live, Some("demo"), 42, 0, development::CampaignTime::Local)?;
     let request = day2::json::decode(br#"{"protocol":1,"action":"dev-examples","input":"{}"}"#)?;
     assert_eq!(
         campaign.effect(request).unwrap_err().to_string(),

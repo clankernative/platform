@@ -203,11 +203,13 @@ pub(crate) fn request(
             &input,
         )?;
     }
-    let model = schema
-        .models
-        .get(&instruction.model)
-        .context("unknown_command_target")?;
-    let row = store::get(connection, &instruction.model, model, instruction.id)?;
+    let row = store::get_operation_target(
+        runtime,
+        connection,
+        &envelope.command,
+        &instruction.model,
+        instruction.id,
+    )?;
     ensure!(
         row.version == instruction.expected_version,
         crate::error::Failure::Conflict
@@ -274,13 +276,12 @@ pub(crate) fn request(
         [&origin.context.invocation_id],
         |row| row.get(0),
     )?;
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    hash.update(parent_seed);
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    hash.update(&parent_seed);
     hash.update(id.as_bytes());
     connection.execute(
         "INSERT INTO day2_id_seeds VALUES(?1,?2)",
-        params![id, hash.finalize().to_vec()],
+        params![id, hash.finish().as_ref().to_vec()],
     )?;
     connection.execute(
         "INSERT INTO day2_command_requests VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -320,19 +321,20 @@ pub(crate) fn validate_target(
     id: &str,
     policy: &Policy,
 ) -> Result<()> {
-    let target: Option<(String, String, i64, String)> = connection
+    let target: Option<(String, String, i64, String, String)> = connection
         .query_row(
-            "SELECT model,target,version,policy FROM day2_command_requests WHERE id=?1",
+            "SELECT r.model,r.target,r.version,r.policy,i.operation FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.id=?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
-    if let Some((model, target, version, captured)) = target {
+    if let Some((model, target, version, captured, operation)) = target {
         ensure!(same_policy(&captured, policy)?, "command_authority_changed");
-        let row = store::get(
+        let row = store::get_operation_target(
+            runtime,
             connection,
+            &operation,
             &model,
-            &runtime.artifact().contract().schema.models[&model],
             crate::identity::parse_public_or_legacy(&target)?,
         )?;
         ensure!(row.version == version, crate::error::Failure::Conflict);
@@ -357,20 +359,22 @@ pub(crate) fn validate_requests(
                 .count()
         });
     let mut statement = connection.prepare(
-        "SELECT model,target,version FROM day2_command_requests WHERE parent=?1 AND ordinal>=?2",
+        "SELECT r.model,r.target,r.version,i.operation FROM day2_command_requests r JOIN day2_invocations i ON i.id=r.id WHERE r.parent=?1 AND r.ordinal>=?2",
     )?;
     for target in statement.query_map(params![parent, i64::try_from(start)?], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
         ))
     })? {
-        let (model, target, version) = target?;
-        let row = store::get(
+        let (model, target, version, operation) = target?;
+        let row = store::get_operation_target(
+            runtime,
             connection,
+            &operation,
             &model,
-            &runtime.artifact().contract().schema.models[&model],
             crate::identity::parse_public_or_legacy(&target)?,
         )?;
         ensure!(

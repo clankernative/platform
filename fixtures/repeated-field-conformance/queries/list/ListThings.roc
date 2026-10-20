@@ -55,7 +55,7 @@ ListThings :: [].{
 
 	verify_result : Str, ThingView.Page, Str -> Try(Bool, Str)
 	verify_result = |before, page, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		Ok(before == after and page.items().all(|view| state.things.any(|row| row.id == view.id)))
 	}
 }

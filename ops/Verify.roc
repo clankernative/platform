@@ -1,10 +1,12 @@
 import Capability
 import Simulation
+import UiDependency
 
 # Platform regression policy, shared by xtask and operator CLI commands.
 Verify :: [].{
 	cli! : (Str => Try(Str, Str)) => Try(Str, Str)
 	cli! = |host!| {
+		_ = UiDependency.install!(host!)?
 		_ = Capability.call!("cli-native", "{}", host!)?
 		for operation in ["check", "test", "build"] {
 			_ = Capability.call!("cli-roc", Json.to_str({ operation: operation }), host!)?
@@ -39,8 +41,8 @@ Verify :: [].{
 		Capability.call!("verify-receipt", Json.to_str({ scope: "reports" }), host!)
 	}
 
-	all! : (Str => Try(Str, Str)) => Try(Str, Str)
-	all! = |host!| {
+	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
+	inputs! = |host!| {
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in [
@@ -55,8 +57,11 @@ Verify :: [].{
 			"request-desk",
 			"app-ownership",
 			"notifications",
+			"chart-live",
 			"redirect",
 			"relational",
+			"lifecycle",
+			"verification-actors",
 			"relational-next",
 			"collection",
 			"owned",
@@ -67,7 +72,14 @@ Verify :: [].{
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
+		_ = Capability.call!("verify-browser", "{}", host!)?
 		_ = Capability.call!("verify-lint", "{}", host!)?
+		Ok("{}")
+	}
+
+	all! : (Str => Try(Str, Str)) => Try(Str, Str)
+	all! = |host!| {
+		_ = inputs!(host!)?
 		_ = Simulation.campaign!(3_664_912_422, 32, host!)?
 		# One Cargo invocation covers the former all-runtime and control package sets.
 		# Tests remain serial; the combined allowance preserves their former 9000s + 3600s ceilings.
@@ -85,6 +97,88 @@ Verify :: [].{
 		}
 		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
 	}
+
+	prepare! : (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare! = |host!| {
+		_ = inputs!(host!)?
+		_ = Capability.call!("verify-test-build", "{}", host!)?
+		_ = Capability.call!("verify-test-docs", "{}", host!)?
+		Capability.call!("verify-prepared", "{}", host!)
+	}
+
+	prepare_part! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_part! = |part, host!| {
+		_ = match part {
+			"inputs" => inputs!(host!)
+			"tests" => {
+				_ = Capability.call!("verify-test-build", "{}", host!)?
+				Capability.call!("verify-test-docs", "{}", host!)
+			}
+			_ => Err("unknown verification preparation part")
+		}?
+		Capability.call!("verify-prepared-part", Json.to_str({ part: part }), host!)
+	}
+
+	prepare_join! : (Str => Try(Str, Str)) => Try(Str, Str)
+	prepare_join! = |host!| Capability.call!("verify-preparation-join", "{}", host!)
+
+	shard! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
+	shard! = |shard, host!| {
+		_ = match shard {
+			"simulation" => Simulation.campaign!(3_664_912_422, 32, host!)
+			"workspace-day2" | "workspace-control" | "workspace-other" =>
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 12_600.U64 }),
+					host!,
+				)
+			"parallel-runtime" => Capability.call!("verify-prebuilt-tests", Json.to_str({ suite: shard }), host!)
+			"isolated-build" | "installation-build" =>
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: shard, budget_seconds: 1800.U64 }),
+					host!,
+				)
+			_ => Err("unknown verification shard")
+		}?
+		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
+	}
+
+	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
+	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
+	mac! = |host!| {
+		_ = Capability.call!("verify-cli", "{}", host!)?
+		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
+		}
+		_ = Capability.call!("verify-test-build", "{}", host!)?
+		_ = Capability.call!("verify-mac-prepared", "{}", host!)?
+		_ = Capability.call!("verify-mac-native", "{}", host!)?
+		for suite in ["isolated-build", "installation-build"] {
+			_ =
+				Capability.call!(
+					"verify-prebuilt-tests",
+					Json.to_str({ suite: suite, budget_seconds: 1800.U64 }),
+					host!,
+				)?
+		}
+		Capability.call!("verify-mac-receipt", "{}", host!)
+	}
+
+	compose! : (Str => Try(Str, Str)) => Try(Str, Str)
+	compose! = |host!| {
+		_ = Capability.call!("verify-join", "{}", host!)?
+		Capability.call!("verify-receipt", Json.to_str({ scope: "all" }), host!)
+	}
+
+	# Mandatory native guards bind authenticated GitHub proof to the exact main
+	# checkout. Absence selects the ordinary full workflow; downloaded proof is
+	# never executed and every PR/merge-group still runs the full recipe.
+	queue_find! : (Str => Try(Str, Str)) => Try(Str, Str)
+	queue_find! = |host!| Capability.call!("verify-queue-find", "{}", host!)
+
+	queue_admit! : (Str => Try(Str, Str)) => Try(Str, Str)
+	queue_admit! = |host!| Capability.call!("verify-queue-admit", "{}", host!)
 
 	control! : (Str => Try(Str, Str)) => Try(Str, Str)
 	control! = |host!| {

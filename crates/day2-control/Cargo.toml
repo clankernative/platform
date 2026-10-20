@@ -10,10 +10,6 @@ day2-contracts = { path = "../day2-contracts" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
-sha2 = "0.10"
-hmac = "0.12"
-sha1 = "0.10"
 crc32c = "0.6"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 tempfile = "3.27"
@@ -29,7 +25,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 
 [dev-dependencies]
 day2-assets = { path = "../day2-assets" }
-proptest = "=1.11.0"
+# Keep in-process generators without optional subprocess or bit-set dependencies.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 axum = "0.8.9"
 
 [[test]]

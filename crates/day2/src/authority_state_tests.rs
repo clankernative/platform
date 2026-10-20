@@ -951,7 +951,7 @@ fn domain_membership_admits_only_under_the_document_s_verified_domain() -> Resul
         "domain-test".into(),
         "/admitted/domain".into(),
         serde_json::from_value(serde_json::json!({
-            "format":crate::artifact::CURRENT_FORMAT,"roc_version":"domain-test",
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"domain-test",
             "worker_digest":"domain-test","schema_digest":"domain-test",
             "schema":{"models":{},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[

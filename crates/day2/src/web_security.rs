@@ -5,11 +5,10 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Sha256;
 use std::collections::BTreeMap;
 
 pub(crate) fn random(entropy: &dyn crate::host_inputs::Entropy) -> Result<String> {
@@ -130,12 +129,11 @@ fn create_session_in(
     Ok(token)
 }
 pub(crate) fn sign(secret: &[u8], value: &[u8]) -> Result<String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret)?;
-    mac.update(value);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     Ok(format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(value),
-        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        URL_SAFE_NO_PAD.encode(hmac::sign(&key, value).as_ref())
     ))
 }
 pub(crate) fn verify(secret: &[u8], raw: &str) -> Result<Vec<u8>> {
@@ -145,9 +143,8 @@ pub(crate) fn verify(secret: &[u8], raw: &str) -> Result<Vec<u8>> {
         .context(crate::error::Failure::InvalidTicket)?;
     let value = URL_SAFE_NO_PAD.decode(value)?;
     let signature = URL_SAFE_NO_PAD.decode(signature)?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret)?;
-    mac.update(&value);
-    mac.verify_slice(&signature)
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+    hmac::verify(&key, &value, &signature)
         .map_err(|_| anyhow::anyhow!(crate::error::Failure::InvalidTicket))?;
     Ok(value)
 }
@@ -161,6 +158,26 @@ pub(crate) fn verify_csrf(secret: &[u8], session: &Session, raw: &str) -> Result
     );
     Ok(())
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum NativeMode {
+    BooleanCheckbox,
+    ListCheckbox,
+    SetCheckbox,
+    Radio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeField {
+    pub mode: NativeMode,
+    /// Signed omission value: false for a Boolean checkbox, empty collection for
+    /// an admitted checkbox collection, and the empty string for an unselected radio.
+    pub omitted: Value,
+    /// Values admitted by this concrete rendered radio/checkbox group.
+    pub choices: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ticket {
@@ -175,6 +192,8 @@ pub(crate) struct Ticket {
     pub form_id: Option<String>,
     pub bound: Value,
     pub editable: Vec<String>,
+    #[serde(default)]
+    pub native: BTreeMap<String, NativeField>,
     pub nonce: String,
     pub issued: i64,
     pub expires: i64,
@@ -288,7 +307,7 @@ pub(crate) fn list_fields(
         );
         let values = fields.entry(key).or_default();
         ensure!(
-            values.len() < 64,
+            values.len() < crate::input_shape::MAX_LIST_ITEMS,
             crate::error::Failure::DuplicateOrExcessFields
         );
         values.push(value.into_owned());
@@ -393,7 +412,9 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
             "false" => Value::Bool(false),
             _ => anyhow::bail!("invalid_boolean"),
         },
-        Kind::OptionalText => anyhow::bail!("optional_form_field_not_supported"),
+        Kind::OptionalText | Kind::OptionalInteger | Kind::OptionalUnsigned(_) => {
+            anyhow::bail!("optional_form_field_not_supported")
+        }
         Kind::InputShape { .. } => anyhow::bail!("structured_form_field_not_supported"),
         _ => Value::String(raw.into()),
     })
@@ -402,6 +423,84 @@ pub(crate) fn field_value(kind: &crate::schema::Kind, raw: &str) -> Result<Value
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn repeated_form_values_match_the_typed_collection_budget() -> Result<()> {
+        let repeatable = std::collections::BTreeSet::from(["tags".into()]);
+        let body = |count: usize| {
+            (0..count)
+                .map(|index| format!("tags=choice-{index}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let accepted = body(crate::input_shape::MAX_LIST_ITEMS);
+        let fields = list_fields(accepted.as_bytes(), &repeatable)?;
+        assert_eq!(fields["tags"].len(), crate::input_shape::MAX_LIST_ITEMS);
+        assert!(
+            list_fields(
+                body(crate::input_shape::MAX_LIST_ITEMS + 1).as_bytes(),
+                &repeatable
+            )
+            .is_err()
+        );
+        assert!(list_fields(b"name=one&name=two", &repeatable).is_err());
+        assert!(list_fields(b"_csrf=one&_csrf=two", &repeatable).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tickets_match_hmac_sha256_known_answers_and_reject_invalid_tags() -> Result<()> {
+        // RFC 4231 cases 1, 2 and 6, plus the empty-key/empty-message vector.
+        for (key, value, expected) in [
+            (
+                vec![0x0b; 20],
+                b"Hi There".as_slice(),
+                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            ),
+            (
+                b"Jefe".to_vec(),
+                b"what do ya want for nothing?".as_slice(),
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            ),
+            (
+                vec![0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First".as_slice(),
+                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+            ),
+            (
+                Vec::new(),
+                b"".as_slice(),
+                "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad",
+            ),
+        ] {
+            let tag = (0..expected.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&expected[index..index + 2], 16))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let ticket = |bytes: &[u8]| {
+                format!(
+                    "{}.{}",
+                    URL_SAFE_NO_PAD.encode(value),
+                    URL_SAFE_NO_PAD.encode(bytes)
+                )
+            };
+            let expected_ticket = ticket(&tag);
+            assert_eq!(sign(&key, value)?, expected_ticket);
+            assert_eq!(verify(&key, &expected_ticket)?, value);
+            assert!(verify(b"wrong key", &expected_ticket).is_err());
+            assert!(verify(&key, &format!("eA.{}", URL_SAFE_NO_PAD.encode(&tag))).is_err());
+            for index in [0, 16, 31] {
+                let mut changed = tag.clone();
+                changed[index] ^= 1;
+                assert!(verify(&key, &ticket(&changed)).is_err());
+            }
+            assert!(verify(&key, &ticket(&tag[..31])).is_err());
+            let mut extended = tag;
+            extended.push(0);
+            assert!(verify(&key, &ticket(&extended)).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn entropy_failure_does_not_install_a_secret_or_emit_a_nonce() -> Result<()> {

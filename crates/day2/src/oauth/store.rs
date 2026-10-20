@@ -5,7 +5,7 @@
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RefreshEligibility {
     pub slot: String,
     pub generation: i64,
@@ -167,12 +167,24 @@ pub fn claim_refresh(
 }
 
 /// A known committed CAS is the only source of a process-local dispatch permit.
+#[cfg(test)]
 pub fn authorize_and_commit_dispatch(
     db: &mut Connection,
     attempt: &str,
 ) -> Result<Option<RefreshDispatchPermit>> {
+    authorize_checked_dispatch(db, attempt, |_| Ok(true))
+}
+
+pub(super) fn authorize_checked_dispatch(
+    db: &mut Connection,
+    attempt: &str,
+    authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
+) -> Result<Option<RefreshDispatchPermit>> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !authorize(&tx)? {
+        return Ok(None);
+    }
     let row = tx.query_row(
         "SELECT a.slot, a.generation, a.base_version, a.security_epoch, a.profile, a.account, a.affinity
          FROM oauth_refresh_attempts a JOIN oauth_connection_slots s ON s.slot = a.slot
@@ -197,6 +209,7 @@ pub fn authorize_and_commit_dispatch(
     )?;
     ensure!(changed == 1, "refresh dispatch fence lost");
     tx.commit()?;
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::DispatchCommitted);
     Ok(Some(RefreshDispatchPermit {
         attempt: attempt.to_owned(),
         eligibility,
@@ -274,7 +287,32 @@ pub fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<b
 
 /// `custody_write` stores only encrypted material in the caller's reserved
 /// private vault tables. Its error rolls back both the version and receipt.
+#[cfg(test)]
 pub fn commit_replacement(
+    db: &mut Connection,
+    attempt: &str,
+    next_version: i64,
+    receipt: &str,
+    custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<Option<ReplacementReceipt>> {
+    commit_replacement_with(db, attempt, next_version, receipt, custody_write)
+}
+
+/// Production publication consumes a sealed, account-verified settlement. The
+/// generic custody callback exists only in this module's kernel test seam.
+pub(super) fn publish_replacement(
+    db: &mut Connection,
+    prepared: super::refresh::PreparedReplacement,
+    authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
+) -> Result<Option<ReplacementReceipt>> {
+    let (attempt, next, receipt, base, material) = prepared.into_parts();
+    commit_replacement_with(db, &attempt, next, &receipt, |tx| {
+        ensure!(authorize(tx)?, "refresh publication authority changed");
+        super::custody::replace_tokens(tx, material, &base)
+    })
+}
+
+fn commit_replacement_with(
     db: &mut Connection,
     attempt: &str,
     next_version: i64,
@@ -376,6 +414,7 @@ pub fn commit_replacement(
         params![attempt, next_version, receipt],
     )?;
     tx.commit()?;
+    super::effects::refresh_boundary(super::effects::RefreshBoundary::PublicationCommitted);
     Ok(Some(ReplacementReceipt {
         attempt: attempt.to_owned(),
         next_version,

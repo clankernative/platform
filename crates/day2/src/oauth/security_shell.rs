@@ -97,15 +97,42 @@ pub(crate) trait ApprovalRegistry: Send + Sync {
 /// neither proves when the human last authenticated.
 pub(crate) trait FreshAuthenticator: Send + Sync {
     fn identify(&self, headers: &HeaderMap, now: i64) -> Result<iap::Verified>;
-    fn begin(&self, identity: &iap::Verified, intent: FreshIntent, now: i64)
-    -> Result<ReauthStart>;
+    fn begin(
+        &self,
+        identity: &iap::Verified,
+        intent: FreshIntent,
+        headers: &HeaderMap,
+        now: i64,
+    ) -> Result<ReauthStart>;
     fn complete(
         &self,
         _query: &str,
         _identity: &iap::Verified,
+        _headers: &HeaderMap,
         _now: i64,
-    ) -> Result<shell_oidc::Reauthenticated> {
+    ) -> Result<ReauthCallback> {
         anyhow::bail!("reauthentication callback unavailable")
+    }
+
+    fn manual_view(
+        &self,
+        _: &str,
+        _: &iap::Verified,
+        _: &HeaderMap,
+        _: i64,
+    ) -> Result<shell_oidc::ManualView> {
+        anyhow::bail!("manual Google checkpoint unavailable")
+    }
+
+    fn resume_manual(
+        &self,
+        _: &str,
+        _: &str,
+        _: &iap::Verified,
+        _: &HeaderMap,
+        _: i64,
+    ) -> Result<String> {
+        anyhow::bail!("manual Google resume unavailable")
     }
 }
 
@@ -113,6 +140,19 @@ pub(crate) enum ReauthStart {
     #[cfg(test)]
     Authenticated(FreshHuman),
     Redirect(String),
+}
+
+pub(crate) enum ReauthCallback {
+    Manual(String),
+    Observed(Box<shell_oidc::Reauthenticated>),
+}
+
+struct ManualRequest<'a> {
+    method: &'a Method,
+    handle: &'a str,
+    query: Option<&'a str>,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
 }
 
 #[cfg(test)]
@@ -247,6 +287,7 @@ pub(crate) struct SecurityShell {
     credentials: Option<Arc<credentials::Registry>>,
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
+    management: Option<Arc<super::management::shell::Shell>>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -427,21 +468,32 @@ impl SecurityShell {
         let (identity, edge) = instance.security_edge()?;
         let origin = format!("{}/", edge.origin);
         let (client_id, exchange) = super::clients::reauthentication(&instance, tokens)?;
+        let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
+            &instance, bearers,
+        )?);
         let authenticator = Arc::new(shell_oidc::GoogleFreshAuthenticator::new(
             &edge.iap_audience,
             &identity.hosted_domain,
             &origin,
             client_id,
             exchange,
+            approvals.clone(),
         )?);
-        let approvals = Arc::new(shell_transport::RemoteApprovals::from_instance(
-            &instance, bearers,
-        )?);
-        Ok((
-            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?,
-            signer,
-            approvals,
-        ))
+        let mut shell = Self::with_transport(
+            origin.clone(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator.clone(),
+        )?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .management = Some(Arc::new(super::management::shell::Shell::new(
+            origin.trim_end_matches('/').into(),
+            approvals.clone(),
+            signer.clone(),
+            authenticator,
+        )));
+        Ok((shell, signer, approvals))
     }
 
     #[cfg(test)]
@@ -483,7 +535,31 @@ impl SecurityShell {
             credentials: None,
             canaries: None,
             guard: None,
+            management: None,
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_management_fixture(
+        origin: String,
+        approvals: Arc<shell_transport::RemoteApprovals>,
+        signer: Arc<admission::ArtifactShellSigner>,
+        authenticator: Arc<dyn FreshAuthenticator>,
+    ) -> Result<Arc<Self>> {
+        // Both contexts share the same concrete handles before trait erasure.
+        // This fixture attaches no proof, caller, key or alternate authenticator.
+        let mut shell =
+            Self::with_transport(origin, approvals.clone(), signer.clone(), authenticator)?;
+        let management = Arc::new(super::management::shell::Shell::new(
+            shell.origin.clone(),
+            approvals,
+            signer,
+            shell.authenticator.clone(),
+        ));
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
+            .management = Some(management);
+        Ok(shell)
     }
 
     /// Attach the same installation's selected local credential adapter before
@@ -526,30 +602,42 @@ impl SecurityShell {
         );
         let capacity = Arc::new(Semaphore::new(concurrency));
         let router_capacity = capacity.clone();
+        // Axum spawns connection/request tasks outside this future's poll.
+        // Capture BOTH ambient tracks before that boundary. A selected registry
+        // still supplies its inner context in handle; absent inner hooks leave
+        // these serving hooks active rather than silently selecting native I/O.
+        let request_effects = crate::managed_credentials::effects::capture();
         let router = Router::new().fallback(move |request: Request| {
             let shell = self.clone();
             let admission = admission.clone();
             let capacity = router_capacity.clone();
+            let captured = request_effects.clone();
             async move {
-                let path = request.uri().path();
-                if matches!(path, "/health/live" | "/health/ready") {
-                    let status =
-                        if request.method() != Method::GET || request.uri().query().is_some() {
-                            StatusCode::BAD_REQUEST
-                        } else if path == "/health/ready" && !admission.load(Ordering::Acquire) {
-                            StatusCode::SERVICE_UNAVAILABLE
-                        } else {
-                            StatusCode::OK
+                captured
+                    .run_async(async move {
+                        let path = request.uri().path();
+                        if matches!(path, "/health/live" | "/health/ready") {
+                            let status = if request.method() != Method::GET
+                                || request.uri().query().is_some()
+                            {
+                                StatusCode::BAD_REQUEST
+                            } else if path == "/health/ready" && !admission.load(Ordering::Acquire)
+                            {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            } else {
+                                StatusCode::OK
+                            };
+                            return protected(status.into_response());
+                        }
+                        if !admission.load(Ordering::Acquire) {
+                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+                        }
+                        let Ok(permit) = capacity.try_acquire_owned() else {
+                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
                         };
-                    return protected(status.into_response());
-                }
-                if !admission.load(Ordering::Acquire) {
-                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                }
-                let Ok(permit) = capacity.try_acquire_owned() else {
-                    return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                };
-                shell.handle(request, permit, admission).await
+                        shell.handle(request, permit, admission).await
+                    })
+                    .await
             }
         });
         axum::serve(listener, router)
@@ -622,7 +710,18 @@ impl SecurityShell {
                 admission.load(Ordering::Acquire),
                 "security shell is draining"
             );
-            self.dispatch(&method, &path, query.as_deref(), &headers, &body, at)
+            match self.dispatch(&method, &path, query.as_deref(), &headers, &body, at) {
+                Ok(response) => Ok(response),
+                Err(error) => match shell_oidc::take_provider_observation(error) {
+                    Ok(data) => {
+                        // Keep the SAME native permit through complete, failed,
+                        // or unknown diagnostic delivery, including disconnect.
+                        let _ = effects::provider_observation(data);
+                        Err(anyhow::anyhow!(shell_oidc::PRODUCER_UNAVAILABLE))
+                    }
+                    Err(error) => Err(error),
+                },
+            }
         })
         .await;
         protected(match response {
@@ -663,12 +762,44 @@ impl SecurityShell {
                 }
             })?;
         }
+        if let Some(management) = &self.management {
+            if let Some(response) = management.provider_callback(
+                super::management::shell::CallbackRequest {
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                },
+                &identity,
+                at,
+            )? {
+                return Ok(response);
+            }
+            if let Some(tail) = path.strip_prefix(super::management::PREFIX) {
+                ensure!(query.is_none(), "OAuth management query refused");
+                return management.dispatch(method, tail, headers, body, &identity, at);
+            }
+        }
         if registration::shell::reserved(path) {
             return self
                 .canaries
                 .as_ref()
                 .context("registration campaign unavailable")?
                 .dispatch(method, path, query, headers, body, &identity, at);
+        }
+        if let Some(handle) = path.strip_prefix(shell_oidc::MANUAL_PREFIX) {
+            return self.manual_google(
+                ManualRequest {
+                    method,
+                    handle,
+                    query,
+                    headers,
+                    body,
+                },
+                &identity,
+                at,
+            );
         }
         if path == shell_oidc::GoogleOidc::callback_path() {
             ensure!(
@@ -748,6 +879,10 @@ impl SecurityShell {
             "security shell registry origin mismatch"
         );
         view.validate(identity)?;
+        ensure!(
+            at >= view.quarantined_at() && at < view.expires_at,
+            "original OAuth approval expired"
+        );
         Ok(Some(view))
     }
 
@@ -772,6 +907,7 @@ impl SecurityShell {
                     match self.authenticator.begin(
                         identity,
                         FreshIntent::approval(&pending, identity)?,
+                        headers,
                         at,
                     )? {
                         #[cfg(test)]
@@ -892,9 +1028,29 @@ impl SecurityShell {
         identity: &iap::Verified,
         at: i64,
     ) -> Result<Response> {
-        let proof =
-            VerifiedAuthTime::from_google(self.authenticator.complete(query, identity, at)?);
+        let observed = match self.authenticator.complete(query, identity, headers, at)? {
+            ReauthCallback::Manual(location) => {
+                ensure!(
+                    location.starts_with(shell_oidc::MANUAL_PREFIX)
+                        && token_shape(&location[shell_oidc::MANUAL_PREFIX.len()..]),
+                    "Google manual checkpoint location refused"
+                );
+                return Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response());
+            }
+            ReauthCallback::Observed(observed) => *observed,
+        };
+        let proof = VerifiedAuthTime::from_google(observed);
         proof.require_current(at)?;
+        if matches!(
+            proof.purpose(),
+            FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+        ) {
+            return self
+                .management
+                .as_ref()
+                .context("OAuth management unavailable")?
+                .reauthenticated(proof, headers, identity, at);
+        }
         if proof.purpose() == FreshPurpose::CredentialIntent {
             let registry = self
                 .credentials
@@ -927,6 +1083,98 @@ impl SecurityShell {
             "{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
         ).parse()?);
         Ok(response)
+    }
+
+    fn manual_google(
+        &self,
+        request: ManualRequest<'_>,
+        identity: &iap::Verified,
+        at: i64,
+    ) -> Result<Response> {
+        let ManualRequest {
+            method,
+            handle,
+            query,
+            headers,
+            body,
+        } = request;
+        ensure!(
+            token_shape(handle) && query.is_none(),
+            "invalid Google manual checkpoint route"
+        );
+        if *method == Method::GET {
+            ensure!(body.is_empty(), "Google manual GET body refused");
+            let view = self
+                .authenticator
+                .manual_view(handle, identity, headers, at)?;
+            ensure!(
+                view.location == format!("{}{handle}", shell_oidc::MANUAL_PREFIX)
+                    && view.human == identity.email
+                    && at < view.deadline,
+                "Google manual view context changed"
+            );
+            let deadline = time::OffsetDateTime::from_unix_timestamp(view.deadline)?
+                .format(&time::format_description::well_known::Rfc3339)?;
+            let markup = html! { (DOCTYPE) html lang="en" {
+                head { meta charset="utf-8"; title { "Complete a fresh Google sign-in" } }
+                body { main {
+                    h1 { "Complete a fresh Google sign-in" }
+                    p { "Account: " (view.human) }
+                    p { "Complete a fresh Google sign-in in another tab, then return here and continue." }
+                    p { a href="https://accounts.google.com/" target="_blank" rel="noopener noreferrer" { "Open Google account" }
+                        " may show your existing sign-in. Opening it does not create a new authentication." }
+                    p { "If you choose to sign out and sign back in, this ends the Google sign-in for this browser. You may need to sign back into this tool before continuing. This page does not sign you out." }
+                    p { "Continue checks your new sign-in; if verification fails, start a new request." }
+                    p { "This request expires at " (deadline) ". Signing in, reloading or continuing does not extend it." }
+                    form method="post" action=(view.location) {
+                        input type="hidden" name="csrf" value=(view.csrf);
+                        button type="submit" { "Continue" }
+                    }
+                } }
+            }};
+            return Ok((
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                markup.into_string(),
+            )
+                .into_response());
+        }
+        ensure!(
+            *method == Method::POST
+                && body.len() <= 1024
+                && headers.get_all(header::ORIGIN).iter().count() == 1
+                && headers
+                    .get(header::ORIGIN)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(&self.origin)
+                && headers.get_all(header::CONTENT_TYPE).iter().count() == 1
+                && headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("application/x-www-form-urlencoded")
+                && headers.get_all("sec-fetch-site").iter().count() <= 1
+                && headers
+                    .get("sec-fetch-site")
+                    .is_none_or(|value| value == "same-origin"),
+            "Google manual form method, origin or type refused"
+        );
+        let fields = web_security::fields(body)?;
+        ensure!(fields.len() == 1, "Google manual form field set refused");
+        let csrf = fields.get("csrf").context("Google manual CSRF missing")?;
+        let location = self
+            .authenticator
+            .resume_manual(handle, csrf, identity, headers, at)?;
+        let target = url::Url::parse(&location)?;
+        ensure!(
+            location.len() <= 4096
+                && target.origin().ascii_serialization() == "https://accounts.google.com"
+                && target.path() == "/o/oauth2/v2/auth"
+                && target.fragment().is_none()
+                && target.username().is_empty()
+                && target.password().is_none(),
+            "Google manual resume target refused"
+        );
+        Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
     }
 
     fn confirm(
@@ -1005,11 +1253,11 @@ impl SecurityShell {
         proof: VerifiedAuthTime,
         at: i64,
     ) -> Result<(ShellSession, String)> {
-        proof.require_intent(
+        proof.require_credential_authentication(
             &credentials::fresh_intent(runtime, pending, identity)?,
             identity,
+            at,
         )?;
-        proof.require_current(at)?;
         let token = effects::random()?;
         let session = ShellSession {
             attempt: pending.attempt.clone(),
@@ -1099,7 +1347,10 @@ impl SecurityShell {
                 .read_session(headers, at)?
             {
                 Some(session) if valid(&session) => (session, None),
-                _ => match self.authenticator.begin(identity, intent.clone(), at)? {
+                _ => match self
+                    .authenticator
+                    .begin(identity, intent.clone(), headers, at)?
+                {
                     #[cfg(test)]
                     ReauthStart::Authenticated(human) => {
                         let (session, token) = self
@@ -1583,7 +1834,13 @@ mod tests {
                     .into(),
             })
         }
-        fn begin(&self, identity: &iap::Verified, _: FreshIntent, now: i64) -> Result<ReauthStart> {
+        fn begin(
+            &self,
+            identity: &iap::Verified,
+            _: FreshIntent,
+            _: &HeaderMap,
+            now: i64,
+        ) -> Result<ReauthStart> {
             if !self.fresh {
                 return Ok(ReauthStart::Redirect(
                     "https://accounts.google.com/reauthenticate".into(),
@@ -2972,14 +3229,19 @@ mod tests {
 
     #[test]
     fn credential_signed_google_session_keeps_original_intent_across_three_roles() -> Result<()> {
-        // The normal checked Credential Metadata artifact and actual local
-        // registry/product-command consumer remain mandatory. This is a native
-        // signed fixture, not a Google live campaign or remote app transport.
+        // Keep this mandatory entrypoint: actual signed callbacks must refuse
+        // before a credential session/context/confirmation. A separately explicit
+        // isolated witness then retains all original three-role product oracles.
+        // The real Credential Metadata artifact and local registry remain required.
         struct CredentialClock(Arc<super::super::simulation::World>);
 
         impl crate::host::Host for CredentialClock {
             fn entropy(&self, scope: &str, invocation: &str) -> Result<[u8; 32]> {
-                crate::host::Host::entropy(&crate::host::System, scope, invocation)
+                crate::host::Host::entropy(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    scope,
+                    invocation,
+                )
             }
 
             fn now_ms(&self) -> Result<i64> {
@@ -2993,7 +3255,11 @@ mod tests {
                 phase: crate::protocol::Phase,
                 request: &crate::protocol::Request,
             ) -> Result<crate::host::WorkerAction> {
-                crate::host::Host::worker_action(&crate::host::System, phase, request)
+                crate::host::Host::worker_action(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    phase,
+                    request,
+                )
             }
 
             fn record_exchange(
@@ -3002,15 +3268,16 @@ mod tests {
                 request: &crate::protocol::Request,
                 result: &Result<crate::protocol::Response>,
             ) -> Result<()> {
-                crate::host::Host::record_exchange(&crate::host::System, phase, request, result)
+                crate::host::Host::record_exchange(
+                    &crate::host::System(crate::host_inputs::Inputs::default()),
+                    phase,
+                    request,
+                    result,
+                )
             }
 
-            fn deadline(
-                &self,
-                phase: crate::protocol::Phase,
-                started: std::time::Instant,
-            ) -> Result<()> {
-                crate::host::Host::deadline(&crate::host::System, phase, started)
+            fn monotonic(&self) -> Duration {
+                effects::Hooks::monotonic(self.0.as_ref())
             }
         }
 
@@ -3024,7 +3291,7 @@ mod tests {
         )?);
         world.runtime = world
             .runtime
-            .with_host(Arc::new(CredentialClock(clock.clone())));
+            .with_host(Arc::new(CredentialClock(clock.clone())), clock.clone());
         effects::scope(clock.clone(), || {
             let identity = iap::Verified {
                 email: "alice@example.com".into(),
@@ -3052,6 +3319,8 @@ mod tests {
                 .resolve(attempt, &identity, world.now)?
                 .context("actual pending")?;
             let intent = credentials::fresh_intent(&runtime, &pending, &identity)?;
+            let google_started_at = world.now;
+            let google_started = effects::Instant::now();
             let (authenticator, assertions, callback) = shell_oidc::fixture_login(
                 &identity,
                 intent.clone(),
@@ -3074,7 +3343,7 @@ mod tests {
                 let changed = credentials::fresh_intent(&runtime, &changed, &owner)?;
                 assert!(
                     authenticator
-                        .begin(&owner, changed.clone(), world.now)
+                        .begin_parser(&owner, changed.clone(), world.now)
                         .is_err(),
                     "active Google intent accepted substitution {mutation}"
                 );
@@ -3085,10 +3354,12 @@ mod tests {
                 attempt,
                 &pending.challenge()?,
                 "https://security.example.com/",
+                pending.created_at,
+                pending.expires_at,
             )?;
             assert!(
                 authenticator
-                    .begin(&identity, opposite.clone(), world.now)
+                    .begin_parser(&identity, opposite.clone(), world.now)
                     .is_err()
             );
             let oauth = Arc::new(NoOAuth);
@@ -3110,25 +3381,109 @@ mod tests {
                 world.runtime.host().now_ms()?.div_euclid(1000),
                 effects::wall_time()?
             );
-            let response = shell.dispatch(
-                &Method::GET,
-                shell_oidc::GoogleOidc::callback_path(),
-                Some(&callback),
-                &headers,
-                &[],
+            let before = signed_replay::database_snapshot_digest(world.runtime.db())?;
+            let keys_before = world.keys.0.load(Ordering::SeqCst);
+            let error = shell
+                .dispatch(
+                    &Method::GET,
+                    shell_oidc::GoogleOidc::callback_path(),
+                    Some(&callback),
+                    &headers,
+                    &[],
+                    world.now + 1,
+                )
+                .err()
+                .context("signed credential callback manufactured a native proof")?;
+            assert_eq!(
+                error.root_cause().to_string(),
+                "OAuth post-pending authentication producer unavailable"
+            );
+            assert!(shell.sessions.lock().unwrap().is_empty());
+            assert!(!headers.contains_key(header::COOKIE));
+            assert_eq!(
+                signed_replay::database_snapshot_digest(world.runtime.db())?,
+                before
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
+            // Exercise direct consumers too: no caller can bypass the common
+            // guard by projecting confirmation DATA or skipping the callback.
+            let (parser, _, query) = shell_oidc::fixture_login(
+                &identity,
+                intent.clone(),
+                world.now,
+                world.now + 1,
                 world.now + 1,
             )?;
-            assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            let cookie = response.headers()[header::SET_COOKIE]
-                .to_str()?
-                .split(';')
-                .next()
-                .context("issued credential cookie")?
-                .to_owned();
-            headers.insert(header::COOKIE, cookie.parse()?);
+            let signed = VerifiedAuthTime::from_google(parser.complete_parser(
+                &query,
+                &identity,
+                world.now + 1,
+            )?);
+            signed.require_intent(&intent, &identity)?;
+            signed.require_current(world.now + 1)?;
+            assert!(
+                signed
+                    .credential_confirmation_context(&intent, &identity, world.now + 1)
+                    .is_err()
+            );
+            assert!(
+                credentials::confirm(
+                    &runtime,
+                    &pending,
+                    &identity,
+                    "signed-parser-no-session",
+                    &signed,
+                    world.now + 1
+                )
+                .is_err()
+            );
+            for acknowledge in [false, true] {
+                assert!(
+                    credentials::deliver(
+                        &runtime,
+                        &pending,
+                        &identity,
+                        "signed-parser-no-session",
+                        &signed,
+                        world.now + 1,
+                        acknowledge
+                    )
+                    .is_err()
+                );
+            }
+            assert!(
+                shell
+                    .credential_session(&runtime, &pending, &identity, signed, world.now + 1)
+                    .is_err()
+            );
+            assert!(shell.sessions.lock().unwrap().is_empty());
+            assert_eq!(
+                signed_replay::database_snapshot_digest(world.runtime.db())?,
+                before
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), keys_before);
+            // Only this named isolated test witness exercises the product
+            // transitions below. No signed input or callback is promoted to it.
+            let isolated = shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
+                intent.clone(),
+                identity.email.clone(),
+                identity.subject.clone(),
+                world.now + 1,
+                google_started_at,
+                google_started,
+            )?;
+            assert_eq!(isolated.deadline()?, intent.deadline());
+            let (_, token) = shell.credential_session(
+                &runtime,
+                &pending,
+                &identity,
+                VerifiedAuthTime::from_google(isolated),
+                world.now + 1,
+            )?;
+            headers.insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
             let session = shell
                 .read_session(&headers, world.now + 1)?
-                .context("actual Google session")?;
+                .context("explicit isolated credential session")?;
             session.proof.require_intent(&intent, &identity)?;
             assert!(session.proof.purpose() == FreshPurpose::CredentialIntent);
             assert!(session.proof.require_intent(&opposite, &identity).is_err());
@@ -3556,6 +3911,13 @@ mod tests {
         }
 
         impl effects::Hooks for Clock {
+            fn provider_observation(
+                &self,
+                _: crate::oauth::shell_oidc::ProviderObservationData,
+            ) -> Result<()> {
+                anyhow::bail!("unscripted provider observation")
+            }
+
             fn domain(&self) -> u64 {
                 effects::Hooks::domain(self.oauth.as_ref())
             }
@@ -3591,6 +3953,16 @@ mod tests {
             }
         }
 
+        impl crate::host_inputs::Clock for Clock {
+            fn wall_time(&self) -> Result<Duration> {
+                Ok(Duration::from_secs(u64::try_from(self.wall())?))
+            }
+
+            fn monotonic(&self) -> Duration {
+                self.time.lock().unwrap().1
+            }
+        }
+
         struct Host {
             original: crate::store::Runtime,
             clock: Arc<Clock>,
@@ -3621,14 +3993,8 @@ mod tests {
             ) -> Result<()> {
                 self.original.host().record_exchange(phase, request, result)
             }
-            fn deadline(
-                &self,
-                phase: crate::protocol::Phase,
-                started: std::time::Instant,
-            ) -> Result<()> {
-                // Existing Simulation modeled Host boundary. The physical
-                // Worker watchdog is unchanged; real elapsed is not replayed.
-                self.original.host().deadline(phase, started)
+            fn monotonic(&self) -> Duration {
+                crate::host_inputs::Clock::monotonic(self.clock.as_ref())
             }
         }
 
@@ -3742,10 +4108,13 @@ mod tests {
             );
             let simulation = crate::simulation::Simulation::new(runtime, [17; 32], 1_000_000)?;
             let original = simulation.runtime().clone();
-            let runtime = original.clone().with_host(Arc::new(Host {
-                original,
-                clock: clock.clone(),
-            }));
+            let runtime = original.clone().with_host(
+                Arc::new(Host {
+                    original,
+                    clock: clock.clone(),
+                }),
+                clock.clone(),
+            );
             runtime.initialize()?;
             let active = crate::authority_state::current(&open(runtime.db())?)?;
             ensure!(
@@ -3870,6 +4239,19 @@ mod tests {
             Credential,
         }
 
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        enum History {
+            RawSigned,
+            // Signed Google data is refused first. Only the separately named
+            // test witness can exercise subsequent consumer action transitions.
+            IsolatedActions,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        enum RawSignedRefusal {
+            PostPendingProducerUnavailable,
+        }
+
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         enum Case {
             Positive,
@@ -3888,6 +4270,7 @@ mod tests {
             OppositePurpose,
             Invalidate,
             Callback,
+            IsolatedPostPending,
             View,
             ExpireTicks,
             DelayKey,
@@ -3919,6 +4302,7 @@ mod tests {
             product_rows: i64,
             delivery_closed: i64,
             response_verified: bool,
+            raw_signed_refusal: Option<RawSignedRefusal>,
             oauth_keys: admission::tests::ReplayKeyCounts,
             credential_keys: [usize; 2],
             providers: shell_oidc::ReplayProviderCounts,
@@ -3929,15 +4313,17 @@ mod tests {
         struct Model {
             consumer: Consumer,
             case: Case,
+            history: History,
             state: PublicState,
             restarted: bool,
         }
 
         impl Model {
-            fn new(consumer: Consumer, case: Case) -> Self {
+            fn new(consumer: Consumer, case: Case, history: History) -> Self {
                 Self {
                     consumer,
                     case,
+                    history,
                     restarted: false,
                     state: PublicState {
                         wall: 1_000,
@@ -3950,6 +4336,7 @@ mod tests {
                         product_rows: 0,
                         delivery_closed: 0,
                         response_verified: false,
+                        raw_signed_refusal: None,
                         oauth_keys: Default::default(),
                         credential_keys: [0; 2],
                         providers: Default::default(),
@@ -4009,8 +4396,14 @@ mod tests {
                             };
                         }
                         self.app_lookup();
+                        self.state.raw_signed_refusal =
+                            Some(RawSignedRefusal::PostPendingProducerUnavailable);
+                        Disposition::Refused
+                    }
+                    Step::IsolatedPostPending => {
+                        self.app_lookup();
                         self.state.sessions = 1;
-                        Disposition::Redirect
+                        Disposition::Ok
                     }
                     Step::View => {
                         self.app_lookup();
@@ -4067,7 +4460,8 @@ mod tests {
                         Disposition::Redirect
                     }
                     Step::Duplicate => {
-                        if self.case == Case::WrongSubject
+                        if self.history == History::RawSigned
+                            || self.case == Case::WrongSubject
                             || self.case == Case::Invalidate
                             || self.case == Case::Restart
                         {
@@ -4104,7 +4498,9 @@ mod tests {
             callback: Option<String>,
             session: Option<ShellSession>,
             original_intent: Option<FreshIntent>,
+            original_oidc_clock: Option<(i64, effects::Instant)>,
             original_authorization: Option<Digest>,
+            raw_signed_refusal: Option<RawSignedRefusal>,
             response_verified: bool,
             response_identity: Option<Digest>,
             invalidated: bool,
@@ -4188,7 +4584,9 @@ mod tests {
                     callback: None,
                     session: None,
                     original_intent: None,
+                    original_oidc_clock: None,
                     original_authorization: None,
+                    raw_signed_refusal: None,
                     response_verified: false,
                     response_identity: None,
                     invalidated: false,
@@ -4244,6 +4642,7 @@ mod tests {
 
             fn capture_intent(&mut self) -> Result<()> {
                 self.original_intent = Some(self.login.pending_intent()?);
+                self.original_oidc_clock = Some(self.login.pending_clock()?);
                 self.original_authorization = Some(self.login.authorization_identity()?);
                 Ok(())
             }
@@ -4294,7 +4693,12 @@ mod tests {
                     );
                     return Ok(None);
                 };
-                let confirmation: serde_json::Value = crate::json::decode(confirmation.as_bytes())?;
+                let record: serde_json::Value = crate::json::decode(confirmation.as_bytes())?;
+                let confirmation = &record["confirmation"];
+                ensure!(
+                    record["original"]["kind"] == "credential",
+                    "replay genuine credential record required"
+                );
                 let original = serde_json::to_value(&world.pending)?;
                 for key in [
                     "invocation",
@@ -4510,12 +4914,14 @@ mod tests {
                                 &world.pending.attempt,
                                 &world.pending.challenge()?,
                                 "https://security.example.com/",
+                                world.pending.created_at,
+                                world.pending.expires_at,
                             )?
                         };
                         ensure!(
                             self.login
                                 .authenticator
-                                .begin(&identity(), intent, self.clock.wall())
+                                .begin_parser(&identity(), intent, self.clock.wall())
                                 .is_err(),
                             "opposite purpose accepted"
                         );
@@ -4565,31 +4971,152 @@ mod tests {
                             self.callback.as_deref(),
                             &[],
                         );
-                        if let Ok(response) = response {
-                            let status = response.status();
-                            if let Some(cookie) = response.headers().get(header::SET_COOKIE) {
-                                self.headers.insert(
-                                    header::COOKIE,
-                                    cookie
-                                        .to_str()?
-                                        .split(';')
-                                        .next()
-                                        .context("replay cookie")?
-                                        .parse()?,
-                                );
-                                self.session =
-                                    self.shell.read_session(&self.headers, self.clock.wall())?;
-                                let session =
-                                    self.session.as_ref().context("replay signed session")?;
-                                session.proof.require_intent(
-                                    self.original_intent.as_ref().unwrap(),
-                                    &identity(),
-                                )?;
+                        match response {
+                            Ok(response) => {
+                                let status = response.status();
+                                if let Some(cookie) = response.headers().get(header::SET_COOKIE) {
+                                    self.headers.insert(
+                                        header::COOKIE,
+                                        cookie
+                                            .to_str()?
+                                            .split(';')
+                                            .next()
+                                            .context("replay cookie")?
+                                            .parse()?,
+                                    );
+                                    self.session = self
+                                        .shell
+                                        .read_session(&self.headers, self.clock.wall())?;
+                                    let session =
+                                        self.session.as_ref().context("replay signed session")?;
+                                    session.proof.require_intent(
+                                        self.original_intent.as_ref().unwrap(),
+                                        &identity(),
+                                    )?;
+                                }
+                                Ok(disposition(status))
                             }
-                            Ok(disposition(status))
-                        } else {
-                            Ok(Disposition::Refused)
+                            Err(error) => {
+                                if step == Step::Callback
+                                    && !matches!(case, Case::WrongSubject | Case::Invalidate)
+                                {
+                                    ensure!(
+                                        error.root_cause().to_string()
+                                            == "OAuth post-pending authentication producer unavailable",
+                                        "signed consumer callback refused for another reason: {error:#}"
+                                    );
+                                    self.raw_signed_refusal =
+                                        Some(RawSignedRefusal::PostPendingProducerUnavailable);
+                                }
+                                Ok(Disposition::Refused)
+                            }
                         }
+                    }
+                    Step::IsolatedPostPending => {
+                        ensure!(
+                            self.raw_signed_refusal
+                                == Some(RawSignedRefusal::PostPendingProducerUnavailable)
+                                && self.session.is_none()
+                                && self.shell.sessions.lock().unwrap().is_empty(),
+                            "isolated witness requires the exact raw signed consumer refusal"
+                        );
+                        let (before, _, _, _) = self.observe()?;
+                        ensure!(
+                            before.oauth_keys.shell_attestation == 0
+                                && before.activation == 0
+                                && before.product == 0
+                                && before.receipts == 0
+                                && before.product_rows == 0
+                                && before.credential_keys == [0; 2],
+                            "raw signed consumer proof reached a key or writer before isolated witness"
+                        );
+                        let oauth_pending = if let Some((_, target, _, _, _, _)) = &self.oauth {
+                            Some(
+                                self.shell
+                                    .pending(
+                                        &target.attempt,
+                                        &identity(),
+                                        &self.headers,
+                                        self.clock.wall(),
+                                    )?
+                                    .context("isolated OAuth original pending absent")?,
+                            )
+                        } else {
+                            None
+                        };
+                        let credential_pending = if let Some(world) = &self.credential {
+                            Some(
+                                world
+                                    .registry
+                                    .resolve(
+                                        &world.pending.attempt,
+                                        &identity(),
+                                        self.clock.wall(),
+                                    )?
+                                    .context("isolated credential original pending absent")?,
+                            )
+                        } else {
+                            None
+                        };
+                        let intent = match (&oauth_pending, &credential_pending) {
+                            (Some(pending), None) => FreshIntent::approval(pending, &identity())?,
+                            (None, Some((runtime, pending))) => {
+                                credentials::fresh_intent(runtime, pending, &identity())?
+                            }
+                            _ => anyhow::bail!("isolated consumer original owner ambiguous"),
+                        };
+                        ensure!(
+                            self.original_intent.as_ref() == Some(&intent),
+                            "isolated witness changed the complete original pending intent"
+                        );
+                        let (started_at, started) = self
+                            .original_oidc_clock
+                            .take()
+                            .context("isolated witness original Google clock absent or reused")?;
+                        let proof =
+                            shell_oidc::Reauthenticated::isolated_fixture_with_original_start(
+                                intent,
+                                identity().email,
+                                identity().subject,
+                                self.clock.wall(),
+                                started_at,
+                                started,
+                            )?;
+                        ensure!(
+                            proof.deadline()?
+                                == started_at
+                                    .checked_add(300)
+                                    .context("replay original deadline overflow")?
+                                && proof.deadline()? == 1_300,
+                            "isolated witness renewed the original authentication deadline"
+                        );
+                        let proof = VerifiedAuthTime::from_google(proof);
+                        let (session, token) = match (&oauth_pending, &credential_pending) {
+                            (Some(pending), None) => self.shell.issue_session(
+                                pending,
+                                &identity(),
+                                proof,
+                                self.clock.wall(),
+                            )?,
+                            (None, Some((runtime, pending))) => self.shell.credential_session(
+                                runtime,
+                                pending,
+                                &identity(),
+                                proof,
+                                self.clock.wall(),
+                            )?,
+                            _ => anyhow::bail!("isolated consumer session owner ambiguous"),
+                        };
+                        ensure!(
+                            session.expires_at == 1_300
+                                && self.original_authorization.as_ref()
+                                    == Some(&self.login.authorization_identity()?),
+                            "isolated witness changed the original deadline or authorization"
+                        );
+                        self.headers
+                            .insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
+                        self.session = Some(session);
+                        Ok(Disposition::Ok)
                     }
                     Step::View => Ok(disposition(
                         self.dispatch(Method::GET, &self.path, None, &[])?.status(),
@@ -4694,6 +5221,7 @@ mod tests {
                     product_rows: 0,
                     delivery_closed: 0,
                     response_verified: self.response_verified,
+                    raw_signed_refusal: self.raw_signed_refusal,
                     oauth_keys: Default::default(),
                     credential_keys: [0; 2],
                     providers,
@@ -4804,7 +5332,7 @@ mod tests {
             }
         }
 
-        fn program(consumer: Consumer, case: Case) -> Vec<Step> {
+        fn program(consumer: Consumer, case: Case, history: History) -> Vec<Step> {
             let mut steps = vec![Step::Begin];
             if case == Case::OppositePurpose {
                 steps.push(Step::OppositePurpose);
@@ -4814,10 +5342,13 @@ mod tests {
                 steps.push(Step::Invalidate);
             }
             steps.push(Step::Callback);
-            if matches!(case, Case::WrongSubject | Case::Invalidate) {
+            if history == History::RawSigned
+                || matches!(case, Case::WrongSubject | Case::Invalidate)
+            {
                 steps.push(Step::Duplicate);
                 return steps;
             }
+            steps.push(Step::IsolatedPostPending);
             steps.push(Step::View);
             match case {
                 Case::TicksExpired => steps.push(Step::ExpireTicks),
@@ -4888,6 +5419,7 @@ mod tests {
             version: u32,
             consumer: Consumer,
             case: Case,
+            history: History,
             program: Vec<Step>,
             sources: BTreeMap<String, Digest>,
             toolchain: Digest,
@@ -4910,17 +5442,25 @@ mod tests {
         const TRACE_BYTES: usize = 4 * 1_024 * 1_024;
         const SNAPSHOT_BYTES: usize = 96 * 1_024;
 
-        fn execute(consumer: Consumer, case: Case, steps: &[Step]) -> Trace {
-            let mut trace = Trace {version:2,consumer,case,program:steps.to_vec(),
+        fn execute(consumer: Consumer, case: Case, history: History, steps: &[Step]) -> Trace {
+            let mut trace = Trace {version:3,consumer,case,history,program:steps.to_vec(),
                 sources:BTreeMap::from([
                     ("crates/day2/src/development.rs".into(),Digest::new(include_bytes!("../development.rs"))),
                     ("crates/day2/src/oauth/admission.rs".into(),Digest::new(include_bytes!("admission.rs"))),
                     ("crates/day2/src/oauth/shell_oidc.rs".into(),Digest::new(include_bytes!("shell_oidc.rs"))),
                     ("crates/day2/src/oauth/security_shell.rs".into(),Digest::new(include_bytes!("security_shell.rs"))),
+                    ("crates/day2/src/oauth/fresh_auth.rs".into(),Digest::new(include_bytes!("fresh_auth.rs"))),
+                    ("crates/day2/src/managed_credentials/browser.rs".into(),Digest::new(include_bytes!("../managed_credentials/browser.rs"))),
+                    ("crates/day2/src/managed_credentials/issuance.rs".into(),Digest::new(include_bytes!("../managed_credentials/issuance.rs"))),
+                    ("crates/day2/src/managed_credentials/store.rs".into(),Digest::new(include_bytes!("../managed_credentials/store.rs"))),
+                    ("crates/day2/src/store.rs".into(),Digest::new(include_bytes!("../store.rs"))),
                 ]),toolchain:Digest::new(include_bytes!("../../../../toolchain.json")),artifact:None,
-                fixture:Digest::new(b"signed-google-replay-v2;seed=17;wall=1000;complete=1001;exp=1301;fixed-reviewed-keys;modeled-host-deadline"),
+                fixture:Digest::new(b"claims-and-isolated-replay-v3;seed=17;wall=1000;complete=1001;exp=1301;original-deadline=1300;raw-Google-refused;separate-isolated-OAuth-witness;fixed-reviewed-keys"),
                 observations:Vec::new(),first_failure:None,refusals:Vec::new()};
-            if steps.is_empty() || steps.len() > 16 || !prerequisites(consumer, case, steps) {
+            if steps.is_empty()
+                || steps.len() > 16
+                || !prerequisites(consumer, case, history, steps)
+            {
                 trace.refuse(Failure {
                     category: "program_refusal".into(),
                     index: None,
@@ -4945,7 +5485,7 @@ mod tests {
                         .credential
                         .as_ref()
                         .map(|world| world.runtime.artifact().id().to_owned());
-                    let mut model = Model::new(consumer, case);
+                    let mut model = Model::new(consumer, case, history);
                     for (index, step) in steps.iter().copied().enumerate() {
                         let expected = model.step(step);
                         let actual = match world.step(step, case) {
@@ -5047,12 +5587,17 @@ mod tests {
             })
         }
 
-        fn prerequisites(consumer: Consumer, case: Case, steps: &[Step]) -> bool {
+        fn prerequisites(consumer: Consumer, case: Case, history: History, steps: &[Step]) -> bool {
+            if history == History::RawSigned
+                && !matches!(case, Case::Positive | Case::OppositePurpose)
+            {
+                return false;
+            }
             // Preserve the original owner's begin/callback, the actual
             // negative trigger, final post and one-use probe. Reduction can
             // remove only the two optional observations, never manufacture a
             // refusal by deleting its causal action or lifetime boundary.
-            let declared = program(consumer, case);
+            let declared = program(consumer, case, history);
             let essential = |steps: &[Step]| {
                 steps
                     .iter()
@@ -5081,6 +5626,8 @@ mod tests {
                     Step::Reuse | Step::OppositePurpose | Step::Invalidate
                         if begun && !callback => {}
                     Step::Callback if begun && !callback => callback = true,
+                    Step::IsolatedPostPending
+                        if callback && !confirmed && history == History::IsolatedActions => {}
                     Step::View | Step::ExpireTicks | Step::DelayKey | Step::Restart if callback => {
                     }
                     Step::Confirm if callback && !confirmed => confirmed = true,
@@ -5192,12 +5739,12 @@ mod tests {
                 while index < reduced.program.len() && attempts < 64 {
                     let mut candidate = reduced.program.clone();
                     candidate.remove(index);
-                    if !prerequisites(first.consumer, first.case, &candidate) {
+                    if !prerequisites(first.consumer, first.case, first.history, &candidate) {
                         index += 1;
                         continue;
                     }
                     attempts += 1;
-                    let actual = execute(first.consumer, first.case, &candidate);
+                    let actual = execute(first.consumer, first.case, first.history, &candidate);
                     let actual_failure = actual.first_failure.clone();
                     // Preserve exact original failed field AND protected
                     // counterexample values, not merely a generic refusal.
@@ -5217,7 +5764,7 @@ mod tests {
             write(
                 "reduction.json",
                 &serde_json::to_vec(&serde_json::json!({
-                    "version":2,"classification":"synthetic-local-signed-replay-only",
+                    "version":3,"classification":"synthetic-local-claims-and-isolated-witness-replay-only",
                     "reduction_attempts":attempts,"actual_attempt_refusals":refusals,
                     "equality_only_divergence":"original pair retained without speculative reduction",
                     "saved_corpus_input":"absent; this is a newly retained actual divergence",
@@ -5226,14 +5773,14 @@ mod tests {
             Ok(())
         }
 
-        fn compare(consumer: Consumer, case: Case) -> Result<()> {
-            let steps = program(consumer, case);
+        fn compare(consumer: Consumer, case: Case, history: History) -> Result<()> {
+            let steps = program(consumer, case, history);
             ensure!(
-                prerequisites(consumer, case, &steps),
+                prerequisites(consumer, case, history, &steps),
                 "signed replay declared prerequisites"
             );
-            let first = execute(consumer, case, &steps);
-            let second = execute(consumer, case, &steps);
+            let first = execute(consumer, case, history, &steps);
+            let second = execute(consumer, case, history, &steps);
             if first.first_failure.is_some() || second.first_failure.is_some() || first != second {
                 persist_failure(&first, &second)?;
                 anyhow::bail!(
@@ -5248,15 +5795,29 @@ mod tests {
         }
 
         #[test]
-        fn signed_google_replay_two_positive_owner_histories() -> Result<()> {
-            for consumer in [Consumer::OAuth, Consumer::Credential] {
-                compare(consumer, Case::Positive)?;
+        fn raw_signed_google_replay_refuses_oauth_without_post_pending_producer() -> Result<()> {
+            for case in [Case::Positive, Case::OppositePurpose] {
+                compare(Consumer::OAuth, case, History::RawSigned)?;
+                compare(Consumer::Credential, case, History::RawSigned)?;
             }
             Ok(())
         }
 
         #[test]
-        fn signed_google_replay_six_paired_negative_owner_histories() -> Result<()> {
+        fn isolated_oauth_and_signed_credential_replay_two_positive_owner_histories() -> Result<()>
+        {
+            compare(Consumer::OAuth, Case::Positive, History::IsolatedActions)?;
+            compare(
+                Consumer::Credential,
+                Case::Positive,
+                History::IsolatedActions,
+            )?;
+            Ok(())
+        }
+
+        #[test]
+        fn isolated_oauth_and_signed_credential_replay_six_paired_negative_owner_histories()
+        -> Result<()> {
             for case in [
                 Case::WrongSubject,
                 Case::OppositePurpose,
@@ -5265,9 +5826,283 @@ mod tests {
                 Case::KeyDelay,
                 Case::Restart,
             ] {
-                for consumer in [Consumer::OAuth, Consumer::Credential] {
-                    compare(consumer, case)?;
-                }
+                compare(Consumer::OAuth, case, History::IsolatedActions)?;
+                compare(Consumer::Credential, case, History::IsolatedActions)?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn signed_credential_initial_commit_loss_retains_original_record_and_deadline() -> Result<()>
+        {
+            for expired in [false, true] {
+                let clock = Clock::new();
+                effects::scope(clock.clone(), || {
+                    credential_effects::scope(clock.clone(), || -> Result<()> {
+                        let mut world = World::new(Consumer::Credential, clock.clone())?;
+                        let result = (|| -> Result<()> {
+                            ensure!(
+                                world.step(Step::Begin, Case::Positive)? == Disposition::Redirect,
+                                "original signed begin refused"
+                            );
+                            let (_, _, before, foreign_before) = world.observe()?;
+                            ensure!(
+                                world.step(Step::Callback, Case::Positive)? == Disposition::Refused,
+                                "actual signed callback manufactured a native proof"
+                            );
+                            let (raw, _, after, foreign_after) = world.observe()?;
+                            ensure!(
+                                before == after
+                                    && foreign_before == foreign_after
+                                    && raw.sessions == 0
+                                    && raw.credential_keys == [0; 2],
+                                "raw signed credential refusal changed a database, key or cookie"
+                            );
+                            ensure!(
+                                world.step(Step::IsolatedPostPending, Case::Positive)?
+                                    == Disposition::Ok,
+                                "explicit isolated original witness refused"
+                            );
+                            let credential = world.credential.as_ref().unwrap();
+                            let session = world
+                                .session
+                                .as_ref()
+                                .context("explicit isolated credential session missing")?;
+                            let binding = world.original_session_binding()?;
+                            let fault = credentials::confirm_with_fault(
+                                &credential.runtime,
+                                &credential.pending,
+                                &identity(),
+                                &binding,
+                                session.proof.as_ref(),
+                                clock.wall(),
+                                credentials::ConfirmationFault::AfterConfirmationCommit,
+                            )
+                            .unwrap_err();
+                            ensure!(
+                                fault.to_string() == "simulated_process_loss",
+                                "unrelated initial commit refusal"
+                            );
+                            let db = open(credential.runtime.db())?;
+                            let original: String = db.query_row(
+                            "SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get(0),
+                        )?;
+                            let record: serde_json::Value =
+                                crate::json::decode(original.as_bytes())?;
+                            ensure!(
+                                record["original"]["kind"] == "credential"
+                                    && record["confirmation"]["approved_at"] == 1_001
+                                    && record["confirmation"]["authenticated_at"] == 1_001
+                                    && record["confirmation"]["expires_at"] == 1_300,
+                                "first approval times/context differ"
+                            );
+                            ensure!(
+                                db.query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+                                    row.get::<_, i64>(0)
+                                })? == 0,
+                                "invocation existed before actual interrupted invoke"
+                            );
+                            ensure!(
+                                db.query_row(
+                                    "SELECT count(*) FROM day2_credential_lineages",
+                                    [],
+                                    |row| row.get::<_, i64>(0)
+                                )? == 0,
+                                "initial approval was mistaken for business commit"
+                            );
+                            let reopened = crate::store::Runtime::load(
+                                credential.runtime.instance_path(),
+                                credential.runtime.app(),
+                            )?
+                            .with_integrations(crate::integration_host::Host::simulated(
+                                credential.runtime.db(),
+                                credential.runtime.scope(),
+                            ))
+                            .with_host(
+                                Arc::new(Host {
+                                    original: credential.runtime.clone(),
+                                    clock: clock.clone(),
+                                }),
+                                clock.clone(),
+                            )
+                            .with_credential_authority(
+                                credential.runtime.credentials.as_ref().unwrap().clone(),
+                            );
+                            reopened.initialize()?;
+                            let before_keys = *credential.keys.counts.lock().unwrap();
+                            // This replacement is well-formed historical DATA and
+                            // preserves the genuine original context. Its approval
+                            // is still in the future, so it must refuse BEFORE keys.
+                            let mut future: serde_json::Value =
+                                crate::json::decode(original.as_bytes())?;
+                            future["confirmation"]["approved_at"] = 1_200.into();
+                            crate::managed_credentials::issuance::rehash_fixture_value(
+                                &mut future,
+                            )?;
+                            let future = future.to_string();
+                            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation=?2",
+                            rusqlite::params![future, credential.pending.invocation])?;
+                            reopened.initialize()?;
+                            let refusal = credentials::confirm(
+                                &reopened,
+                                &credential.pending,
+                                &identity(),
+                                &binding,
+                                session.proof.as_ref(),
+                                clock.wall(),
+                            )
+                            .unwrap_err();
+                            ensure!(
+                                refusal.to_string() == "credential approval not current",
+                                "unrelated future-approval refusal"
+                            );
+                            ensure!(
+                                *credential.keys.counts.lock().unwrap() == before_keys,
+                                "future approval reached key provider"
+                            );
+                            ensure!(
+                                db.query_row("SELECT count(*) FROM day2_invocations", [], |row| {
+                                    row.get::<_, i64>(0)
+                                })? == 0,
+                                "future approval accepted invocation"
+                            );
+                            ensure!(db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get::<_, String>(0))? == future,
+                            "future approval was repaired or rewritten");
+                            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation=?2",
+                            rusqlite::params![original, credential.pending.invocation])?;
+                            ensure!(
+                                credentials::confirm(
+                                    &reopened,
+                                    &credential.pending,
+                                    &identity(),
+                                    "changed-session",
+                                    session.proof.as_ref(),
+                                    clock.wall()
+                                )
+                                .is_err(),
+                                "changed session resumed approval"
+                            );
+                            ensure!(
+                                *credential.keys.counts.lock().unwrap() == before_keys,
+                                "retargeting reached key provider"
+                            );
+                            if expired {
+                                clock.expire_ticks()?;
+                                ensure!(
+                                    credentials::confirm(
+                                        &reopened,
+                                        &credential.pending,
+                                        &identity(),
+                                        &binding,
+                                        session.proof.as_ref(),
+                                        clock.wall()
+                                    )
+                                    .is_err(),
+                                    "expired original approval resumed"
+                                );
+                                ensure!(
+                                    *credential.keys.counts.lock().unwrap() == before_keys,
+                                    "expired approval reached key provider"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_invocations",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 0,
+                                    "expired recovery accepted invocation"
+                                );
+                            } else {
+                                // Duplicate request time changes; first approved_at cannot.
+                                clock.time.lock().unwrap().0 = 1_002;
+                                let outcome = credentials::confirm(
+                                    &reopened,
+                                    &credential.pending,
+                                    &identity(),
+                                    &binding,
+                                    session.proof.as_ref(),
+                                    clock.wall(),
+                                )?;
+                                ensure!(
+                                    outcome.status == "success",
+                                    "original eligible recovery did not commit"
+                                );
+                                ensure!(
+                                    credentials::confirm(
+                                        &reopened,
+                                        &credential.pending,
+                                        &identity(),
+                                        &binding,
+                                        session.proof.as_ref(),
+                                        clock.wall()
+                                    )? == outcome,
+                                    "duplicate terminal result changed"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_credential_lineages",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 1,
+                                    "recovery issued more than one lineage"
+                                );
+                                ensure!(
+                                    db.query_row(
+                                        "SELECT count(*) FROM day2_credential_receipts",
+                                        [],
+                                        |row| row.get::<_, i64>(0)
+                                    )? == 1,
+                                    "recovery issued more than one receipt"
+                                );
+                                crate::store::replay(
+                                    reopened.artifact(),
+                                    &reopened.trace(&credential.pending.invocation)?,
+                                )?;
+                            }
+                            ensure!(db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+                            [&credential.pending.invocation], |row| row.get::<_, String>(0))? == original,
+                            "recovery replaced body/context/hash or renewed times");
+                            Ok(())
+                        })();
+                        if result.is_err() {
+                            use std::io::Write;
+                            // Keep actual signed callback/approval state before a fallible evidence write.
+                            let credential = world.credential.take().unwrap();
+                            let artifact = credential.runtime.artifact().id().to_owned();
+                            let trace = credential
+                                .runtime
+                                .trace(&credential.pending.invocation)
+                                .ok();
+                            let path = credential._directory.keep();
+                            let evidence = serde_json::to_vec(&serde_json::json!({
+                                "seed":17,"expired":expired,
+                                "schedule":["actual_signed_begin","actual_signed_callback","actual_confirmation_commit_fault","reopen","original_resume"],
+                                "artifact":artifact,"trace":trace,
+                                "source":Digest::new(include_bytes!("security_shell.rs")),
+                                "toolchain":Digest::new(include_bytes!("../../../../toolchain.json")),
+                                "original_state":"retained in original SQLite; no fresh or provider qualification claim",
+                            }))?;
+                            ensure!(
+                                evidence.len() <= TRACE_BYTES,
+                                "confirmation loss evidence budget"
+                            );
+                            let mut file = std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .mode(0o600)
+                                .open(path.join("initial-confirmation-counterexample.json"))?;
+                            file.write_all(&evidence)?;
+                            file.sync_all()?;
+                            eprintln!(
+                                "private initial confirmation counterexample: {}",
+                                path.display()
+                            );
+                        }
+                        result
+                    })
+                })?;
             }
             Ok(())
         }
@@ -5290,6 +6125,10 @@ mod tests {
             definition: Digest,
             columns: Vec<String>,
             rows: Vec<Vec<serde_json::Value>>,
+        }
+
+        pub(super) fn database_snapshot_digest(path: &Path) -> Result<Digest> {
+            Digest::of(&snapshot(path)?)
         }
 
         fn snapshot(path: &Path) -> Result<Vec<Table>> {

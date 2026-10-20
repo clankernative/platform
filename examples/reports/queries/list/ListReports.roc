@@ -64,7 +64,7 @@ ListReports :: [].{
 
 	verify_result : Str, ReportView.Page, Str -> Try(Bool, Str)
 	verify_result = |before, page, after| {
-		state = Data.snapshot(before)?
+		state = Data.verification_snapshot(before)?.live
 		Ok(
 			before
 				== after

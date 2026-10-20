@@ -58,6 +58,13 @@ run "wires_private_app_calls_into_the_normal_host" {
     error_message = "Serving evidence must expose the exact artifact and keys must use the managed CSI mount."
   }
   assert {
+    condition = jsondecode(kubernetes_manifest.app_call_keys[0].manifest.spec.parameters.secrets) == [
+      { resourceName = "projects/123/secrets/issuer/versions/1", path = "issuer" },
+      { resourceName = "projects/123/secrets/workload/versions/1", path = "workload" },
+    ]
+    error_message = "App-call projections must use the JSON array admitted by the release verifier."
+  }
+  assert {
     condition     = length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if volume.name == "app-call-selection" && volume.config_map[0].optional]) == 1
     error_message = "The host can become ready before activation publishes the selector; calls still fail closed until it exists."
   }
@@ -1148,13 +1155,13 @@ run "provisions_outbound_and_verification_secrets_from_exact_versions" {
 
   assert {
     condition = (
-      yamldecode(kubernetes_manifest.credentials[0].manifest.spec.parameters.secrets) == [
+      jsondecode(kubernetes_manifest.credentials[0].manifest.spec.parameters.secrets) == [
         { resourceName = "projects/example-tools/secrets/forge-token/versions/3", path = "a5a7f32250a55cfbb38de1f5486d175644a40d22f95411b6acd303ca29c08d4c" },
         { resourceName = "projects/example-tools/secrets/forge-signer/versions/1", path = "51af0efaac59f9189aad4f7e27487636512661c49b0b7d003e22971c8a7c2602" },
       ] &&
       kubernetes_manifest.credentials[0].manifest.spec.provider == "gke"
     )
-    error_message = "The CSI add-on must read exactly the named versions."
+    error_message = "Credential projections must use a JSON array containing exactly the named versions."
   }
 
   assert {

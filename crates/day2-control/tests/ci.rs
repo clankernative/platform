@@ -6,9 +6,8 @@ use day2_control::{
     journal::Journal,
     source::{CheckBinding, GithubBinding, SecretRef},
 };
-use hmac::{Hmac, Mac};
+use ring::hmac;
 use serde_json::{Value, json};
-use sha2::Sha256;
 
 fn name(value: &str) -> Name {
     Name::try_from(value.to_owned()).unwrap()
@@ -47,9 +46,13 @@ fn receiver() -> Result<Receiver> {
 }
 
 fn signature(bytes: &[u8]) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(&[42; 32]).unwrap();
-    mac.update(bytes);
-    format!("sha256={:x}", mac.finalize().into_bytes())
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &[42; 32]);
+    let hex: String = hmac::sign(&key, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256={hex}")
 }
 
 fn event() -> Value {

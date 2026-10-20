@@ -70,9 +70,30 @@ pub struct Operation {
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_all_rows: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<String>,
 }
 
 impl Operation {
+    fn validate_observations(&self) -> Result<()> {
+        ensure!(
+            self.observations.len() <= crate::capabilities::READS.len(),
+            "observation requirement budget"
+        );
+        let mut seen = BTreeSet::new();
+        for capability in &self.observations {
+            ensure!(
+                crate::capabilities::READS.contains(&capability.as_str()),
+                "unknown observation requirement: {capability}"
+            );
+            ensure!(
+                seen.insert(capability),
+                "duplicate observation requirement: {capability}"
+            );
+        }
+        Ok(())
+    }
+
     fn validate_required_all_rows(&self, schema: &Schema) -> Result<()> {
         ensure!(
             self.required_all_rows.len() <= 64,
@@ -90,6 +111,13 @@ impl Operation {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationActor {
+    pub operation: String,
+    pub actor: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failure {
@@ -99,6 +127,8 @@ pub struct Failure {
     pub operation: operation_metadata::Target,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_operations: Vec<operation_metadata::Target>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_actors: Vec<VerificationActor>,
 }
 
 impl Failure {
@@ -112,6 +142,13 @@ impl Failure {
         } else {
             format!("{}@{}", self.code, target.operation)
         }
+    }
+
+    pub fn verification_actor(&self, target: &operation_metadata::Target) -> Option<&str> {
+        self.verification_actors
+            .iter()
+            .find(|entry| entry.operation == target.operation)
+            .map(|entry| entry.actor.as_str())
     }
 
     fn validate_targets(
@@ -143,6 +180,27 @@ impl Failure {
                     .get(&operation.name)
                     .is_some_and(|operation| operation.errors.contains(&self.code)),
                 "application failure requires a matching operation contract and scenario"
+            );
+        }
+        let mut actor_targets = BTreeSet::new();
+        for override_actor in &self.verification_actors {
+            ensure!(
+                self.targets()
+                    .any(|target| target.operation == override_actor.operation),
+                "verification actor requires a declared failure target"
+            );
+            ensure!(
+                actor_targets.insert(&override_actor.operation),
+                "duplicate failure verification actor"
+            );
+            ensure!(
+                !override_actor.actor.is_empty()
+                    && override_actor.actor.len() <= 128
+                    && override_actor
+                        .actor
+                        .bytes()
+                        .all(|byte| { byte.is_ascii_alphanumeric() || b"._:-".contains(&byte) }),
+                "invalid failure verification actor"
             );
         }
         Ok(())
@@ -182,6 +240,16 @@ pub struct Definition {
     pub invariants: BTreeMap<String, String>,
     pub domains: crate::domain::Catalog,
     pub errors: BTreeMap<String, Failure>,
+}
+
+impl Definition {
+    pub(crate) fn is_verification_actor(&self, operation: &str, actor: &str) -> bool {
+        self.errors.values().any(|failure| {
+            failure.verification_actors.iter().any(|override_actor| {
+                override_actor.operation == operation && override_actor.actor == actor
+            })
+        })
+    }
 }
 
 pub fn decode(raw: &[u8]) -> Result<Definition> {
@@ -438,6 +506,7 @@ impl Definition {
                 "internal command cannot be a cross-app export: {name}"
             );
             definition.validate_required_all_rows(&artifact.schema)?;
+            definition.validate_observations()?;
         }
         for (path, media) in [
             (&self.presentation.stylesheet, "text/css; charset=utf-8"),
@@ -932,7 +1001,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), observations: product.operations.{name}.observations(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -949,6 +1018,9 @@ pub fn modules(
         )).collect::<Vec<_>>().join(", ");
         source = source.replacen("        if raw == \"examples\"",
             &format!("        if raw == \"connection-contract\" {{ return Json.to_str([{declarations}]) }}\n        if raw == \"examples\""), 1);
+    } else {
+        source = source.replacen("        if raw == \"examples\"",
+            "        if raw == \"connection-contract\" { return \"[]\" }\n        if raw == \"examples\"", 1);
     }
     if !catalog.credentials.is_empty() {
         let families = catalog
@@ -1350,9 +1422,13 @@ fn selector_field_imports(kind: &Kind, schema: &Schema) -> Result<BTreeSet<Strin
         Kind::Cursor | Kind::IdCursor => (Some("Cursor"), None),
         Kind::PageSize => (Some("PageSize"), None),
         // Optional text is a closed built-in union, not a pair of modules.
-        Kind::Integer | Kind::Unsigned(_) | Kind::Text | Kind::Boolean | Kind::OptionalText => {
-            (None, None)
-        }
+        Kind::Integer
+        | Kind::Unsigned(_)
+        | Kind::Text
+        | Kind::Boolean
+        | Kind::OptionalText
+        | Kind::OptionalInteger
+        | Kind::OptionalUnsigned(_) => (None, None),
         // Structured inputs were built only from builtins until nominal collections
         // existed, so their annotations now have to contribute imports too.
         Kind::InputShape { roc_type, .. } => {
@@ -1531,6 +1607,26 @@ mod selector_tests {
     use super::*;
 
     #[test]
+    fn directory_observation_requirements_reject_unknown_writes_and_duplicates() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["create"].clone();
+        operation.observations = vec![
+            "workspace_directory.hierarchy.v1".into(),
+            "workspace_directory.page.v1".into(),
+        ];
+        operation.validate_observations()?;
+        for requirements in [
+            vec!["unknown.read.v1".into()],
+            vec![crate::capabilities::WRITES[0].into()],
+            vec!["workspace_directory.hierarchy.v1".into(); 2],
+        ] {
+            operation.observations = requirements;
+            assert!(operation.validate_observations().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn required_all_rows_metadata_defaults_empty_and_preserves_existing_wire() -> Result<()> {
         let (_, _, contracts) = shared_failure_fixture()?;
         for operation in contracts.values() {
@@ -1604,6 +1700,9 @@ mod selector_tests {
                     })
                     .context("operation read requirements missing")?;
                 assert!(metadata.contains("errors: contract.errors.map(|failure| failure.code())"));
+                assert!(metadata.contains(&format!(
+                    "observations: product.operations.{operation}.observations()"
+                )));
             }
         }
         Ok(())
@@ -1619,7 +1718,7 @@ mod selector_tests {
             output_type: "result".into(),
         };
         let artifact: Artifact = serde_json::from_value(serde_json::json!({
-            "format":13,"roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "format":13,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"test","worker_digest":"test","schema_digest":"test",
             "schema":schema,"operations":[operation],"sources":{},"admission":"test"
         }))?;
         let effect = Effect {
@@ -1723,6 +1822,7 @@ mod selector_tests {
                 input_type: "preview_input".into(),
                 output_type: "result".into(),
             }],
+            verification_actors: Vec::new(),
         };
         Ok((failure, operations, contracts))
     }
@@ -1776,6 +1876,62 @@ mod selector_tests {
                 });
             assert!(admitted.is_err(), "{mutation} verification case");
         }
+        let mut actor_override = failure.clone();
+        actor_override.verification_actors = vec![VerificationActor {
+            operation: "create".into(),
+            actor: "freetool-denied-synthetic".into(),
+        }];
+        actor_override.validate_targets(&operations, &contracts)?;
+        assert_eq!(
+            actor_override.verification_actor(&actor_override.operation),
+            Some("freetool-denied-synthetic")
+        );
+        for (actors, expected) in [
+            (
+                vec![VerificationActor {
+                    operation: "missing".into(),
+                    actor: "freetool-denied-synthetic".into(),
+                }],
+                "verification actor requires a declared failure target",
+            ),
+            (
+                vec![
+                    VerificationActor {
+                        operation: "create".into(),
+                        actor: "first-synthetic".into(),
+                    },
+                    VerificationActor {
+                        operation: "create".into(),
+                        actor: "second-synthetic".into(),
+                    },
+                ],
+                "duplicate failure verification actor",
+            ),
+        ] {
+            let mut invalid = failure.clone();
+            invalid.verification_actors = actors;
+            assert_eq!(
+                invalid
+                    .validate_targets(&operations, &contracts)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+            );
+        }
+        for actor in ["".into(), "bad actor".into(), "é".into(), "a".repeat(129)] {
+            let mut invalid = failure.clone();
+            invalid.verification_actors = vec![VerificationActor {
+                operation: "create".into(),
+                actor,
+            }];
+            assert_eq!(
+                invalid
+                    .validate_targets(&operations, &contracts)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid failure verification actor",
+            );
+        }
         let mut unlisted = contracts.clone();
         unlisted.get_mut("preview").unwrap().errors.clear();
         assert!(failure.validate_targets(&operations, &unlisted).is_err());
@@ -1806,6 +1962,16 @@ mod selector_tests {
             "app:example.invalid_input"
         );
         assert_eq!(serde_json::to_value(failure)?, wire);
+        let actor_wire = serde_json::json!({
+            "code":"app:example.invalid_input",
+            "description":"Invalid.",
+            "recovery":"Correct it.",
+            "operation":{"operation":"create","input_type":"input","output_type":"output"},
+            "verification_actors":[{"operation":"create","actor":"freetool-denied-synthetic"}]
+        });
+        let failure: Failure = serde_json::from_value(actor_wire.clone())?;
+        assert_eq!(failure.verification_actors.len(), 1);
+        assert_eq!(serde_json::to_value(failure)?, actor_wire);
         Ok(())
     }
 
@@ -2139,7 +2305,7 @@ mod selector_tests {
         let mut inspected = 0;
         for admission in [false, true] {
             let generated = modules(&catalog, &schema, &outputs, "", admission)?;
-            let registry_only = catalog.modules(&schema, &outputs, admission)?;
+            let registry_only = catalog.modules(&schema, &outputs, &[], admission)?;
             for source in generated.values().chain(registry_only.values()) {
                 for literal in contract_literals(source) {
                     inspected += 1;

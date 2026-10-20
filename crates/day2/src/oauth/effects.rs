@@ -1,6 +1,6 @@
 //! The ambient-effect boundary for OAuth. Production uses the OS clock, crypto
-//! entropy and the bounded native HTTP adapters. Tests replace all three together
-//! and run the same host code; a scripted transport never opens a socket.
+//! entropy, bounded native HTTP and fixed private diagnostic delivery. Tests
+//! replace them together and run the same host code; scripted HTTP opens no socket.
 //!
 //! Simulation hooks exist only in test binaries. They cannot mint production
 //! readiness or install deterministic cryptographic entropy in a serving host.
@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{IntoUrl, blocking, header::HeaderMap};
 use serde::Serialize;
 use std::{
-    io::Read,
+    io::{Read, Write},
     net::SocketAddr,
     ops::{Add, Sub},
     time::Duration,
@@ -23,6 +23,44 @@ pub(crate) trait Hooks: Send + Sync {
     fn monotonic(&self) -> Duration;
     fn fill(&self, bytes: &mut [u8]) -> Result<()>;
     fn send(&self, request: blocking::Request) -> Result<Response>;
+    fn provider_observation(&self, data: super::shell_oidc::ProviderObservationData) -> Result<()>;
+    fn refresh_boundary(&self, _boundary: RefreshBoundary) {}
+}
+
+/// One fixed private operator record. It carries no authority and is emitted
+/// only by the existing admitted blocking request, never by an async logger.
+pub(super) fn provider_observation(data: super::shell_oidc::ProviderObservationData) -> Result<()> {
+    let mut line = serde_json::to_vec(&data)?;
+    ensure!(
+        line.len() < 1024 && line.is_ascii() && !line.contains(&b'\n') && !line.contains(&b'\r'),
+        "provider observation encoding refused"
+    );
+    line.push(b'\n');
+    #[cfg(test)]
+    if let Some(hooks) = HOOKS.with(|slot| slot.borrow().clone()) {
+        return hooks.provider_observation(data);
+    }
+    // One write_all invocation may internally continue short writes/EINTR. No
+    // second invocation follows its error; delivery never changes the refusal.
+    std::io::stderr().lock().write_all(&line)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshBoundary {
+    DispatchCommitted,
+    MaterialWritten,
+    PublicationCommitted,
+}
+
+/// A test process can terminate at the real durable boundaries. Serving builds
+/// have no hook and execute exactly the same transition without an observer.
+pub(super) fn refresh_boundary(boundary: RefreshBoundary) {
+    #[cfg(test)]
+    if let Some(hooks) = HOOKS.with(|slot| slot.borrow().clone()) {
+        hooks.refresh_boundary(boundary);
+    }
+    let _ = boundary;
 }
 
 #[cfg(test)]

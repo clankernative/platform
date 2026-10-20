@@ -8,6 +8,19 @@ The current Links proof of concept uses ordinary app-owned HTML/Jinja templates,
 CSS and native browser modules. Roc supplies typed query data and business
 commands, not a page-building DSL. See [UI-POC.md](UI-POC.md) for the file map.
 
+## Experimental request-time presentations
+
+An opt-in `ui_scene` call transforms current authorized query data through an
+independently approved bounded renderer, returning typed scene records for
+ordinary escaped templates. Declarations do not approve executable bytes;
+build-time UI assembly never runs on requests. Apps without declarations are
+unchanged.
+
+[RUNTIME-PRESENTATIONS.md](RUNTIME-PRESENTATIONS.md) defines the ABI, operator
+pin, ports, limits and failure behavior.
+[Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
+deterministic simulations, real adapters, builds and remaining browser/full gates.
+
 ## Live queries over SSE
 
 SSE is the platform transport for live frontend updates. A live page subscribes
@@ -362,6 +375,10 @@ references against the output, command and asset contracts, including included
 components and conditional branches. Undefined data and invalid rendered
 markup are rejected independently at runtime.
 
+`ui_key(field)` accepts scalar identity fields, including checked nominal `Ref(Model)`
+fields and typed loop items; constants, computed expressions and booleans are rejected.
+Normal output decoding still validates model prefixes and canonical UUIDv7 values.
+
 The supported template subset includes scalar field access, selected typed
 operators, `length`, `asset`, `if`, list `for` and literal includes, not full
 Jinja. Admission expands at most 256 structural variants and rejects larger
@@ -413,6 +430,26 @@ Formats 1 through 11 remain loadable for inspection, replay, and explicit operat
 recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
+
+## App contract export
+
+Export a normally built, admitted artifact as deterministic typed JSON:
+
+```console
+cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
+```
+
+Schema 1 includes commands, all registered queries, routes, forms, schedules and
+redirects. Query input/output schemas and route `contextKey` describe template
+bindings; shared context such as `company` is separate. Named view types are not
+derived (`viewType: null`, `viewTypes: {}`). Export is limited to 4 MiB and does
+not execute operations or grant authority.
+
+The output parent must be operator-owned with no concurrent namespace mutation.
+Publication is private and atomic; initially absent outputs are no-clobber,
+existing regular outputs are replaced without truncating a hardlinked inode.
+Native local-dev also writes `app-contracts.json`; use `--status` and match its
+served artifact and file digest. An export error is not a current contract file.
 
 ## Redirect Routes
 
@@ -593,18 +630,83 @@ declares the GoLinks shape and is exercised end to end at the edge by
 
 The required `App.definition.presentation` explicitly names stylesheet and script
 entries under `ui/`; empty strings mean absent. Modules can import other
-local admitted `.js` modules with relative paths. A Rust Oxc parser rejects bare,
+local admitted `.js` modules with relative paths. The one host import
+`/assets/platform/navigation.js` exposes `canonicalPageURL` and
+`createPageNavigation` from embedded platform bytes. It owns named-route query
+serialization and live-stream replacement; apps supply view-specific response
+checks and UI feedback. Its admitted regions exclude forms and editable controls
+so command drafts survive navigation. Other absolute imports remain forbidden.
+A Rust Oxc parser rejects bare,
 remote, computed, escaping and missing module imports; no npm, Node server or
 app build scripts run. The complete source graph and resource hashes are bound
 to the app artifact and verified again on load/serve. HTML templates and their
 include graph are separately admitted, hashed and rendered on the server;
-they are not browser module entrypoints. A general company library
-catalog is not implemented yet; Datastar is a fixed platform dependency.
+they are not browser module entrypoints. Datastar is a fixed platform dependency.
+
+### Optional UI assembly
+
+Clanker UI is a standard, build-only dependency of the Platform distribution.
+`xtask cli` executes the same `ops/UiDependency.roc` setup recipe locally and in
+the Linux tooling image: obtain the reviewed target archive, verify its pinned
+identity, extract a bounded regular-file closure, verify all package/tool/legal
+bytes, and publish the installation atomically. A verified existing installation
+requires no network. Corrupt installations fail closed rather than being silently
+replaced. `xtask bootstrap-ui` runs that recipe independently of rebuilding the CLI.
+
+The reviewed release catalog is `build-dependencies/clanker-ui.json`. This release
+supports Mac ARM64 and Linux x86-64; unsupported targets fail explicitly. The
+complete release, including notices and licenses, stays beside the builder under
+`cli/build-dependencies/`. Downloading the bundle is Platform setup, never app
+build automation. Ordinary app builds are offline and never install dependencies.
+
+`day2 platform ui-lock SOURCE` initializes a new app's `ui/ui.lock.json` from the
+installed package. It does not silently replace a different existing package pin.
+Schema 2 locks identify the provider and exact package name/version/digest/inputs;
+they contain no filesystem path. The app cannot nominate a download URL or an
+executable. Installing a trusted Platform distribution establishes approval of
+its catalog-pinned build tool. No provider environment override or separate UI
+provider configuration is needed. Apps without a UI lock do not invoke assembly.
+
+The host discovers the installed dependency, captures the locked closure, and
+translates the authored lock into the pinned compiler's private input contract.
+The temporary package path is host-owned. Admission verifies generated lock metadata
+separately as `ui-provider/input-lock`; the original schema-2 lock remains unchanged
+and content-addressed as app source. Assembly runs in that private snapshot, then
+the host independently admits the returned templates/resources.
+Installation builds capture and materialize the same complete
+verified dependency into their offline job, binding its identity to the builder
+and evidence. The v0.1.1 bundle also retains and verifies the chart worker,
+its presentation ABI 1 contract and legal closure. This does not authorize worker
+execution or add chart runtime support: matching host support and separate
+operator approval are still required. GoLinks does not request that worker.
+The assembly provider is never loaded while serving pages. App models,
+commands, routes and authorization remain app-owned; normal form, resource, CSP
+and runtime checks still apply.
+
+Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the released
+[protocol](https://github.com/clankernative/clanker-ui/blob/v0.1.1/docs/native-assembly-protocol.md)
+for the envelope and generic `ui_*` helpers. The distribution-approved executable is
+trusted operator tooling, not a hostile-code sandbox. The upstream v0.1.1 assets
+are unsigned; reviewed hashes identify exact bytes, not a claim of upstream
+signature verification. A Platform upgrade does not silently update app UI locks.
+
+The host loads an admitted `ui-package.js` component entry only when assembly
+recorded the approved provider executable in the artifact's source identity.
+Live refresh rechecks authority after rendering images and regions through the
+same sequence used by the seeded simulations.
+
+Query forms require explicit `value="true"` for Boolean checkboxes and reject
+controls omitted by disabled fieldsets. Controls in a disabled fieldset's first
+legend retain HTML's normal exception.
+Remote image hosts must also be safe CSP source tokens; URL-valid policy
+delimiters are rejected before an origin enters the document policy.
 
 CSS is parsed with cssparser. Layout, custom properties and responsive media
-queries are allowed. This first asset pipeline does not admit CSS `@import`,
-external fonts/images or non-fragment URL references. HTML images use checked
-`{{ asset('name') }}` references to the admitted app image catalog.
+queries are allowed. CSS `@import` and external CSS font/image URLs are rejected;
+local WOFF2 fonts require admitted resource closure. HTML images use checked
+`{{ asset('name') }}` references to the admitted app image catalog. A generic
+`ui_image` capability also checks credential-free HTTPS image sources and retains
+host-owned provenance and CSP checks; it does not fetch an image.
 Browser JS is ordinary native code, not a capability sandbox. CSP restricts script
 sources to the admitted app resource prefix and pinned platform Datastar file;
 `unsafe-eval` is necessary for Datastar expressions. Import admission is dependency
@@ -612,6 +714,45 @@ governance, not proof that app code cannot synthesize executable code.
 The new backend authority checks do not change that browser trust model. App
 scripts can submit commands allowed to the signed-in session; neither a ticket
 nor a valid Edit precondition proves a human intended the action.
+
+#### Upgrading an app UI lock
+
+Choose the reviewed Platform release whose `build-dependencies/clanker-ui.json`
+pins the desired Clanker package. Install that release through normal Platform
+setup and make the same builder available in CI before committing the app lock.
+Review the catalog's release, package version and package digest first; the
+builder supports exactly its bundled package, not an independently edited version.
+
+Start in the app repository with a clean Git working tree and a committed
+`ui/ui.lock.json`. The lock command only initializes a missing lock or confirms
+an identical one. To authorize a different pin, remove the old source lock and
+regenerate it with the selected Platform distribution:
+
+```console
+git status --short
+rm ui/ui.lock.json
+/path/to/reviewed-platform/cli/day2 platform ui-lock "$PWD"
+git diff -- ui/ui.lock.json
+```
+
+Review the schema, provider, package name/version/digest and complete per-file
+input closure. Do not hand-edit only the version or digest, copy dependency files
+into the app, or configure a provider override. Running `ui-lock` again with the
+same package confirms the pin without rewriting the file.
+
+Build and run the app's required verification using that same distribution:
+
+```console
+/path/to/reviewed-platform/cli/day2 platform build "$PWD"
+/path/to/reviewed-platform/cli/day2 platform check "$PWD"
+```
+
+Exercise the affected browser journeys separately, then commit the regenerated
+lock with any required template/style changes. Build and product checks do not
+establish browser interaction or visual conformance. If generation or review
+fails, `git restore -- ui/ui.lock.json` restores the previously committed source
+lock; select its matching Platform release before rebuilding. This procedure
+changes source inputs, not application data or the active installation.
 
 ## Three Asset Owners
 

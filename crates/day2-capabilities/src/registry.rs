@@ -140,6 +140,15 @@ providers! {
             GoogleDirectoryEnsureGroupMember => "google_directory.ensure_group_member.v1" (write),
         },
     },
+    WorkspaceDirectory {
+        kind: WorkspaceDirectory,
+        world: "workspace_directory.simulated.sqlite",
+        actions: {
+            WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read),
+            WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read),
+            WorkspaceDirectoryPage => "workspace_directory.page.v1" (read),
+        },
+    },
     // App-to-app delegation. The "provider" is another application in this same
     // instance, which is why it has no connection and no credential: there is
     // nothing to reach. It is a provider anyway because everything a delegated

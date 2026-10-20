@@ -623,7 +623,10 @@ impl View<'_> {
             ensure!(
                 !matches!(
                     record.fields[&field.name],
-                    Kind::OptionalText | Kind::InputShape { .. }
+                    Kind::OptionalText
+                        | Kind::OptionalInteger
+                        | Kind::OptionalUnsigned(_)
+                        | Kind::InputShape { .. }
                 ),
                 "unsupported_form_field"
             );
@@ -650,6 +653,7 @@ impl View<'_> {
             form_id: None,
             bound,
             editable: node.fields.iter().map(|field| field.name.clone()).collect(),
+            native: BTreeMap::new(),
             nonce: security::random(self.entropy)?,
             issued: self.now,
             expires: (self.now + 1800).min(self.session.expires),

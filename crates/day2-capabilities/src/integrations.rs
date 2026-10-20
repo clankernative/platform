@@ -77,12 +77,24 @@ pub enum LiveConnection {
         project_id: String,
         organization_id: Option<String>,
     },
+    /// Read-only Google Workspace Directory access through workload identity.
+    WorkspaceDirectory {
+        service_account: String,
+        auth: WorkspaceDirectoryAuth,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceDirectoryAuth {
+    DirectServiceAccount,
+    DomainWideDelegation { delegated_admin: String },
 }
 
 impl LiveConnection {
-    /// The outbound credential. Its connection variant determines how it is used:
+    /// The outbound credential, absent only when a provider uses workload identity.
     /// SlackWebhook authenticates in the reviewed URL, never a bearer header.
-    pub fn credential_ref(&self) -> &VersionRef {
+    pub fn credential_ref(&self) -> Option<&VersionRef> {
         match self {
             Self::SlackWebhook { credential_ref }
             | Self::Slack { credential_ref, .. }
@@ -91,7 +103,8 @@ impl LiveConnection {
             | Self::LinearWork { credential_ref, .. }
             | Self::GitHubActions { credential_ref, .. }
             | Self::GiteaActions { credential_ref, .. }
-            | Self::OpenAi { credential_ref, .. } => credential_ref,
+            | Self::OpenAi { credential_ref, .. } => Some(credential_ref),
+            Self::WorkspaceDirectory { .. } => None,
         }
     }
 
@@ -110,7 +123,8 @@ impl LiveConnection {
             | Self::OpenAi { .. }
             | Self::ObjectStore { .. }
             | Self::LinearWork { .. }
-            | Self::GitHubActions { .. } => None,
+            | Self::GitHubActions { .. }
+            | Self::WorkspaceDirectory { .. } => None,
         }
     }
 
@@ -125,6 +139,7 @@ impl LiveConnection {
     /// thing is a secret.
     pub fn credential_refs(&self) -> Vec<&VersionRef> {
         match self {
+            Self::WorkspaceDirectory { .. } => vec![],
             Self::SlackWebhook { credential_ref } => vec![credential_ref],
             Self::Slack {
                 credential_ref,
@@ -281,6 +296,16 @@ impl LiveConnection {
                     !organization_id.trim().is_empty() && organization_id.len() <= 256,
                     "invalid_linear_organization"
                 );
+                Ok(())
+            }
+            Self::WorkspaceDirectory {
+                service_account,
+                auth,
+            } => {
+                workspace_service_account(service_account)?;
+                if let WorkspaceDirectoryAuth::DomainWideDelegation { delegated_admin } = auth {
+                    workspace_email(delegated_admin)?;
+                }
                 Ok(())
             }
             Self::OpenAi {
@@ -471,6 +496,37 @@ impl OpenAiText {
             .ok_or_else(|| anyhow::anyhow!("model_cost_overflow"))?;
         u64::try_from(nanos.div_ceil(1000)).map_err(|_| anyhow::anyhow!("model_cost_overflow"))
     }
+}
+
+fn workspace_service_account(value: &str) -> Result<()> {
+    ensure!(
+        value.len() <= 320
+            && value.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty()
+                    && !local.contains('@')
+                    && domain.ends_with(".iam.gserviceaccount.com")
+                    && domain.len() > ".iam.gserviceaccount.com".len()
+            })
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@._-".contains(&byte)),
+        "invalid_workspace_service_account"
+    );
+    Ok(())
+}
+
+fn workspace_email(value: &str) -> Result<()> {
+    ensure!(
+        value.len() <= 320
+            && value.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty() && !local.contains('@') && domain.contains('.')
+            })
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@._+-".contains(&byte)),
+        "invalid_workspace_delegated_admin"
+    );
+    Ok(())
 }
 
 fn identifier(value: &str, max: usize) -> Result<()> {

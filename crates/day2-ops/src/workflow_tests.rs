@@ -7,6 +7,94 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[test]
+fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
+    let mut effects = Vec::new();
+    let receipt = automation::run(
+        &automation::runner()?,
+        &["platform", "ui-lock", "fixture-source"],
+        |request| {
+            effects.push(request.action.clone());
+            assert_eq!(
+                request.decode::<Value>()?,
+                json!({"source":"fixture-source"})
+            );
+            Ok(json!({"fixture":true}))
+        },
+    )?;
+    assert_eq!(effects, ["ui-lock"]);
+    assert_eq!(receipt, json!({"fixture":true}));
+    Ok(())
+}
+
+#[test]
+fn bundled_ui_recipe_uses_verified_installation_without_network() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        assert_eq!(request.decode::<Value>()?, json!({}));
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": true})
+        } else {
+            json!({"verified": true})
+        })
+    })?;
+    assert_eq!(effects, ["ui-dependency-inspect", "ui-dependency-receipt"]);
+    Ok(())
+}
+
+#[test]
+fn bundled_ui_recipe_verifies_before_atomic_publication() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": false})
+        } else {
+            json!({})
+        })
+    })?;
+    assert_eq!(
+        effects,
+        [
+            "ui-dependency-inspect",
+            "ui-dependency-fetch",
+            "ui-dependency-extract",
+            "ui-dependency-verify",
+            "ui-dependency-publish",
+            "ui-dependency-receipt",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_ui_dependency_never_reaches_publication() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(&automation::runner()?, &["ui-dependency"], |request| {
+        effects.push(request.action.clone());
+        if request.action == "ui-dependency-verify" {
+            bail!("injected bundle digest rejection");
+        }
+        Ok(if request.action == "ui-dependency-inspect" {
+            json!({"installed": false})
+        } else {
+            json!({})
+        })
+    });
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("injected bundle digest rejection")
+    );
+    assert_eq!(
+        effects.last().map(String::as_str),
+        Some("ui-dependency-verify")
+    );
+    Ok(())
+}
+
+#[test]
 fn stale_or_modified_workflow_executables_are_rejected() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let original = automation::runner()?;
@@ -71,8 +159,8 @@ fn roc_selects_one_example_and_stops_before_command_drain_when_replay_fails() ->
             effects.push(request.action.clone());
             match request.action.as_str() {
                 "dev-examples" => Ok(json!([
-                    {"name":"ignored","error":"","steps":[{"operation":"must_not_run","input":"{}"}]},
-                    {"name":"chosen","error":"","steps":[{"operation":"submit","input":"{}"}]}
+                    {"name":"ignored","error":"","steps":[{"kind":"command","operation":"must_not_run","payload":"{}"}]},
+                    {"name":"chosen","error":"","steps":[{"kind":"command","operation":"submit","payload":"{}"}]}
                 ])),
                 "dev-example" => {
                     assert_eq!(request.decode::<Value>()?["name"], "chosen");
@@ -97,6 +185,79 @@ fn roc_selects_one_example_and_stops_before_command_drain_when_replay_fails() ->
 }
 
 #[test]
+fn generated_example_is_prepared_at_its_ordered_stage_before_shared_checks() -> Result<()> {
+    let mut actions = Vec::new();
+    let mut invoked = Vec::new();
+    let mut current_snapshot = "empty".to_owned();
+    automation::run(
+        &automation::runner()?,
+        &["exercise", "chosen", "0"],
+        |request| {
+            actions.push(request.action.clone());
+            match request.action.as_str() {
+                "dev-examples" => Ok(json!([{
+                    "name":"chosen",
+                    "error":"",
+                    "steps":[
+                        {"kind":"command","operation":"create","payload":"{}"},
+                        {"kind":"generated","operation":"add","payload":"0"}
+                    ]
+                }])),
+                "dev-example" => Ok(json!({})),
+                "dev-prepare-example" => {
+                    assert_eq!(
+                        actions.get(actions.len() - 2).map(String::as_str),
+                        Some("dev-step-complete")
+                    );
+                    assert_eq!(current_snapshot, "space-created");
+                    Ok(json!({
+                        "kind":"command",
+                        "operation":"add",
+                        "payload":format!(r#"{{"space":"{current_snapshot}"}}"#)
+                    }))
+                }
+                "dev-invoke" => {
+                    let input: Value = request.decode()?;
+                    assert_eq!(input["kind"], "command");
+                    match input["operation"].as_str().unwrap() {
+                        "create" => current_snapshot = "space-created".into(),
+                        "add" => assert_eq!(input["payload"], r#"{"space":"space-created"}"#),
+                        operation => panic!("unexpected generated example operation: {operation}"),
+                    }
+                    invoked.push(input["operation"].as_str().unwrap().to_owned());
+                    Ok(json!({}))
+                }
+                _ => Ok(json!({})),
+            }
+        },
+    )?;
+    assert_eq!(invoked, ["create", "add"]);
+    let prepared = actions
+        .iter()
+        .position(|action| action == "dev-prepare-example")
+        .unwrap();
+    let invoked = actions
+        .iter()
+        .rposition(|action| action == "dev-invoke")
+        .unwrap();
+    assert_eq!(invoked, prepared + 1);
+    assert_eq!(
+        &actions[invoked + 1..invoked + 9],
+        [
+            "dev-assert",
+            "dev-replay",
+            "dev-duplicate",
+            "dev-invalid",
+            "dev-properties",
+            "dev-drain",
+            "dev-properties",
+            "dev-step-complete",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn generated_cases_use_the_same_checks_as_examples_and_empty_apps_are_explicit() -> Result<()> {
     for count in [0, 3] {
         let mut invoked = Vec::new();
@@ -110,8 +271,8 @@ fn generated_cases_use_the_same_checks_as_examples_and_empty_apps_are_explicit()
                 match request.action.as_str() {
                 "dev-examples" => Ok(json!([])),
                 "dev-samples" => Ok(json!((0..count).map(|index| json!({"generator":"reports","operation":"submit","seed":index.to_string(),"input":format!("{{\"index\":{index}}}"),"error":""})).collect::<Vec<_>>())),
-                "dev-prepare-sample" => Ok(json!({"operation":"submit","input":format!("{{\"index\":{}}}", invoked.len())})),
-                "dev-invoke" => { invoked.push(request.decode::<Value>()?["input"].clone()); Ok(json!({})) }
+                "dev-prepare-sample" => Ok(json!({"kind":"command","operation":"submit","payload":format!("{{\"index\":{}}}", invoked.len())})),
+                "dev-invoke" => { invoked.push(request.decode::<Value>()?["payload"].clone()); Ok(json!({})) }
                 "dev-replay" => { replayed += 1; Ok(json!({})) }
                 "dev-properties" => { properties += 1; Ok(json!({})) }
                 "dev-finish" => { finished = true; Ok(json!({})) }

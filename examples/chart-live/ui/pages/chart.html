@@ -1,0 +1,61 @@
+<header class="chart-header">
+  <p class="eyebrow">Clanker Native · request-time chart</p>
+  <h1>Current data. Server-rendered.</h1>
+  <p>A Roc query reads your persisted samples. ECharts renders the current values on the server. No browser chart engine.</p>
+</header>
+<nav class="range-presets" aria-label="Chart ranges">
+  <a href="{{ routes.chart(start=chart.full_start, end=chart.full_end) }}" data-chart-navigation>Full range · 1–8 Jan</a>
+  <a href="{{ routes.chart(start=1735862400000, end=1736208000000) }}" data-chart-navigation>Focused range · 3–7 Jan</a>
+</nav>
+<form id="chart-range" class="range-form" data-page="chart" data-default-start="{{ chart.full_start }}" data-default-end="{{ chart.full_end }}">
+  <label for="range-start">Start · UTC epoch milliseconds</label>
+  <input id="range-start" name="start" type="number" step="1" min="0" max="4102444800000" value="{{ chart.chart.start }}" required>
+  <label for="range-end">End · exclusive UTC epoch milliseconds</label>
+  <input id="range-end" name="end" type="number" step="1" min="1" max="4102444800001" value="{{ chart.chart.end }}" required>
+  <button type="submit">Apply range</button>
+</form>
+<p id="chart-request-status" class="muted" role="status" aria-live="polite">Range changes request fresh authorized data. Gaps are not zero values.</p>
+<section id="chart-region" data-live data-start="{{ chart.chart.start }}" data-end="{{ chart.chart.end }}">
+  <cui-chart id="sample-chart" data="{{ chart.chart }}" label="Current samples · values · UTC" enhance="true" />
+</section>
+<section id="sample-revisions" data-live aria-label="Current sample revisions">
+  <h2>Persisted sample revisions</h2>
+  <p class="muted">Use these current timestamps and versions to revise a sample. All operations remain actor-scoped.</p>
+  <div class="table-scroll"><table>
+    <caption>Current records in the selected range</caption>
+    <thead><tr><th scope="col">Timestamp · UTC epoch ms</th><th scope="col">Row version</th><th scope="col">Value</th></tr></thead>
+    <tbody>{% for edit in chart.sample_edits.items %}<tr><td>{{ edit.sample_time }}</td><td>{{ edit.expected_version }}</td><td>{% if edit.missing %}Missing{% else %}{{ edit.value }}{% endif %}</td></tr>{% else %}<tr><td colspan="3">No persisted samples in this interval.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+<section id="sample-commands">
+  <h2>Change the data—not the build</h2>
+  <p class="muted">These are normal app commands. A successful write refreshes the chart through Native live updates. Rejected writes keep your draft.</p>
+  <div class="command-grid">
+    <form id="append-sample" data-command="chart_live.append_sample">
+      <h3>Add a sample</h3>
+      <label for="append-time">Timestamp · UTC epoch milliseconds</label>
+      <input id="append-time" name="time" type="number" step="1" min="0" max="4102444800000" aria-describedby="append-time-hint" required>
+      <p id="append-time-hint" class="muted">Choose an unused timestamp. For example, 1736121600000 is 6 Jan 2025 at 00:00 UTC. A sample outside the selected range is saved but will not appear in that chart.</p>
+      <label for="append-value">Value · 0 to 100</label>
+      <input id="append-value" name="value" type="number" step="1" min="0" max="100" value="0" required>
+      <label class="check" for="append-missing"><input id="append-missing" name="missing" type="checkbox" value="true">Mark as missing (not zero)</label>
+      <button type="submit">Add persisted sample</button>
+    </form>
+    <form id="update-sample" data-command="chart_live.update_sample">
+      <h3>Revise a sample</h3>
+      <label for="update-time">Timestamp · UTC epoch milliseconds</label>
+      <input id="update-time" name="sample_time" type="number" step="1" min="0" max="4102444800000" value="1735689600000" required>
+      <label for="update-version">Expected row version</label>
+      <input id="update-version" name="expected_version" type="number" step="1" min="1" value="1" required>
+      <label for="update-value">Value · 0 to 100</label>
+      <input id="update-value" name="value" type="number" step="1" min="0" max="100" value="0" required>
+      <label class="check" for="update-missing"><input id="update-missing" name="missing" type="checkbox" value="true">Mark as missing (not zero)</label>
+      <button type="submit">Revise persisted sample</button>
+    </form>
+  </div>
+</section>
+<dialog id="sample-dialog" aria-labelledby="sample-dialog-title">
+  <h2 id="sample-dialog-title">Sample details</h2>
+  <p id="sample-dialog-values"></p>
+  <button type="button" id="sample-dialog-close">Close</button>
+</dialog>

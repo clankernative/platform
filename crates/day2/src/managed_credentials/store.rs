@@ -405,47 +405,16 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             materialize(row)?;
-            let confirmation: super::issuance::Confirmation =
-                crate::json::decode(row.get_ref(1)?.as_str()?.as_bytes())?;
-            ensure!(
-                confirmation.invocation == row.get_ref(0)?.as_str()?,
-                "invalid restored credential confirmation identity"
-            );
-            for value in [
-                &confirmation.invocation,
-                &confirmation.operation,
-                &confirmation.session,
-                &confirmation.family,
-            ] {
-                validate_id(value)?;
-            }
-            crate::authority::valid_actor(&confirmation.actor)?;
-            ensure!(
-                !confirmation.subject.is_empty()
-                    && confirmation.subject.len() <= 256
-                    && confirmation
-                        .subject
-                        .bytes()
-                        .all(|byte| byte.is_ascii_graphic()),
-                "invalid restored credential confirmation subject"
-            );
-            Digest::try_from(confirmation.artifact.clone())?;
-            Digest::try_from(confirmation.authority.epoch.clone())?;
-            ensure!(
-                confirmation.security_epoch > 0
-                    && confirmation.authority.revision > 0
-                    && confirmation.input.is_object()
-                    && confirmation.authenticated_at >= 0
-                    && confirmation.authenticated_at <= confirmation.approved_at
-                    && confirmation.approved_at < confirmation.expires_at
-                    && confirmation
-                        .expires_at
-                        .checked_sub(confirmation.authenticated_at)
-                        .is_some_and(|seconds| seconds <= 300),
-                "invalid restored credential confirmation authority or time"
-            );
-            validate_restored_intent(&confirmation.intent, &confirmation.family)?;
+            let record = super::issuance::decode_record(
+                row.get_ref(0)?.as_str()?,
+                row.get_ref(1)?.as_str()?.as_bytes(),
+            )?;
+            let confirmation = &record.confirmation;
             if let Some(navigation) = pending.get(&confirmation.invocation) {
+                let super::issuance::ConfirmationOrigin::Credential(original) = &record.original
+                else {
+                    anyhow::bail!("restored credential navigation requires genuine context");
+                };
                 ensure!(
                     confirmation.operation == navigation.operation
                         && confirmation.actor == navigation.actor
@@ -456,7 +425,11 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
                         && confirmation.authority == navigation.authority
                         && confirmation.binding == navigation.binding
                         && confirmation.authenticated_at > navigation.created_at
-                        && confirmation.expires_at <= navigation.expires_at,
+                        && confirmation.expires_at <= navigation.expires_at
+                        && original.attempt == navigation.attempt
+                        && original.pending_challenge == navigation.challenge()?
+                        && original.pending_created_at == navigation.created_at
+                        && original.pending_expires_at == navigation.expires_at,
                     "restored credential confirmation changed navigation intent"
                 );
             }
@@ -468,7 +441,10 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn validate_restored_intent(intent: &super::lifecycle::Intent, family: &str) -> Result<()> {
+pub(super) fn validate_restored_intent(
+    intent: &super::lifecycle::Intent,
+    family: &str,
+) -> Result<()> {
     use super::lifecycle::Intent;
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let reference = |value: &str| -> Result<()> {
@@ -2105,7 +2081,7 @@ fn random_id() -> Result<String> {
     super::effects::record_id()
 }
 
-fn validate_id(value: &str) -> Result<()> {
+pub(super) fn validate_id(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
             && value.len() <= 160
@@ -3105,6 +3081,26 @@ mod tests {
             approved_at: 102,
             expires_at: 400,
         };
+        // Explicit synthetic restore DATA: it is never an authentication proof.
+        let original = super::super::issuance::ConfirmationOrigin::Credential(
+            crate::oauth::fresh_auth::CredentialContextData {
+                purpose: crate::oauth::fresh_auth::CredentialContextPurpose::CredentialIntent,
+                scope: "localdev/disposable/app".into(),
+                app: "app".into(),
+                artifact: navigation.artifact.clone(),
+                app_origin: "https://app.example.com".into(),
+                shell_origin: "https://shell.example.com".into(),
+                attempt: navigation.attempt.clone(),
+                pending_challenge: navigation.challenge()?,
+                human: navigation.actor.clone(),
+                subject: confirmation.subject.clone(),
+                pending_created_at: navigation.created_at,
+                pending_expires_at: navigation.expires_at,
+                authenticated_at: confirmation.authenticated_at,
+                proof_deadline: 400,
+            },
+        );
+        let raw = super::super::issuance::encode_record(confirmation, original)?;
         db.execute(
             "INSERT INTO day2_credential_browser VALUES(?1,?2,?3,?4)",
             params![
@@ -3115,11 +3111,8 @@ mod tests {
             ],
         )?;
         db.execute(
-            "INSERT INTO day2_credential_confirmations VALUES(?1,?2)",
-            params![
-                confirmation.invocation,
-                serde_json::to_string(&confirmation)?
-            ],
+            "INSERT INTO day2_credential_confirmations (invocation,confirmation) VALUES(?1,?2)",
+            params![navigation.invocation, raw],
         )?;
         Ok(db)
     }
@@ -3154,7 +3147,13 @@ mod tests {
                 |row| row.get(0),
             )?;
             let mut changed: serde_json::Value = crate::json::decode(raw.as_bytes())?;
-            changed.as_object_mut().unwrap().insert(field.into(), value);
+            changed["confirmation"]
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), value);
+            if field != "unexpected" {
+                super::super::issuance::rehash_fixture_value(&mut changed)?;
+            }
             let changed = changed.to_string();
             candidate.execute(
                 "UPDATE day2_credential_confirmations SET confirmation=?1",
@@ -3236,14 +3235,19 @@ mod tests {
                 changed["expires_at"] = serde_json::json!(290);
                 db.execute("UPDATE day2_credential_browser SET expires_at=290", [])?;
             } else {
-                changed["authenticated_at"] = serde_json::json!(-1);
-                changed["approved_at"] = serde_json::json!(0);
-                changed["expires_at"] = serde_json::json!(299);
+                changed["confirmation"]["authenticated_at"] = serde_json::json!(-1);
+                changed["confirmation"]["approved_at"] = serde_json::json!(0);
+                changed["confirmation"]["expires_at"] = serde_json::json!(299);
+                super::super::issuance::rehash_fixture_value(&mut changed)?;
             }
             let changed = changed.to_string();
             db.execute(&format!("UPDATE {table} SET {column}=?1"), [&changed])?;
             let error = install_schema(&db).unwrap_err();
-            assert!(format!("{error:#}").contains("time"));
+            assert!(format!("{error:#}").contains(if navigation {
+                "time"
+            } else {
+                "invalid credential confirmation record"
+            }));
             assert_eq!(
                 db.query_row(
                     "SELECT version FROM day2_credential_schema_version",
@@ -3277,8 +3281,22 @@ mod tests {
                     row.get(0)
                 })?;
             let mut changed: serde_json::Value = crate::json::decode(raw.as_bytes())?;
-            changed["family"] = family.into();
-            changed["intent"] = serde_json::to_value(intent)?;
+            if table == "day2_credential_browser" {
+                changed["family"] = family.into();
+                changed["intent"] = serde_json::to_value(intent)?;
+            } else {
+                changed["confirmation"]["family"] = family.into();
+                changed["confirmation"]["intent"] = serde_json::to_value(intent)?;
+                let pending: super::super::browser::Pending = crate::json::decode(
+                    db.query_row("SELECT intent FROM day2_credential_browser", [], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .as_bytes(),
+                )?;
+                changed["original"]["context"]["pending_challenge"] =
+                    serde_json::to_value(pending.challenge()?)?;
+                super::super::issuance::rehash_fixture_value(&mut changed)?;
+            }
             db.execute(
                 &format!("UPDATE {table} SET {column}=?1"),
                 [changed.to_string()],
@@ -3383,6 +3401,32 @@ mod tests {
 
     #[test]
     fn schema_native_runtime_initialization_reopens_with_installed_peers() -> Result<()> {
+        fn assert_fresh_owner_unit(runtime: &crate::store::Runtime) -> Result<()> {
+            let db = crate::store::open(runtime.db())?;
+            assert_eq!(
+                db.query_row(
+                    "SELECT version FROM native_fresh_schema_version",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )?,
+                1
+            );
+            for guard in [
+                "native_fresh_owners_shape_INSERT_v1",
+                "native_fresh_owners_shape_UPDATE_v1",
+            ] {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                        [guard],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    1
+                );
+            }
+            Ok(())
+        }
+
         let artifact=std::path::PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
             .context("build credential-metadata-conformance and set DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")?);
         let directory = tempfile::tempdir()?;
@@ -3393,8 +3437,10 @@ mod tests {
             "alice@example.com",
         )?;
         runtime.initialize()?;
+        assert_fresh_owner_unit(&runtime)?;
         let reopened = crate::store::Runtime::load(runtime.instance_path(), runtime.app())?;
         reopened.initialize()?;
+        assert_fresh_owner_unit(&reopened)?;
         let db = crate::store::open(reopened.db())?;
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('day2_credential_browser','day2_credential_confirmations','day2_credential_origins')",[],|row| row.get::<_,i64>(0))?,3);
         Ok(())

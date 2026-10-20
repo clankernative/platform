@@ -106,7 +106,7 @@ Move :: [].{
 
 	verify_input : Str, U64 -> Try(MoveTypes.Input, Str)
 	verify_input = |snapshot, _seed| {
-		state = Data.snapshot(snapshot)?
+		state = Data.verification_snapshot(snapshot)?.live
 		deal = state.deals.first().map_err(|_| "initialize a deal first")?
 		target = state.stages.find_first(|stage| stage.id != deal.value.stage_id).map_err(|_| "missing other stage")?
 		Ok({ deal_id: deal.id, target_stage_id: target.id, expected_version: deal.version })
@@ -114,8 +114,8 @@ Move :: [].{
 
 	verify_result : Str, DealView.Saved, Str -> Try(Bool, Str)
 	verify_result = |before, saved, after| {
-		old = Data.snapshot(before)?
-		next = Data.snapshot(after)?
+		old = Data.verification_snapshot(before)?.live
+		next = Data.verification_snapshot(after)?.live
 		deal = old.deals.find_first(|row| row.id == saved.id).map_err(|_| "missing previous deal")?
 		row = next.deals.find_first(|item| item.id == saved.id).map_err(|_| "missing moved deal")?
 		Ok(

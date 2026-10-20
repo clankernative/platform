@@ -1,7 +1,7 @@
 use crate::{
     audit::Filter,
     digest,
-    host_inputs::{Clock, Entropy, LiveTicks, SecureEntropy, SystemClock, TokioTicks},
+    host_inputs::{Clock, Entropy, LiveTicks},
     store::{Fault, Runtime, open},
     web_assets::Appearance,
     web_html::{self as view, document, icon},
@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use maud::{Markup, html};
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -70,6 +71,56 @@ struct Notice<'a> {
     invocation: &'a str,
     operation: &'a str,
 }
+fn accepted_page_acknowledgement(
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    rejection: &PageOutcomeFailure,
+    reload: &str,
+) -> Markup {
+    let message = match status {
+        StatusCode::OK => "Saved. The page could not be refreshed.",
+        StatusCode::ACCEPTED => {
+            "Accepted. This is still finishing; the page could not be refreshed."
+        }
+        _ => unreachable!("only accepted commands receive a fallback acknowledgement"),
+    };
+    html! { main id="day2-main"
+        data-day2-invocation=(invocation)
+        data-day2-operation=(operation)
+        data-day2-status=(if status == StatusCode::ACCEPTED { "pending" } else { "success" }) {
+        div id="day2-command-status" {
+            div class="notice" role="status" {
+                p { (message) }
+                p { (&rejection.message) }
+                p { a href=(reload) { "Reload page" } " before making another change." }
+                p { "Receipt: " code { @for character in invocation.chars() { (character) wbr; } } }
+            }
+        }
+    } }
+}
+
+fn page_content_or_acknowledgement(
+    rendered: Result<Markup>,
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    reload: &str,
+) -> Result<Markup> {
+    match rendered {
+        Ok(content) => Ok(content),
+        Err(error) if matches!(status, StatusCode::OK | StatusCode::ACCEPTED) => {
+            match error.downcast::<PageOutcomeFailure>() {
+                Ok(rejection) => Ok(accepted_page_acknowledgement(
+                    status, invocation, operation, &rejection, reload,
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
@@ -86,6 +137,7 @@ struct Host {
     cookie_name: String,
     secret: Vec<u8>,
     sign_in: SignIn,
+    presentation: Option<Arc<dyn crate::presentation::Port>>,
     capacity: Arc<Semaphore>,
     /// Issuance must make progress while the originating query holds its own
     /// request permit. Keep this separately bounded from browser admission.
@@ -106,6 +158,18 @@ pub struct LocalServer {
     pub login_url: String,
 }
 
+enum PresentationSource {
+    Environment,
+    #[cfg(test)]
+    Test(Arc<dyn crate::presentation::Port>),
+}
+
+struct ListenerOptions {
+    concurrency: usize,
+    health_endpoints: bool,
+    presentation: PresentationSource,
+}
+
 pub(crate) struct Admission(Arc<AtomicBool>);
 
 impl Admission {
@@ -113,20 +177,6 @@ impl Admission {
         self.0.store(false, Ordering::Release);
     }
 }
-/// How often the occurrence source looks for work. This is not the schedule
-/// interval: occurrences are derived from the clock, so this only bounds how late
-/// a run can start, never whether it happens. The shortest interval an application
-/// may declare is a minute, so looking every ten seconds is frequent enough to keep
-/// lateness small and rare enough to cost two indexed lookups per schedule.
-const SCHEDULE_TICK: Duration = Duration::from_secs(10);
-
-/// How often the journal is compacted, and how much one pass may do. Each batch is
-/// its own short write transaction, so requests queue behind at most one batch; a
-/// backlog larger than one pass drains over the following minutes.
-const JOURNAL_TICK: Duration = Duration::from_secs(60);
-const JOURNAL_BATCH: usize = 500;
-const JOURNAL_BATCHES_PER_TICK: usize = 20;
-
 /// A loopback documentation preview with no sessions or business API dispatcher.
 pub async fn serve_docs_preview(
     artifact: crate::artifact::LoadedArtifact,
@@ -299,8 +349,11 @@ impl LocalServer {
             edge.authority().into(),
             edge.origin.clone(),
             SignIn::Edge(verifier),
-            concurrency,
-            true,
+            ListenerOptions {
+                concurrency,
+                health_endpoints: true,
+                presentation: PresentationSource::Environment,
+            },
         )
     }
 
@@ -322,15 +375,19 @@ impl LocalServer {
             crate::error::Failure::Forbidden
         );
         let origin = format!("http://{authority}");
-        let (grant, token) = Grant::issue(actor, &SecureEntropy, &SystemClock::new())?;
+        let inputs = runtime.inputs();
+        let (grant, token) = Grant::issue(actor, inputs.entropy.as_ref(), inputs.clock.as_ref())?;
         let mut server = Self::bind_listener(
             runtime,
             listener,
             authority,
             origin.clone(),
             SignIn::Link(Mutex::new(Some(grant))),
-            concurrency,
-            health_endpoints,
+            ListenerOptions {
+                concurrency,
+                health_endpoints,
+                presentation: PresentationSource::Environment,
+            },
         )?;
         server.login_url = format!("{origin}/login?token={token}");
         Ok(server)
@@ -342,8 +399,7 @@ impl LocalServer {
         authority: String,
         origin: String,
         sign_in: SignIn,
-        concurrency: usize,
-        health_endpoints: bool,
+        options: ListenerOptions,
     ) -> Result<Self> {
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
@@ -357,13 +413,24 @@ impl LocalServer {
         } else {
             ""
         };
-        let entropy: Arc<dyn Entropy> = Arc::new(SecureEntropy);
+        let inputs = runtime.inputs().clone();
+        let entropy = inputs.entropy.clone();
+        let declarations =
+            crate::web_templates::presentation_catalog(&runtime.artifact().contract().templates)?;
+        let presentation = match options.presentation {
+            PresentationSource::Environment => {
+                crate::presentation::load_environment(&declarations)?
+            }
+            #[cfg(test)]
+            PresentationSource::Test(port) => Some(port),
+        };
         let host = Arc::new(Host {
             entropy: entropy.clone(),
-            clock: Arc::new(SystemClock::new()),
-            live_ticks: Arc::new(TokioTicks),
+            clock: inputs.clock.clone(),
+            live_ticks: inputs.live_ticks.clone(),
             oauth: None,
             credential_effects: crate::managed_credentials::effects::capture(),
+            presentation,
             api,
             routes: (runtime.artifact().contract().format >= 7)
                 .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
@@ -380,7 +447,7 @@ impl LocalServer {
             authority,
             origin: origin.clone(),
             sign_in,
-            capacity: Arc::new(Semaphore::new(concurrency)),
+            capacity: Arc::new(Semaphore::new(options.concurrency)),
             app_capacity: Arc::new(Semaphore::new(16)),
             app_issue_capacity: Arc::new(Semaphore::new(4)),
             app_execute_capacity: Arc::new(Semaphore::new(6)),
@@ -388,7 +455,7 @@ impl LocalServer {
             queued: std::sync::atomic::AtomicUsize::new(0),
             live_capacity: Arc::new(Semaphore::new(64)),
             admitting: Arc::new(AtomicBool::new(true)),
-            health_endpoints,
+            health_endpoints: options.health_endpoints,
         });
         Ok(Self {
             listener,
@@ -417,137 +484,31 @@ impl LocalServer {
         Ok(())
     }
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-        let runtime = self.host.runtime.clone();
-        let (stop, mut stopped) = tokio::sync::watch::channel(false);
-        let commands = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(200));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = stopped.changed() => break,
-                    _ = interval.tick() => {
-                        let runtime = runtime.clone();
-                        match tokio::task::spawn_blocking(move || crate::invocations::drain(&runtime, 8)).await {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(error)) => eprintln!("command_scheduler_tick_failed {}", crate::error::diagnostic(&error)),
-                            Err(_) => eprintln!("command_scheduler_task_failed"),
-                        }
-                    }
-                }
-            }
-        });
-        // Only applications that declare a schedule get an occurrence source.
-        let declared = !self.host.runtime.artifact().contract().schedules.is_empty();
-        let scheduled = declared.then(|| {
-            let runtime = self.host.runtime.clone();
-            let clock = self.host.clock.clone();
-            let mut stopped = stop.subscribe();
-            tokio::spawn(async move {
-                // A refusal is a condition, not an event: an unbound schedule is
-                // still unbound on the next tick. Report each one when it changes,
-                // so a stuck schedule is visible without a line every ten seconds.
-                let mut reported = crate::schedules::Refusals::default();
-                let mut interval = tokio::time::interval(SCHEDULE_TICK);
-                // A tick missed under load is skipped rather than replayed: the
-                // occurrence it would have found is still derived from the clock on
-                // the next one, so catching up here would only duplicate work.
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = stopped.changed() => break,
-                        _ = interval.tick() => {
-                            let runtime = runtime.clone();
-                            let clock = clock.clone();
-                            let ticked = tokio::task::spawn_blocking(move || {
-                                crate::schedules::tick(&runtime, clock.wall_time()?.as_millis().try_into()?)
-                            })
-                            .await;
-                            match ticked {
-                                Ok(Ok(ticks)) => {
-                                    for tick in ticks {
-                                        // A refusal is reported once, where it happens.
-                                        // A schedule that silently does nothing cannot be
-                                        // told from one that is working.
-                                        if reported.should_report(
-                                            &tick.schedule,
-                                            tick.skipped.as_ref(),
-                                        ) {
-                                            eprintln!(
-                                                "schedule_not_offered {} {:?}",
-                                                tick.schedule,
-                                                tick.skipped
-                                            );
-                                        }
-                                        for (occurrence, outcome) in tick.offered {
-                                            if outcome.status == "failure" {
-                                                eprintln!(
-                                                    "schedule_run_failed {} {occurrence} {}",
-                                                    tick.schedule, outcome.error
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(Err(error)) => eprintln!(
-                                    "schedule_source_tick_failed {}",
-                                    crate::error::diagnostic(&error)
-                                ),
-                                Err(_) => eprintln!("schedule_source_task_failed"),
-                            }
-                        }
-                    }
-                }
-            })
-        });
-        let journal = {
-            let runtime = self.host.runtime.clone();
-            let clock = self.host.clock.clone();
-            let mut stopped = stop.subscribe();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(JOURNAL_TICK);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = stopped.changed() => break,
-                        _ = interval.tick() => {
-                            let runtime = runtime.clone();
-                            let clock = clock.clone();
-                            let compacted = tokio::task::spawn_blocking(move || -> Result<()> {
-                                for _ in 0..JOURNAL_BATCHES_PER_TICK {
-                                    if crate::journal::compact(&runtime, clock.wall_time()?.as_secs().try_into()?, JOURNAL_BATCH)? < JOURNAL_BATCH {
-                                        break;
-                                    }
-                                }
-                                Ok(())
-                            })
-                            .await;
-                            match compacted {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => eprintln!(
-                                    "journal_compaction_failed {}",
-                                    crate::error::diagnostic(&error)
-                                ),
-                                Err(_) => eprintln!("journal_compaction_task_failed"),
-                            }
-                        }
-                    }
-                }
-            })
-        };
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let background = tokio::spawn(crate::host_loop::run(
+            self.host.runtime.clone(),
+            self.host.clock.clone(),
+            self.host.live_ticks.clone(),
+            self.host.admitting.clone(),
+            stopped,
+        ));
         let admitting = self.host.admitting.clone();
+        let shutdown_admission = admitting.clone();
+        let shutdown_stop = stop.clone();
         let router = Router::new().fallback(handle).with_state(self.host);
         let result = axum::serve(self.listener, router)
             .with_graceful_shutdown(async move {
                 shutdown.await;
-                admitting.store(false, Ordering::Release);
+                shutdown_admission.store(false, Ordering::Release);
+                let _ = shutdown_stop.send(true);
             })
             .await;
+        // Also stop after an unexpected server exit. Already admitted requests
+        // and blocking native calls may still finish; shutdown does not undo
+        // their transactions or interrupt external calls. Await pump settlement.
+        admitting.store(false, Ordering::Release);
         let _ = stop.send(true);
-        commands.await?;
-        journal.await?;
-        if let Some(scheduled) = scheduled {
-            scheduled.await?;
-        }
+        background.await??;
         result?;
         Ok(())
     }
@@ -1565,8 +1526,28 @@ impl Host {
         }
         let stylesheet = self.appearance.stylesheet_url(&self.runtime)?;
         let script = self.appearance.script_url(&self.runtime)?;
+        let component_script = self.appearance.component_script_url(&self.runtime)?;
+        let font_policy = if self
+            .runtime
+            .artifact()
+            .contract()
+            .web_resources
+            .values()
+            .any(|resource| resource.media_type == "font/woff2")
+        {
+            format!(
+                " font-src {}{};",
+                self.origin,
+                self.appearance.resource_prefix()
+            )
+        } else {
+            String::new()
+        };
         let theme = self.appearance.theme_url()?;
-        let live = self.live_initializer(name, input)?;
+        let image_origins =
+            crate::web_templates::remote_image_origins(&content.clone().into_string())?;
+        let live = self.live_initializer(name, input, &image_origins)?;
+        let image_sources = image_origins.join(" ");
         let mut response = html_response(
             status,
             html! {
@@ -1580,6 +1561,8 @@ impl Host {
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
                         @if let Some(script) = script { script type="module" src=(script) {} }
+                        // Component behavior has a separate admitted entrypoint.
+                        @if let Some(script) = component_script { script type="module" src=(script) {} }
                     }
                     body { (live) (content) }
                 }
@@ -1590,8 +1573,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.appearance.resource_prefix()
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
@@ -1605,6 +1588,16 @@ impl Host {
         notice: Option<Notice<'_>>,
         submitted: Option<view::Submitted<'_>>,
     ) -> Result<Markup> {
+        let page = self.runtime.artifact().page(name)?;
+        let presentation_authority = if self.presentation.is_some() {
+            Some(
+                self.runtime
+                    .authority_snapshot(&page.operation, &session.actor)?
+                    .stamp,
+            )
+        } else {
+            None
+        };
         // A completion can invalidate a prepared read between its observation
         // and validation. Retry only the page query with a fresh invocation;
         // the command and its durable receipt are never repeated here.
@@ -1613,13 +1606,15 @@ impl Host {
                 .render_page(name, &session.actor, id, input, at)
         })?;
         if outcome.status != "success" {
-            anyhow::bail!(match outcome.error.as_str() {
-                "not_found" => crate::error::Failure::UnknownPage,
-                "invalid_input" | "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
-                "forbidden" => crate::error::Failure::Forbidden,
-                "preparation_conflict" => crate::error::Failure::PreparationConflict,
-                _ => crate::error::Failure::Internal,
-            });
+            if let Some(rejection) = declared_page_rejection(&self.runtime, name, &outcome.error) {
+                return Err(anyhow::Error::new(rejection));
+            }
+            let failure = match outcome.error.as_str() {
+                "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
+                code => crate::error::Failure::from_code(code)
+                    .unwrap_or(crate::error::Failure::Internal),
+            };
+            anyhow::bail!(failure);
         }
         let renderer = view::View {
             runtime: &self.runtime,
@@ -1632,7 +1627,6 @@ impl Host {
             now: at,
             submitted,
         };
-        let page = self.runtime.artifact().page(name)?;
         let content = if page.template.is_empty() {
             renderer.render(&outcome.result)?
         } else {
@@ -1652,26 +1646,54 @@ impl Host {
                 .map(|key| Ok((key.clone(), self.appearance.app_url(&self.runtime, key)?)))
                 .collect::<Result<BTreeMap<_, _>>>()?;
             let markup = if let Some(routes) = &self.routes {
-                crate::web_templates::render_routed(
-                    self.runtime.artifact().directory(),
-                    &self.runtime.artifact().contract().templates,
-                    &page.template,
-                    context,
-                    asset_urls,
-                    routes,
-                    &self.origin,
+                crate::web_templates::render_routed_with_presentations(
+                    crate::web_templates::RoutedRender {
+                        directory: self.runtime.artifact().directory(),
+                        catalog: &self.runtime.artifact().contract().templates,
+                        path: &page.template,
+                        context,
+                        asset_urls,
+                        routes,
+                        origin: &self.origin,
+                    },
+                    self.presentation.clone(),
                 )?
             } else {
-                crate::web_templates::render(
+                crate::web_templates::render_with_presentations(
                     self.runtime.artifact().directory(),
                     &self.runtime.artifact().contract().templates,
                     &page.template,
                     context,
                     asset_urls,
+                    self.presentation.clone(),
                 )?
             };
             crate::web_forms::bind(&renderer, &markup)?
         };
+        // Presentation execution may take seconds. Do not return a formerly
+        // authorized query after revocation or an A -> B -> A policy change.
+        if let Some(authority) = presentation_authority {
+            self.appearance.check_binding(&self.runtime)?;
+            let current = self
+                .runtime
+                .authority_snapshot(&page.operation, &session.actor)?
+                .stamp;
+            let db = open(self.runtime.db())?;
+            let current_session: Option<(String, i64)> = db
+                .query_row(
+                    "SELECT actor,expires FROM day2_web_sessions WHERE hash=?1",
+                    [&session.hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            validate_presentation_delivery(
+                &authority,
+                &current,
+                &session.actor,
+                current_session.as_ref(),
+                self.wall_seconds(),
+            )?;
+        }
         Ok(html! { main id="day2-main"
             data-day2-invocation=[notice.as_ref().map(|value| value.invocation)]
             data-day2-operation=[notice.as_ref().map(|value| value.operation)]
@@ -1742,6 +1764,55 @@ impl Host {
                 }
             }
         }
+        for (name, native) in &ticket.native {
+            ensure!(
+                ticket.editable.iter().any(|editable| editable == name),
+                crate::error::Failure::InvalidTicket
+            );
+            let kind = record
+                .fields
+                .get(name)
+                .context(crate::error::Failure::InvalidTicket)?;
+            let compatible = match native.mode {
+                security::NativeMode::BooleanCheckbox => {
+                    *kind == crate::schema::Kind::Boolean && native.omitted == Value::Bool(false)
+                }
+                security::NativeMode::ListCheckbox => {
+                    crate::web_forms::scalar_list(kind)
+                        && native.omitted == Value::Array(Vec::new())
+                }
+                security::NativeMode::SetCheckbox => {
+                    crate::web_forms::carrier(kind) == crate::web_forms::Carrier::Set
+                        && native.omitted == serde_json::json!({"members": []})
+                }
+                security::NativeMode::Radio => {
+                    matches!(
+                        kind,
+                        crate::schema::Kind::Text | crate::schema::Kind::StandardText { .. }
+                    ) && native.omitted == Value::String(String::new())
+                }
+            };
+            ensure!(
+                compatible
+                    && !native.choices.is_empty()
+                    && native.choices.iter().all(|choice| !choice.is_empty())
+                    && native
+                        .choices
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == native.choices.len(),
+                crate::error::Failure::InvalidTicket
+            );
+            if let Some(values) = fields.get(name) {
+                ensure!(
+                    values.iter().all(|value| native.choices.contains(value)),
+                    crate::error::Failure::UnknownFields
+                );
+            } else {
+                fields.insert(name.clone(), vec![]);
+            }
+        }
         let names: std::collections::BTreeSet<&str> = fields
             .keys()
             .chain(keyed.keys())
@@ -1759,13 +1830,21 @@ impl Host {
         let validation: Result<()> = (|| {
             for (name, value) in &fields {
                 ensure!(input.get(name).is_none(), "bound_field_override");
-                input[name] = security::field_values(
-                    record
-                        .fields
+                if value.is_empty() {
+                    let default = ticket
+                        .native
                         .get(name)
-                        .context(crate::error::Failure::UnknownFields)?,
-                    value,
-                )?;
+                        .context(crate::error::Failure::UnknownFields)?;
+                    input[name] = default.omitted.clone();
+                } else {
+                    input[name] = security::field_values(
+                        record
+                            .fields
+                            .get(name)
+                            .context(crate::error::Failure::UnknownFields)?,
+                        value,
+                    )?;
+                }
             }
             for (name, entries) in &keyed {
                 ensure!(input.get(name).is_none(), "bound_field_override");
@@ -1860,7 +1939,7 @@ impl Host {
         } else {
             // A rendering failure after commit is ambiguous only to the browser.
             // The unchanged signed ticket always identifies the durable receipt.
-            let content = self.page(
+            let rendered = self.page(
                 &ticket.page,
                 &ticket.page_input,
                 session,
@@ -1876,6 +1955,13 @@ impl Host {
                     bound: &ticket.bound,
                     fields: &fields,
                 }),
+            );
+            let content = page_content_or_acknowledgement(
+                rendered,
+                status,
+                &id,
+                &ticket.operation,
+                &view::page_url(&self.runtime, &ticket.page, &ticket.page_input)?,
             )?;
             if datastar {
                 if self.runtime.artifact().page(&ticket.page)?.live {
@@ -2084,6 +2170,9 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
     }
 }
 fn failure(error: &anyhow::Error) -> Response {
+    if let Some(page_failure) = error.downcast_ref::<PageOutcomeFailure>() {
+        return error_page(page_failure.status, &page_failure.message);
+    }
     crate::web_api::record_failure(error);
     if crate::error::classify(error) == crate::error::Failure::InvalidLoginLink {
         return error_page(
@@ -2093,6 +2182,74 @@ fn failure(error: &anyhow::Error) -> Response {
     }
     let (status, _, message) = crate::web_api::failure_details(error);
     error_page(status, message)
+}
+
+#[derive(Debug)]
+struct PageOutcomeFailure {
+    status: StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for PageOutcomeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("page query failed")
+    }
+}
+
+impl std::error::Error for PageOutcomeFailure {}
+
+fn declared_page_rejection(
+    runtime: &Runtime,
+    page_name: &str,
+    code: &str,
+) -> Option<PageOutcomeFailure> {
+    let artifact = runtime.artifact();
+    let page = artifact.page(page_name).ok()?;
+    let contract = artifact.contract().app_contract.as_ref()?;
+    let operation = contract.operations.get(&page.operation)?;
+    declared_page_rejection_for(&page.operation, &operation.errors, &contract.errors, code)?;
+    let (status, _, message) = crate::web_api::outcome_failure(runtime, code);
+    Some(PageOutcomeFailure { status, message })
+}
+
+fn declared_page_rejection_for<'a>(
+    operation_name: &str,
+    declared_errors: &[String],
+    failures: &'a std::collections::BTreeMap<String, crate::app_contract::Failure>,
+    code: &str,
+) -> Option<&'a crate::app_contract::Failure> {
+    if !declared_errors.iter().any(|declared| declared == code) {
+        return None;
+    }
+    let failure = failures.get(code)?;
+    if failure.code != code
+        || !failure
+            .targets()
+            .any(|target| target.operation == operation_name)
+    {
+        return None;
+    }
+    Some(failure)
+}
+
+fn validate_presentation_delivery(
+    expected: &crate::authority_state::AuthorityStamp,
+    current: &crate::authority_state::AuthorityStamp,
+    actor: &str,
+    session: Option<&(String, i64)>,
+    wall: Result<i64>,
+) -> Result<()> {
+    ensure!(
+        current == expected,
+        crate::error::Failure::AuthorityPolicyChanged
+    );
+    ensure!(
+        session.is_some_and(|(session_actor, expires)| {
+            session_actor == actor && wall.as_ref().is_ok_and(|at| at < expires)
+        }),
+        crate::error::Failure::SignInRequired
+    );
+    Ok(())
 }
 
 fn fresh_page_query(
@@ -2145,6 +2302,132 @@ fn patch(markup: Markup) -> Response {
     event.push('\n');
     ([(header::CONTENT_TYPE, "text/event-stream")], event).into_response()
 }
+
+#[cfg(test)]
+mod page_failure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_failure_html_uses_status_and_escapes_public_message() {
+        let response = failure(&anyhow::Error::new(PageOutcomeFailure {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "Use <a safe filter> & retry.".into(),
+        }));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response.into_body();
+        let markup = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("error page body");
+        let markup = String::from_utf8(markup.to_vec()).expect("HTML is UTF-8");
+        assert!(markup.contains("Use &lt;a safe filter&gt; &amp; retry."));
+        assert!(!markup.contains("Use <a safe filter> & retry."));
+
+        let response = failure(&anyhow::anyhow!("database connection details"));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("error body");
+        let body = String::from_utf8(body.to_vec()).expect("HTML is UTF-8");
+        assert!(!body.contains("database connection details"));
+        assert!(body.contains("Retry commands with the same idempotency key."));
+    }
+
+    #[test]
+    fn accepted_command_page_rejection_returns_receipt_acknowledgement() -> Result<()> {
+        for (status, state, phrase) in [
+            (StatusCode::OK, "success", "Saved."),
+            (StatusCode::ACCEPTED, "pending", "Accepted."),
+        ] {
+            let content = page_content_or_acknowledgement(
+                Err(anyhow::Error::new(PageOutcomeFailure {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    message: "<Access & membership denied> Choose \"another\" space & retry."
+                        .into(),
+                })),
+                status,
+                "web-original-ticket-nonce",
+                "freetool.space_update",
+                "/spaces/example/settings?tab=details&view=current",
+            )?;
+            let markup = content.into_string();
+            assert!(markup.contains("data-day2-invocation=\"web-original-ticket-nonce\""));
+            assert!(markup.contains("data-day2-operation=\"freetool.space_update\""));
+            assert!(markup.contains(&format!("data-day2-status=\"{state}\"")));
+            assert!(markup.contains(phrase));
+            assert!(markup.contains("&lt;Access &amp; membership denied&gt;"));
+            assert!(markup.contains("Choose &quot;another&quot; space &amp; retry."));
+            let document = scraper::Html::parse_fragment(&markup);
+            let text = document.root_element().text().collect::<String>();
+            assert!(text.contains("Reload page before making another change."));
+            assert!(text.contains("Receipt: web-original-ticket-nonce"));
+            assert!(markup.contains("<wbr>"));
+            assert!(
+                markup.contains("href=\"/spaces/example/settings?tab=details&amp;view=current\"")
+            );
+            assert!(!markup.contains("<form") && !markup.contains("_ticket"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn acknowledgement_fallback_does_not_convert_rejected_or_operational_errors() {
+        let rejected = page_content_or_acknowledgement(
+            Err(anyhow::Error::new(PageOutcomeFailure {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                message: "Denied. Reload.".into(),
+            })),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert!(rejected.downcast_ref::<PageOutcomeFailure>().is_some());
+        let operational = page_content_or_acknowledgement(
+            Err(anyhow::anyhow!("rendering database failure")),
+            StatusCode::OK,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert_eq!(operational.to_string(), "rendering database failure");
+    }
+
+    #[test]
+    fn app_failure_requires_exact_operation_declaration_and_matching_target() {
+        let code = "app:freetool.space_page_denied";
+        let declarations = vec![code.into()];
+        let matching = std::collections::BTreeMap::from([(
+            code.into(),
+            crate::app_contract::Failure {
+                code: code.into(),
+                description: "Denied".into(),
+                recovery: "Reload".into(),
+                operation: crate::operation_metadata::Target {
+                    operation: "freetool.space_page".into(),
+                    input_type: "input".into(),
+                    output_type: "output".into(),
+                },
+                additional_operations: Vec::new(),
+                verification_actors: Vec::new(),
+            },
+        )]);
+        assert!(
+            declared_page_rejection_for("freetool.space_page", &declarations, &matching, code)
+                .is_some()
+        );
+        assert!(
+            declared_page_rejection_for("freetool.other_page", &declarations, &matching, code)
+                .is_none()
+        );
+        assert!(declared_page_rejection_for("freetool.space_page", &[], &matching, code).is_none());
+    }
+}
+
+#[cfg(test)]
+#[path = "presentation_delivery_tests.rs"]
+mod presentation_delivery_tests;
 
 #[cfg(test)]
 mod deployment_health_tests {

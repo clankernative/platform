@@ -1,0 +1,15 @@
+<h1>Native list checkbox conformance</h1>
+<form id="native-controls-form" data-command="things.tag" class="command">
+  <label>Name <input type="text" name="name" required maxlength="200"></label>
+  <fieldset>
+    <legend>Tags</legend>
+    {% for thing in native_controls.items %}
+    <label><input type="checkbox" name="tags" value="{{ thing.name }}">{{ thing.name }}</label>
+    {% else %}
+    <label><input type="checkbox" name="tags" value="unavailable" disabled>No tags available</label>
+    {% endfor %}
+  </fieldset>
+  <label>Role <input type="text" name="attributes.role"></label>
+  <label>Group <input type="text" name="groups"></label>
+  <button type="submit">Save</button>
+</form>

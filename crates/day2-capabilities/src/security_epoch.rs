@@ -6,6 +6,40 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
+pub mod bootstrap;
+
+/// Google's stable numeric identity, including values larger than a u64.
+/// The 128-byte limit is a local input budget, not a provider length claim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ServiceAccountUid(String);
+
+impl ServiceAccountUid {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ServiceAccountUid {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        ensure!(
+            (1..=128).contains(&value.len())
+                && matches!(value.as_bytes().first(), Some(b'1'..=b'9'))
+                && value.bytes().all(|byte| byte.is_ascii_digit()),
+            "invalid_security_epoch_service_account_uid"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<ServiceAccountUid> for String {
+    fn from(value: ServiceAccountUid) -> Self {
+        value.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityScope {
@@ -58,7 +92,34 @@ pub enum EpochProvider {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EpochIam {
-    GkeWorkloadIdentityV1 { service_account: String },
+    GkeWorkloadIdentityV1 {
+        service_account: String,
+        service_account_uid: ServiceAccountUid,
+    },
+}
+
+impl EpochIam {
+    pub fn validate(&self) -> Result<()> {
+        let Self::GkeWorkloadIdentityV1 {
+            service_account, ..
+        } = self;
+        crate::oauth::ShellTransport {
+            service_account: service_account.clone(),
+        }
+        .validate()
+    }
+
+    /// A desired mint target, never evidence of the identity of an issued token.
+    pub fn access_token_target(&self) -> String {
+        let Self::GkeWorkloadIdentityV1 {
+            service_account_uid,
+            ..
+        } = self;
+        format!(
+            "projects/-/serviceAccounts/{}",
+            service_account_uid.as_str()
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,11 +157,7 @@ impl EpochStore {
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
             "invalid_security_epoch_project"
         );
-        let EpochIam::GkeWorkloadIdentityV1 { service_account } = iam_source;
-        crate::oauth::ShellTransport {
-            service_account: service_account.clone(),
-        }
-        .validate()?;
+        iam_source.validate()?;
         ensure!(
             database_uid.len() == 36
                 && database_uid.bytes().enumerate().all(|(index, byte)| {
@@ -139,7 +196,7 @@ impl EpochStore {
 mod tests {
     use super::*;
 
-    fn selection() -> EpochStore {
+    pub(super) fn selection() -> EpochStore {
         EpochStore {
             scope: AuthorityScope {
                 installation: "company".to_owned().try_into().unwrap(),
@@ -153,6 +210,7 @@ mod tests {
                 database_uid: "01234567-89ab-4cde-8fab-0123456789ab".into(),
                 iam_source: EpochIam::GkeWorkloadIdentityV1 {
                     service_account: "epoch@project-seven.iam.gserviceaccount.com".into(),
+                    service_account_uid: "100000000000000000007".to_owned().try_into().unwrap(),
                 },
             },
             key_set: Digest::new(b"exact keys"),
@@ -198,6 +256,7 @@ mod tests {
         let EpochProvider::FirestoreNativeV1 { iam_source, .. } = &mut rotated.provider;
         *iam_source = EpochIam::GkeWorkloadIdentityV1 {
             service_account: "successor@project-seven.iam.gserviceaccount.com".into(),
+            service_account_uid: "100000000000000000008".to_owned().try_into().unwrap(),
         };
         assert_eq!(
             original.authority_key().unwrap(),
@@ -220,5 +279,51 @@ mod tests {
         let EpochProvider::FirestoreNativeV1 { database_uid, .. } = &mut store.provider;
         *database_uid = "same-name-is-not-an-identity".into();
         assert!(store.validate().is_err());
+    }
+
+    #[test]
+    fn immutable_gsa_identity_is_required_and_not_a_numeric_coercion() {
+        let iam = serde_json::to_value(match selection().provider {
+            EpochProvider::FirestoreNativeV1 { iam_source, .. } => iam_source,
+        })
+        .unwrap();
+        let selected: EpochIam = serde_json::from_value(iam.clone()).unwrap();
+        assert_eq!(
+            selected.access_token_target(),
+            "projects/-/serviceAccounts/100000000000000000007"
+        );
+        for invalid in ["", "0", "01", "+1", "1.0", "1e2", " 1", "١", "../other"] {
+            let mut bad = iam.clone();
+            bad["service_account_uid"] = invalid.into();
+            assert!(
+                serde_json::from_value::<EpochIam>(bad).is_err(),
+                "{invalid}"
+            );
+        }
+        let mut missing = iam.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("service_account_uid");
+        assert!(serde_json::from_value::<EpochIam>(missing).is_err());
+        let mut numeric = iam.clone();
+        numeric["service_account_uid"] = 7.into();
+        assert!(serde_json::from_value::<EpochIam>(numeric).is_err());
+        assert!(ServiceAccountUid::try_from("1".repeat(129)).is_err());
+        let mut recreated = selection();
+        let EpochProvider::FirestoreNativeV1 { iam_source, .. } = &mut recreated.provider;
+        let EpochIam::GkeWorkloadIdentityV1 {
+            service_account_uid,
+            ..
+        } = iam_source;
+        *service_account_uid = "100000000000000000008".to_owned().try_into().unwrap();
+        assert_eq!(
+            selection().authority_key().unwrap(),
+            recreated.authority_key().unwrap()
+        );
+        assert_ne!(
+            Digest::of(&selection()).unwrap(),
+            Digest::of(&recreated).unwrap()
+        );
     }
 }

@@ -46,7 +46,7 @@ fn compiler_enforces_opaque_types_and_generated_codecs_reject_counterfeit_nomina
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let temporary = tempfile::tempdir_in(root.join("artifacts"))?;
+    let temporary = crate::support::compiler::stage(&root)?;
     let stage = temporary.path();
     fs::create_dir_all(stage.join("sdk"))?;
     fs::create_dir_all(stage.join("app"))?;
@@ -244,6 +244,11 @@ expect parse_ref("ord_00000000000000000000000000") == Err(InvalidRef)
 expect parse_ref("ORD_01h455vb4pex5vsknk084sn02q") == Err(InvalidRef)
 page_result : List(Str), Bool, Cursor -> Try(CollectionPage(Str), Str)
 page_result = CollectionPage.from_parts
+empty_strings : CollectionPage(Str)
+empty_strings = CollectionPage.empty({{}})
+empty_numbers : CollectionPage(U64)
+empty_numbers = CollectionPage.empty({{}})
+expect empty_strings.items().is_empty() and empty_numbers.items().is_empty()
 expect Cursor.from_str("") == Ok(Cursor.start)
 expect Cursor.from_str("01") == Err(InvalidCursor)
 expect Cursor.from_str("-1") == Err(InvalidCursor)
@@ -290,7 +295,7 @@ step = |raw| raw
         "pagination expectations: {diagnostic}"
     );
     anyhow::ensure!(
-        diagnostic.contains("All (17) tests passed"),
+        diagnostic.contains("All (18) tests passed"),
         "pagination expectations did not all execute: {diagnostic}"
     );
     Ok(())

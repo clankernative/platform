@@ -1,6 +1,7 @@
 import pf.Env
 import pf.Path
 import pf.Cmd
+import pf.OsStr
 
 # The native broker is distributed beside this CLI. Never resolve it from PATH
 # or a project-controlled executable name. Its protocol is private and versioned.
@@ -19,7 +20,7 @@ Host :: [].{
 		executable = Env.exe_path!().map_err(|_| "cannot locate platform CLI")?
 		text = Path.to_str(executable).map_err(|_| "CLI path must be UTF-8")?
 		directory = Str.join_with(text.split_on("/").drop_last(1), "/")
-		command = Cmd.new_str("${directory}/day2-host").args_str([request])
+		command = Cmd.new(OsStr.from_str("${directory}/day2-host")).args([OsStr.from_str(request)])
 		decoded : Request
 		decoded = Json.parse(request).map_err(|_| "invalid host request")?
 		streaming = if decoded.action == "workflow" {
@@ -31,12 +32,14 @@ Host :: [].{
 		} else Bool.False
 		if streaming {
 			# The host has already written its own error to the terminal.
-			code = command.exec_exit_code!().map_err(|_| "cannot start the platform host; run xtask cli")?
-			return if code == 0 Ok("") else Err("platform workflow failed")
+			result = command.inherit_stdio().run!().map_err(|_| "cannot start the platform host; run xtask cli")?
+			return if result.status == Exited(0) Ok("") else Err("platform workflow failed")
 		}
-		result = command.exec_output!().map_err(|_| "cannot start platform host; run xtask cli")?
+		result = command.run!().map_err(|_| "cannot start platform host; run xtask cli")?
+		_ = result.require_success().map_err(|_| "cannot start platform host; run xtask cli")?
+		raw = result.stdout_utf8().map_err(|_| "invalid platform host response")?
 		response : Response
-		response = Json.parse(result.stdout_utf8).map_err(|_| "invalid platform host response")?
+		response = Json.parse(raw).map_err(|_| "invalid platform host response")?
 		if response.protocol != 1 {
 			return Err("incompatible platform host protocol")
 		}

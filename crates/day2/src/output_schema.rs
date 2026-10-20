@@ -19,6 +19,8 @@ const MAX_STRING_BYTES: usize = 16 * 1_024;
 pub enum Type {
     String,
     OptionalText,
+    OptionalInteger,
+    OptionalUnsigned(day2_contracts::numeric::Unsigned),
     StandardText {
         domain: String,
     },
@@ -102,6 +104,10 @@ impl Table {
         *nodes += 1;
         ensure!(*nodes <= MAX_SCHEMA_NODES, "output schema node budget");
         let node = self.node(id)?;
+        ensure!(
+            !crate::connection_codegen::invocation_type(&node.name),
+            "connection Use cannot appear in public outputs"
+        );
         let (shape, roc_type) = match node.kind.as_str() {
             "text" => (Type::String, "Str".into()),
             "integer" => (Type::Integer, "I64".into()),
@@ -133,11 +139,20 @@ impl Table {
                     .iter()
                     .find(|tag| tag.name == "Some" && tag.payload.len() == 1)
                     .context("optional output requires one Some payload")?;
-                ensure!(
-                    self.node(some.payload[0])?.kind == "text",
-                    "only optional text outputs are supported"
-                );
-                (Type::OptionalText, "[None, Some(Str)]".into())
+                let payload = self.node(some.payload[0])?;
+                match payload.kind.as_str() {
+                    "text" => (Type::OptionalText, "[None, Some(Str)]".into()),
+                    "integer" => (Type::OptionalInteger, "[None, Some(I64)]".into()),
+                    "unsigned" => {
+                        let width = day2_contracts::numeric::Unsigned::from_roc(&payload.name)
+                            .context("unsupported optional unsigned output width")?;
+                        (
+                            Type::OptionalUnsigned(width),
+                            format!("[None, Some({})]", width.roc_type()),
+                        )
+                    }
+                    _ => bail!("optional outputs support only text and numeric scalars"),
+                }
             }
             "record" if node.name == "Text" => {
                 ensure!(node.fields.len() == 2, "invalid text output shape");
@@ -514,6 +529,8 @@ impl Type {
     pub(crate) fn wire_annotation(&self) -> String {
         match self {
             Self::OptionalText => "[None, Some(Str)]".into(),
+            Self::OptionalInteger => "[None, Some(I64)]".into(),
+            Self::OptionalUnsigned(width) => format!("[None, Some({})]", width.roc_type()),
             Self::String
             | Self::StandardText { .. }
             | Self::ModelReference { .. }
@@ -732,6 +749,8 @@ impl Type {
             Self::Set => {}
             Self::String
             | Self::OptionalText
+            | Self::OptionalInteger
+            | Self::OptionalUnsigned(_)
             | Self::StandardText { .. }
             | Self::Integer
             | Self::Unsigned(_)
@@ -766,21 +785,29 @@ impl Type {
         *nodes += 1;
         ensure!(*nodes <= MAX_VALUE_NODES, "page output node budget");
         match self {
-            Self::OptionalText => {
+            Self::OptionalText | Self::OptionalInteger | Self::OptionalUnsigned(_) => {
                 if value != "None" {
-                    let object = value.as_object().context("expected optional text output")?;
-                    ensure!(
-                        object.len() == 1,
-                        "optional text output requires one Some field"
-                    );
-                    Self::String.validate_at(
-                        object
-                            .get("Some")
-                            .context("optional text output requires Some")?,
-                        depth + 1,
-                        nodes,
-                        collection_items,
-                    )?;
+                    let object = value.as_object().context("expected optional output")?;
+                    ensure!(object.len() == 1, "optional output requires one Some field");
+                    let payload = object
+                        .get("Some")
+                        .context("optional output requires Some")?;
+                    match self {
+                        Self::OptionalText => {
+                            Self::String.validate_at(payload, depth + 1, nodes, collection_items)?
+                        }
+                        Self::OptionalInteger => Self::Integer.validate_at(
+                            payload,
+                            depth + 1,
+                            nodes,
+                            collection_items,
+                        )?,
+                        Self::OptionalUnsigned(width) => width
+                            .valid(payload)
+                            .then_some(())
+                            .context("invalid optional unsigned output")?,
+                        _ => unreachable!(),
+                    }
                 }
             }
             Self::String | Self::StandardText { .. } => ensure!(

@@ -173,6 +173,14 @@ pub(super) fn tokens(
     context: super::catalog::TokenContext<'_>,
     refresh: bool,
 ) -> Result<super::catalog::Tokens> {
+    Ok(normalized_tokens(raw, context, refresh)?.1)
+}
+
+pub(super) fn normalized_tokens(
+    raw: &[u8],
+    context: super::catalog::TokenContext<'_>,
+    refresh: bool,
+) -> Result<(Vec<u8>, super::catalog::Tokens)> {
     let raw: GoogleTokens =
         crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google token response"))?;
     if let Some(id_token) = &raw.id_token {
@@ -215,21 +223,34 @@ pub(super) fn tokens(
                     && token.bytes().all(|byte| byte.is_ascii_graphic())),
         "invalid Google token material"
     );
-    Ok(super::catalog::Tokens {
-        access: raw.access_token,
-        refresh: raw.refresh_token,
-    })
+    Ok((
+        normalized,
+        super::catalog::Tokens {
+            access: raw.access_token,
+            refresh: raw.refresh_token,
+        },
+    ))
 }
 
 pub(super) fn account(raw: &[u8], subject: &str, tenant: &str) -> Result<()> {
+    let account = observe_account(raw)?;
+    ensure!(
+        account.subject == subject && account.tenant == tenant,
+        "Google account mismatch"
+    );
+    Ok(())
+}
+
+pub(super) fn observe_account(raw: &[u8]) -> Result<super::account::ProviderAccount> {
     let account: UserInfo =
         crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google account response"))?;
     ensure!(
         !account.sub.is_empty()
             && account.sub.len() <= 255
             && account.sub.bytes().all(|b| b.is_ascii_graphic())
-            && account.sub == subject
-            && account.hd == tenant
+            && !account.hd.is_empty()
+            && account.hd.len() <= 255
+            && account.hd.bytes().all(|b| b.is_ascii_graphic())
             && account.email_verified
             && !account.email.is_empty()
             && account.email.len() <= 320
@@ -237,7 +258,67 @@ pub(super) fn account(raw: &[u8], subject: &str, tenant: &str) -> Result<()> {
             && account.email.contains('@'),
         "Google account mismatch"
     );
-    Ok(())
+    Ok(super::account::ProviderAccount {
+        issuer: ISSUER.into(),
+        subject: account.sub,
+        tenant: account.hd,
+        display_email: account.email,
+    })
+}
+
+/// Product refresh keeps Google's reviewed reusable token. A response cannot
+/// silently replace that token or widen the original semantic scope ceiling.
+pub(super) fn refresh_tokens(
+    raw: &[u8],
+    reviewed: &profiles::ReviewedBrowserCodeProfile,
+    permission: &day2_capabilities::oauth::ProviderPermissionContract,
+    reusable: &str,
+) -> Result<profiles::ValidatedTokenResponse> {
+    ensure!(
+        matches!(
+            reviewed.protocol,
+            profiles::ConfidentialPkceProfile::Reusable {
+                retry: profiles::ReusableRetry::NoAutomaticRetry,
+                ..
+            }
+        ),
+        "unsupported product refresh semantics"
+    );
+    let parsed: GoogleTokens =
+        crate::json::decode(raw).map_err(|_| anyhow::anyhow!("invalid Google refresh response"))?;
+    ensure!(
+        parsed
+            .refresh_token
+            .as_deref()
+            .is_none_or(|token| token == reusable),
+        "Google reusable refresh token changed"
+    );
+    ensure!(
+        parsed
+            .access_token
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+            && parsed
+                .id_token
+                .as_ref()
+                .is_none_or(|token| !token.is_empty()
+                    && token.len() <= 16_384
+                    && token.bytes().all(|b| b.is_ascii_graphic()))
+            && parsed
+                .refresh_token_expires_in
+                .is_none_or(|seconds| seconds > 0),
+        "invalid Google refresh material"
+    );
+    let normalized = serde_json::to_vec(&NormalizedTokens {
+        access_token: &parsed.access_token,
+        refresh_token: Some(reusable),
+        token_type: &parsed.token_type,
+        expires_in: parsed.expires_in,
+        scope: normalize_scope(&parsed.scope)?,
+    })?;
+    reviewed
+        .protocol
+        .validate_token_response(&normalized, permission)
 }
 
 #[cfg(test)]

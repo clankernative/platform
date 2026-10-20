@@ -8,8 +8,8 @@ use day2_capabilities::oauth::{
     ResourceAudienceRef,
 };
 use day2_capabilities::{BindingRef, Digest};
+use ring::digest::{SHA256, digest};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
@@ -535,7 +535,7 @@ fn challenge_for_verifier(verifier: &str) -> Result<String> {
         "invalid PKCE verifier"
     );
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(Sha256::digest(verifier.as_bytes()));
+        .encode(digest(&SHA256, verifier.as_bytes()).as_ref());
     pkce(&challenge)?;
     Ok(challenge)
 }

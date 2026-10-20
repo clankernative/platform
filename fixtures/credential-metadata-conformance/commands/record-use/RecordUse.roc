@@ -30,8 +30,8 @@ RecordUse :: [].{
 		verification: {
 			input: |_snapshot, seed| Ok({ note: "use_${seed.to_str()}" }),
 			check: |before, output, after| {
-				old = Data.snapshot(before)?
-				next = Data.snapshot(after)?
+				old = Data.verification_snapshot(before)?.live
+				next = Data.verification_snapshot(after)?.live
 				Ok(output.recorded and next.use_receipts.len() == old.use_receipts.len() + 1)
 			},
 		},

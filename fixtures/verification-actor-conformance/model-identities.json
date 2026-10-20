@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "7cf3ec6668700d342eed48aa43b65517",
+        "prefix": "not"
+      },
+      "table": "notes",
+      "roc_type": "Models.Note",
+      "retired": false
+    }
+  ]
+}

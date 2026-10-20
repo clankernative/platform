@@ -294,15 +294,28 @@ impl Table {
                     let some = node.tags.iter().find(|tag| tag.name == "Some");
                     ensure!(
                         node.tags.len() == 2
+                            && node.fields.is_empty()
+                            && node.args.is_empty()
+                            && node.item == 0
+                            && node.ret == 0
                             && none.is_some_and(|tag| tag.payload.is_empty())
                             && some.is_some_and(|tag| tag.payload.len() == 1),
                         "unsupported declaration tag union"
                     );
                     ensure!(
-                        self.node(some.context("optional payload")?.payload[0])?
-                            .kind
-                            == "text",
-                        "only optional text supported in declaration codecs"
+                        matches!(
+                            self.node(some.context("optional payload")?.payload[0])?
+                                .kind
+                                .as_str(),
+                            "text" | "integer" | "unsigned"
+                        ),
+                        "optional declaration codecs support only scalar payloads"
+                    );
+                    let payload = self.node(some.context("optional payload")?.payload[0])?;
+                    ensure!(
+                        payload.kind != "unsigned"
+                            || day2_contracts::numeric::Unsigned::from_roc(&payload.name).is_some(),
+                        "unsupported optional unsigned declaration width"
                     );
                 }
                 let left = a
@@ -966,8 +979,10 @@ impl Catalog {
         &self,
         schema: &Schema,
         outputs: &output_schema::Catalog,
+        connections: &[day2_capabilities::oauth::ConnectionDeclaration],
         admission: bool,
     ) -> Result<BTreeMap<String, String>> {
+        crate::connection_declaration::validate_catalog(connections, self)?;
         let prefix = if admission { "admission_" } else { "" };
         let input_type = |key: &str| -> Result<String> {
             Ok(schema
@@ -985,6 +1000,10 @@ impl Catalog {
                 .clone())
         };
         let mut modules = BTreeMap::new();
+        modules.insert(
+            crate::connection_codegen::MODULE.into(),
+            crate::connection_codegen::module(connections, admission)?,
+        );
         modules.insert(
             crate::credential_codegen::MODULE.into(),
             crate::credential_codegen::module(
