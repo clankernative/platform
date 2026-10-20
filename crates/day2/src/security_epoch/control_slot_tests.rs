@@ -956,7 +956,7 @@ impl SharedPort {
     ) -> (
         firestore::EpochObservation,
         guarded::SlotObservation,
-        CurrentBootstrapExecution,
+        CurrentBootstrapExecution<'static, 'static>,
     ) {
         let counter = self.counter.observe(&core.counter).unwrap();
         let context = CurrentBootstrapExecution::fixture(

@@ -554,7 +554,7 @@ pub(super) fn commit_body(selection: &EpochStore, request: &Request) -> Result<V
 pub(super) fn commit(
     port: &mut impl Port,
     selection: &EpochStore,
-    dispatch: super::journal::AuthorizedDispatch,
+    dispatch: super::journal::AuthorizedDispatch<'_, '_>,
 ) -> Result<()> {
     let reply = dispatch.prepare(selection, port)?.send(selection, port)?;
     #[derive(Deserialize)]
