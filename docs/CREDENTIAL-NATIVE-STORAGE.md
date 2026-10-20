@@ -233,6 +233,15 @@ closed. The new private owner types reject cloning, serialization and thread
 transfer. These types supply neither effective IAM nor active epoch/writer or
 Shell serving authority; no production bootstrap-dispatch factory is enabled.
 
+The App counterpart, `AppInitialStorageContinuity`, consumes its genuine
+authenticated first holder and retains the SAME read-only file and peer in one
+private owner. Each `CurrentAppStorageBootstrapPhase` checks that file around
+the fresh handshake and through final completion on the same actual App stage.
+It cannot receive a Controller stage, mutation credential or reconstructed file
+owner. The Controller rechecks its joined durability operation within each new
+bootstrap stage before advertising that phase. Neither side reuses the original
+grant or treats the historical durability completion as a configuration lease.
+
 The native creation factory consumes the actual enrolled controller stage and
 performs authenticated provider reads and native block-device/mount checks. It
 has not been qualified on the live GKE profile. Complete exclusive
