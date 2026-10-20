@@ -973,6 +973,12 @@ impl Runtime {
         &self.db
     }
 
+    /// Classification DATA only. Current native permission still requires the
+    /// actual retained participant and enrolled stage at each consumer.
+    pub(crate) fn uses_native_storage(&self) -> bool {
+        native_storage::is_native_database(&self.db)
+    }
+
     pub fn scope(&self) -> &str {
         &self.scope
     }
