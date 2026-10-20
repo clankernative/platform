@@ -4,7 +4,7 @@
 
 use super::{FileIdentity, NativeAcquisition, PreparedFileProjection, observe_anchored_file};
 #[cfg(target_os = "linux")]
-use super::{INITIAL_FILE, IO_CHUNK_BYTES};
+use super::{INITIAL_FILE, IO_CHUNK_BYTES, observe_current_anchored_file};
 use crate::security_epoch::{
     native_enrollment::{
         AuthenticatedInitialHolderOffer, EnrolledRoleStage, NativeRole, SameEnrolledOwner,
@@ -312,9 +312,11 @@ impl AppFileContinuity {
                         && directory_metadata.uid() == self.identity.uid,
                     "app_file_continuity_directory_profile_changed"
                 );
-                let length = usize::try_from(self.file.metadata()?.len())?;
+                // App writes may grow/shrink the SAME file between checks.
+                // Size is not a physical identity and must not be sampled once
+                // then compared against a later legitimate writer's size.
                 let observed =
-                    observe_anchored_file(&self.directory, &self.anchor, &self.file, length)?;
+                    observe_current_anchored_file(&self.directory, &self.anchor, &self.file)?;
                 ensure!(
                     observed == self.identity,
                     "app_file_continuity_file_changed"
