@@ -8,6 +8,7 @@ use crate::security_epoch::native_enrollment::{
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
     root_kms::RootKms,
+    storage_socket_directory::StorageSocketDirectory,
 };
 use anyhow::{Result, ensure};
 use std::{
@@ -66,6 +67,7 @@ struct IssuerBirthOwner {
     peer: Option<MessageProcess>,
     _listener: Listener,
     socket_identity: (u64, u64),
+    storage: StorageSocketDirectory,
 }
 
 impl Drop for IssuerBirthOwner {
@@ -105,9 +107,12 @@ pub(super) fn run() -> Result<()> {
     )?);
     let metadata = directory.metadata()?;
     ensure!(
-        metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+        metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o755,
         "native_enrollment_operator_directory"
     );
+    acquisition.remaining()?;
+    let storage = StorageSocketDirectory::prepare(&directory)?;
+    acquisition.remaining()?;
     let (listener, listener_child) = Listener::create(&mut acquisition)?;
     let metadata = std::fs::symlink_metadata("/run/day2-native-enrollment/issuer.sock")?;
     let (mut channel, child_channel) = Channel::pair(&mut acquisition)?;
@@ -123,6 +128,7 @@ pub(super) fn run() -> Result<()> {
         peer: None,
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
+        storage,
     };
     birth.peer = Some(grant_child(
         &mut birth.child,
@@ -140,6 +146,8 @@ pub(super) fn run() -> Result<()> {
             "native_enrollment_issuer_stopped"
         );
         let mut check = NativeAcquisition::begin(5)?;
+        birth.storage.check(&directory)?;
+        check.remaining()?;
         birth
             .peer
             .as_mut()
