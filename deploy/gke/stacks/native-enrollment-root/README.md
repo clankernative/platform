@@ -21,5 +21,5 @@ disabled so the workload uses GKE Workload Identity metadata authentication. The
 issuer child shares the provisioner identity and privileged trust boundary.
 Creating the root alone proves no native enrollment or live readiness.
 
-See the [native enrollment contract](../../../../../docs/CREDENTIAL-NATIVE-ENROLLMENT.md)
+See the [native enrollment contract](../../../../docs/CREDENTIAL-NATIVE-ENROLLMENT.md)
 and Google's [software Ed25519 support](https://docs.cloud.google.com/kms/docs/algorithms).
