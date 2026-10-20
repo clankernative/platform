@@ -93,7 +93,7 @@ pub(crate) struct FreshIntent {
 }
 
 impl FreshIntent {
-    pub(super) fn commitment(&self) -> Result<Digest> {
+    pub(crate) fn commitment(&self) -> Result<Digest> {
         Digest::of(&("original-native-fresh-intent-v1", self))
     }
 

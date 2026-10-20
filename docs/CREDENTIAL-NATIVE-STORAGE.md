@@ -306,5 +306,35 @@ write cannot race an obsolete initial-byte comparison after release. The App
 cannot construct its active owner before all six checked native steps finish.
 Active observations retain the complete four-document provider-version binding,
 not just receipt values. The new owners remain private and cannot be cloned,
-serialized or transferred to another thread. Native deployment qualification
-and actual serving/Runtime composition remain separate owed work.
+serialized or transferred to another thread. Native deployment qualification remains separate owed work.
+
+
+## Current App serving and existing-file Runtime admission
+
+An active App participant now supplies the sealed serving borrow from its real
+retained initial file and Controller channel. Every operation uses a fresh role
+stage, fresh signed peer transcript, and coherent four-document observation
+matching the original activation, including provider version tokens. Controller
+release follows the App consumption acknowledgement and a fresh provider read.
+Unknown outcomes close the same retained continuation; a later stage cannot
+reopen it. The Controller path has no consumer callback.
+
+The actual response connection reserves its identity before its first poll.
+Connection clones share that identity; another connection cannot complete or
+refuse a paused winner. Terminal refusal requires an existing exact hold and
+performs no role, clock or provider acquisition. These connection records are
+ownership DATA and cannot manufacture a serving scope.
+
+Native Runtime admission is separate from ordinary loading. It requires the
+actual active App participant and same current serving stage before opening
+`/state/day2-native/day2-initial.sqlite`. The fixed existing-file SQLite open
+omits CREATE and enables NOFOLLOW; it cannot initialize, adopt, repair or
+select an activated artifact path. Current metadata, explicit bootstrap policy,
+original seed/schema, activated artifact and storage binding must all match
+inside the retained scope. SQLite recovery is considered an attempted effect,
+so the scope is armed before open. Ordinary startup fences and final Product
+startup integration are composed separately.
+
+The Shell supplier and production Controller service lifecycle are still under
+composition. No local filesystem test, static proof inventory or earlier CI
+receipt establishes actual native P3, serving or end-to-end OAuth success.
