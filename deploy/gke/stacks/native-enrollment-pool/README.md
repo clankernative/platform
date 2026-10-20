@@ -1,10 +1,10 @@
-# Dedicated native enrollment node pool (draft profile)
+# Dedicated native enrollment node pool
 
-This root plans one node pool in an **existing zonal GKE Standard cluster**. It
+This root creates one node pool in an **existing zonal GKE Standard cluster**. It
 does not manage the cluster, shared node pool, node IAM, KMS keys or any app data.
-It is a deployment proposal; no native enrollment or runtime qualification is
-established by a successful plan. Do not apply before the instance trust/spend
-decision and the native supplier deployment have been approved.
+No native enrollment or runtime qualification is established by creating the
+pool. The instance operator approves the trust profile and spend before apply;
+supplier readiness and actual capacity must be checked before moving workloads.
 
 The instance supplies the project, zone, cluster, pool/profile names, existing
 node service account, machine type and pod PID bound. Keep its backend and
@@ -59,8 +59,14 @@ leaves approximately 3,920m CPU and 2,972 MiB memory for Pods before system
 DaemonSets; allowing 500m/512 MiB for those leaves modest headroom. Two-core
 E2 sizes cannot fit the declared CPU requests. This is the smallest supported
 predefined E2 size for these budgets, **not a measured native-capacity pass**.
-Reconcile actual supplier requests and system Pods before approval; select
+Reconcile actual supplier requests and system Pods before moving workloads; select
 `e2-standard-4` if memory needs more headroom. [GKE node reservations](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes).
+
+The approved Calendar node's actual allocatable memory was 2,793 MiB, with
+approximately 930 MiB of system Pod requests. The proposed native requests leave
+only about 71 MiB of scheduling headroom. This is tighter than the initial
+allowance above; reconcile actual native requests and measured usage before
+workload deployment. A larger machine needs its own cost approval.
 
 At 730 hours/month, on-demand Iowa pricing checked 19 October 2026:
 
@@ -83,6 +89,8 @@ Cloud NAT. This estimate is not authorization to create a pool or spend money.
 
 Use `tofu init -backend=false` and `tofu test` for the offline mocked plans.
 Tests require an exact dedicated profile and reject Autopilot and undersized
-machines. A real read-only plan can use an operator-owned local backend override;
-it must propose only the single new node pool. Retain its reviewed plan outside
-the repository. Never run `apply` as part of this draft preparation.
+machines. Initialize the instance's separate GCS backend and plan with its
+variable file. The first plan must propose only the single new node pool.
+Retain and apply that reviewed plan after approval, then require a clean plan
+and verify the actual node's readiness, labels, taint and capacity. Commit both
+Linux and local provider checksums so hosted validation can use the same lock.
