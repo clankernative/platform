@@ -84,6 +84,76 @@ const _: () = {
         crate::security_epoch::native_enrollment::EnrolledOriginalClock,
         std::fmt::Debug
     );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::InitialHolderServer<'static, 'static>
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderServer<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderServer<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderServer<'static, 'static>,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer,
+        Sync
+    );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::AuthenticatedAppFirstHolder<'static, 'static>
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedAppFirstHolder<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedAppFirstHolder<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedAppFirstHolder<'static, 'static>,
+        Sync
+    );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::AuthenticatedControllerFirstHolder<
+            'static,
+            'static,
+        >
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedControllerFirstHolder<
+            'static,
+            'static,
+        >,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedControllerFirstHolder<
+            'static,
+            'static,
+        >,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AuthenticatedControllerFirstHolder<
+            'static,
+            'static,
+        >,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::NativeConnectionPeerObservation);
     assert_not_impl!(
         crate::security_epoch::NativeConnectionPeerObservation,
