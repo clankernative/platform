@@ -638,6 +638,15 @@ const _: () = {
 };
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::serving::CurrentShellServingPhase<'static>);
+    assert_not_impl!(
+        crate::security_epoch::serving::CurrentShellServingPhase<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::serving::CurrentShellServingPhase<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::ServingParticipant);
     assert_consuming!(crate::security_epoch::CurrentAppServingPhase<'static>);
     assert_not_impl!(crate::security_epoch::ServingParticipant, Send);

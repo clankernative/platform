@@ -10,6 +10,8 @@ use day2_capabilities::Digest;
 use serde::Serialize;
 use std::rc::Rc;
 
+mod shell;
+
 /// Purpose selection DATA, not execution permission. Each later irreversible
 /// phase needs its own genuine same-stage serving fence.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,7 +84,7 @@ impl ResponseIdentity {
         Self(Rc::new(()))
     }
 
-    fn same(&self, other: &Self) -> bool {
+    pub(crate) fn same(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
@@ -189,14 +191,31 @@ impl ResponseHolds {
 
 /// Real active material; connection DATA cannot construct native permission.
 pub(crate) struct ServingParticipant {
-    app: super::ActiveAppStorageContinuity,
+    native: ParticipantOwner,
     response: ResponseHolds,
+}
+
+enum ParticipantOwner {
+    App(Box<super::ActiveAppStorageContinuity>),
+    Shell(Box<super::native_enrollment::ShellServingPeer>),
+}
+
+pub(crate) struct CurrentShellServingPhase<'peer> {
+    peer: super::native_enrollment::CurrentServingPeerPhase<'peer>,
+    disposition: super::bootstrap::ServingDisposition,
 }
 
 impl ServingParticipant {
     pub(crate) fn app(app: super::ActiveAppStorageContinuity) -> Self {
         Self {
-            app,
+            native: ParticipantOwner::App(Box::new(app)),
+            response: ResponseHolds::default(),
+        }
+    }
+
+    pub(crate) fn shell(peer: super::native_enrollment::ShellServingPeer) -> Self {
+        Self {
+            native: ParticipantOwner::Shell(Box::new(peer)),
             response: ResponseHolds::default(),
         }
     }
@@ -205,7 +224,10 @@ impl ServingParticipant {
         if let Some(hold) = &mut self.response.current {
             hold.refused = true;
         }
-        self.app.refuse();
+        match &mut self.native {
+            ParticipantOwner::App(app) => app.refuse(),
+            ParticipantOwner::Shell(shell) => shell.refuse(),
+        }
     }
 }
 
@@ -235,25 +257,43 @@ pub(crate) fn with_current_serving<'role, T>(
     operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> Result<T> {
     intent.require_oauth_management()?;
-    ensure!(
-        !matches!(
-            purpose,
-            ServingUse::Session | ServingUse::Signature | ServingUse::ShellResponseComplete
+    match &participant.native {
+        ParticipantOwner::App(_) => ensure!(
+            !matches!(
+                purpose,
+                ServingUse::Session | ServingUse::Signature | ServingUse::ShellResponseComplete
+            ),
+            "native_serving_shell_participant_required"
         ),
-        "native_serving_shell_participant_required"
-    );
+        ParticipantOwner::Shell(_) => ensure!(
+            matches!(
+                purpose,
+                ServingUse::Session
+                    | ServingUse::Signature
+                    | ServingUse::Response
+                    | ServingUse::ShellResponseComplete
+            ),
+            "native_serving_app_participant_required"
+        ),
+    }
     let commitment = intent.commitment()?;
     // A duplicate loser fails BEFORE taking the paused winner's native scope.
     participant
         .response
         .require_bound(&commitment, purpose, response)?;
     let binding = Digest::of(&("day2-native-human-serving-v1", &commitment, purpose))?;
-    match participant
-        .app
-        .with_serving(stage, binding, ScopePurpose::Human(purpose), operation)
-    {
+    let outcome = match &mut participant.native {
+        ParticipantOwner::App(app) => {
+            app.with_serving(stage, binding, ScopePurpose::Human(purpose), operation)
+        }
+        ParticipantOwner::Shell(peer) => shell::with_current(peer, stage, binding, operation),
+    };
+    match outcome {
         ScopeOutcome::Known(value) => {
-            if purpose == ServingUse::AppResponseComplete {
+            if matches!(
+                purpose,
+                ServingUse::AppResponseComplete | ServingUse::ShellResponseComplete
+            ) {
                 participant.response.current = None;
             }
             Ok(value)
@@ -273,10 +313,10 @@ pub(crate) fn with_current_runtime_serving<'role, T>(
     operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> Result<T> {
     let binding = Digest::of(&("day2-native-runtime-serving-v1", purpose))?;
-    match participant
-        .app
-        .with_serving(stage, binding, ScopePurpose::Runtime(purpose), operation)
-    {
+    let ParticipantOwner::App(app) = &mut participant.native else {
+        anyhow::bail!("native_runtime_app_participant_required");
+    };
+    match app.with_serving(stage, binding, ScopePurpose::Runtime(purpose), operation) {
         ScopeOutcome::Known(value) => Ok(value),
         ScopeOutcome::Excluded(error) => Err(error),
         ScopeOutcome::Refused(error) => {
@@ -316,7 +356,7 @@ pub(crate) fn refuse_current_serving(
     );
     let commitment = intent.commitment()?;
     participant.response.refuse_exact(&commitment, identity)?;
-    participant.app.refuse();
+    participant.refuse();
     Ok(())
 }
 
@@ -460,5 +500,103 @@ mod response_tests {
                 .is_err()
         );
         assert!(!holds.current.as_ref().unwrap().refused);
+    }
+}
+
+#[cfg(test)]
+mod native_admission_tests {
+    use crate::store::Runtime;
+    fn selected_profile_instance() -> anyhow::Result<crate::artifact::Instance> {
+        use anyhow::Context;
+        let mut instance = crate::oauth::clients::tests::security_instance("workspace", true)?;
+        let control = instance.control.as_mut().context("fixture control")?;
+        let (alias, store) = control
+            .security_epochs
+            .iter()
+            .find(|(_, store)| store.scope.app.as_str() == "workspace")
+            .map(|(alias, store)| (alias.clone(), store.clone()))
+            .context("fixture epoch")?;
+        let mut policy = crate::security_epoch::control_slot_tests::policy(&store);
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { project, .. } =
+            &store.provider;
+        policy.cluster.project = project.clone();
+        policy.epoch_store.id = alias;
+        policy.control_store.epoch_store = policy.epoch_store.clone();
+        control
+            .security_bootstraps
+            .insert("native".to_owned().try_into()?, policy);
+        crate::artifact::Instance::from_bytes(&serde_json::to_vec(&instance)?)
+    }
+
+    #[test]
+    fn ordinary_runtime_refuses_selected_native_before_creating_state_or_loading_an_artifact()
+    -> anyhow::Result<()> {
+        let instance = selected_profile_instance()?;
+        assert!(instance.native_bootstrap_for("workspace")?.is_some());
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        std::fs::write(&path, serde_json::to_vec(&instance)?)?;
+        let error = Runtime::load(&path, "workspace")
+            .err()
+            .expect("ordinary native load refused");
+        assert!(format!("{error:#}").contains("native_runtime_current_serving_required"));
+        assert!(!directory.path().join(".state").exists());
+        assert!(instance.native_bootstrap_for("unknown-app").is_err());
+        for mutation in [
+            "wrong_scope",
+            "duplicate_policy",
+            "missing_epoch",
+            "duplicate_epoch",
+        ] {
+            let mut invalid = instance.clone();
+            let control = invalid.control.as_mut().unwrap();
+            match mutation {
+                "wrong_scope" => {
+                    control
+                        .security_bootstraps
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .scope
+                        .environment = "foreign".to_owned().try_into()?
+                }
+                "duplicate_policy" => {
+                    let policy = control.security_bootstraps.values().next().unwrap().clone();
+                    control
+                        .security_bootstraps
+                        .insert("second".to_owned().try_into()?, policy);
+                }
+                "missing_epoch" => control.security_epochs.clear(),
+                "duplicate_epoch" => {
+                    let epoch = control.security_epochs.values().next().unwrap().clone();
+                    control
+                        .security_epochs
+                        .insert("second".to_owned().try_into()?, epoch);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                invalid.native_bootstrap_for("workspace").is_err(),
+                "{mutation}"
+            );
+        }
+        let mut prerequisite = instance;
+        prerequisite
+            .control
+            .as_mut()
+            .unwrap()
+            .security_bootstraps
+            .clear();
+        assert!(prerequisite.native_bootstrap_for("workspace")?.is_none());
+        // Epoch catalog alone does not select native mode or create authority.
+        assert!(
+            !prerequisite
+                .control
+                .as_ref()
+                .unwrap()
+                .security_epochs
+                .is_empty()
+        );
+        Ok(())
     }
 }

@@ -63,3 +63,62 @@ impl ActiveControllerStorageContinuity {
         result
     }
 }
+
+impl ActiveControllerStorageContinuity {
+    /// The Shell's actual role channel remains borrowed alongside the SAME
+    /// physical file/provider scope. Original App liveness is retained here;
+    /// it is never interpreted as a fresh App role or Shell database identity.
+    pub(in crate::security_epoch) fn serve_shell_current(
+        &mut self,
+        stage: EnrolledRoleStage<'_>,
+        peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
+    ) -> Result<()> {
+        ensure!(self.valid, "active_controller_storage_refused");
+        self.valid = false;
+        let result = (|| {
+            let mut physical = self.storage.begin_current_controller(stage)?;
+            let mut shell = peer.accept_current(physical.controller_stage()?)?;
+            let _binding = shell.request_binding();
+            let mut reads = AuthenticatedReads::acquire(
+                &self.policy,
+                &self.store,
+                NativeRole::EpochController,
+                physical.controller_stage()?,
+            )?
+            .retain_current()?;
+            let names = request_names(&self.store, &self.completion)?;
+            let mut observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
+            check_active_snapshot(
+                &self.store,
+                &self.completion,
+                &self.activation,
+                observed.snapshot(),
+            )?;
+            physical.check()?;
+            reads.check_observation(physical.controller_stage()?, &mut observed)?;
+            shell.check(physical.controller_stage()?)?;
+            shell.announce_known(physical.controller_stage()?)?;
+            shell.await_consumed(physical.controller_stage()?)?;
+            observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
+            check_active_snapshot(
+                &self.store,
+                &self.completion,
+                &self.activation,
+                observed.snapshot(),
+            )?;
+            reads.check_observation(physical.controller_stage()?, &mut observed)?;
+            physical.check()?;
+            shell.check(physical.controller_stage()?)?;
+            shell.release(physical.controller_stage()?)?;
+            shell.finish_checked(physical.controller_stage()?)?;
+            physical.finish_controller_known()
+        })();
+        if result.is_ok() {
+            self.valid = true;
+        } else {
+            self.storage.refuse();
+            peer.refuse();
+        }
+        result
+    }
+}

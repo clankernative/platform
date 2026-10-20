@@ -23,7 +23,7 @@ mod app_serving;
 mod controller_serving;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ServingDisposition {
+pub(in crate::security_epoch) enum ServingDisposition {
     Unarmed,
     Armed,
     Known,

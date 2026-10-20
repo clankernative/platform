@@ -10,6 +10,7 @@ mod bootstrap;
 mod control_slot;
 mod control_slot_firestore;
 pub(crate) mod control_slot_io;
+pub(crate) mod controller;
 mod credential_material;
 mod firestore;
 mod identity_protocol;
