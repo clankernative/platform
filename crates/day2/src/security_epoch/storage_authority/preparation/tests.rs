@@ -735,3 +735,37 @@ mod linux {
         assert!(owner.file.metadata().is_ok());
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_identity_allows_growth_between_observations_but_initial_length_and_shape_stay_exact() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = File::open(temporary.path()).unwrap();
+    let anchor = super::super::directory_identity(&directory).unwrap();
+    let path = temporary.path().join("retained.sqlite");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.set_len(4096).unwrap();
+    let original = observe_anchored_file(&directory, &anchor, &file, 4096).unwrap();
+    // Model the actual interleaving: metadata observes the old length, then
+    // another legitimate SQLite writer grows the same retained inode.
+    let earlier_length = usize::try_from(file.metadata().unwrap().len()).unwrap();
+    file.set_len(8192).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).unwrap() == original);
+    assert!(observe_anchored_file(&directory, &anchor, &file, earlier_length).is_err());
+    file.set_len(4096).unwrap();
+    assert!(observe_anchored_file(&directory, &anchor, &file, 4096).unwrap() == original);
+    // Dropping the length constraint does not relax nlink or mode constraints.
+    let alias = temporary.path().join("alias.sqlite");
+    std::fs::hard_link(&path, &alias).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).is_err());
+    std::fs::remove_file(alias).unwrap();
+    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o644)).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).is_err());
+}
