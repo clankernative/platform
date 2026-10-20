@@ -37,8 +37,10 @@ impl StorageSocketDirectory {
             Err(rustix::io::Errno::EXIST) => false,
             Err(error) => return Err(error.into()),
         };
-        let directory = open_child(root)?;
         if created {
+            // This read-capable descriptor is acquired while UID0 still owns
+            // the new inode, then closed after the ownership transfer.
+            let directory = open_initial_child(root)?;
             // Set the exact mode while the provisioner still owns the inode.
             // Transferring ownership needs CHOWN, not an additional FOWNER grant.
             rustix::fs::fchmod(&directory, Mode::RWXU)?;
@@ -48,6 +50,7 @@ impl StorageSocketDirectory {
                 Some(rustix::process::Gid::from_raw_unchecked(CONTROLLER)),
             )?;
         }
+        let directory = open_child(root)?;
         let identity = child_identity(&directory)?;
         let owner = Self {
             directory,
@@ -79,10 +82,20 @@ fn root_identity(root: &File) -> Result<(u64, u64)> {
 }
 
 fn open_child(root: &File) -> Result<File> {
+    open_with(root, OFlags::PATH)
+}
+
+fn open_initial_child(root: &File) -> Result<File> {
+    open_with(root, OFlags::RDONLY)
+}
+
+fn open_with(root: &File, access: OFlags) -> Result<File> {
+    // After chown, UID0 without DAC_OVERRIDE cannot open this 0700 directory
+    // for reading. Identity checks need only O_PATH, never directory contents.
     Ok(File::from(rustix::fs::openat2(
         root,
         CHILD,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        access | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::BENEATH
             | ResolveFlags::NO_SYMLINKS
@@ -107,6 +120,27 @@ fn child_identity(directory: &File) -> Result<(u64, u64)> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    #[ignore = "run isolated Linux UID0 with cap-drop ALL and only CHOWN"]
+    fn chown_only_provisioner_checks_existing_private_child_without_read_access() {
+        assert_eq!(rustix::process::geteuid().as_raw(), 0);
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = File::open(parent.path()).unwrap();
+        let owner = StorageSocketDirectory::prepare(&root).unwrap();
+        assert!(File::open(parent.path().join(CHILD)).is_err());
+        owner.check(&root).unwrap();
+        StorageSocketDirectory::prepare(&root)
+            .unwrap()
+            .check(&root)
+            .unwrap();
+        // Test-only cleanup/negative mutation. The production constructor never
+        // repairs an existing wrong owner or opens the child's contents.
+        std::os::unix::fs::chown(parent.path().join(CHILD), Some(0), Some(0)).unwrap();
+        assert!(owner.check(&root).is_err());
+        assert!(StorageSocketDirectory::prepare(&root).is_err());
+    }
 
     #[test]
     #[ignore = "requires an isolated root-owned Linux filesystem; run explicitly"]
