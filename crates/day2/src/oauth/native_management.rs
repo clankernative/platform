@@ -1232,7 +1232,7 @@ pub(crate) struct Consumer<'a, 'role, 'original> {
     source: ConsumerSource<'a, 'role>,
     original: &'a mut OriginalPhase<'original>,
     armed: &'a std::cell::Cell<bool>,
-    committed: bool,
+    finalized: bool,
 }
 
 enum ConsumerSource<'stage, 'role> {
@@ -1282,7 +1282,7 @@ impl Consumer<'_, '_, '_> {
 
     pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
         self.original.require_signature_intent(expected)?;
-        let result = self.prepare_commit();
+        let result = self.prepare_finalization();
         if result.is_err() {
             self.refuse();
         }
@@ -1315,7 +1315,7 @@ impl Consumer<'_, '_, '_> {
     /// returns a dispatch permit or rearms the original.
     pub(crate) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
         let result = (|| {
-            self.prepare_commit()?;
+            self.prepare_finalization()?;
             tx.commit()?;
             self.check()
         })();
@@ -1330,7 +1330,7 @@ impl Consumer<'_, '_, '_> {
         tx: crate::write_queue::WriteTransaction<'_>,
     ) -> Result<()> {
         let result = (|| {
-            self.prepare_commit()?;
+            self.prepare_finalization()?;
             tx.commit()?;
             self.check()
         })();
@@ -1340,9 +1340,9 @@ impl Consumer<'_, '_, '_> {
         result
     }
 
-    fn prepare_commit(&mut self) -> Result<()> {
+    fn prepare_finalization(&mut self) -> Result<()> {
         ensure!(
-            !self.committed,
+            !self.finalized,
             "native consumer finalization already attempted"
         );
         if self.armed.get() {
@@ -1351,7 +1351,7 @@ impl Consumer<'_, '_, '_> {
             self.arm()?;
         }
         // Close before the actual COMMIT/signature, including a lost result.
-        self.committed = true;
+        self.finalized = true;
         Ok(())
     }
 
@@ -1534,7 +1534,7 @@ fn with_consumer_for_role<T>(
                         },
                         original,
                         armed: &guard.armed,
-                        committed: false,
+                        finalized: false,
                     }
                     .run(operation)
                 },
@@ -1544,7 +1544,7 @@ fn with_consumer_for_role<T>(
                 source: ConsumerSource::Simulated(stage),
                 original,
                 armed: &guard.armed,
-                committed: false,
+                finalized: false,
             }
             .run(operation),
         },
