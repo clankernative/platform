@@ -356,6 +356,24 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
     fresh.original.deadline_ns += 10_000_000_000;
     fresh.original.domain = Digest::new(b"new-original-acquisition");
     assert!(old.same_enrollment(&fresh));
+    // A fresh envelope/nonce alone is not a new issuer role grant.
+    let mut rewrapped = old.clone();
+    rewrapped.original.domain = Digest::new(b"different-envelope-only");
+    assert_ne!(old.digest().unwrap(), rewrapped.digest().unwrap());
+    assert_eq!(
+        old.grant_digest().unwrap(),
+        rewrapped.grant_digest().unwrap()
+    );
+    assert_ne!(old.grant_digest().unwrap(), fresh.grant_digest().unwrap());
+    let previous = old.grant_digest().unwrap();
+    assert!(old.require_new_grant(&previous).is_err());
+    assert!(rewrapped.require_new_grant(&previous).is_err());
+    fresh.require_new_grant(&previous).unwrap();
+    assert!(
+        fresh
+            .require_new_grant(&fresh.grant_digest().unwrap())
+            .is_err()
+    );
     let now = Duration::from_secs(112);
     assert!(
         old.validate(
