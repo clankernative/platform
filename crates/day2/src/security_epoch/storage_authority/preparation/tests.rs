@@ -163,11 +163,14 @@ fn app_admits_the_exact_creator_image_without_reinitializing_random_authority() 
     let decoded = observed
         .decode_exact_readback(first.bytes(), &mut acquisition())
         .unwrap();
-    assert!(decoded.is_readonly(rusqlite::MAIN_DB).unwrap());
+    // Verify the actual write boundary, rather than the underlying memory
+    // connection's sqlite3_db_readonly reflection of its original open mode.
+    let write_error = decoded
+        .execute("DELETE FROM day2_initial_security_seed", [])
+        .unwrap_err();
     assert!(
-        decoded
-            .execute("DELETE FROM day2_initial_security_seed", [])
-            .is_err()
+        matches!(write_error, rusqlite::Error::SqliteFailure(ref error, _)
+        if error.code == rusqlite::ErrorCode::ReadOnly)
     );
     // Valid SQLite initialized independently has a different genuine authority
     // lineage. It cannot replace the creator's exact projected image.
