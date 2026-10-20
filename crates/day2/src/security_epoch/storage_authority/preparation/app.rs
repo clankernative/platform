@@ -6,7 +6,7 @@ use super::{FileIdentity, NativeAcquisition, PreparedFileProjection, observe_anc
 #[cfg(target_os = "linux")]
 use super::{INITIAL_FILE, IO_CHUNK_BYTES};
 use crate::security_epoch::{
-    native_enrollment::{EnrolledRoleStage, NativeRole},
+    native_enrollment::{AuthenticatedInitialHolderOffer, EnrolledRoleStage, NativeRole},
     preparation_image::ObservedInitialImage,
     storage_authority::{DirectoryIdentity, directory_identity},
 };
@@ -38,8 +38,11 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
         runtime: &crate::store::InitialStoreMetadata,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
-        projection: PreparedFileProjection,
+        offer: &mut AuthenticatedInitialHolderOffer,
     ) -> Result<Self> {
+        // Authenticate the Controller and exact original exchange BEFORE any
+        // file open, byte read or SQLite parsing; DATA cannot bypass this gate.
+        let projection = offer.projection(stage, policy, store)?;
         stage.check_selection(policy, store, NativeRole::AppHost)?;
         let acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
         projection.validate_selection(policy, store)?;
@@ -98,6 +101,7 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
             )?;
             owner.image = Some(image);
             owner.check_original()?;
+            offer.check(owner.stage)?;
             Ok(owner)
         }
     }
@@ -201,6 +205,18 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
             self.acquisition.refuse();
         }
         result
+    }
+
+    /// Lend only the same originally borrowed stage, after current file checks.
+    /// The fixed peer must recheck this file after its I/O before completion.
+    pub(crate) fn app_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.check_original()?;
+        Ok(self.stage)
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        self.valid = false;
+        self.acquisition.refuse();
     }
 
     pub(crate) fn projection(&mut self) -> Result<PreparedFileProjection> {

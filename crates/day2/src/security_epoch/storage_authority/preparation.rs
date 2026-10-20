@@ -218,7 +218,7 @@ impl PreparedFileProjection {
         Digest::of(&("day2-original-prepared-file-projection-v1", self))
     }
 
-    pub(super) fn validate_selection(
+    pub(in crate::security_epoch) fn validate_selection(
         &self,
         policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
         store: &EpochStore,
