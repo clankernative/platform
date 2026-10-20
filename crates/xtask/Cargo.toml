@@ -14,7 +14,7 @@ ring = "=0.17.14"
 flate2 = "=1.1.10"
 tar = { version = "=0.4.46", default-features = false }
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
-rustix = { version = "=1.1.4", features = ["fs"] }
+rustix = { version = "=1.1.5", features = ["fs"] }
 day2 = { path = "../day2" }
 day2-control = { path = "../day2-control" }
 day2-ops = { path = "../day2-ops" }

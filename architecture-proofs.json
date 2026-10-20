@@ -272,7 +272,7 @@
       "type_name": "AuthenticatedReads",
       "owning_children": [],
       "methods": [
-        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : RolePurpose) -> Result < Self >",
+        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >",
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "fn sample (& mut self) -> Result < Sample >"
@@ -280,7 +280,7 @@
       "factories": [
         {
           "owner": "AuthenticatedReads",
-          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : RolePurpose) -> Result < Self >"
+          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -378,6 +378,8 @@
         "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
+        "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
+        "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >",
         "fn observe (& mut self , now : Duration) -> Result < Sample >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn remaining (& mut self) -> Result < Duration >",
@@ -387,6 +389,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -397,6 +403,14 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn budget (& mut self) -> Result < Budget >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >"
         },
         {
           "owner": "NativeAcquisition",
@@ -621,6 +635,7 @@
       "methods": [
         "pub (super) fn acquire (acquisition : & mut NativeAcquisition) -> Result < Self >",
         "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (super) fn data (& self) -> & NamespaceFacts",
         "pub (super) fn into_data (self) -> NamespaceFacts",
         "pub (super) fn mappings (& mut self , acquisition : & mut NativeAcquisition) -> Result < Vec < namespace_protocol :: Mapping > >"
       ],
@@ -634,6 +649,10 @@
         {
           "owner": "NativeNamespaceObservation",
           "signature": "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "NativeNamespaceObservation",
+          "signature": "pub (super) fn data (& self) -> & NamespaceFacts"
         },
         {
           "owner": "NativeNamespaceObservation",
@@ -783,6 +802,150 @@
         }
       ],
       "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "EnrolledOriginalClock",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn origin (& self) -> Duration",
+        "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "EnrolledOriginalClock",
+          "signature": "pub (crate) fn origin (& self) -> Duration"
+        },
+        {
+          "owner": "EnrolledOriginalClock",
+          "signature": "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "EnrolledProcessRoleOwner",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >",
+        "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >",
+        "fn check_local (& mut self) -> Result < () >",
+        "pub (crate) fn enroll_current_thread (scope : & AuthorityScope , role : NativeRole) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn enroll_current_thread (scope : & AuthorityScope , role : NativeRole) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "fn check_local (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "EnrolledRoleStage",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
+        "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ClockAnchors",
+          "signature": "fn capture (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "ClockAnchors",
+          "signature": "fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledOriginalClock",
+          "signature": "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+      "type_name": "SameEnrolledOwner",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []

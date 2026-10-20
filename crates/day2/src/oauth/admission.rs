@@ -3177,6 +3177,7 @@ pub(super) mod tests {
                 "kubernetes_service_account":{"name":role,"uid":format!("{role}-service-account")},
                 "google_service_account":account,"workload_kind":"deployment_v1",
                 "workload":{"name":role,"uid":format!("{role}-deployment")},
+                "container":{"name":role,"image":Digest::new(b"fixture-image")},
                 "token_review_audience":"fixture-audience"
             })
         };
@@ -3189,9 +3190,12 @@ pub(super) mod tests {
                 "service_account":"controller@company-tools.iam.gserviceaccount.com",
                 "service_account_uid":"100000000000000000099"})),
             "app":role("app",serde_json::to_value(iam_source)?),
+            "shell":role("shell",json!({"kind":"gke_workload_identity_v1",
+                "service_account":"shell@company-tools.iam.gserviceaccount.com",
+                "service_account_uid":"100000000000000000098"})),
             "control_store":{"kind":"firestore_authority_database_v1","epoch_store":reference},
             "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":digest,
-                "controller_code":digest,"app_artifact":digest},
+                "controller_code":digest,"app_host_code":digest,"security_shell_code":digest,"app_artifact":digest},
             "fresh_storage":{"provider_volume_uid":"volume-one","mount_binding":digest,
                 "schema_contract":digest,"marker_format":"fixture_marker_v1"}
         }))?;
