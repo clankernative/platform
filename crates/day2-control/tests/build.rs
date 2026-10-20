@@ -614,7 +614,7 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
         &path("DAY2_TEST_BUILD_RUST")?,
         &path("DAY2_TEST_BUILD_REGISTRY")?,
     )?;
-    let runner = runner.with_bundled_ui(&root)?;
+    let runner = runner.with_platform_inputs(&root)?;
     let platform = PlatformInputs::capture(&root, &root.join("../.toolchains"))?;
     let external_source = std::env::var_os("DAY2_TEST_BUILD_APP");
     let source_root = external_source
