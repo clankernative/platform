@@ -169,7 +169,7 @@ impl Attestation {
         now: i64,
         current: &mut super::native_management::Consumer<'_, '_, '_>,
     ) -> Result<Self> {
-        proof.require_management_authentication()?;
+        proof.require_management_authentication(current)?;
         view.validate(identity, now)?;
         let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
         proof.require_intent(&intent, identity)?;

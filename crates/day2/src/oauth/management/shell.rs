@@ -109,13 +109,13 @@ impl Shell {
         let view = self.pending(proof.attempt(), headers, identity, now)?;
         proof.require_intent(&FreshIntent::management(&view, identity)?, identity)?;
         proof.require_current(now)?;
-        proof.require_management_authentication()?;
         let intent = FreshIntent::management(&view, identity)?;
         crate::oauth::native_management::with_consumer(
             &intent,
             crate::oauth::native_management::Phase::Session,
             now,
             |current| {
+                proof.require_management_authentication(current)?;
                 let token = effects::random()?;
                 let digest = Digest::new(token.as_bytes());
                 let session = Session {

@@ -363,9 +363,12 @@ impl VerifiedAuthTime {
         self.google.require_post_pending_authentication()
     }
 
-    pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {
+    pub(in crate::oauth) fn require_management_authentication(
+        &self,
+        current: &mut super::native_management::Consumer<'_, '_, '_>,
+    ) -> Result<()> {
         self.google.intent().require_oauth_management()?;
-        self.google.require_post_pending_authentication()
+        self.google.require_management_authentication(current)
     }
 
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {

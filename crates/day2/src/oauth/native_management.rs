@@ -797,6 +797,22 @@ enum ConsumerSource<'stage, 'role> {
 }
 
 impl Consumer<'_, '_, '_> {
+    /// A signed Google observation is consumed only inside the genuine Shell
+    /// session/signature phase for this exact retained original. No simulator,
+    /// serialized observation or registry DATA can supply native permission.
+    pub(super) fn require_google_producer(&mut self, intent: &FreshIntent) -> Result<()> {
+        ensure!(
+            self.original.intent == intent
+                && matches!(self.original.phase, Phase::Session | Phase::Signature),
+            "Google producer original or consumer changed"
+        );
+        match &self.source {
+            ConsumerSource::Native { .. } => self.check(),
+            #[cfg(test)]
+            ConsumerSource::Simulated(_) => anyhow::bail!(super::shell_oidc::PRODUCER_UNAVAILABLE),
+        }
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = match &mut self.source {
             ConsumerSource::Native { stage, current } => current
@@ -1592,6 +1608,27 @@ mod tests {
                 1
             );
             Ok(())
+        })
+    }
+
+    #[test]
+    fn simulated_original_and_serving_phase_cannot_supply_the_native_google_producer() -> Result<()>
+    {
+        let world = super::super::simulation::World::new(454);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("native-google-supplier-required", 305)?;
+            reserve_shell(&intent, 5)?;
+            let error = with_consumer(&intent, Phase::Session, 5, |current| {
+                current.require_google_producer(&intent)
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                super::super::shell_oidc::PRODUCER_UNAVAILABLE
+            );
+            // This known exclusion made no native action and cannot burn an
+            // unrelated valid simulated operation or turn into native material.
+            with_consumer(&intent, Phase::Session, 5, |current| current.check())
         })
     }
 

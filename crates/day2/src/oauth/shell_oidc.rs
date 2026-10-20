@@ -485,8 +485,8 @@ impl Reauthenticated {
         self.authenticated_at
     }
 
-    /// Signed timestamps alone do not establish authentication after the local
-    /// pending request. No production causal producer is admitted yet.
+    /// Approval and credential enrollment remain unsupported. Their observations
+    /// cannot use the OAuth management producer or its owner scopes.
     pub(in crate::oauth) fn require_post_pending_authentication(&self) -> Result<()> {
         #[cfg(test)]
         if self.isolated_fixture {
@@ -522,6 +522,50 @@ impl Reauthenticated {
         // genuine original lifetime/current role/epoch or final app settlement.
         // No production success branch is installed before those are supplied.
         anyhow::bail!(PRODUCER_UNAVAILABLE)
+    }
+
+    /// Consume the verified issuer-order chain at its actual Shell session or
+    /// signer, retaining the same enrolled original and genuine serving scope.
+    /// This lends no transferable permit and never reconstructs native owners.
+    pub(in crate::oauth) fn require_management_authentication(
+        &self,
+        current: &mut super::native_management::Consumer<'_, '_, '_>,
+    ) -> Result<()> {
+        self.intent.require_oauth_management()?;
+        #[cfg(test)]
+        if self.isolated_fixture {
+            return Ok(());
+        }
+        let order = self.ordering.as_ref().context(PRODUCER_UNAVAILABLE)?;
+        ensure!(
+            order.original == self.intent.commitment()?
+                && order.fresh.issuer == order.baseline.issuer
+                && order.fresh.profile == order.baseline.profile
+                && order.fresh.claims.sub == order.baseline.claims.sub
+                && order.fresh.claims.aud == order.baseline.claims.aud
+                && order.fresh.claims.auth_time == self.authenticated_at
+                && order.fresh.claims.auth_time > order.baseline.claims.iat
+                && order.fresh.claims.auth_time <= order.fresh.claims.iat,
+            "Google original ordering context changed"
+        );
+        if let Err(error) = current.require_google_producer(&self.intent) {
+            // Keep the closed prerequisite diagnostic for signed replay without
+            // actual native suppliers. It does not grant a session or retry.
+            return Err(anyhow::Error::new(ProviderObservationUnavailable(
+                ProviderObservationData {
+                    version: 1,
+                    kind: "google_provider_prerequisite",
+                    outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+                    baseline_iat: order.baseline.claims.iat,
+                    fresh_auth_time: order.fresh.claims.auth_time,
+                    profile: observation_profile(&order.fresh.profile)?,
+                    correlation: order.observation_correlation.clone(),
+                },
+            ))
+            .context(error));
+        }
+        self.require_current(effects::wall_time()?)?;
+        current.check()
     }
 
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
