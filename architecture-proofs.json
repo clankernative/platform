@@ -1332,12 +1332,12 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+        "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
       ],
       "factories": [
         {
           "owner": "PreparedFileContinuity",
-          "signature": "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+          "signature": "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
         }
       ],
       "material_uses": [
