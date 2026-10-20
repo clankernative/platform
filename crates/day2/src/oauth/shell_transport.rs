@@ -447,6 +447,15 @@ impl AppApprovalReceiver {
             .map_or_else(|| Ok(Vec::new()), |manager| manager.native_selections())
     }
 
+    pub(crate) fn native_runtime_response_scope(
+        &self,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        self.management.as_ref().map_or_else(
+            || Ok(None),
+            |manager| manager.native_runtime_response_scope(),
+        )
+    }
+
     fn dispatch(
         &self,
         method: &Method,

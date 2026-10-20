@@ -841,6 +841,200 @@ pub(crate) enum RuntimePhase {
     Refresh,
 }
 
+/// Autonomous operation borrow. It has no human original, signature factory or
+/// conversion into Consumer. Native construction always borrows the real App
+/// participant and SAME stage; ordinary/test Runtime data cannot supply those.
+pub(crate) struct RuntimeConsumer<'a, 'role> {
+    source: RuntimeSource<'a, 'role>,
+}
+
+enum RuntimeSource<'a, 'role> {
+    Native {
+        current: &'a mut dyn CurrentServingPhase,
+        stage: &'a mut EnrolledRoleStage<'role>,
+    },
+    Ordinary,
+}
+
+impl RuntimeConsumer<'_, '_> {
+    pub(super) fn check(&mut self) -> Result<()> {
+        match &mut self.source {
+            RuntimeSource::Native { current, stage } => current.check(stage),
+            RuntimeSource::Ordinary => Ok(()),
+        }
+    }
+
+    /// This does not mint a dispatch or publication permit. Existing durable
+    /// CAS/selection/slot checks still own each transaction's actual authority.
+    pub(super) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            tx.commit()?;
+            self.check()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(super) fn send<T>(&mut self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let result = (|| {
+            self.check()?;
+            let value = operation()?;
+            self.check()?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(super) fn refuse(&mut self) {
+        if let RuntimeSource::Native { current, .. } = &mut self.source {
+            current.refuse();
+        }
+    }
+
+    fn run<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.check()?;
+        if let RuntimeSource::Native { current, stage } = &mut self.source {
+            // SQLite open/recovery is an attempted effect too. No native file
+            // access occurs before this real scope is armed.
+            current.arm(stage)?;
+        }
+        let result = (|| {
+            let value = operation(self)?;
+            self.check()?;
+            if let RuntimeSource::Native { current, stage } = &mut self.source {
+                current.finish_known(stage)?;
+            }
+            self.check()?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+}
+
+pub(super) fn with_runtime_consumer<T>(
+    runtime: &crate::store::Runtime,
+    phase: RuntimePhase,
+    operation: impl FnOnce(&mut RuntimeConsumer<'_, '_>) -> Result<T>,
+) -> Result<T> {
+    let purpose = match phase {
+        RuntimePhase::Read => crate::security_epoch::serving::RuntimeServingUse::Read,
+        RuntimePhase::Refresh => crate::security_epoch::serving::RuntimeServingUse::Refresh,
+        RuntimePhase::InitialStorage => {
+            anyhow::bail!("native initial admission requires its dedicated factory")
+        }
+    };
+    if !runtime.uses_native_storage() {
+        return RuntimeConsumer {
+            source: RuntimeSource::Ordinary,
+        }
+        .run(operation);
+    }
+    let scope = OWNERS.with(|owners| {
+        let owners = owners.try_borrow()?;
+        Ok::<_, anyhow::Error>(
+            owners
+                .get(runtime.app())
+                .context("native runtime executor missing")?
+                .selection
+                .scope()
+                .clone(),
+        )
+    })?;
+    with_app_participant(&scope, |participant, stage| {
+        crate::security_epoch::serving::with_current_runtime_serving(
+            participant,
+            stage,
+            purpose,
+            |current, same| {
+                RuntimeConsumer {
+                    source: RuntimeSource::Native {
+                        current,
+                        stage: same,
+                    },
+                }
+                .run(operation)
+            },
+        )
+    })
+}
+
+/// Immutable Runtime/registry selection DATA, not current permission. A native
+/// Runtime cannot downgrade to an unowned response when its supplier is absent.
+pub(crate) fn runtime_response_scope(
+    runtime: &crate::store::Runtime,
+) -> Result<Option<AuthorityScope>> {
+    if !runtime.uses_native_storage() {
+        return Ok(None);
+    }
+    OWNERS.with(|owners| {
+        let owners = owners.try_borrow()?;
+        let owner = owners
+            .get(runtime.app())
+            .context("native runtime response executor missing")?;
+        ensure!(
+            owner.kind == NativeRole::AppHost,
+            "native runtime response requires App owner"
+        );
+        Ok(Some(owner.selection.scope().clone()))
+    })
+}
+
+fn with_runtime_response<T>(
+    scope: &AuthorityScope,
+    identity: &ResponseIdentity,
+    complete: bool,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owner = owners
+            .get_mut(scope.app.as_str())
+            .context("native runtime response executor missing")?;
+        ensure!(
+            owner.kind == NativeRole::AppHost,
+            "native runtime response requires App owner"
+        );
+        let AppStorage::Participant(participant) = &mut owner.storage else {
+            anyhow::bail!("native runtime response participant unavailable")
+        };
+        // Pure exact-holder exclusion BEFORE touching the winner's role/clock.
+        crate::security_epoch::serving::require_runtime_response(participant, scope, identity)?;
+        let mut role = owner.role.try_borrow_mut()?;
+        let mut stage = role.begin_current_stage()?;
+        stage.check_selection(&owner.selection.policy, &owner.selection.store, owner.kind)?;
+        let purpose = if complete {
+            crate::security_epoch::serving::RuntimeServingUse::ResponseComplete
+        } else {
+            crate::security_epoch::serving::RuntimeServingUse::Response
+        };
+        crate::security_epoch::serving::with_current_runtime_response(
+            participant,
+            &mut stage,
+            scope,
+            purpose,
+            identity,
+            |current, same| {
+                let mut consumer = RuntimeConsumer {
+                    source: RuntimeSource::Native {
+                        current,
+                        stage: same,
+                    },
+                };
+                consumer.run(|_| operation())
+            },
+        )
+    })
+}
+
 /// Autonomous read/refresh has a current role phase, never a human original.
 /// The callback retains the actual native borrow through read/admission/result.
 pub(crate) fn with_current_app_role<T>(
@@ -1370,6 +1564,7 @@ pub(super) struct Sink {
     identity: ResponseIdentity,
     bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
     state: Rc<std::cell::Cell<SinkState>>,
+    runtime: Rc<RefCell<Option<RuntimeBinding>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1393,13 +1588,69 @@ struct SinkBinding {
     effects: crate::managed_credentials::effects::Captured,
 }
 
+#[derive(Clone)]
+struct RuntimeBinding {
+    scope: AuthorityScope,
+    effects: crate::managed_credentials::effects::Captured,
+}
+
 impl Sink {
     pub(super) fn new() -> Self {
         Self {
             identity: ResponseIdentity::new(),
             bindings: Rc::new(RefCell::new(BTreeMap::new())),
             state: Rc::new(std::cell::Cell::new(SinkState::Open)),
+            runtime: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Called at response creation before Hyper can poll its headers/body.
+    /// Human precedence selects the ACTUAL human helper, never an early bypass.
+    pub(super) fn prepare_response(&self, scope: Option<AuthorityScope>) -> Result<()> {
+        ensure!(
+            self.state.get() == SinkState::Open,
+            "native response sink closed"
+        );
+        if !self.bindings.try_borrow()?.is_empty() {
+            ensure!(
+                self.runtime.try_borrow()?.is_none(),
+                "native response ownership cannot be reclassified"
+            );
+            return self.with_current_result(Phase::Response, || Ok(()));
+        }
+        let Some(scope) = scope else { return Ok(()) };
+        let mut binding = self.runtime.try_borrow_mut()?;
+        if let Some(current) = binding.as_ref() {
+            ensure!(
+                current.scope == scope,
+                "native runtime response scope changed"
+            );
+        }
+        OWNERS.with(|owners| {
+            let mut owners = owners.try_borrow_mut()?;
+            let owner = owners
+                .get_mut(scope.app.as_str())
+                .context("native runtime response executor missing")?;
+            ensure!(
+                owner.kind == NativeRole::AppHost,
+                "native runtime response requires App owner"
+            );
+            let AppStorage::Participant(participant) = &mut owner.storage else {
+                anyhow::bail!("native runtime response participant unavailable")
+            };
+            crate::security_epoch::serving::bind_runtime_response(
+                participant,
+                &scope,
+                &self.identity,
+            )
+        })?;
+        if binding.is_none() {
+            *binding = Some(RuntimeBinding {
+                scope,
+                effects: crate::managed_credentials::effects::capture(),
+            });
+        }
+        Ok(())
     }
 
     /// A synchronous fixture RPC still has its own response scope. It must not
@@ -1447,8 +1698,22 @@ impl Sink {
             .map(|((role, _), binding)| (*role, binding.clone()))
             .collect();
         match intents.as_slice() {
-            [] => operation(),
+            [] => match self.runtime.try_borrow()?.clone() {
+                Some(binding) => binding.effects.run(|| {
+                    with_runtime_response(
+                        &binding.scope,
+                        &self.identity,
+                        phase == Phase::ResponseComplete,
+                        operation,
+                    )
+                }),
+                None => operation(),
+            },
             [(role, binding)] => binding.effects.clone().run(|| {
+                ensure!(
+                    self.runtime.try_borrow()?.is_none(),
+                    "native response ownership conflict"
+                );
                 with_consumer_for_role(
                     &binding.intent,
                     phase,
@@ -1482,6 +1747,30 @@ impl Sink {
                 .effects
                 .clone()
                 .run(|| -> Result<()> { refuse_response(&binding.intent, *role, &self.identity) });
+        }
+        if let Ok(binding) = self.runtime.try_borrow() {
+            if let Some(binding) = binding.as_ref() {
+                let _ = binding.effects.clone().run(|| {
+                    OWNERS.with(|owners| {
+                        let mut owners = owners.try_borrow_mut()?;
+                        let owner = owners
+                            .get_mut(binding.scope.app.as_str())
+                            .context("native runtime terminal executor missing")?;
+                        ensure!(
+                            owner.kind == NativeRole::AppHost,
+                            "native runtime terminal role changed"
+                        );
+                        let AppStorage::Participant(participant) = &mut owner.storage else {
+                            anyhow::bail!("native runtime terminal participant unavailable")
+                        };
+                        crate::security_epoch::serving::refuse_runtime_response(
+                            participant,
+                            &binding.scope,
+                            &self.identity,
+                        )
+                    })
+                });
+            }
         }
     }
 
@@ -1755,6 +2044,60 @@ mod tests {
             );
             assert!(!entered.get());
             Ok(())
+        })
+    }
+
+    #[test]
+    fn native_runtime_metadata_and_scripted_role_cannot_supply_runtime_or_response_permission()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (ordinary, _, _) =
+            super::super::admission::tests::management_fixture(directory.path())?;
+        let metadata_only = crate::store::Runtime::from_artifact_for_tests(
+            ordinary.instance_path().to_owned(),
+            ordinary.app().into(),
+            std::path::PathBuf::from("/state/day2-native/day2-initial.sqlite"),
+            ordinary.artifact().clone(),
+        )?;
+        assert!(metadata_only.uses_native_storage());
+        assert!(!ordinary.uses_native_storage());
+        let instance = crate::artifact::Instance::load(ordinary.instance_path())?;
+        let scope = AuthorityScope {
+            installation: instance.installation,
+            environment: instance.environment,
+            app: ordinary.app().to_owned().try_into()?,
+        };
+        let world = super::super::simulation::World::new(458);
+        super::super::effects::scope(world, || -> Result<()> {
+            fixtures::select_app_scope(&scope)?;
+            for phase in [RuntimePhase::Read, RuntimePhase::Refresh] {
+                let entered = std::cell::Cell::new(false);
+                let error = with_runtime_consumer(&metadata_only, phase, |_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .unwrap_err();
+                assert_eq!(error.to_string(), "native runtime executor missing");
+                assert!(!entered.get());
+            }
+            assert!(runtime_response_scope(&metadata_only).is_err());
+            let sink = Sink::new();
+            assert!(sink.prepare_response(Some(scope.clone())).is_err());
+            assert!(sink.runtime.borrow().is_none());
+            assert!(sink.bindings.borrow().is_empty());
+            with_runtime_consumer(&ordinary, RuntimePhase::Read, |current| {
+                let mut db = rusqlite::Connection::open_in_memory()?;
+                db.execute_batch("CREATE TABLE runtime_probe(value INTEGER)")?;
+                let tx = db.transaction()?;
+                tx.execute("INSERT INTO runtime_probe VALUES(1)", [])?;
+                current.commit(tx)?;
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM runtime_probe", [], |r| r
+                        .get::<_, i64>(0))?,
+                    1
+                );
+                Ok(())
+            })
         })
     }
 

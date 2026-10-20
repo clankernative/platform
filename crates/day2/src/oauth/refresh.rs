@@ -287,6 +287,7 @@ pub(super) fn ensure_current(
     subject: &str,
     selection: &usage::Selection,
     started_at: i64,
+    serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
 ) -> Result<Resolution> {
     let authority = runtime
         .connections
@@ -303,7 +304,7 @@ pub(super) fn ensure_current(
         selection,
         started_at,
     );
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     let context = match context {
         Ok(Some(context)) => context,
         Ok(None) => {
@@ -323,6 +324,7 @@ pub(super) fn ensure_current(
             )
         };
     let selected = selection.identity()?;
+    serving.check()?;
     let Some(key) = authority.custody(
         runtime.app(),
         registration,
@@ -344,6 +346,7 @@ pub(super) fn ensure_current(
         "refresh authority changed during key retrieval"
     );
     let expected = context.eligibility();
+    serving.check()?;
     let source = custody::load_refresh(
         &snapshot,
         &key,
@@ -353,7 +356,7 @@ pub(super) fn ensure_current(
         expected.base_version,
         now,
     )?;
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     let Some(source) = source else {
         return Ok(Resolution::unavailable("ReauthRequired"));
     };
@@ -374,6 +377,7 @@ pub(super) fn ensure_current(
                 == super::catalog::Adapter::GoogleCalendar,
         "product refresh adapter unavailable"
     );
+    serving.check()?;
     let client = authority.refresh_client(
         runtime.app(),
         registration,
@@ -419,14 +423,16 @@ pub(super) fn ensure_current(
             }
             let snapshot = db.transaction()?;
             let eligible = local_matches(&snapshot, current, dispatch_at)?;
-            snapshot.commit()?;
+            serving.commit(snapshot)?;
             if !eligible {
                 return Ok(false);
             }
             // Reclaiming an unsent Ready attempt is safe; the durable CAS still
             // returns at most one process-local permit across processes/restarts.
+            serving.check()?;
             store::claim_refresh(&mut db, &attempt, expected)?;
             permit = store::authorize_checked_dispatch(&mut db, &attempt, |tx| {
+                serving.check()?;
                 let at = effects::wall_time()?;
                 if at < dispatch_at {
                     return Err(ClockRefusal.into());
@@ -465,6 +471,7 @@ pub(super) fn ensure_current(
     let result = permit.send(
         |bound| -> Result<Option<super::profiles::ValidatedTokenResponse>> {
             ensure!(bound == expected, "refresh dispatch material changed");
+            serving.check()?;
             let wire = Wire::new()?;
             let response = wire
                 .client
@@ -477,8 +484,10 @@ pub(super) fn ensure_current(
                 ])
                 .send()
                 .map_err(|_| anyhow::anyhow!("OAuth refresh response unavailable; do not retry"))?;
+            serving.check()?;
             let status = response.status().as_u16();
             let bytes = body(response)?;
+            serving.check()?;
             if status == 400 {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -532,7 +541,7 @@ pub(super) fn ensure_current(
                 local_matches(&snapshot, &current, at)?,
                 "OAuth refresh authority changed before account read"
             );
-            snapshot.commit()?;
+            serving.commit(snapshot)?;
             ensure!(
                 monotonic.elapsed() <= BUDGET,
                 "OAuth refresh account dispatch elapsed budget exceeded"
@@ -542,6 +551,7 @@ pub(super) fn ensure_current(
                 tokens.refresh_access()
             ))?;
             authorization.set_sensitive(true);
+            serving.check()?;
             let response = wire
                 .client
                 .get(google::USERINFO)
@@ -552,7 +562,10 @@ pub(super) fn ensure_current(
                 response.status().as_u16() == 200,
                 "OAuth refresh account refused"
             );
-            let observed = google::observe_account(&body(response)?)?;
+            serving.check()?;
+            let account = body(response)?;
+            serving.check()?;
+            let observed = google::observe_account(&account)?;
             ensure!(
                 super::account::provider_account_digest(&observed)?.as_str() == expected.account,
                 "OAuth refreshed account changed"
@@ -567,10 +580,13 @@ pub(super) fn ensure_current(
     let tokens = match result {
         Ok(Some(tokens)) => tokens,
         Ok(None) => {
+            serving.check()?;
             store::mark_definitive_rejection(&mut db, &attempt)?;
+            serving.check()?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
         Err(_) => {
+            serving.refuse();
             if clock_failed {
                 clock_refusal(&db, &context)?;
             }
@@ -618,6 +634,7 @@ pub(super) fn ensure_current(
     });
     let mut freshest = observed_at;
     let mut publication_clock_refused = false;
+    serving.check()?;
     let publication = authority.with_current(
         runtime.app(),
         registration,
@@ -633,6 +650,7 @@ pub(super) fn ensure_current(
                     .take()
                     .context("refresh settlement already consumed")?,
                 |tx| {
+                    serving.check()?;
                     let at = effects::wall_time()?;
                     if at < observed_at || at >= expires_at {
                         publication_clock_refused = true;
@@ -649,6 +667,7 @@ pub(super) fn ensure_current(
             .is_some())
         },
     );
+    serving.check()?;
     match publication {
         Ok(true) => Resolution::ready(&context, next, freshest),
         _ => {

@@ -14,7 +14,6 @@ use hyper::{rt, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use std::{
     cell::RefCell,
-    convert::Infallible,
     future::Future,
     io,
     pin::Pin,
@@ -26,6 +25,9 @@ use std::{
     thread::ThreadId,
 };
 use tokio::{net::TcpListener, runtime::Handle};
+
+#[cfg(test)]
+use std::convert::Infallible;
 
 thread_local! {
     // Only timer creation enters this handle. Keeping an entered Tokio runtime
@@ -162,6 +164,19 @@ impl Endpoint {
             #[cfg(test)]
             Self::Prepared(_, _) => panic!("native fixture not prepared"),
         }
+    }
+
+    fn prepare_response(&self, sink: &super::native_management::Sink) -> Result<()> {
+        let scope = match self {
+            Self::App(host) => crate::web::native_runtime_response_scope(host)?,
+            Self::Receiver(receiver) => receiver.native_runtime_response_scope()?,
+            Self::Shell(_) => None,
+            #[cfg(test)]
+            Self::Test(_) => None,
+            #[cfg(test)]
+            Self::Prepared(_, _) => anyhow::bail!("native fixture preparation not complete"),
+        };
+        sink.prepare_response(scope)
     }
 }
 
@@ -366,7 +381,11 @@ async fn run(
                         let sink = sink.clone();
                         async move {
                             let response = sink.scope(endpoint.handle(request.map(Body::new), admitted)).await;
-                            Ok::<_, Infallible>(response)
+                            if endpoint.prepare_response(&sink).is_err() {
+                                sink.abort();
+                                return Err(io::Error::other("native response authority unavailable"));
+                            }
+                            Ok::<_, io::Error>(response)
                         }
                     });
                     // A failed write means delivery is unknown/failed. Never

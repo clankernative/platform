@@ -481,7 +481,12 @@ fn load(
     Ok(claims)
 }
 
-fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> Result<String> {
+fn resolve(
+    runtime: &Runtime,
+    request: &Request,
+    instruction: &Instruction,
+    serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
+) -> Result<String> {
     let input: ResolveInput = crate::json::decode(instruction.data.as_bytes())?;
     let requirement = declaration(runtime, &input.registration)?;
     ensure!(
@@ -498,7 +503,7 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
         crate::connection_codegen::RESOLVE,
     )?;
     let subject = human(&snapshot, runtime, request)?;
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     let Some(subject) = subject else {
         return Ok(unavailable("PermissionDenied"));
     };
@@ -527,6 +532,7 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
         &subject,
         &selection,
         now,
+        serving,
     )?;
     if let Some(problem) = refresh.problem() {
         return Ok(unavailable(problem));
@@ -541,7 +547,7 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
     let tx = crate::write_queue::immediate(&mut db)?;
     let now = super::effects::wall_time()?;
     if !refresh.validate(&tx, now)? {
-        tx.commit()?;
+        serving.commit(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     runtime.check_binding(&tx)?;
@@ -594,7 +600,7 @@ fn resolve(runtime: &Runtime, request: &Request, instruction: &Instruction) -> R
             serde_json::to_string(&claims)?
         ],
     )?;
-    tx.commit()?;
+    serving.commit(tx)?;
     Ok(json!({"Available": reference}).to_string())
 }
 
@@ -607,8 +613,42 @@ pub(crate) fn execute(
         instruction.kind == "observe",
         "connection read requires observation phase"
     );
+    ensure!(
+        [
+            crate::connection_codegen::RESOLVE,
+            crate::connection_codegen::LIST_EVENTS
+        ]
+        .contains(&instruction.model.as_str()),
+        "unknown connection observation"
+    );
+    // Reject malformed DATA before acquiring any native operation scope.
     if instruction.model == crate::connection_codegen::RESOLVE {
-        return resolve(runtime, request, instruction);
+        let _: ResolveInput = crate::json::decode(instruction.data.as_bytes())?;
+    } else {
+        let _: ReadInput = crate::json::decode(instruction.data.as_bytes())?;
+    }
+    let phase = if instruction.model == crate::connection_codegen::RESOLVE {
+        super::native_management::RuntimePhase::Refresh
+    } else {
+        super::native_management::RuntimePhase::Read
+    };
+    super::native_management::with_runtime_consumer(runtime, phase, |serving| {
+        execute_current(runtime, request, instruction, serving)
+    })
+}
+
+fn execute_current(
+    runtime: &Runtime,
+    request: &Request,
+    instruction: &Instruction,
+    serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
+) -> Result<String> {
+    ensure!(
+        instruction.kind == "observe",
+        "connection read requires observation phase"
+    );
+    if instruction.model == crate::connection_codegen::RESOLVE {
+        return resolve(runtime, request, instruction, serving);
     }
     ensure!(
         instruction.model == crate::connection_codegen::LIST_EVENTS,
@@ -633,7 +673,7 @@ pub(crate) fn execute(
         &input.reference,
         started,
     )?;
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     if !input.window.valid() {
         return Ok(json!("InvalidWindow").to_string());
     }
@@ -655,9 +695,10 @@ pub(crate) fn execute(
     if selected_at < started {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        tx.commit()?;
+        serving.commit(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
+    serving.check()?;
     let Some(key) = authority.custody(
         runtime.app(),
         &input.registration,
@@ -672,7 +713,7 @@ pub(crate) fn execute(
     if now < selected_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        tx.commit()?;
+        serving.commit(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let snapshot = crate::write_queue::immediate(&mut db)?;
@@ -689,6 +730,7 @@ pub(crate) fn execute(
         "connection use changed during key retrieval"
     );
     let (intent, binding) = activation(&snapshot, &claims, &selection)?;
+    serving.check()?;
     let token = super::custody::load_access(
         &snapshot,
         &key,
@@ -709,16 +751,16 @@ pub(crate) fn execute(
             ],
         )?;
     }
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     let Some(token) = token else {
         return Ok(unavailable("ReauthRequired"));
     };
-    let result = super::calendar::list(&token, &input.window)?;
+    let result = serving.send(|| super::calendar::list(&token, &input.window))?;
     let at = super::effects::wall_time()?;
     if at < now || at >= token.expires_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        tx.commit()?;
+        serving.commit(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
@@ -733,7 +775,7 @@ pub(crate) fn execute(
     if completed_at < at || completed_at >= token.expires_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        tx.commit()?;
+        serving.commit(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let snapshot = db.transaction()?;
@@ -745,7 +787,7 @@ pub(crate) fn execute(
         &input.reference,
         completed_at,
     )?;
-    snapshot.commit()?;
+    serving.commit(snapshot)?;
     Ok(result)
 }
 

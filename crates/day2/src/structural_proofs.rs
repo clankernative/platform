@@ -32,6 +32,19 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::oauth::native_management::RuntimeConsumer<'static, 'static>);
+    assert_not_impl!(
+        crate::oauth::native_management::RuntimeConsumer<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::RuntimeConsumer<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::RuntimeConsumer<'static, 'static>,
+        Sync
+    );
     assert_consuming!(crate::oauth::native_management::PendingWriter<'static, 'static>);
     assert_not_impl!(
         crate::oauth::native_management::PendingWriter<'static, 'static>,

@@ -600,6 +600,12 @@ pub(crate) fn native_selections(
         .native_selections()
 }
 
+pub(crate) fn native_runtime_response_scope(
+    host: &Host,
+) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+    crate::oauth::native_management::runtime_response_scope(&host.runtime)
+}
+
 pub(crate) async fn native_pump(
     host: Arc<Host>,
     stopped: tokio::sync::watch::Receiver<bool>,
