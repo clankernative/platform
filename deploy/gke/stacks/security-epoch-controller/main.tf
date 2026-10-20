@@ -59,7 +59,9 @@ resource "kubernetes_deployment_v1" "controller" {
     namespace = var.namespace
     labels    = local.labels
   }
-  wait_for_rollout = var.activate
+  # The first App exchange completes activation, so a single apply must not
+  # synchronously wait for an App that is deployed by another state root.
+  wait_for_rollout = false
   spec {
     replicas = var.activate ? 1 : 0
     strategy { type = "Recreate" }

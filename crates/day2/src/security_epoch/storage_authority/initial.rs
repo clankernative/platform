@@ -8,7 +8,7 @@ use crate::security_epoch::{
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
         AppHolderPeerContinuity, AuthenticatedAppFirstHolder, ControllerHolderPeerContinuity,
-        CurrentStoragePeerPhase, EnrolledRoleStage, InitialHolderServer, StoragePeerPurpose,
+        CurrentStoragePeerPhase, EnrolledRoleStage, InitialHolderListener, StoragePeerPurpose,
         StoragePeerRequest,
     },
 };
@@ -81,11 +81,12 @@ impl InitialStorageContinuity {
     /// as a substitute. A filesystem fixture cannot supply the required phase.
     pub(crate) fn establish(
         mut file: PreparedFileContinuity,
+        listener: InitialHolderListener,
         stage: EnrolledRoleStage<'_>,
     ) -> InitialStorageOutcome {
         let result = (|| {
             let phase = file.begin_initial_phase(stage)?;
-            let mut holder = InitialHolderServer::bind(phase)?.exchange()?;
+            let mut holder = listener.start(phase)?.exchange()?;
             holder.check_initial_durability()?;
             holder.retain_for_activation()
         })();

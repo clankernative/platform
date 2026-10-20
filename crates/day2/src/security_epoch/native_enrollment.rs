@@ -40,7 +40,7 @@ pub(crate) use serving_peer::{
 pub(crate) use storage_peer::{
     AppHolderPeerContinuity, AuthenticatedAppFirstHolder, AuthenticatedControllerFirstHolder,
     AuthenticatedInitialHolderOffer, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
-    InitialHolderServer,
+    InitialHolderListener, InitialHolderServer,
 };
 pub(crate) use storage_peer_wire::StoragePeerRequest;
 
