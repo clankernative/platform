@@ -1772,6 +1772,29 @@ mod tests {
         )
     }
 
+    fn committed_management_intent() -> Result<(tempfile::TempDir, FreshIntent)> {
+        use super::super::management::app::{Call, Manager, Reply};
+        let directory = tempfile::tempdir()?;
+        let (runtime, authority, _) =
+            super::super::admission::tests::management_fixture(directory.path())?;
+        let identity = crate::iap::Verified {
+            email: "alice@example.com".into(),
+            subject: "accounts.google.com:alice".into(),
+        };
+        let Reply::Pending { view } = Manager::new(runtime, authority).dispatch(
+            Call::Capture {
+                registration: "calendar".into(),
+                operation: super::super::management::Action::Connect,
+            },
+            &identity,
+            100,
+        )?
+        else {
+            anyhow::bail!("management fixture did not commit Pending")
+        };
+        Ok((directory, FreshIntent::management(&view, &identity)?))
+    }
+
     #[test]
     fn consumer_cannot_commit_a_second_mutation_with_the_same_phase() -> Result<()> {
         let world = super::super::simulation::World::new(398);
@@ -1838,10 +1861,11 @@ mod tests {
     fn simulated_original_and_serving_phase_cannot_supply_the_native_management_producer()
     -> Result<()> {
         let world = super::super::simulation::World::new(454);
+        world.advance(95);
         super::super::effects::scope(world, || -> Result<()> {
-            let intent = original_intent("native-google-supplier-required", 305)?;
-            reserve_shell(&intent, 5)?;
-            let error = with_consumer(&intent, Phase::Session, 5, |current| {
+            let (_directory, intent) = committed_management_intent()?;
+            reserve_shell(&intent, 100)?;
+            let error = with_consumer(&intent, Phase::Session, 100, |current| {
                 current.require_management_producer(&intent)
             })
             .unwrap_err();
@@ -1851,7 +1875,7 @@ mod tests {
             );
             // This known exclusion made no native action and cannot burn an
             // unrelated valid simulated operation or turn into native material.
-            with_consumer(&intent, Phase::Session, 5, |current| current.check())
+            with_consumer(&intent, Phase::Session, 100, |current| current.check())
         })
     }
 
@@ -1879,22 +1903,23 @@ mod tests {
     #[test]
     fn provider_authentication_scope_cannot_become_a_session_or_signature() -> Result<()> {
         let world = super::super::simulation::World::new(457);
+        world.advance(95);
         super::super::effects::scope(world, || -> Result<()> {
-            let intent = original_intent("provider-only-scope", 305)?;
-            reserve_shell(&intent, 5)?;
+            let (_directory, intent) = committed_management_intent()?;
+            reserve_shell(&intent, 100)?;
             assert!(
-                with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+                with_consumer(&intent, Phase::ShellAuthentication, 100, |current| {
                     current.require_management_producer(&intent)
                 })
                 .is_err()
             );
             assert!(
-                with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+                with_consumer(&intent, Phase::ShellAuthentication, 100, |current| {
                     current.require_signature(&intent)
                 })
                 .is_err()
             );
-            with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+            with_consumer(&intent, Phase::ShellAuthentication, 100, |current| {
                 current.check()
             })
         })
