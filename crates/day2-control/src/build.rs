@@ -1,6 +1,8 @@
 //! Fixed local build recipe. The trusted runner is an operator capability, not app input.
 
+mod cargo_sources;
 mod ui_assembly;
+use cargo_sources::OfflineCargoSources;
 use ui_assembly::{UiAssemblyInputs, validate_ui_activation};
 
 use crate::{
@@ -20,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RECIPE: &str = "day2-local-build-v4:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:offline-cargo:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
+const RECIPE: &str = "day2-local-build-v5:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:locked-offline-cargo-sources:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
 const MAX_FILES: usize = 100_000;
 const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -33,6 +35,7 @@ pub fn recipe_digest() -> Digest {
             RECIPE.as_bytes(),
             include_bytes!("build.rs"),
             include_bytes!("build/ui_assembly.rs"),
+            include_bytes!("build/cargo_sources.rs"),
             include_bytes!("simulation_campaign.rs"),
             day2::automation::source_digest().as_bytes(),
         ]
@@ -228,6 +231,7 @@ pub struct TrustedRunner {
     system_ssl: Option<InputFile>,
     rust: PinnedTree,
     registry: PinnedTree,
+    offline_sources: Option<OfflineCargoSources>,
     ui_assembly: Option<UiAssemblyInputs>,
 }
 
@@ -410,13 +414,19 @@ impl TrustedRunner {
             },
             rust,
             registry,
+            offline_sources: None,
             ui_assembly: None,
         })
     }
 
-    /// Bind the standard UI dependency to the operator-selected Platform installation.
-    pub fn with_bundled_ui(mut self, platform_root: &Path) -> Result<Self> {
+    /// Bind UI and all locked Cargo sources to the selected Platform installation.
+    pub fn with_platform_inputs(mut self, platform_root: &Path) -> Result<Self> {
         self.ui_assembly = Some(UiAssemblyInputs::capture(platform_root)?);
+        self.offline_sources = Some(OfflineCargoSources::capture(
+            &self.rust.root.join("bin/cargo"),
+            &self.registry.root,
+            platform_root,
+        )?);
         Ok(self)
     }
 
@@ -429,6 +439,9 @@ impl TrustedRunner {
         });
         if let Some(ui) = &self.ui_assembly {
             identity["ui_assembly"] = ui.binding_identity()?;
+        }
+        if let Some(sources) = &self.offline_sources {
+            identity["offline_cargo_sources"] = sources.identity();
         }
         BindingRef::pin(self.identity.clone(), &identity)
     }
@@ -565,6 +578,9 @@ impl TrustedRunner {
                 .context("UI capability disappeared")?
                 .input_manifest()?;
         }
+        if let Some(sources) = &self.offline_sources {
+            manifest["offline_cargo_sources"] = sources.manifest();
+        }
         Ok(serde_json::to_vec_pretty(&manifest)?)
     }
 
@@ -638,7 +654,11 @@ impl TrustedRunner {
                     }
                     self.rust.materialize(&job.join("rust"))?;
                     private_directory(&job.join("cargo"))?;
-                    self.registry.materialize(&job.join("cargo/registry"))?;
+                    if let Some(sources) = &self.offline_sources {
+                        sources.materialize(&job.join("cargo"))?;
+                    } else {
+                        self.registry.materialize(&job.join("cargo/registry"))?;
+                    }
                     write_pinned(&self.executable, &job.join("xtask"), &self.executable_pin)?;
                     for name in ["home", "tmp"] {
                         private_directory(&job.join(name))?;
