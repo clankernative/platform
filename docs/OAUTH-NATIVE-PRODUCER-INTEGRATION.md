@@ -7,10 +7,12 @@ below are still missing from those PRs, as confirmed by their owners.
 
 ## Required suppliers
 
-- Credential owns the closed authenticated initial-holder peer exchange. It
+- G1 owns the closed authenticated initial-holder peer exchange. It
   must join the actual enrolled Controller and App messages within their
   original stages, before the App parses SQLite. S1's `SameEnrolledOwner` is
   enrollment continuity, not that exchange or a first-holder grant.
+  Credential owns the fixed issuer entrypoint, operational composition and
+  live enrollment qualification; G1 is implementing the exchange against S1.
 - G1 owns provider P3 and exclusive-mutator qualification, counter activation,
   current serving/writer authority, and final consumer settlement. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
