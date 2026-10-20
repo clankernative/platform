@@ -286,7 +286,33 @@ enum RoleSource<'a> {
     Simulated(fixtures::SimulationStage),
 }
 
-impl RoleStage<'_> {
+// A closed borrow of the existing stage, never a new acquisition or owner.
+// The scripted variant cannot be converted to the native variant.
+enum BorrowedRoleStage<'stage, 'role> {
+    Native(&'stage mut EnrolledRoleStage<'role>),
+    #[cfg(test)]
+    Simulated(&'stage mut fixtures::SimulationStage),
+}
+
+impl BorrowedRoleStage<'_, '_> {
+    fn check(&mut self) -> Result<()> {
+        match self {
+            Self::Native(stage) => stage.check(),
+            #[cfg(test)]
+            Self::Simulated(stage) => stage.check(),
+        }
+    }
+}
+
+impl<'role> RoleStage<'role> {
+    fn borrowed(&mut self) -> BorrowedRoleStage<'_, 'role> {
+        match &mut self.source {
+            RoleSource::Native(stage) => BorrowedRoleStage::Native(stage),
+            #[cfg(test)]
+            RoleSource::Simulated(stage) => BorrowedRoleStage::Simulated(stage),
+        }
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         match &mut self.source {
             RoleSource::Native(stage) => stage.check(),
@@ -387,21 +413,37 @@ impl OriginalPhase<'_> {
     }
 
     pub(crate) fn check(&mut self, stage: &mut RoleStage<'_>) -> Result<()> {
+        self.check_at(stage.borrowed(), self.wall)
+    }
+
+    /// Check the SAME retained original against a native stage already held by
+    /// the consumer. `entry_wall` is only a floor: obtain current wall time and
+    /// sample the original enrolled clock through this exact stage. No new
+    /// acquisition, clock, owner, continuation or operation permission is made.
+    pub(crate) fn check_with_native(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        entry_wall: i64,
+    ) -> Result<()> {
+        self.check_at(BorrowedRoleStage::Native(stage), entry_wall)
+    }
+
+    fn check_at(&mut self, mut stage: BorrowedRoleStage<'_, '_>, entry_wall: i64) -> Result<()> {
         let result = (|| {
             let wall = super::effects::wall_time()?;
             ensure!(
-                wall >= self.wall,
+                wall >= self.wall && wall >= entry_wall,
                 "native original wall clock moved backwards"
             );
             self.wall = wall;
             stage.check()?;
-            match (&mut self.original, &mut stage.source) {
-                (PhaseOriginal::Native(original), RoleSource::Native(stage)) => {
+            match (&mut self.original, stage) {
+                (PhaseOriginal::Native(original), BorrowedRoleStage::Native(stage)) => {
                     let now = original.clock.clock.sample(stage);
                     original.check_sample(self.intent, self.wall, now)
                 }
                 #[cfg(test)]
-                (PhaseOriginal::Simulated(original), RoleSource::Simulated(_)) => {
+                (PhaseOriginal::Simulated(original), BorrowedRoleStage::Simulated(_)) => {
                     original.check(self.intent, self.wall)
                 }
                 #[cfg(test)]
@@ -612,6 +654,94 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn original_intent(attempt: &str, deadline: i64) -> Result<FreshIntent> {
+        FreshIntent::fixture_oauth(
+            &crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            },
+            attempt,
+            &day2_capabilities::Digest::new(b"same-stage original"),
+            "https://security.example.com",
+            5,
+            deadline,
+        )
+    }
+
+    #[test]
+    fn borrowed_stage_wall_floor_cannot_replace_current_time_or_clear_refusal() -> Result<()> {
+        let world = super::super::simulation::World::new(90);
+        super::super::effects::scope(world.clone(), || -> Result<()> {
+            let intent = original_intent("borrowed-wall-floor", 305)?;
+            reserve_shell(&intent, 5)?;
+            with_current_original(&intent, Phase::ShellFlow, 5, |role, original| {
+                original.check_at(role.borrowed(), 0)?;
+                assert_eq!(original.wall, 5);
+                // A supplied future floor is not a replacement clock sample.
+                assert!(original.check_at(role.borrowed(), 7).is_err());
+                world.advance(2);
+                // Current time now meets both floors and this stage is still
+                // under five seconds; the failed original remains refused.
+                role.check()?;
+                assert!(original.check(role).is_err());
+                Ok(())
+            })?;
+            let mut entered = false;
+            assert!(
+                with_current_original(&intent, Phase::ShellFlow, 7, |_, _| {
+                    entered = true;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!entered);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn borrowed_stage_stale_entry_cannot_hide_stage_or_original_expiry() -> Result<()> {
+        for (seed, elapsed, deadline) in [(91, 5, 305), (92, 2, 7)] {
+            let world = super::super::simulation::World::new(seed);
+            super::super::effects::scope(world.clone(), || -> Result<()> {
+                let intent = original_intent("borrowed-expiry", deadline)?;
+                reserve_shell(&intent, 5)?;
+                with_current_original(&intent, Phase::ShellFlow, 5, |role, original| {
+                    world.advance(elapsed);
+                    assert!(original.check_at(role.borrowed(), 5).is_err());
+                    assert!(original.check(role).is_err());
+                    Ok(())
+                })?;
+                assert!(
+                    with_current_original(&intent, Phase::ShellFlow, 5, |_, _| Ok(())).is_err()
+                );
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scripted_original_cannot_enter_the_native_stage_consumer() -> Result<()> {
+        let world = super::super::simulation::World::new(93);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("native-borrow-required", 305)?;
+            reserve_shell(&intent, 5)?;
+            with_current_original(&intent, Phase::ShellFlow, 5, |role, original| {
+                let mut entered = false;
+                assert!(
+                    role.with_native(|native| {
+                        entered = true;
+                        original.check_with_native(native, 5)
+                    })
+                    .is_err()
+                );
+                assert!(!entered);
+                original.check(role)
+            })
+        })
+    }
 
     #[test]
     fn signature_borrow_cannot_substitute_another_phase_or_original() -> Result<()> {

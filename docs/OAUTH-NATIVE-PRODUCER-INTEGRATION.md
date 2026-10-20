@@ -52,6 +52,14 @@ check. A dropped response, unknown commit or unknown send must retain the
 appropriate unresolved ownership; it must not restart either original or
 create a second permit journal.
 
+When a storage consumer already holds the native stage,
+`OriginalPhase::check_with_native` checks the same retained original through
+that exact borrow. It shares the wrapper's clock/refusal implementation. The
+caller-supplied wall value is only a floor; current wall time and the retained
+enrolled clock are still sampled. It neither reacquires a stage nor authorizes
+an operation. Purpose/phase and the actual S3 owner remain mandatory at the
+protected consumer.
+
 Approval, CredentialIntent, reveal/ack and all other purposes remain
 unsupported. Recurring read and refresh need their own current narrow phase
 authority; the human original is not an autonomous grant.
