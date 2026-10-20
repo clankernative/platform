@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:9decbed7e0ac04f1c0246cbf6e1d976f4e3e52a24ecb711cad534186127b3104",
+      "fingerprint": "sha256:d9a6d2f9a4c996d0e2b8379bcc1d85a418074c99f84acbf4baa12e73afe1bf9a",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -572,7 +572,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+          "signature": "pub (super) fn ensure_current (runtime : & crate :: store :: Runtime , request : & crate :: protocol :: Request , registration : & str , subject : & str , selection : & usage :: Selection , started_at : i64 , serving : & mut super :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < Resolution >"
         }
       ],
       "material_uses": [
@@ -597,7 +597,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+          "signature": "pub (super) fn ensure_current (runtime : & crate :: store :: Runtime , request : & crate :: protocol :: Request , registration : & str , subject : & str , selection : & usage :: Selection , started_at : i64 , serving : & mut super :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < Resolution >"
         },
         {
           "owner": "Resolution",
@@ -3436,6 +3436,67 @@
         {
           "owner": "InitialHolderListener",
           "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RuntimeConsumer",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self) -> Result < () >",
+        "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
+        "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_runtime_response < T > (scope : & AuthorityScope , identity : & ResponseIdentity , complete : bool , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
         }
       ],
       "proof_uses": [],
