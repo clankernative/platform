@@ -1447,15 +1447,10 @@ fn enlist(
                 crate::security_epoch::serving::bind_response(participant, intent, &sink.identity)?;
             }
             response.connection = Some(sink.identity.clone());
-            if !indexes.contains_key(&key) {
-                indexes.insert(
-                    key,
-                    SinkBinding {
-                        intent: intent.clone(),
-                        effects: crate::managed_credentials::effects::capture(),
-                    },
-                );
-            }
+            indexes.entry(key).or_insert_with(|| SinkBinding {
+                intent: intent.clone(),
+                effects: crate::managed_credentials::effects::capture(),
+            });
         }
         Ok(())
     })
