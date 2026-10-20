@@ -507,6 +507,162 @@ impl NativeVolumeResources {
     }
 }
 
+impl NativeVolumeResources {
+    fn check_durability_profile(&mut self, reader: &mut ProviderReader<'_>) -> Result<()> {
+        let result = (|| {
+            self.check_current(reader)?;
+            // Repeat the authenticated selected disk/attachment join within
+            // this SAME original phase, before accepting the provider contract.
+            ensure!(
+                reader.observe_provider()? == self.device_name,
+                "storage_durability_attachment_changed"
+            );
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_native_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let uevent = read_fixed(
+                    &format!(
+                        "/sys/dev/block/{}:{}/uevent",
+                        self.identity.device_major, self.identity.device_minor
+                    ),
+                    4096,
+                    &mut reader.acquisition,
+                )?;
+                let device = kernel_block_name(
+                    &uevent,
+                    self.identity.device_major,
+                    self.identity.device_minor,
+                )?;
+                // ext4_seq_options_show uses nodefs=1 here: unlike mountinfo,
+                // it prints the live data mode and barrier choice explicitly.
+                let options = read_fixed(
+                    &format!("/proc/fs/ext4/{device}/options"),
+                    8192,
+                    &mut reader.acquisition,
+                )?;
+                ext4_durability_options(&options)?;
+                let mut superblock = [0_u8; 1024];
+                let mut offset = 0;
+                while offset < superblock.len() {
+                    reader.acquisition.remaining()?;
+                    let read = rustix::io::pread(
+                        &self.block,
+                        &mut superblock[offset..],
+                        (1024 + offset) as u64,
+                    )?;
+                    ensure!(
+                        read > 0 && read <= superblock.len() - offset,
+                        "storage_durability_superblock_read_progress"
+                    );
+                    offset += read;
+                    reader.acquisition.remaining()?;
+                }
+                ext4_internal_journal(&superblock)?;
+                self.check_current(reader)
+            }
+        })();
+        if result.is_err() {
+            self.valid = false;
+            reader.acquisition.refuse();
+        }
+        result
+    }
+}
+
+// All parsers below validate DATA only. Native ownership comes exclusively from
+// the retained block/directory FDs and role/provider checks around actual reads.
+fn kernel_block_name(bytes: &[u8], major: u32, minor: u32) -> Result<String> {
+    let fields = kernel_lines(bytes, 4096)?;
+    ensure!(
+        fields.get("MAJOR").copied() == Some(major.to_string().as_str())
+            && fields.get("MINOR").copied() == Some(minor.to_string().as_str())
+            && fields.get("DEVTYPE").copied() == Some("disk"),
+        "storage_durability_kernel_device_identity"
+    );
+    let name = fields
+        .get("DEVNAME")
+        .context("storage_durability_kernel_device_name")?;
+    ensure!(
+        !name.is_empty()
+            && name.len() <= 63
+            && name
+                .bytes()
+                .all(|v| v.is_ascii_alphanumeric() || matches!(v, b'-' | b'_')),
+        "storage_durability_kernel_device_component"
+    );
+    Ok((*name).to_owned())
+}
+
+fn kernel_lines(bytes: &[u8], limit: usize) -> Result<std::collections::BTreeMap<&str, &str>> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= limit && bytes.ends_with(b"\n"),
+        "storage_durability_kernel_snapshot_bound"
+    );
+    let text = std::str::from_utf8(bytes)?;
+    let mut fields = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        ensure!(
+            !line.is_empty() && line.len() <= 512 && line.bytes().all(|v| v.is_ascii_graphic()),
+            "storage_durability_kernel_line"
+        );
+        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        ensure!(
+            !key.is_empty() && fields.len() < 128 && fields.insert(key, value).is_none(),
+            "storage_durability_kernel_duplicate_or_bound"
+        );
+    }
+    Ok(fields)
+}
+
+fn ext4_durability_options(bytes: &[u8]) -> Result<()> {
+    let fields = kernel_lines(bytes, 8192)?;
+    ensure!(
+        fields.get("rw") == Some(&"")
+            && !fields.contains_key("ro")
+            && fields.get("data") == Some(&"ordered")
+            && fields
+                .get("barrier")
+                .is_some_and(|v| matches!(*v, "" | "1"))
+            && ![
+                "nobarrier",
+                "noload",
+                "norecovery",
+                "journal_dev",
+                "journal_path",
+                "journal_async_commit",
+                "abort",
+                "sb",
+                "dax"
+            ]
+            .iter()
+            .any(|v| fields.contains_key(*v)),
+        "storage_durability_ext4_options"
+    );
+    Ok(())
+}
+
+fn ext4_internal_journal(bytes: &[u8]) -> Result<()> {
+    ensure!(bytes.len() == 1024, "storage_durability_superblock_bound");
+    let word = |offset| {
+        u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("fixed superblock offsets"),
+        )
+    };
+    ensure!(
+        u16::from_le_bytes(bytes[0x38..0x3a].try_into()?) == 0xef53
+            && u16::from_le_bytes(bytes[0x3a..0x3c].try_into()?) & 2 == 0
+            && word(0x5c) & 4 != 0
+            && word(0x60) & 8 == 0
+            && word(0xe0) != 0
+            && word(0xe4) == 0,
+        "storage_durability_internal_journal_required"
+    );
+    Ok(())
+}
+
 impl NativeVolumeContinuity {
     pub(super) fn begin_current<'volume, 'role>(
         &'volume mut self,
@@ -544,6 +700,12 @@ impl NativeVolumeContinuity {
 }
 
 impl CurrentVolumePhase<'_, '_> {
+    /// Observe the live selected filesystem contract, not omitted mountinfo
+    /// defaults or desired fsType. This grants no standalone P3 permission.
+    pub(super) fn check_durability_profile(&mut self) -> Result<()> {
+        self.resources.check_durability_profile(&mut self.reader)
+    }
+
     pub(super) fn check_directory(
         &mut self,
         directory: &File,
