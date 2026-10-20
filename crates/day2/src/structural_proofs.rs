@@ -241,6 +241,19 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Send);
     assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Sync);
+    assert_consuming!(crate::security_epoch::CurrentPhysicalFilePhase<'static, 'static>);
+    assert_not_impl!(
+        crate::security_epoch::CurrentPhysicalFilePhase<'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentPhysicalFilePhase<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentPhysicalFilePhase<'static, 'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::CurrentPreparedFilePhase<'static, 'static>);
     assert_not_impl!(
         crate::security_epoch::CurrentPreparedFilePhase<'static, 'static>,

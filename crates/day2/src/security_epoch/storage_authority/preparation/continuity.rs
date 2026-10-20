@@ -54,6 +54,14 @@ pub(crate) struct CurrentPreparedFilePhase<'file, 'role> {
     disposition: FilePhaseDisposition<'file>,
 }
 
+/// A current physical-file phase after legitimate application writes. It is
+/// deliberately distinct from CurrentPreparedFilePhase: the initial exchange
+/// cannot accept it or reinterpret modified bytes as a prepared initial image.
+/// It supplies no provider P3, activation, counter or current writer authority.
+pub(crate) struct CurrentPhysicalFilePhase<'file, 'role> {
+    inner: CurrentPreparedFilePhase<'file, 'role>,
+}
+
 /// Pessimistically close continuity before any fallible phase work. Only the
 /// fixed operation's known successful final check may restore it. This helper
 /// has no native constructor, clock, descriptor or authority of its own.
@@ -182,6 +190,34 @@ impl PreparedFileContinuity {
         Ok(current)
     }
 
+    /// Own a fresh provider/device/mount phase on the SAME original file.
+    /// Closing the continuation before any I/O retains abandonment/refusal.
+    /// Only native activation/serving composition may use this physical input;
+    /// constructing it alone never grants an active writer or control send.
+    pub(crate) fn begin_physical_phase<'file, 'role>(
+        &'file mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
+        let phase = self.volume.begin_current(stage)?;
+        let mut current = CurrentPhysicalFilePhase {
+            inner: CurrentPreparedFilePhase {
+                phase,
+                selection: &self.selection,
+                directory: &self.directory,
+                anchor: &self.anchor,
+                file: &self.file,
+                identity: &self.identity,
+                layout: &self.layout,
+                process: self.process,
+                thread: self.thread,
+                disposition,
+            },
+        };
+        current.check()?;
+        Ok(current)
+    }
+
     /// Read-only continuity observation; it grants no peer, P3 or writer
     /// authority. Legitimate later writes need the serving transition.
     pub(crate) fn check_initial(&mut self, stage: EnrolledRoleStage<'_>) -> Result<()> {
@@ -299,6 +335,58 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 
     pub(crate) fn refuse(&mut self) {
         self.disposition.refuse();
+    }
+}
+
+impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
+    pub(crate) fn check(&mut self) -> Result<()> {
+        let result = (|| {
+            self.inner.disposition.check()?;
+            ensure!(
+                self.inner.process == std::process::id()
+                    && self.inner.thread == std::thread::current().id(),
+                "retained_storage_executor_changed"
+            );
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("original_file_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                // Length is observed from the retained descriptor, not from the
+                // old initial image. Identity/modes/nlink/mount and fixed named
+                // leaf remain exact; this does not validate the active contents.
+                let length = usize::try_from(self.inner.file.metadata()?.len())?;
+                check_identity(
+                    &mut self.inner.phase,
+                    self.inner.directory,
+                    self.inner.anchor,
+                    self.inner.file,
+                    self.inner.identity,
+                    length,
+                )
+            }
+        })();
+        if result.is_err() {
+            self.inner.disposition.refuse();
+        }
+        result
+    }
+
+    pub(crate) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.check()?;
+        let result = self.inner.phase.controller_stage();
+        if result.is_err() {
+            self.inner.disposition.refuse();
+        }
+        result
+    }
+
+    pub(crate) fn finish_checked(mut self) -> Result<()> {
+        self.check()?;
+        self.inner.disposition.complete()
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        self.inner.disposition.refuse();
     }
 }
 
