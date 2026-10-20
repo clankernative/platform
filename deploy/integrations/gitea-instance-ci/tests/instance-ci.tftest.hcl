@@ -73,11 +73,45 @@ run "plan_identity_is_read_only" {
   assert {
     condition = (
       toset(keys(google_project_iam_member.plan)) == toset(["roles/viewer", "roles/iam.securityReviewer", "roles/container.viewer", "roles/secretmanager.viewer"]) &&
+      length(google_project_iam_custom_role.plan_state_locks) == 0 &&
+      length(google_storage_bucket_iam_member.plan_state_locks) == 0 &&
       google_storage_bucket_iam_member.plan_state_reader.role == "roles/storage.objectViewer" &&
       toset(keys(google_secret_manager_secret_iam_member.plan_secret_reader)) == toset(["cloudflare-api-token"])
     )
     error_message = "the plan identity reads the project, the state and the named secrets, nothing more"
   }
+}
+
+run "optional_lock_mutation_is_exact_and_does_not_write_state" {
+  command = plan
+  variables {
+    plan_state_lock_objects = ["platform/app/example/default.tflock"]
+  }
+  override_resource {
+    target = google_project_iam_custom_role.plan_state_locks
+    values = { name = "projects/example-project/roles/instance_ci_plan_state_locks" }
+  }
+  assert {
+    condition = (
+      toset(google_project_iam_custom_role.plan_state_locks[0].permissions) == toset(["storage.objects.create", "storage.objects.delete"]) &&
+      google_storage_bucket_iam_member.plan_state_locks[0].bucket == "example-project-tofu-state" &&
+      google_storage_bucket_iam_member.plan_state_locks[0].member == "serviceAccount:instance-ci-plan@example-project.iam.gserviceaccount.com" &&
+      google_storage_bucket_iam_member.plan_state_locks[0].condition[0].expression == "resource.name in [\"projects/_/buckets/example-project-tofu-state/objects/platform/app/example/default.tflock\"]"
+    )
+    error_message = "Plan locking may mutate only the explicitly reviewed lock object, never state contents or other objects."
+  }
+}
+
+run "refuses_state_content_as_a_plan_lock" {
+  command = plan
+  variables { plan_state_lock_objects = ["platform/app/example/default.tfstate"] }
+  expect_failures = [var.plan_state_lock_objects]
+}
+
+run "refuses_wildcard_plan_lock_authority" {
+  command = plan
+  variables { plan_state_lock_objects = ["platform/app/*/default.tflock"] }
+  expect_failures = [var.plan_state_lock_objects]
 }
 
 run "plan_identity_refuses_write_roles" {

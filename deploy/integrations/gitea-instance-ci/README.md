@@ -45,6 +45,14 @@ state bucket, Gitea server URL and OIDC issuer URL. Set `gitea_url` and
 `https://git-oidc.example.com`; neither has a platform default. Keep a separate
 backend prefix for this root.
 
+GCS plans may need to create/delete a lock even though they do not modify
+infrastructure or state contents. Optional `plan_state_lock_objects` grants only
+those two permissions, conditioned on exact reviewed `.tflock` object names in
+`state_bucket_name`. It is empty by default; state objects, wildcards and
+traversal are refused. Bootstrap a new lock selection through a reviewed operator
+apply of this integration before the dependent app plan. Do not bypass locking
+or grant state-content writer authority to make a bootstrap plan pass.
+
 Before applying, enable Compute, IAP, IAM, IAM Credentials, STS and Secret
 Manager in the selected project. Create the workload identity pool and the
 repository-scoped runner registration secret, and enable Actions on the
