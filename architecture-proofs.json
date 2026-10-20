@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:eb80294cf2b92e852d907b496181eb0ed728df79cc17583fc8631f7e6835bcaf",
+      "fingerprint": "sha256:b22b1d39c93d0896e30e3359d6771aebf79025097e6cd73c6162d9a40894b4b0",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -1627,7 +1627,8 @@
         "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: InitialStoreMetadata , policy : & InitialBootstrapPolicy , store : & EpochStore , offer : & mut AuthenticatedInitialHolderOffer) -> Result < Self >",
         "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
         "fn read_current (& mut self) -> Result < Vec < u8 > >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
       ],
       "factories": [
         {
@@ -1659,11 +1660,17 @@
         {
           "owner": "AppPreparedFile < 'stage , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "retain_physical"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
@@ -1671,6 +1678,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
+        "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >",
         "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
         "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
       ],
@@ -1684,6 +1692,10 @@
         {
           "owner": "PreparedFileContinuity",
           "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PreparedFileContinuity",
@@ -1816,6 +1828,10 @@
         {
           "owner": "PreparedFileContinuity",
           "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -1963,6 +1979,79 @@
       "consuming_methods": [
         "exchange"
       ]
+    },
+    {
+      "kind": "private_material",
+      "consuming_methods": [],
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+      "type_name": "AppFileContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn check_initial (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn check_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn check_initial (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ],
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "CurrentPhysicalFilePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
     }
   ],
   "buffer_destructors": [
