@@ -83,3 +83,33 @@ current epoch authority. Actual current checks remain mandatory at security
 consumers. Conditional PD/ext4 durability and accepted provider/governance trust
 limits remain unchanged. The S1 supplier qualification, actual App/Shell consumer
 settlement and end-to-end Google campaign remain separately required.
+
+### Preparation refusal details
+
+A refusal at `preparation` additionally exports a closed `preparation` record:
+`{"step":"claim_binding","category":"permission_denied"}` is an example.
+The step is the innermost annotated actual boundary, including its existing
+pre/post checks; it does not establish that a request was sent or a filesystem
+operation completed. It distinguishes the role-stage acquisition, selected
+profile/CA/credentials, fixed provider joins, block/mount checks, private-directory
+creation, memory-image admission and original-file preparation/retention.
+
+Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
+transport unavailable, response status or bound, admission rejected, known OS
+error categories, or `other`. The combined response category does not reveal or
+prove a particular HTTP status; transport unavailability does not itself prove
+a timeout. Unknown causes are never formatted or exported. The original error
+and existing refusal remain intact internally. The same twelve-record and
+2,048-byte record ceilings apply; no request, check, deadline, retry, adoption or
+permission is added. These details diagnose a stopped attempt only; they are
+neither authority nor a successful preparation receipt.
+
+The fixed Compute instance GET requests only
+`id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
+[partial-response fields parameter](https://docs.cloud.google.com/compute/docs/api/how-tos/performance).
+Every attachment remains present for the unchanged complete-list, ambiguity,
+32-attachment and read/write joins. The 65,536-byte response ceiling, exact
+resource selection, authenticated transport and original acquisition are
+unchanged. This avoids unrelated instance metadata; it does not filter disks,
+truncate a response, retry a failed read or establish the cause of a prior
+refusal.

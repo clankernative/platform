@@ -3,6 +3,7 @@
 //! Namespace, Kubernetes and volume DATA cannot construct the native owner.
 //! Live profile qualification and current counter/writer admission are separate.
 
+use super::controller::evidence::{PreparationFailure, PreparationStep};
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -162,14 +163,19 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
     ) -> Result<(Self, NativeAcquisition)> {
-        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)?;
-        let seed = volume.original_seed()?;
+        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)
+            .map_err(|error| PreparationFailure::at(PreparationStep::StorageAcquisition, error))?;
+        let seed = volume
+            .original_seed()
+            .map_err(|error| PreparationFailure::at(PreparationStep::Seed, error))?;
         let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&SelectionData {
             policy: policy.clone(),
             store: store.clone(),
             seed,
         })?)?;
-        let (directory, identity, mut acquisition) = volume.create_initial_directory()?;
+        let (directory, identity, mut acquisition) = volume
+            .create_initial_directory()
+            .map_err(|error| PreparationFailure::at(PreparationStep::PrivateDirectory, error))?;
         let preparation = acquisition.budget()?;
         let mut authority = Self {
             selection,
@@ -302,7 +308,8 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
     let (authority, mut acquisition) =
         NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
     let layout =
-        preparation::ReviewedFileLayout::prepare(instance, &authority.selection, &mut acquisition)?;
+        preparation::ReviewedFileLayout::prepare(instance, &authority.selection, &mut acquisition)
+            .map_err(|error| PreparationFailure::at(PreparationStep::ImageAdmission, error))?;
     match preparation::prepare_original_file(authority, &layout, &mut acquisition) {
         NativeOriginalPreparationOutcome::Prepared(creator) => {
             let original = PreparedInitialFile::retain_original(creator, layout, acquisition);
@@ -310,17 +317,26 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
                 PreparedRetentionOutcome::Retained(file) => Ok(*file),
                 PreparedRetentionOutcome::Refused { original, error } => {
                     let _refused_original = original;
-                    Err(error)
+                    Err(PreparationFailure::at(
+                        PreparationStep::OriginalRetention,
+                        error,
+                    ))
                 }
             }
         }
         NativeOriginalPreparationOutcome::RefusedBeforeAttempt(original) => {
             let _refused_original = original;
-            anyhow::bail!("native_controller_initial_preparation_refused")
+            Err(PreparationFailure::at(
+                PreparationStep::OriginalPreparation,
+                anyhow::anyhow!("native_controller_initial_preparation_refused"),
+            ))
         }
         NativeOriginalPreparationOutcome::RefusedAfterAttempt(original) => {
             let _refused_original = original;
-            anyhow::bail!("native_controller_initial_preparation_unknown")
+            Err(PreparationFailure::at(
+                PreparationStep::OriginalPreparation,
+                anyhow::anyhow!("native_controller_initial_preparation_unknown"),
+            ))
         }
     }
 }
