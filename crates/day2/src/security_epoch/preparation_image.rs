@@ -33,20 +33,27 @@ struct FreshMemoryDatabase {
 }
 
 impl FreshMemoryDatabase {
+    /// Fresh scratch memory only. No pathname, original creator or native
+    /// acquisition is accepted or produced by this constructor.
+    fn data_only() -> Result<Self> {
+        let connection = Connection::open_in_memory()?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
+        ensure!(
+            connection.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
+            "epoch_preparation_temp_store_required"
+        );
+        crate::store::configure_connection(&connection)?;
+        Ok(Self { connection })
+    }
+
     fn empty(acquisition: &mut NativeAcquisition) -> Result<Self> {
         let result = (|| {
             acquisition.remaining()?;
-            let connection = Connection::open_in_memory()?;
             // Set this before any initializer or schema sorting SQL. Bundled
             // SQLite's default does not itself guarantee memory-only temp data.
-            connection.pragma_update(None, "temp_store", "MEMORY")?;
-            ensure!(
-                connection.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
-                "epoch_preparation_temp_store_required"
-            );
-            crate::store::configure_connection(&connection)?;
+            let memory = Self::data_only()?;
             acquisition.remaining()?;
-            Ok(Self { connection })
+            Ok(memory)
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -57,6 +64,36 @@ impl FreshMemoryDatabase {
     fn freeze(self, acquisition: &mut NativeAcquisition) -> Result<FrozenPreparationImage> {
         FrozenPreparationImage::freeze(&self.connection, acquisition)
     }
+}
+
+/// Operator desired metadata, never a prepared image, original file, Runtime,
+/// seed/marker row, native role, P3 or serving permission. The normal artifact
+/// admission loader and exact framework/app initializer remain mandatory.
+pub(super) fn operator_schema_metadata(
+    instance: &std::path::Path,
+    app: &str,
+) -> Result<serde_json::Value> {
+    let runtime = crate::store::InitialStoreMetadata::load(instance, app)?;
+    schema_metadata(&runtime)
+}
+
+fn schema_metadata(runtime: &crate::store::InitialStoreMetadata) -> Result<serde_json::Value> {
+    let mut memory = FreshMemoryDatabase::data_only()?;
+    let tx = memory
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    runtime.initialize_in_transaction(&tx)?;
+    // This definition is part of the ACTUAL initial image contract. Do not
+    // generate incarnations, a core, a marker or a row just to learn its schema.
+    tx.execute_batch(INITIAL_SEED_SCHEMA)?;
+    let contract = schema_contract(&tx)?;
+    tx.rollback()?;
+    Ok(serde_json::json!({
+        "mode":"desired_native_storage_metadata_only",
+        "scope":runtime.scope(),
+        "artifact":runtime.artifact().id(),
+        "fresh_storage":{"schema_contract":contract}
+    }))
 }
 
 /// The complete initial framework/app schema, selected store and canonical
@@ -705,6 +742,53 @@ pub(super) mod tests {
             database: Digest::new(b"database"),
             activation: Digest::new(b"activation"),
         }
+    }
+
+    #[test]
+    fn operator_schema_matches_actual_complete_memory_image_contract() {
+        // Synthetic contract DATA; this is not artifact/compiler or native
+        // original admission. Production uses InitialStoreMetadata::load.
+        let (_directory, runtime) = runtime();
+        let store = crate::security_epoch::tests::selection();
+        let policy = policy(&runtime, &store);
+        let observed = schema_metadata(&runtime).unwrap();
+        let image = InitialPreparationImage::prepare(
+            &runtime,
+            &policy,
+            &store,
+            incarnations(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        assert_eq!(
+            observed["fresh_storage"]["schema_contract"],
+            image.core().schema_contract.as_str()
+        );
+        assert_eq!(observed["mode"], "desired_native_storage_metadata_only");
+        assert_eq!(observed["artifact"], runtime.artifact().id());
+        assert!(observed.get("runtime_profile").is_none());
+        assert!(observed.get("seed").is_none() && observed.get("image").is_none());
+        assert_eq!(observed, schema_metadata(&runtime).unwrap());
+    }
+
+    #[test]
+    fn operator_schema_does_not_create_or_adopt_serving_state_and_refuses_changed_instance() {
+        let (directory, runtime) = runtime();
+        let state = directory.path().join(".state");
+        std::fs::create_dir(&state).unwrap();
+        let original = state.join("day2-initial.sqlite");
+        let bytes = b"Existing unrelated state must stay byte-identical";
+        std::fs::write(&original, bytes).unwrap();
+        schema_metadata(&runtime).unwrap();
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
+        let instance = directory.path().join("instance.json");
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&instance).unwrap()).unwrap();
+        changed["environment"] = serde_json::json!("other");
+        std::fs::write(instance, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(schema_metadata(&runtime).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
     }
 
     pub(in crate::security_epoch) fn policy(

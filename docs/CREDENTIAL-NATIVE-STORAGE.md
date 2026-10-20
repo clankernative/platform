@@ -139,6 +139,53 @@ ordinary Runtime retains its existing active-database selection behavior. This
 separation is schema admission only: the authenticated first-holder and current
 serving factories must still supply their actual native owners before file use.
 
+### Operator desired metadata
+
+Use the `day2` binary from the same source, dependencies and toolchain as the
+Controller whose image will be admitted:
+
+```sh
+umask 077
+day2 native-storage-metadata /path/to/instance.json calendar > native-schema-metadata.json
+day2 native-profile-manifest /path/to/reviewed-static-runtime-profile.txt > native-profile-metadata.json
+```
+
+`native-storage-metadata` admits the actual selected artifact and instance via
+`InitialStoreMetadata::load`. It runs the exact framework/app initializer and
+the shared `day2_initial_security_seed` table definition on fresh memory-only
+SQLite with memory-only temporary storage, hashes the complete schema, then
+rolls back and drops it. Read `.fresh_storage.schema_contract` from its output;
+do not hash this output JSON. The `artifact` and `scope` identify its admitted
+inputs. No Runtime, serving database pathname, native file, seed/marker row,
+creator, enrollment or authority is constructed or adopted. An already-present
+installation database is not inspected or repaired. A base desired Instance
+without a native bootstrap selection can supply these schema inputs; the final
+full desired native policy must still pass ordinary strict validation and all
+actual native checks. Unknown/old Instance shapes are not normalized.
+
+`runtime_profile.manifest` is currently an opaque operator-selected profile
+document identity, not a built-in value derived from the Roc artifact alone.
+S1 supplies no canonical manifest document format or semantic document loader.
+The second command commits the exact nonempty UTF-8 document bytes using raw
+SHA-256 (`Digest::new`), including whitespace and final newline, and returns
+`.runtime_profile.manifest`. This is **not** `Digest::of` over a parsed value.
+It reads only an explicit regular, bounded one-MiB document through a final
+NOFOLLOW/nonblocking open and refuses observed changes; no all-ancestor or
+hostile-administrator containment guarantee is implied. The mode is
+`operator_profile_document_digest_only`: it does not validate the truth of the
+document or qualify the selected producers.
+
+The operator must retain and review a real static document covering actual
+immutable native code/dependency/image and app-artifact selections, runtime/node
+selectors, required namespace and continuous-clock assumptions, supported
+storage/channel choices and the accepted initialization/debug/governance TCB.
+Keep current boot/process/namespace observations, generated incarnations,
+request IDs, holders, clocks, receipts and qualified outcomes as separate
+evidence. Do not hash a supplier fixture label, an artifact digest, a historical
+node-facts/receipt record, or a policy containing its own manifest digest as a
+substitute for that reviewed document. No metadata output grants enrollment,
+storage/P3, writer, serving or fresh-human authority.
+
 The App reads the controller's exact initial bytes through its own existing
 read-only descriptor. It matches the creator projection's digest and validates
 the complete bounded read-only SQLite image, selected schema, canonical store,

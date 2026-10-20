@@ -30,6 +30,14 @@ pub(crate) use serving::ServingParticipant;
 mod storage_authority;
 mod transport;
 
+/// Desired schema metadata only; this creates no native original or authority.
+pub(crate) fn native_schema_metadata(
+    instance: &std::path::Path,
+    app: &str,
+) -> anyhow::Result<serde_json::Value> {
+    preparation_image::operator_schema_metadata(instance, app)
+}
+
 pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, RetainedEpochReads};
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
