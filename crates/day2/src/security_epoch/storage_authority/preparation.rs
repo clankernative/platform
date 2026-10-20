@@ -19,7 +19,7 @@ const IO_CHUNK_BYTES: usize = 64 * 1024;
 
 mod app;
 mod continuity;
-pub(crate) use app::AppPreparedFile;
+pub(crate) use app::{AppFileContinuity, AppPreparedFile};
 pub(crate) use continuity::{
     CurrentPreparedFilePhase, PreparedFileContinuity, PreparedRetentionOutcome,
 };
