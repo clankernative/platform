@@ -47,6 +47,37 @@ fn process(code: Digest) -> ProcessData {
 }
 
 #[test]
+fn runtime_revision_may_be_explicitly_empty_but_cannot_be_omitted_or_normalized() {
+    let root = KeyOwner::generate().unwrap();
+    let mut selected = policy(&root);
+    selected.runtime.containerd_version = "2.1.5-0ubuntu0~24.04.1~gke1".into();
+    selected.runtime.containerd_revision.clear();
+    selected.validate().unwrap();
+    let empty_revision = selected.digest().unwrap();
+    let mut encoded = serde_json::to_value(&selected).unwrap();
+    let decoded: EnrollmentPolicy =
+        crate::json::decode(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+    assert_eq!(decoded, selected);
+    encoded["runtime"]
+        .as_object_mut()
+        .unwrap()
+        .remove("containerd_revision");
+    assert!(
+        crate::json::decode::<EnrollmentPolicy>(&serde_json::to_vec(&encoded).unwrap()).is_err()
+    );
+
+    selected.runtime.containerd_revision = "selected-revision".into();
+    assert_ne!(selected.digest().unwrap(), empty_revision);
+    for revision in [" ".to_owned(), "\n".to_owned(), "x".repeat(254)] {
+        selected.runtime.containerd_revision = revision;
+        assert!(selected.validate().is_err());
+    }
+    selected.runtime.containerd_revision.clear();
+    selected.runtime.containerd_version.clear();
+    assert!(selected.validate().is_err());
+}
+
+#[test]
 fn signatures_are_purpose_and_value_bound_and_canonical() {
     let key = KeyOwner::generate().unwrap();
     let signature = key.sign("birth", &"one").unwrap();
