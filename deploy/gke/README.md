@@ -324,6 +324,16 @@ scope closed as an exclusion does not produce `scope_completed`. A known read
 result can still be rejected by the application (for example, a bad signature
 after successful key retrieval); scope completion does not assert acceptance.
 
+`executor_enrolled` is a separate startup observation from the actual final
+App/Shell executor after native enrollment and selected-stage checks. It has a
+role, selection and incarnation commitment, with null binding, purpose and
+snapshot. Shell has connected its actual retained authenticated peer at this
+point; no Shell serving consumer has run. There is no supported browser-free
+Shell consumer. Pre-browser qualification is therefore limited to the nine
+Controller startup records, actual App initial Runtime admission, and actual
+App/Shell enrollment and startup. A genuine Shell consumer and OAuth acceptance
+remain part of the real human flow; no synthetic request can supply them.
+
 These are historical diagnostic DATA, not a permission, readiness receipt, or an
 independent proof of the entire OAuth lifecycle. A matching health response,
 stored row, missing/truncated log, or a record from another process cannot replace

@@ -115,9 +115,10 @@ pub(super) enum ScopePurpose {
 // and cannot manufacture one from a matching binding.
 #[derive(Clone)]
 pub(in crate::security_epoch) struct ConsumerScopeEvidence {
+    role: super::native_enrollment::NativeRole,
     selection: Option<Digest>,
     incarnation: Digest,
-    binding: Digest,
+    binding: Option<Digest>,
     purpose: Option<ScopePurpose>,
     snapshot: Option<Digest>,
 }
@@ -125,6 +126,7 @@ pub(in crate::security_epoch) struct ConsumerScopeEvidence {
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum ConsumerScopeResult {
+    ExecutorEnrolled,
     #[serde(rename = "scope_completed")]
     Completed,
     OperationRefused,
@@ -138,9 +140,10 @@ struct ConsumerEvidenceRecord<'a> {
     format: &'static str,
     sequence: u8,
     observation: ConsumerScopeResult,
+    role: super::native_enrollment::NativeRole,
     selection: &'a Option<Digest>,
     consumer_incarnation: &'a Digest,
-    binding: &'a Digest,
+    binding: &'a Option<Digest>,
     purpose: &'a Option<ScopePurpose>,
     snapshot: &'a Option<Digest>,
 }
@@ -168,9 +171,10 @@ impl ConsumerScopeEvidence {
         purpose: ScopePurpose,
     ) -> Self {
         Self {
+            role: super::native_enrollment::NativeRole::AppHost,
             selection: Some(selection),
             incarnation,
-            binding,
+            binding: Some(binding),
             purpose: Some(purpose),
             snapshot: None,
         }
@@ -178,9 +182,10 @@ impl ConsumerScopeEvidence {
 
     pub(in crate::security_epoch) fn shell(incarnation: Digest, binding: Digest) -> Self {
         Self {
+            role: super::native_enrollment::NativeRole::SecurityShell,
             selection: None,
             incarnation,
-            binding,
+            binding: Some(binding),
             purpose: None,
             snapshot: None,
         }
@@ -198,6 +203,7 @@ impl ConsumerScopeEvidence {
             format: "day2_native_consumer_evidence_v1",
             sequence,
             observation,
+            role: self.role,
             selection: &self.selection,
             consumer_incarnation: &self.incarnation,
             binding: &self.binding,
@@ -221,6 +227,41 @@ impl ConsumerScopeEvidence {
         // truncated diagnostics remain missing evidence, never a positive claim.
         let _ = std::io::stderr().lock().write_all(&line);
     }
+}
+
+/// Only the actual final HTTP executor calls this after genuine enrollment and
+/// its checked App/Shell stage. This reports no file, P3, consumer or readiness
+/// success; Shell still needs a real human request to enter a serving scope.
+pub(crate) fn record_executor_enrollment(
+    stage: &mut EnrolledRoleStage<'_>,
+    policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    store: &day2_capabilities::security_epoch::EpochStore,
+    role: super::native_enrollment::NativeRole,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            role,
+            super::native_enrollment::NativeRole::AppHost
+                | super::native_enrollment::NativeRole::SecurityShell
+        ),
+        "native HTTP enrollment role refused"
+    );
+    stage.check_selection(policy, store, role)?;
+    let evidence = ConsumerScopeEvidence {
+        role,
+        selection: Some(Digest::of(&(
+            "day2-controller-evidence-selection-v1",
+            policy,
+            store,
+        ))?),
+        incarnation: stage.incarnation_data()?,
+        binding: None,
+        purpose: None,
+        snapshot: None,
+    };
+    stage.check_selection(policy, store, role)?;
+    evidence.record(ConsumerScopeResult::ExecutorEnrolled);
+    Ok(())
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -665,6 +706,39 @@ impl CurrentServingPhase for ServingBorrow<'_, '_> {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    #[test]
+    fn enrollment_observation_does_not_invent_a_serving_binding_or_snapshot() {
+        for role in [
+            super::super::native_enrollment::NativeRole::AppHost,
+            super::super::native_enrollment::NativeRole::SecurityShell,
+        ] {
+            // Format DATA only. This fixture never constructs a native stage or
+            // calls the actual checked enrollment-observation producer.
+            let evidence = ConsumerScopeEvidence {
+                role,
+                selection: Some(Digest::new(b"selected policy DATA")),
+                incarnation: Digest::new(b"historical incarnation DATA"),
+                binding: None,
+                purpose: None,
+                snapshot: None,
+            };
+            let line = String::from_utf8(
+                evidence
+                    .line(1, ConsumerScopeResult::ExecutorEnrolled)
+                    .unwrap(),
+            )
+            .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap()).unwrap();
+            assert_eq!(value["observation"], "executor_enrolled");
+            for field in ["binding", "purpose", "snapshot"] {
+                assert!(value[field].is_null());
+            }
+            assert!(value["selection"].is_string());
+            assert!(value["consumer_incarnation"].is_string());
+        }
+    }
 
     #[test]
     fn consumer_diagnostic_budget_cannot_wrap_or_reopen_after_exhaustion() {

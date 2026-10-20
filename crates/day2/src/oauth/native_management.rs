@@ -157,7 +157,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
         let storage = {
             let mut stage = role.begin_current_stage()?;
             stage.check_selection(&selection.policy, &selection.store, kind)?;
-            match kind {
+            let storage = match kind {
                 NativeRole::AppHost => AppStorage::Unstarted,
                 NativeRole::SecurityShell => {
                     let peer = crate::security_epoch::native_enrollment::ShellServingPeer::connect(
@@ -169,7 +169,14 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                 NativeRole::EpochController => {
                     anyhow::bail!("native HTTP controller role refused")
                 }
-            }
+            };
+            crate::security_epoch::serving::record_executor_enrollment(
+                &mut stage,
+                &selection.policy,
+                &selection.store,
+                kind,
+            )?;
+            storage
         };
         ensure!(
             selected
