@@ -3056,11 +3056,27 @@
         },
         {
           "owner": null,
+          "signature": "pub (crate) fn bind_runtime_response (participant : & mut ServingParticipant , scope : & day2_capabilities :: security_epoch :: AuthorityScope , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
           "signature": "pub (crate) fn load_native_runtime (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < '_ > , metadata : crate :: store :: InitialStoreMetadata) -> Result < crate :: store :: Runtime >"
         },
         {
           "owner": null,
           "signature": "pub (crate) fn refuse_current_serving (participant : & mut ServingParticipant , intent : & FreshIntent , purpose : ServingUse , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn refuse_runtime_response (participant : & mut ServingParticipant , scope : & day2_capabilities :: security_epoch :: AuthorityScope , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn require_runtime_response (participant : & mut ServingParticipant , scope : & day2_capabilities :: security_epoch :: AuthorityScope , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_runtime_response < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , scope : & day2_capabilities :: security_epoch :: AuthorityScope , purpose : RuntimeServingUse , identity : & ResponseIdentity , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> Result < T >"
         },
         {
           "owner": null,
