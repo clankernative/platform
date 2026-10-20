@@ -358,7 +358,7 @@ fn admit_full(
     ensure!(
         prepared.identity == expected
             && joined.identity == expected
-            && serde_json::to_value(combine_parts(inputs, tests, &expected)?)?
+            && serde_json::to_value(combine_parts(inputs, tests, &expected, "all")?)?
                 == serde_json::to_value(&prepared)?,
         "complete current-source queue preparation required"
     );
@@ -655,7 +655,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&inputs)?)?,
             serde_json::from_value(serde_json::to_value(&tests)?)?,
             &current,
-        )?;
+         "all",)?;
         let compiler = BuildIdentity {
             snapshot: current.snapshot.clone(),
             workflow: current.workflow.clone(),

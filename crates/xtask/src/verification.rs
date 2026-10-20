@@ -282,13 +282,15 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
     let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
-        let prepared = shards::load(root, &snapshot)?;
+        let prepared = shards::load(root, &snapshot, "all")?;
         fixtures = shards::fixtures(root, &prepared)?;
         Some(prepared)
     } else {
         None
     };
-    let arguments = if let Some(part) = recipe.strip_prefix("verify-prepare-part-") {
+    let arguments = if let Some(part) = recipe.strip_prefix("verify-mac-prepare-") {
+        vec!["verify-mac-prepare", part]
+    } else if let Some(part) = recipe.strip_prefix("verify-prepare-part-") {
         vec!["verify-prepare-part", part]
     } else {
         recipe
@@ -345,7 +347,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
-            if recipe == "verify-mac" {
+            if ["verify-mac", "verify-mac-runtime"].contains(&recipe) {
                 mac_campaigns.insert(campaign.suite.clone(), executed_binaries.clone());
             }
             ensure_stable(root, recipe, &snapshot)?;
@@ -398,9 +400,36 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 )?);
                 return Ok(json!({}));
             }
+            "verify-mac-prepared-part" => {
+                let part = value("part")?;
+                ensure!(
+                    recipe == format!("verify-mac-prepare-{part}")
+                        && ["inputs", "tests"].contains(&part)
+                        && std::env::consts::OS == "macos"
+                        && std::env::consts::ARCH == "aarch64",
+                    "closed native Mac preparation part required"
+                );
+                ensure_stable(root, recipe, &snapshot)?;
+                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, &format!("mac-{part}"))?;
+                return Ok(json!({}));
+            }
+            "verify-mac-preparation-join" => {
+                ensure!(
+                    recipe == "verify-mac-runtime" && parameters.is_empty()
+                        && std::env::consts::OS == "macos"
+                        && std::env::consts::ARCH == "aarch64",
+                    "closed native Mac preparation join required"
+                );
+                let joined = shards::mac::join(root, &snapshot)?;
+                fixtures = joined.fixtures;
+                passed = joined.passed;
+                timings.steps_ms = joined.timings;
+                prepared = Some(joined.prepared);
+                return Ok(json!({}));
+            }
             "verify-mac-native" => {
                 ensure!(
-                    recipe == "verify-mac" && parameters.is_empty(),
+                    ["verify-mac", "verify-mac-runtime"].contains(&recipe) && parameters.is_empty(),
                     "closed native Mac cases required"
                 );
                 shards::mac::focused(
@@ -412,7 +441,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             "verify-mac-receipt" => {
                 ensure!(
-                    recipe == "verify-mac" && parameters.is_empty(),
+                    ["verify-mac", "verify-mac-runtime"].contains(&recipe) && parameters.is_empty(),
                     "closed native Mac receipt required"
                 );
                 ensure_stable(root, recipe, &snapshot)?;
@@ -466,7 +495,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     "preparation join accepts no overrides"
                 );
                 ensure_stable(root, recipe, &snapshot)?;
-                shards::combine(root, &snapshot)?;
+                shards::combine(root, &snapshot, "all")?;
                 return Ok(json!({}));
             }
             "verify-shard-receipt" => {
@@ -828,6 +857,9 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare-join"
         | "verify-compose"
         | "verify-mac"
+        | "verify-mac-prepare-inputs"
+        | "verify-mac-prepare-tests"
+        | "verify-mac-runtime"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -1948,7 +1980,14 @@ mod tests {
 
     #[test]
     fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
-        let job = ci_job("verify-mac-compatibility");
+        let mut jobs: Vec<_> = include_str!("../../../.github/workflows/ci.yml")
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':'))
+            .map(|line| ci_job(line.trim().trim_end_matches(':')))
+            .filter(|job| job.contains("runs-on: macos-15") && job.contains("id: cargo_intermediates"))
+            .collect();
+        assert_eq!(jobs.len(), 1, "one native Mac intermediate-cache producer");
+        let job = jobs.pop().unwrap();
         let restore = ci_step(&job, "Restore compatible Cargo intermediates");
         let save = ci_step(&job, "Save compatible Cargo intermediates");
         let paths = |step: &str| {
@@ -1997,7 +2036,7 @@ mod tests {
         let source = job
             .find("      - run: cargo run --locked -p xtask -- source-check\n")
             .unwrap();
-        let verify = job.find("      - run: cargo run --locked -p xtask -- verify-mac\n        id: native_preparation").unwrap();
+        let verify = job.find("      - run: target/debug/xtask verify-mac").unwrap();
         let saved = job
             .find("      - name: Save compatible Cargo intermediates\n")
             .unwrap();

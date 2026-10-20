@@ -362,7 +362,7 @@ pub(super) struct Proof {
     campaigns: Vec<Receipt>,
 }
 
-fn preparation_effects() -> BTreeSet<String> {
+pub(super) fn preparation_effects() -> BTreeSet<String> {
     [
         "cli",
         "build-reports",
@@ -381,6 +381,31 @@ fn required_cases() -> Vec<(String, String, String, String, bool)> {
         .iter()
         .map(|(p, t, k, n, i)| ((*p).into(), (*t).into(), (*k).into(), (*n).into(), *i))
         .collect()
+}
+
+pub(in super::super) struct Joined {
+    pub(in super::super) prepared: Prepared,
+    pub(in super::super) fixtures: BTreeMap<String, PathBuf>,
+    pub(in super::super) passed: BTreeSet<String>,
+    pub(in super::super) timings: BTreeMap<String, u64>,
+}
+
+pub(in super::super) fn join(root: &Path, snapshot: &str) -> Result<Joined> {
+    let joined = super::combine(root, snapshot, "mac-all")?;
+    let fixtures = super::fixtures(root, &joined)?;
+    let prepared = prepare(root, snapshot, &fixtures, &joined.passed, &joined.timings_ms)?;
+    ensure!(
+        joined.binaries == prepared.binaries
+            && joined.programs == prepared.programs
+            && joined.auxiliaries == prepared.auxiliaries,
+        "Mac preparation and compiler inventories differ"
+    );
+    Ok(Joined {
+        prepared,
+        fixtures,
+        passed: joined.passed,
+        timings: joined.timings_ms,
+    })
 }
 
 pub(in super::super) fn prepare(

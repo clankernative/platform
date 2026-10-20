@@ -1141,6 +1141,17 @@ fn preparation_steps() -> Result<BTreeSet<String>> {
 }
 
 fn part_steps(part: &str) -> Result<BTreeSet<String>> {
+    if let Some(part) = part.strip_prefix("mac-") {
+        ensure!(["all", "inputs", "tests"].contains(&part), "unknown Mac preparation part");
+        return Ok(mac::preparation_effects()
+            .into_iter()
+            .filter(|step| match part {
+                "inputs" => !step.starts_with("test-"),
+                "tests" => step.starts_with("test-"),
+                _ => true,
+            })
+            .collect());
+    }
     ensure!(
         ["all", "inputs", "tests"].contains(&part),
         "unknown preparation part"
@@ -1158,8 +1169,8 @@ fn part_steps(part: &str) -> Result<BTreeSet<String>> {
 fn preparation_path(part: &str) -> Result<&'static str> {
     match part {
         "all" => Ok(PREPARED),
-        "inputs" => Ok("artifacts/ci-preparation-inputs.json"),
-        "tests" => Ok("artifacts/ci-preparation-tests.json"),
+        "inputs" | "mac-inputs" => Ok("artifacts/ci-preparation-inputs.json"),
+        "tests" | "mac-tests" => Ok("artifacts/ci-preparation-tests.json"),
         _ => anyhow::bail!("unknown preparation part"),
     }
 }
@@ -1176,12 +1187,12 @@ pub(super) fn save(
         *passed == part_steps(part)?,
         "incomplete hosted verification preparation"
     );
-    let binaries: Vec<Binary> = if part == "inputs" {
+    let binaries: Vec<Binary> = if part.ends_with("inputs") {
         Vec::new()
     } else {
         day2::json::decode(&fs::read(root.join(BINARIES))?)?
     };
-    let programs = if part == "inputs" {
+    let programs = if part.ends_with("inputs") {
         Vec::new()
     } else {
         let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
@@ -1191,7 +1202,7 @@ pub(super) fn save(
         );
         cache.programs
     };
-    let auxiliaries = if part == "inputs" {
+    let auxiliaries = if part.ends_with("inputs") {
         Vec::new()
     } else {
         let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
@@ -1249,7 +1260,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
             .iter()
             .map(|binary| binary.package.as_str())
             .collect::<BTreeSet<_>>()
-            == if part == "inputs" {
+            == if part.ends_with("inputs") {
                 BTreeSet::new()
             } else {
                 packages()
@@ -1315,7 +1326,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     }
     validate_auxiliary_inventory(
         &prepared.auxiliaries,
-        if part == "inputs" {
+        if part.ends_with("inputs") {
             "none"
         } else {
             &prepared.identity.host
@@ -1324,13 +1335,21 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     Ok(())
 }
 
-fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> Result<Prepared> {
+fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity, part: &str) -> Result<Prepared> {
+    let (inputs_part, tests_part) = match part {
+        "all" => ("inputs", "tests"),
+        "mac-all" => {
+            ensure!(expected.host == "macos" && expected.architecture == "aarch64", "native Mac preparation host required");
+            ("mac-inputs", "mac-tests")
+        }
+        _ => anyhow::bail!("unknown complete preparation"),
+    };
     ensure!(
         inputs.identity == *expected && tests.identity == *expected,
         "preparation parts belong to another checkout, run, attempt or host"
     );
-    validate_preparation(&inputs, "inputs")?;
-    validate_preparation(&tests, "tests")?;
+    validate_preparation(&inputs, inputs_part)?;
+    validate_preparation(&tests, tests_part)?;
     ensure!(
         inputs.passed.is_disjoint(&tests.passed),
         "preparation effects must be disjoint"
@@ -1340,33 +1359,34 @@ fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> 
     inputs.auxiliaries = tests.auxiliaries;
     inputs.passed.extend(tests.passed);
     inputs.timings_ms.extend(tests.timings_ms);
-    validate_preparation(&inputs, "all")?;
+    validate_preparation(&inputs, part)?;
     Ok(inputs)
 }
 
-pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
+pub(super) fn combine(root: &Path, snapshot: &str, part: &str) -> Result<Prepared> {
     let inputs: Prepared = day2::json::decode(&fs::read(
         root.join("artifacts/ci-preparation-inputs.json"),
     )?)?;
     let tests: Prepared =
         day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
-    let prepared = combine_parts(inputs, tests, &identity(root, snapshot)?)?;
+    let prepared = combine_parts(inputs, tests, &identity(root, snapshot)?, part)?;
     fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
     // Admit all transported executable bytes and every native fixture before
     // the workflow can publish the complete workspace to runtime campaigns.
-    let prepared = load(root, snapshot)?;
+    let prepared = load(root, snapshot, part)?;
     fixtures(root, &prepared)?;
     println!("Joined both preparation parts with all fixtures and test executables");
-    Ok(())
+    Ok(prepared)
 }
 
-pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
+pub(super) fn load(root: &Path, snapshot: &str, part: &str) -> Result<Prepared> {
+    ensure!(["all", "mac-all"].contains(&part), "complete preparation required");
     let prepared: Prepared = day2::json::decode(&fs::read(root.join(PREPARED))?)?;
     ensure!(
         prepared.identity == identity(root, snapshot)?,
         "prepared verification belongs to another checkout, run, attempt or host"
     );
-    validate_preparation(&prepared, "all")?;
+    validate_preparation(&prepared, part)?;
     for binary in prepared.binaries.iter().chain(&prepared.programs) {
         admit_executable(
             &root.join(&binary.executable),
@@ -2082,7 +2102,7 @@ mod tests {
         let passed = part_steps(part)?;
         Ok(Prepared {
             identity: sample_identity(),
-            binaries: if part == "tests" {
+            binaries: if part.ends_with("tests") {
                 packages()
                     .into_iter()
                     .map(|package| Binary {
@@ -2116,14 +2136,14 @@ mod tests {
             sample_part("inputs")?,
             sample_part("tests")?,
             &sample_identity(),
-        )?;
+         "all",)?;
         assert_eq!(complete.passed, preparation_steps()?);
         assert_eq!(complete.fixtures.len(), 23);
         for fixture in ["lifecycle", "verification-actors", "chart-live"] {
             assert!(complete.fixtures.contains_key(fixture));
             let mut incomplete = sample_part("inputs")?;
             incomplete.fixtures.remove(fixture);
-            assert!(combine_parts(incomplete, sample_part("tests")?, &sample_identity()).is_err());
+            assert!(combine_parts(incomplete, sample_part("tests")?, &sample_identity(), "all").is_err());
         }
         for field in [
             "checkout",
@@ -2146,7 +2166,7 @@ mod tests {
                 } else {
                     (sample_part("inputs")?, invalid)
                 };
-                assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+                assert!(combine_parts(inputs, tests, &sample_identity(), "all").is_err());
             }
         }
         for (part, field) in [
@@ -2167,17 +2187,65 @@ mod tests {
             } else {
                 (sample_part("inputs")?, invalid)
             };
-            assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+            assert!(combine_parts(inputs, tests, &sample_identity(), "all").is_err());
         }
         assert!(
             combine_parts(
                 sample_part("tests")?,
                 sample_part("inputs")?,
                 &sample_identity()
-            )
+            , "all")
             .is_err()
         );
         assert!(part_steps("unknown").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mac_preparation_join_requires_both_complete_current_parts_without_runtime_outcomes() -> Result<()> {
+        let complete = combine_parts(
+            sample_part("mac-inputs")?, sample_part("mac-tests")?, &sample_identity(), "mac-all",
+        )?;
+        assert_eq!(complete.passed, mac::preparation_effects());
+        assert_eq!(complete.fixtures.len(), 4);
+        assert!(!complete.passed.contains("test-docs"));
+        assert!(!complete.passed.contains("test-mac-native"));
+        assert!(!complete.passed.contains("test-isolated-build"));
+        assert!(!complete.passed.contains("test-installation-build"));
+        for part in ["mac-inputs", "mac-tests"] {
+            for field in ["checkout", "tree", "source_identity", "workspace", "run", "attempt", "host", "architecture", "workflow", "snapshot"] {
+                let mut value = serde_json::to_value(sample_part(part)?)?;
+                value["identity"][field] = json!("foreign");
+                let invalid = serde_json::from_value(value)?;
+                let (inputs, tests) = if part == "mac-inputs" {
+                    (invalid, sample_part("mac-tests")?)
+                } else {
+                    (sample_part("mac-inputs")?, invalid)
+                };
+                assert!(combine_parts(inputs, tests, &sample_identity(), "mac-all").is_err());
+            }
+        }
+        for step in mac::preparation_effects() {
+            let mut inputs = sample_part("mac-inputs")?;
+            let mut tests = sample_part("mac-tests")?;
+            if step == "test-binaries" { tests.passed.remove(&step); } else { inputs.passed.remove(&step); }
+            assert!(combine_parts(inputs, tests, &sample_identity(), "mac-all").is_err());
+        }
+        for extra in ["test-docs", "test-mac-native", "test-isolated-build", "test-installation-build"] {
+            let mut inputs = sample_part("mac-inputs")?;
+            inputs.passed.insert(extra.into());
+            inputs.timings_ms.insert(extra.into(), 1);
+            assert!(combine_parts(inputs, sample_part("mac-tests")?, &sample_identity(), "mac-all").is_err());
+        }
+        assert!(combine_parts(sample_part("inputs")?, sample_part("mac-tests")?, &sample_identity(), "mac-all").is_err());
+        assert!(combine_parts(sample_part("mac-inputs")?, sample_part("mac-tests")?, &sample_identity(), "all").is_err());
+        let mut current = sample_identity();
+        current.host = "linux".into();
+        let mut inputs = sample_part("mac-inputs")?;
+        let mut tests = sample_part("mac-tests")?;
+        inputs.identity.host = current.host.clone(); tests.identity.host = current.host.clone();
+        assert!(combine_parts(inputs, tests, &current, "mac-all").is_err());
+        assert!(part_steps("mac-unknown").is_err());
         Ok(())
     }
 
@@ -2528,7 +2596,7 @@ mod tests {
             });
             Ok(tests)
         };
-        let complete = combine_parts(sample_part("inputs")?, make_tests()?, &sample_identity())?;
+        let complete = combine_parts(sample_part("inputs")?, make_tests()?, &sample_identity(), "all")?;
         assert_eq!(complete.programs.len(), 1);
         assert!(!expected_binaries(&complete, "workspace-day2").contains(&program_output("day2")));
         for field in ["programs", "executable", "target", "kind", "directory"] {
@@ -2543,7 +2611,7 @@ mod tests {
                 };
             }
             let invalid = serde_json::from_value(value)?;
-            assert!(combine_parts(sample_part("inputs")?, invalid, &sample_identity()).is_err());
+            assert!(combine_parts(sample_part("inputs")?, invalid, &sample_identity(), "all").is_err());
         }
         Ok(())
     }

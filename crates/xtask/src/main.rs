@@ -791,7 +791,8 @@ fn main() -> Result<()> {
             );
             verification::queue_receipt(&root, &action)?;
         }
-        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac" => {
+        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac"
+        | "verify-mac-runtime" => {
             ensure!(
                 args.next().is_none(),
                 "verification stage accepts no arguments"
@@ -807,6 +808,11 @@ fn main() -> Result<()> {
                 "usage: xtask verify-prepare-part PART"
             );
             verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
+        }
+        "verify-mac-prepare" => {
+            let part = args.next().context("usage: xtask verify-mac-prepare PART")?;
+            ensure!(args.next().is_none(), "usage: xtask verify-mac-prepare PART");
+            verification::execute(&root, &format!("verify-mac-prepare-{part}"))?;
         }
         "verify-shard" => {
             let shard = args.next().context("usage: xtask verify-shard SHARD")?;
