@@ -36,6 +36,7 @@ locals {
 }
 
 resource "kubernetes_config_map_v1" "instance" {
+  depends_on = [terraform_data.native_admission]
   metadata {
     name      = "security-shell-instance"
     namespace = var.namespace
@@ -100,10 +101,19 @@ resource "kubernetes_deployment_v1" "shell" {
         automount_service_account_token  = false
         enable_service_links             = false
         host_network                     = false
-        host_pid                         = false
+        host_pid                         = local.native_enabled
         host_ipc                         = false
-        node_selector                    = var.node_selector
+        node_selector                    = merge(var.node_selector, local.native_node_selector)
         termination_grace_period_seconds = local.resources.shutdown_seconds + 5
+        dynamic "toleration" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            key      = "day2.dev/native-enrollment"
+            operator = "Equal"
+            value    = var.native_node_profile
+            effect   = "NoSchedule"
+          }
+        }
         security_context {
           run_as_non_root = true
           run_as_user     = 10001
@@ -144,6 +154,15 @@ resource "kubernetes_deployment_v1" "shell" {
             name       = "tmp"
             mount_path = "/tmp"
           }
+          dynamic "volume_mount" {
+            for_each = local.native_mounts
+            content {
+              name       = volume_mount.value.name
+              mount_path = volume_mount.value.path
+              sub_path   = volume_mount.value.sub_path
+              read_only  = volume_mount.value.read_only
+            }
+          }
           readiness_probe {
             http_get {
               path = "/health/ready"
@@ -153,15 +172,18 @@ resource "kubernetes_deployment_v1" "shell" {
             timeout_seconds   = 2
             failure_threshold = 3
           }
-          liveness_probe {
-            http_get {
-              path = "/health/live"
-              port = "http"
+          dynamic "liveness_probe" {
+            for_each = local.native_enabled ? [] : [true]
+            content {
+              http_get {
+                path = "/health/live"
+                port = "http"
+              }
+              period_seconds        = 10
+              timeout_seconds       = 2
+              failure_threshold     = 6
+              initial_delay_seconds = 10
             }
-            period_seconds        = 10
-            timeout_seconds       = 2
-            failure_threshold     = 6
-            initial_delay_seconds = 10
           }
         }
         volume {
@@ -169,6 +191,26 @@ resource "kubernetes_deployment_v1" "shell" {
           config_map {
             name         = kubernetes_config_map_v1.instance.metadata[0].name
             default_mode = "0444"
+          }
+        }
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-policy"
+            config_map {
+              name         = kubernetes_config_map_v1.native_policy[0].metadata[0].name
+              default_mode = "0444"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-enrollment"
+            host_path {
+              path = "/run/day2-native-enrollment"
+              type = "Directory"
+            }
           }
         }
         volume {

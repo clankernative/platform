@@ -2,6 +2,13 @@
 # These synthetic pins do not qualify an artifact, Google client or live IAM.
 mock_provider "kubernetes" {}
 
+# This file exercises first ordinary installation unless a run overrides it.
+# Keep that assumption explicit instead of inheriting another file's mock value.
+override_data {
+  target = data.kubernetes_resources.workload
+  values = { objects = [] }
+}
+
 variables {
   app_id                  = "example_app"
   namespace               = "app-example"

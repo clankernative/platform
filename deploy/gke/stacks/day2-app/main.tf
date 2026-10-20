@@ -123,7 +123,7 @@ locals {
 }
 
 resource "kubernetes_config_map_v1" "instance" {
-  depends_on = [terraform_data.oauth_admission]
+  depends_on = [terraform_data.oauth_admission, terraform_data.native_admission]
   metadata {
     name      = "${local.workload_name}-instance"
     namespace = var.namespace
@@ -234,14 +234,27 @@ resource "kubernetes_stateful_set_v1" "day2" {
       }
 
       spec {
-        # The internal-tools tenancy policy admits only serviceAccountName=runtime
-        # in app-* namespaces. day2 needs no Kubernetes API access.
+        # Ordinary App mode needs no Kubernetes API token. Native epoch reads
+        # project only their explicit API/subject tokens below; automount stays off.
         service_account_name             = var.service_account_name
         automount_service_account_token  = false
         enable_service_links             = false
         termination_grace_period_seconds = var.runtime_resources.shutdown_seconds + 15
 
-        node_selector = var.node_selector
+        host_pid      = local.native_enabled
+        host_network  = false
+        host_ipc      = false
+        node_selector = merge(var.node_selector, local.native_node_selector)
+
+        dynamic "toleration" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            key      = "day2.dev/native-enrollment"
+            operator = "Equal"
+            value    = var.native_node_profile
+            effect   = "NoSchedule"
+          }
+        }
 
         # No fsGroup on purpose: kubelet's fsGroup handling would re-add group
         # rwx and setgid to the state directory day2 keeps at 0700.
@@ -256,7 +269,9 @@ resource "kubernetes_stateful_set_v1" "day2" {
         }
 
         dynamic "init_container" {
-          for_each = var.state_ownership_init_enabled ? [true] : []
+          # Native storage already has its actual Controller-owned metadata.
+          # No startup chown may change that original mount/root observation.
+          for_each = var.state_ownership_init_enabled && !local.native_enabled ? [true] : []
 
           content {
             name              = "state-ownership"
@@ -550,6 +565,16 @@ resource "kubernetes_stateful_set_v1" "day2" {
             mount_path = "/tmp"
           }
 
+          dynamic "volume_mount" {
+            for_each = local.native_mounts
+            content {
+              name       = volume_mount.value.name
+              mount_path = volume_mount.value.path
+              sub_path   = volume_mount.value.sub_path
+              read_only  = volume_mount.value.read_only
+            }
+          }
+
           # The registered mounts' paths; see credentials.tf.
           dynamic "volume_mount" {
             for_each = local.has_credentials ? [true] : []
@@ -574,15 +599,18 @@ resource "kubernetes_stateful_set_v1" "day2" {
             failure_threshold = 3
           }
 
-          liveness_probe {
-            http_get {
-              path = "/health/live"
-              port = "http"
+          dynamic "liveness_probe" {
+            for_each = local.native_enabled ? [] : [true]
+            content {
+              http_get {
+                path = "/health/live"
+                port = "http"
+              }
+              initial_delay_seconds = 10
+              period_seconds        = 10
+              timeout_seconds       = 2
+              failure_threshold     = 6
             }
-            initial_delay_seconds = 10
-            period_seconds        = 10
-            timeout_seconds       = 2
-            failure_threshold     = 6
           }
         }
 
@@ -605,6 +633,67 @@ resource "kubernetes_stateful_set_v1" "day2" {
 
           persistent_volume_claim {
             claim_name = local.pvc_name
+          }
+        }
+
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-policy"
+            config_map {
+              name         = kubernetes_config_map_v1.native_policy[0].metadata[0].name
+              default_mode = "0444"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-enrollment"
+            host_path {
+              path = "/run/day2-native-enrollment"
+              type = "Directory"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-api"
+            projected {
+              default_mode = "0444"
+              sources {
+                service_account_token {
+                  path               = "token"
+                  expiration_seconds = 3600
+                }
+              }
+              sources {
+                config_map {
+                  name = "kube-root-ca.crt"
+                  items {
+                    key  = "ca.crt"
+                    path = "ca.crt"
+                  }
+                }
+              }
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = local.native_enabled ? [true] : []
+          content {
+            name = "native-subject"
+            projected {
+              default_mode = "0444"
+              sources {
+                service_account_token {
+                  path               = "subject-token"
+                  audience           = try(local.native_role.token_review_audience, "")
+                  expiration_seconds = 600
+                }
+              }
+            }
           }
         }
 
@@ -752,7 +841,9 @@ resource "kubernetes_cron_job_v1" "backup" {
     starting_deadline_seconds     = var.backup_starting_deadline_seconds
     successful_jobs_history_limit = 3
     failed_jobs_history_limit     = 3
-    suspend                       = false
+    # Ordinary backup tooling cannot acquire/adopt a native original holder.
+    # A native backup implementation needs its own supported owner path.
+    suspend = local.native_enabled
 
     job_template {
       metadata {
