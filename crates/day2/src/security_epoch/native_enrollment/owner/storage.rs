@@ -1,14 +1,15 @@
-//! Purpose-closed storage statements from the actual retained enrolled key and
-//! ORIGINAL stage. DATA cannot provide a replacement stage clock or key.
+//! Purpose-closed statements from the actual retained key and ORIGINAL stage.
+//! Parsed DATA cannot replace a stage clock, process handle or key owner.
 
 use super::EnrolledRoleStage;
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
-    process::MessageProcess,
-    runtime,
-    storage_peer::wire::{Body, Message, OriginalInterval, StageStatement},
+    protocol::ProcessData,
+    storage_peer_wire::{Body, Message, StageStatement},
 };
+#[cfg(target_os = "linux")]
+use crate::security_epoch::native_enrollment::{runtime, storage_peer_wire::OriginalInterval};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 
@@ -26,8 +27,7 @@ impl EnrolledRoleStage<'_> {
                 !self.owner.initial_holder_attempted,
                 "storage_peer_initial_attempt_already_started"
             );
-            // Before connection, nonce generation or any packet. No code resets
-            // this gate on failure, success, expiry or a replacement stage.
+            // One-way refusal gate BEFORE connection, naming or packet I/O.
             self.owner.initial_holder_attempted = true;
             Ok(())
         })();
@@ -50,19 +50,24 @@ impl EnrolledRoleStage<'_> {
                 ),
                 "storage_peer_shell_role_refused"
             );
-            let (origin, deadline) = self.acquisition.interval_data()?;
-            let sample = self.acquisition.sample()?;
-            let statement = StageStatement {
-                certificate: self.owner.certificate.clone(),
-                stage: self.current_grant.clone(),
-                original: OriginalInterval {
-                    domain: sample.domain,
-                    origin_ns: origin.as_nanos().try_into()?,
-                    deadline_ns: deadline.min(self.deadline).as_nanos().try_into()?,
-                },
-            };
-            self.check()?;
-            Ok(statement)
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let (origin, deadline) = self.acquisition.interval_data()?;
+                let sample = self.acquisition.sample()?;
+                let statement = StageStatement {
+                    certificate: self.owner.certificate.clone(),
+                    stage: self.current_grant.clone(),
+                    original: OriginalInterval {
+                        domain: sample.domain,
+                        origin_ns: origin.as_nanos().try_into()?,
+                        deadline_ns: deadline.min(self.deadline).as_nanos().try_into()?,
+                    },
+                };
+                self.check()?;
+                Ok(statement)
+            }
         })();
         if result.is_err() {
             self.owner.refused = true;
@@ -140,15 +145,13 @@ impl EnrolledRoleStage<'_> {
     pub(in crate::security_epoch::native_enrollment) fn storage_peer_code(
         &mut self,
     ) -> Result<Digest> {
-        self.check()?;
-        let expected = match self.owner.role {
-            NativeRole::EpochController => NativeRole::AppHost,
-            NativeRole::AppHost => NativeRole::EpochController,
-            NativeRole::SecurityShell => anyhow::bail!("storage_peer_shell_role_refused"),
-        };
+        let expected = self.storage_peer_role()?;
         Ok(self.owner.policy.code(expected).clone())
     }
 
+    /// The private receiver retains/checks the ACTUAL privileged sender pidfd;
+    /// issuer observations replace App-side privileged proc/containerd reads.
+    /// This validator alone returns no native peer or storage authority.
     pub(in crate::security_epoch::native_enrollment) fn check_storage_controller_statement(
         &mut self,
         statement: &StageStatement,
@@ -167,18 +170,14 @@ impl EnrolledRoleStage<'_> {
                 kernel_process,
                 acquisition.sample()?.elapsed,
             )?;
-            runtime::require_common(&statement.stage.data.process, &self.owner.self_data)?;
-            let runtime = &statement.stage.data.runtime;
-            let selected = self.owner.policy.workload(NativeRole::EpochController);
-            ensure!(
-                runtime.node_uid == self.owner.policy.runtime.node_uid
-                    && runtime.boot == statement.stage.data.process.boot
-                    && runtime.container.node_name == self.owner.policy.runtime.node_name
-                    && runtime.container.container_name == selected.container.name.as_str()
-                    && runtime.container.image == selected.container.image,
-                "storage_peer_runtime_selection"
-            );
-            self.check_storage_acquisition(acquisition)
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                runtime::require_common(&statement.stage.data.process, &self.owner.self_data)?;
+                self.check_storage_runtime_selection(statement, NativeRole::EpochController)?;
+                self.check_storage_acquisition(acquisition)
+            }
         })();
         if result.is_err() {
             self.owner.refused = true;
@@ -188,45 +187,35 @@ impl EnrolledRoleStage<'_> {
         result
     }
 
-    pub(in crate::security_epoch::native_enrollment) fn check_storage_peer(
+    /// The caller holds the actual MessageProcess and checks its original
+    /// pidfd/code/namespaces around this DATA comparison, never a caller PID.
+    pub(in crate::security_epoch::native_enrollment) fn check_storage_app_statement(
         &mut self,
         statement: &StageStatement,
-        process: &mut MessageProcess,
+        observed: &ProcessData,
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
             self.check_storage_acquisition(acquisition)?;
-            let role = match self.owner.role {
-                NativeRole::EpochController => NativeRole::AppHost,
-                NativeRole::AppHost => NativeRole::EpochController,
-                NativeRole::SecurityShell => anyhow::bail!("storage_peer_shell_role_refused"),
-            };
-            process.check_identity(acquisition)?;
+            ensure!(
+                self.owner.role == NativeRole::EpochController,
+                "storage_peer_app_receipt_role"
+            );
             statement.validate(
                 &self.owner.policy,
                 &self.owner.certificate,
-                role,
-                process.data(),
+                NativeRole::AppHost,
+                observed,
                 acquisition.sample()?.elapsed,
             )?;
-            runtime::require_common(process.data(), &self.owner.self_data)?;
-            // The ACTUAL retained same-generation issuer joined this exact
-            // process to its runtime when issuing this signed <=5s stage. The
-            // receiver retains/rechecks that issuer and this message's pidfd;
-            // no parsed grant alone supplies a native peer. App/Shell must not
-            // receive containerd access merely to authenticate this endpoint.
-            let runtime = &statement.stage.data.runtime;
-            let selected = self.owner.policy.workload(role);
-            ensure!(
-                runtime.node_uid == self.owner.policy.runtime.node_uid
-                    && runtime.boot == process.data().boot
-                    && runtime.container.node_name == self.owner.policy.runtime.node_name
-                    && runtime.container.container_name == selected.container.name.as_str()
-                    && runtime.container.image == selected.container.image,
-                "storage_peer_runtime_selection"
-            );
-            process.check_identity(acquisition)?;
-            self.check_storage_acquisition(acquisition)
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                runtime::require_common(observed, &self.owner.self_data)?;
+                self.check_storage_runtime_selection(statement, NativeRole::AppHost)?;
+                self.check_storage_acquisition(acquisition)
+            }
         })();
         if result.is_err() {
             self.owner.refused = true;
@@ -234,5 +223,23 @@ impl EnrolledRoleStage<'_> {
             acquisition.refuse();
         }
         result
+    }
+
+    fn check_storage_runtime_selection(
+        &mut self,
+        statement: &StageStatement,
+        role: NativeRole,
+    ) -> Result<()> {
+        let runtime = &statement.stage.data.runtime;
+        let selected = self.owner.policy.workload(role);
+        ensure!(
+            runtime.node_uid == self.owner.policy.runtime.node_uid
+                && runtime.boot == statement.stage.data.process.boot
+                && runtime.container.node_name == self.owner.policy.runtime.node_name
+                && runtime.container.container_name == selected.container.name.as_str()
+                && runtime.container.image == selected.container.image,
+            "storage_peer_runtime_selection"
+        );
+        Ok(())
     }
 }

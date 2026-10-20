@@ -26,7 +26,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
 mod storage;
 
 struct OwnerIdentity;

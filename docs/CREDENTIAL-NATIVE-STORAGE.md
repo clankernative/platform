@@ -59,14 +59,34 @@ public key, Pod UID or signed certificate cannot reconstruct the native owner.
 The controller remains distinct from AppHost, and an AppHost cannot create the
 file or acquire the controller's mutation identity.
 
-The fixed exchange endpoint is `/run/day2-native-enrollment/storage/peer.sock`. Its only initial
-operations are BeginInitialHolder and ConfirmPreparedMount. The statements bind
-the exact original seed, marker, file identity and image. The controller retains
-its own original interval and CreatorFD; an App observation retains its own
-descriptor and original role interval. Linux mount IDs are namespace-local;
+The fixed exchange endpoint is `/run/day2-native-enrollment/storage/peer.sock`.
+The closed exchange is Hello, Offer, Confirm, Complete and Accepted. Both role
+statements, both fresh nonces, the original intervals and the exact seed,
+marker, file identity and image are bound into the signed transcript. The
+controller retains its own original interval and CreatorFD; an App observation
+retains its own descriptor and original role interval. Linux mount IDs are namespace-local;
 their numeric equality across controller and App namespaces is not a volume
 join. No arbitrary signing, pathname, descriptor adoption or generic callback
 belongs in this interface.
+
+The Controller authenticates the unprivileged App through each actual received
+SCM_PIDFD and its executable/process/namespace checks. The App retains the
+Controller's actual received kernel handle and verifies the same live issuer's
+signed Controller grant plus fresh key possession. This does not give the App
+ptrace or containerd access or claim independent privileged-process inspection.
+The original CLOEXEC seqpacket socket must remain connected around each message
+and final admission. HUP, including a buffered final reply after peer closure,
+refuses. The kernel handle alone would not detect an exec of a still-live peer.
+
+The App authenticates Offer before opening or parsing the projected file.
+`AppPreparedFile::observe_existing` requires that actual offer rather than raw
+projection DATA. Its received Complete and own final file checks precede
+Accepted; a Controller send alone is not the App receipt. The actual sender
+handles, channel, file and original clocks remain owned after the exchange.
+An App enrollment can attempt initial participation only once. The Controller's
+file continuation was already pessimistically closed before the exchange, so
+drop, error, expiry or unknown disposition cannot restart either side with a
+fresh stage. These owners still grant neither P3 nor current serving authority.
 
 ## Retained boundaries
 
