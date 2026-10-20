@@ -13,7 +13,7 @@ variables {
   native_enrollment_json = jsonencode({
     bootstrap = jsondecode(file("tests/native-bootstrap.fixture.json"))
     store     = jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch
-    runtime   = { architecture = "x86_64", node_name = "native-node", node_uid = "native-node-uid" }
+    runtime   = { architecture = "amd64", node_name = "native-node", node_uid = "native-node-uid" }
   })
 }
 
@@ -90,7 +90,7 @@ run "native_shell_refuses_foreign_epoch_store" {
     native_enrollment_json = jsonencode({
       bootstrap = jsondecode(file("tests/native-bootstrap.fixture.json"))
       store     = { scope = { installation = "other", environment = "production", app = "workspace" } }
-      runtime   = { architecture = "x86_64", node_name = "native-node", node_uid = "native-node-uid" }
+      runtime   = { architecture = "amd64", node_name = "native-node", node_uid = "native-node-uid" }
     })
   }
   expect_failures = [terraform_data.native_admission]
@@ -135,5 +135,29 @@ run "native_shell_refuses_multiple_fixed_enrollment_scopes" {
 run "native_inputs_cannot_enable_an_unselected_shell" {
   command = plan
   variables { instance_json = file("tests/oauth-instance.json") }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_shell_refuses_noncanonical_runtime_architecture" {
+  command = plan
+  variables {
+    native_enrollment_json = jsonencode({
+      bootstrap = jsondecode(file("tests/native-bootstrap.fixture.json"))
+      store     = jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch
+      runtime   = { architecture = "x86_64", node_name = "native-node", node_uid = "native-node-uid" }
+    })
+  }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_shell_refuses_other_runtime_architecture" {
+  command = plan
+  variables {
+    native_enrollment_json = jsonencode({
+      bootstrap = jsondecode(file("tests/native-bootstrap.fixture.json"))
+      store     = jsondecode(file("tests/oauth-instance.json")).control.security_epochs.app_epoch
+      runtime   = { architecture = "arm64", node_name = "native-node", node_uid = "native-node-uid" }
+    })
+  }
   expect_failures = [terraform_data.native_admission]
 }
