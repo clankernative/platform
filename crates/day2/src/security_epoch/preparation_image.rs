@@ -187,6 +187,141 @@ impl InitialPreparationImage {
     }
 }
 
+/// Read-only DATA admitted from the actual controller image, not a second
+/// initialization. Fresh authority initialization deliberately uses real entropy
+/// and may carry a controller-local artifact path. Reinitializing independently
+/// cannot reproduce those bytes. Only the peer composition authenticates the
+/// controller's projection; this type alone supplies no storage/holder authority
+/// and cannot be passed to the original-file creation layout.
+pub(super) struct ObservedInitialImage {
+    bytes: Vec<u8>,
+    store: EpochStore,
+    core: OriginalSeedCore,
+}
+
+impl ObservedInitialImage {
+    pub(super) fn admit(
+        runtime: &crate::store::Runtime,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        core: OriginalSeedCore,
+        readback: &[u8],
+        expected_image: &Digest,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let result = (|| {
+            acquisition.remaining()?;
+            core.validate(policy, store)?;
+            ensure!(
+                runtime.scope()
+                    == format!(
+                        "{}/{}/{}",
+                        core.scope.installation.as_str(),
+                        core.scope.environment.as_str(),
+                        core.scope.app.as_str()
+                    )
+                    && runtime.app() == core.scope.app.as_str()
+                    && runtime.artifact().id() == core.artifact.as_str(),
+                "epoch_preparation_runtime_selection_mismatch"
+            );
+            ensure!(
+                (100..=MAX_IMAGE_BYTES).contains(&readback.len())
+                    && Digest::new(readback) == *expected_image,
+                "epoch_preparation_creator_image_mismatch"
+            );
+            let value = Self {
+                bytes: readback.to_vec(),
+                store: store.clone(),
+                core,
+            };
+            value.decode_exact_readback(readback, acquisition)?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            acquisition.refuse();
+        }
+        result
+    }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(super) fn decode_exact_readback(
+        &self,
+        readback: &[u8],
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Connection> {
+        let result = (|| {
+            ensure!(
+                readback == self.bytes,
+                "epoch_preparation_image_readback_mismatch"
+            );
+            let decoded = decode_complete_image(readback, &self.core.schema_contract, acquisition)?;
+            let count: i64 = decoded.query_row(
+                "SELECT count(*) FROM day2_initial_security_seed",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(count == 1, "epoch_preparation_seed_cardinality");
+            let (store, core, marker): (Vec<u8>, Vec<u8>, Vec<u8>) = decoded.query_row(
+                "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(
+                store == serde_json::to_vec(&self.store)?
+                    && core == serde_json::to_vec(&self.core)?
+                    && marker == serde_json::to_vec(&self.core.marker()?)?,
+                "epoch_preparation_seed_marker_readback_mismatch"
+            );
+            acquisition.remaining()?;
+            Ok(decoded)
+        })();
+        if result.is_err() {
+            acquisition.refuse();
+        }
+        result
+    }
+}
+
+// Decode only a bounded complete immutable in-memory SQLite image. The caller
+// separately fixes its expected byte digest and selected schema/seed; no
+// filename, writable connection or native permission is accepted or returned.
+fn decode_complete_image(
+    readback: &[u8],
+    schema: &Digest,
+    acquisition: &mut NativeAcquisition,
+) -> Result<Connection> {
+    acquisition.remaining()?;
+    ensure!(
+        (100..=MAX_IMAGE_BYTES).contains(&readback.len())
+            && &readback[..16] == b"SQLite format 3\0"
+            && readback[18] == 1
+            && readback[19] == 1,
+        "epoch_preparation_initial_image_format"
+    );
+    let mut memory = FreshMemoryDatabase::empty(acquisition)?;
+    memory
+        .connection
+        .deserialize_read_exact(MAIN_DB, readback, readback.len(), true)?;
+    let decoded = memory.connection;
+    let pages: i64 = decoded.pragma_query_value(None, "page_count", |row| row.get(0))?;
+    let size: i64 = decoded.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    ensure!(
+        usize::try_from(pages)?.checked_mul(usize::try_from(size)?) == Some(readback.len()),
+        "epoch_preparation_image_length"
+    );
+    ensure!(
+        schema_contract(&decoded)? == *schema,
+        "epoch_preparation_schema_readback_mismatch"
+    );
+    let integrity: String = decoded.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    ensure!(integrity == "ok", "epoch_preparation_image_integrity");
+    acquisition.remaining()?;
+    Ok(decoded)
+}
+
 /// An owned, immutable copy: a SQLite NOCOPY view cannot outlive this snapshot
 /// or change after a later write to the source connection. No native authority
 /// can be reconstructed from an image or its schema digest.
