@@ -2370,6 +2370,34 @@ mod tests {
     }
 
     #[test]
+    fn prearmed_signature_can_finalize_once_and_duplicate_refusal_cannot_be_swallowed() -> Result<()>
+    {
+        let world = super::super::simulation::World::new(462);
+        world.advance(95);
+        super::super::effects::scope(world, || -> Result<()> {
+            let (_directory, intent) = committed_management_intent()?;
+            reserve_shell(&intent, 100)?;
+            let result = with_consumer(&intent, Phase::Signature, 100, |current| {
+                current.arm()?;
+                current.require_signature(&intent)?;
+                assert!(current.require_signature(&intent).is_err());
+                Ok(())
+            });
+            assert!(result.is_err());
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                with_consumer(&intent, Phase::Signature, 100, |_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!entered.get());
+            Ok(())
+        })
+    }
+
+    #[test]
     fn simulated_original_and_serving_phase_cannot_supply_the_native_management_producer()
     -> Result<()> {
         let world = super::super::simulation::World::new(454);
