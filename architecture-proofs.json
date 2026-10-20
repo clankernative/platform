@@ -1196,6 +1196,13 @@
       "type_name": "EnrolledOriginalClock",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -1231,6 +1238,13 @@
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "type_name": "EnrolledProcessRoleOwner",
       "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
           "registration": {
@@ -1274,6 +1288,13 @@
       "type_name": "EnrolledRoleStage",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -1283,16 +1304,27 @@
       ],
       "methods": [
         "pub (in crate :: security_epoch :: native_enrollment) fn begin_initial_holder_attempt (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >",
         "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_controller_statement (& mut self , statement : & Statement , pid : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_shell_statement (& mut self , statement : & Statement , observed : & ProcessData , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_statement (& mut self , statement : & Statement , kernel_process : u32 , observed : Option < & ProcessData > , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_app_statement (& mut self , statement : & StageStatement , observed : & ProcessData , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_controller_statement (& mut self , statement : & StageStatement , kernel_process : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn check_storage_runtime_selection (& mut self , statement : & StageStatement , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_role (& mut self) -> Result < NativeRole >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn serving_role (& mut self) -> Result < NativeRole >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn serving_statement (& mut self) -> Result < Statement >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn sign_serving_message (& mut self , body : Body) -> Result < Message >",
         "pub (in crate :: security_epoch :: native_enrollment) fn sign_storage_message (& mut self , body : Body) -> Result < Message >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_role (& mut self) -> Result < NativeRole >",
@@ -1347,6 +1379,26 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_controller_statement (& mut self , statement : & Statement , pid : u32 , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_shell_statement (& mut self , statement : & Statement , observed : & ProcessData , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_statement (& mut self , statement : & Statement , kernel_process : u32 , observed : Option < & ProcessData > , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
@@ -1356,6 +1408,30 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_controller_statement (& mut self , statement : & StageStatement , kernel_process : u32 , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_role (& mut self) -> Result < NativeRole >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn serving_role (& mut self) -> Result < NativeRole >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn serving_statement (& mut self) -> Result < Statement >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn sign_serving_message (& mut self , body : Body) -> Result < Message >"
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
@@ -1390,6 +1466,13 @@
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "type_name": "SameEnrolledOwner",
       "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/owner/serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
+            "module": "serving"
+          }
+        },
         {
           "source": "crates/day2/src/security_epoch/native_enrollment/owner/storage.rs",
           "registration": {
@@ -2111,8 +2194,7 @@
       "consuming_methods": [
         "finish_checked"
       ]
-    }
-  ,
+    },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
       "type_name": "CurrentStorageBootstrapPhase",
@@ -2221,8 +2303,7 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
-    }
-  ,
+    },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
       "type_name": "AppInitialStorageContinuity",
@@ -2776,6 +2857,170 @@
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "ControllerServingListener",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingPeer >",
+        "pub (crate) fn bind (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerServingListener",
+          "signature": "pub (crate) fn bind (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerServingListener",
+          "signature": "pub (crate) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingPeer >"
+        },
+        {
+          "owner": "ControllerServingListener",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "ControllerServingPeer",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerServingListener",
+          "signature": "pub (crate) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingPeer >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerServingPeer",
+          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerServingPeer",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "ControllerServingPeer",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "CurrentServingPeerPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn announce_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn await_consumed (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , role : NativeRole , expected : Completion , next : Completion , send : bool) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn release (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn request_binding (& self) -> & Digest"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn start_current < 'peer > (owner : & 'peer mut Retained , stage : & mut EnrolledRoleStage < '_ > , role : NativeRole , binding : Option < Digest >) -> Result < CurrentServingPeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerServingPeer",
+          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ShellServingPeer",
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "fn packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , role : NativeRole , expected : Completion , next : Completion , send : bool) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn announce_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn await_consumed (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn release (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentServingPeerPhase < '_ >",
+          "signature": "pub (crate) fn request_binding (& self) -> & Digest"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "ShellServingPeer",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >",
+        "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ShellServingPeer",
+          "signature": "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ShellServingPeer",
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ShellServingPeer",
+          "signature": "pub (crate) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],
