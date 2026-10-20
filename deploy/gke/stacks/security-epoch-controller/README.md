@@ -18,12 +18,18 @@ Keep `activate=false` until Root has registered/read the actual Deployment UID
 and selected that UID, exact images/native code, public enrollment profile,
 original clock/runtime, and immutable volume/node metadata. This registration
 starts no placeholder executor or native-input ConfigMap. It needs no invented
-workload UID or fabricated bootstrap profile. Only after registration can the
+workload UID, native-node CSI mount path or fabricated bootstrap profile. Supply
+only `app`, `namespace` and the qualified digest-pinned `image` (plus Kubernetes
+connection settings) for registration. Leave `bootstrap_alias`, `instance_json`,
+`enrollment_json`, `storage_json`, `host_state_path` and `node_profile` omitted.
+The dormant Pod template has no native-input annotation, native node selection,
+toleration, volume, volume mount or projected credentials. Only after registration can the
 operator bind the actual workload UID into the complete native inputs. Native admission still independently refuses a
 foreign UID or incomplete profile. Metadata equality and mock plans do not
 qualify any native ownership. Final activation/apply is separately approved.
 
-`host_state_path` must be the operator-observed existing CSI global mount of the
+Activation requires every native input above. `host_state_path` must then be the
+operator-observed existing CSI global mount of the
 SAME App disk on the selected node. The App must see that same volume at `/state`
 in addition to any prerequisite-only installation mount. Never infer a native
 mount witness from the PVC name or copy an ordinary `.state` database into the
