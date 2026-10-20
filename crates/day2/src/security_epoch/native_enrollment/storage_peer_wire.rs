@@ -2,7 +2,7 @@
 //! native stage, process handle, prepared file, first holder or writer.
 
 use super::{
-    NativeRole,
+    NativeRole, StoragePeerPurpose,
     policy::{EnrollmentPolicy, decode_key},
     protocol::{self, IssuerCertificate, ProcessData, SignedStage},
 };
@@ -45,6 +45,18 @@ pub(in crate::security_epoch::native_enrollment) struct StageStatement {
 }
 
 impl StageStatement {
+    /// Stable original enrollment identity, not a current grant. Later phases
+    /// must additionally validate a NEW issuer-signed stage and fresh message.
+    pub(super) fn same_enrollment(&self, other: &Self) -> bool {
+        self.certificate == other.certificate
+            && self.stage.data.issuer == other.stage.data.issuer
+            && self.stage.data.policy == other.stage.data.policy
+            && self.stage.data.role == other.stage.data.role
+            && self.stage.data.public_key == other.stage.data.public_key
+            && self.stage.data.process == other.stage.data.process
+            && self.stage.data.runtime == other.stage.data.runtime
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-initial-holder-stage-v1", self))
     }
@@ -151,6 +163,33 @@ impl Exchange {
     }
 }
 
+/// A closed request binding is DATA. It creates neither a current peer phase
+/// nor a file, P3, epoch, writer or consumer permission.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoragePeerRequest {
+    pub purpose: StoragePeerPurpose,
+    pub binding: Digest,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CurrentExchange {
+    pub initial: Digest,
+    pub sequence: u64,
+    pub request: StoragePeerRequest,
+    pub app_stage: Digest,
+    pub controller_stage: Digest,
+    pub app_nonce: Digest,
+    pub controller_nonce: Digest,
+}
+
+impl CurrentExchange {
+    pub(super) fn digest(&self) -> Result<Digest> {
+        Digest::of(&("day2-current-storage-peer-exchange-v1", self))
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::security_epoch::native_enrollment) enum Body {
@@ -173,15 +212,37 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
     Accepted {
         exchange: Digest,
     },
+    CurrentHello {
+        app: Box<StageStatement>,
+        initial: Digest,
+        sequence: u64,
+        request: StoragePeerRequest,
+        nonce: Digest,
+    },
+    CurrentOffer {
+        controller: Box<StageStatement>,
+        exchange: CurrentExchange,
+    },
+    CurrentAck {
+        exchange: Digest,
+    },
+    CurrentReady {
+        exchange: Digest,
+    },
 }
 
 impl Body {
     pub(in crate::security_epoch::native_enrollment) fn sender_role(&self) -> NativeRole {
         match self {
-            Self::Hello { .. } | Self::Confirm { .. } | Self::Accepted { .. } => {
-                NativeRole::AppHost
-            }
-            Self::Offer { .. } | Self::Complete { .. } => NativeRole::EpochController,
+            Self::Hello { .. }
+            | Self::Confirm { .. }
+            | Self::Accepted { .. }
+            | Self::CurrentHello { .. }
+            | Self::CurrentAck { .. } => NativeRole::AppHost,
+            Self::Offer { .. }
+            | Self::Complete { .. }
+            | Self::CurrentOffer { .. }
+            | Self::CurrentReady { .. } => NativeRole::EpochController,
         }
     }
 }
@@ -240,7 +301,16 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
                 require_object(&value, path)?;
             }
         }
-        Some("confirm" | "complete" | "accepted") => {}
+        Some("current_hello") => {
+            require_stage_objects(&value, "/body/app")?;
+            require_object(&value, "/body/request")?;
+        }
+        Some("current_offer") => {
+            require_stage_objects(&value, "/body/controller")?;
+            require_object(&value, "/body/exchange")?;
+            require_object(&value, "/body/exchange/request")?;
+        }
+        Some("confirm" | "complete" | "accepted" | "current_ack" | "current_ready") => {}
         _ => anyhow::bail!("storage_peer_step"),
     }
     Ok(serde_json::from_value(value)?)
