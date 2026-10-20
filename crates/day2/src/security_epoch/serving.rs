@@ -23,6 +23,7 @@ pub(crate) enum ServingUse {
     ProviderSend,
     FinishCommit,
     DisconnectCommit,
+    Authentication,
     Session,
     Signature,
     Verification,
@@ -264,14 +265,18 @@ pub(crate) fn with_current_serving<'role, T>(
         ParticipantOwner::App(_) => ensure!(
             !matches!(
                 purpose,
-                ServingUse::Session | ServingUse::Signature | ServingUse::ShellResponseComplete
+                ServingUse::Authentication
+                    | ServingUse::Session
+                    | ServingUse::Signature
+                    | ServingUse::ShellResponseComplete
             ),
             "native_serving_shell_participant_required"
         ),
         ParticipantOwner::Shell(_) => ensure!(
             matches!(
                 purpose,
-                ServingUse::Session
+                ServingUse::Authentication
+                    | ServingUse::Session
                     | ServingUse::Signature
                     | ServingUse::Response
                     | ServingUse::ShellResponseComplete
