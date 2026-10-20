@@ -14,6 +14,7 @@ package
 		OAuthRegistration,
 		Release,
 		GkeRelease,
+		NativeEnrollment,
 		SecretRetirement,
 		UiDependency,
 	]

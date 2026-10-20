@@ -82,7 +82,12 @@ impl Drop for IssuerBirthOwner {
     }
 }
 
-pub(super) fn run() -> Result<()> {
+pub(super) struct Provisioner {
+    directory: File,
+    birth: IssuerBirthOwner,
+}
+
+pub(super) fn start() -> Result<Provisioner> {
     // Original origin precedes policy/key reads, executable checks and spawn.
     let mut acquisition = NativeAcquisition::begin(5)?;
     let policy = load_policy(&mut acquisition)?;
@@ -138,22 +143,25 @@ pub(super) fn run() -> Result<()> {
         &policy,
         &mut acquisition,
     )?);
-    // Provisioner stays alive and retains actual child ownership. The root key
-    // remains in KMS. There is no saved-row adoption or successful-reply retry.
-    loop {
+    Ok(Provisioner { directory, birth })
+}
+
+impl Provisioner {
+    // Fresh checks never extend the completed original birth acquisition.
+    pub(super) fn check(&mut self) -> Result<()> {
         ensure!(
-            birth.child.try_wait()?.is_none(),
+            self.birth.child.try_wait()?.is_none(),
             "native_enrollment_issuer_stopped"
         );
         let mut check = NativeAcquisition::begin(5)?;
-        birth.storage.check(&directory)?;
+        self.birth.storage.check(&self.directory)?;
         check.remaining()?;
-        birth
+        self.birth
             .peer
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_birth_missing"))?
             .check_identity(&mut check)?;
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        Ok(())
     }
 }
 

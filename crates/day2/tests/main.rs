@@ -32,6 +32,7 @@ mod lifecycle;
 mod linux_worker;
 mod live_updates;
 mod migration_commands;
+mod native_enrollment_recipe;
 mod numeric;
 mod oauth_setup;
 mod operation_catalog;
