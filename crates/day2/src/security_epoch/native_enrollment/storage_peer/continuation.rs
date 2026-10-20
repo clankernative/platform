@@ -66,6 +66,7 @@ struct RetainedPeer {
     projection: PreparedFileProjection,
     last_local_grant: Digest,
     last_remote_grant: Digest,
+    first_holder: crate::security_epoch::kernel::Holder,
     disposition: Disposition,
     #[cfg(target_os = "linux")]
     peer: Peer,
@@ -109,6 +110,7 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
         let initial = self.offer.exchange.digest()?;
         let last_local_grant = self.offer.local.grant_digest()?;
         let last_remote_grant = self.offer.remote.grant_digest()?;
+        let first_holder = self.offer.local.app_holder()?;
         // The storage owner moves the SAME descriptors after its own final
         // original checks. No file/key/channel is reopened or reconstructed.
         let file = self.file.retain_physical()?;
@@ -122,6 +124,7 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
                     projection,
                     last_local_grant,
                     last_remote_grant,
+                    first_holder,
                     disposition: Disposition::Ready(0),
                     #[cfg(target_os = "linux")]
                     peer: self.offer.peer,
@@ -142,6 +145,7 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
         let initial = self.exchange.digest()?;
         let last_local_grant = self.local.grant_digest()?;
         let last_remote_grant = self.remote.grant_digest()?;
+        let first_holder = self.remote.app_holder()?;
         // Only known initial exchange completion closes this original phase.
         // Its caller still owns the SAME PreparedFileContinuity; it may now
         // move that owner into its storage composite. This peer is not a file.
@@ -154,6 +158,7 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
                 projection,
                 last_local_grant,
                 last_remote_grant,
+                first_holder,
                 disposition: Disposition::Ready(0),
                 #[cfg(target_os = "linux")]
                 peer: self.peer,
@@ -311,6 +316,11 @@ impl AppHolderPeerContinuity {
 }
 
 impl ControllerHolderPeerContinuity {
+    /// Candidate DATA captured from the actual initial App participant.
+    pub(in crate::security_epoch) fn first_holder(&self) -> &crate::security_epoch::kernel::Holder {
+        &self.owner.first_holder
+    }
+
     pub(crate) fn initial_projection(&self) -> &PreparedFileProjection {
         &self.owner.projection
     }
