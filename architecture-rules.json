@@ -338,6 +338,7 @@
     "crates/day2/src/security_epoch/runtime_identity_tests.rs",
     "crates/day2/src/security_epoch/runtime_profile.rs",
     "crates/day2/src/security_epoch/seed_core.rs",
+    "crates/day2/src/security_epoch/serving.rs",
     "crates/day2/src/security_epoch/storage_authority.rs",
     "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
     "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
