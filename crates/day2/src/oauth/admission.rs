@@ -203,6 +203,7 @@ impl ArtifactShellSigner {
             super::native_management::Phase::Signature,
             now,
             |current| {
+                proof.require_management_authentication(current)?;
                 let state = self
                     .state
                     .read()

@@ -414,12 +414,122 @@ pub(crate) struct AppCreator<'a> {
     original: CapturedOriginal,
     app: String,
     start: &'a super::management::app::CaptureStart,
+    pending: PendingCaptureState,
+}
+
+#[derive(PartialEq, Eq)]
+enum PendingCaptureState {
+    Captured,
+    Attempted,
+    Committed,
 }
 
 enum CapturedOriginal {
     Native(Original<EnrolledClock>),
     #[cfg(test)]
     Simulated(Original<fixtures::SimulationClock>),
+}
+
+/// Borrow of the original creator and its current storage scope before an
+/// immutable Pending exists. It cannot sign, authenticate or bind an intent.
+pub(crate) struct PendingWriter<'a, 'role> {
+    source: PendingSource<'a, 'role>,
+    committed: bool,
+}
+
+enum PendingSource<'a, 'role> {
+    Native {
+        original: &'a mut Original<EnrolledClock>,
+        current: &'a mut dyn CurrentServingPhase,
+        stage: &'a mut EnrolledRoleStage<'role>,
+    },
+    #[cfg(test)]
+    Simulated {
+        original: &'a mut Original<fixtures::SimulationClock>,
+        stage: fixtures::SimulationStage,
+    },
+}
+
+impl PendingWriter<'_, '_> {
+    pub(super) fn check(&mut self) -> Result<()> {
+        match &mut self.source {
+            PendingSource::Native {
+                original,
+                current,
+                stage,
+            } => {
+                current.check(stage)?;
+                let sample = original.clock.clock.sample(stage);
+                original.check_capture_sample(sample)
+            }
+            #[cfg(test)]
+            PendingSource::Simulated { original, stage } => {
+                stage.check()?;
+                let sample = original.clock.sample();
+                original.check_capture_sample(sample)
+            }
+        }
+    }
+
+    pub(super) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.committed, "native Pending commit already attempted");
+            self.check()?;
+            self.committed = true;
+            tx.commit()?;
+            self.check()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn run<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check()?;
+            match &mut self.source {
+                PendingSource::Native { current, stage, .. } => current.arm(stage)?,
+                #[cfg(test)]
+                PendingSource::Simulated { .. } => {}
+            }
+            let value = operation(self)?;
+            ensure!(self.committed, "native Pending commit missing");
+            self.check()?;
+            match &mut self.source {
+                PendingSource::Native { current, stage, .. } => current.finish_known(stage)?,
+                #[cfg(test)]
+                PendingSource::Simulated { .. } => {}
+            }
+            self.check()?;
+            Ok(value)
+        }));
+        match result {
+            Ok(result) => {
+                if result.is_err() {
+                    self.refuse();
+                }
+                result
+            }
+            Err(panic) => {
+                self.refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    fn refuse(&mut self) {
+        match &mut self.source {
+            PendingSource::Native {
+                original, current, ..
+            } => {
+                original.refuse();
+                current.refuse();
+            }
+            #[cfg(test)]
+            PendingSource::Simulated { original, .. } => original.refuse(),
+        }
+    }
 }
 
 fn capture(owners: &mut Owners, expected: NativeRole) -> Result<Original<EnrolledClock>> {
@@ -450,11 +560,76 @@ pub(super) fn capture_app<'a>(
             original: CapturedOriginal::Native(capture(owners, NativeRole::AppHost)?),
             app: app.into(),
             start,
+            pending: PendingCaptureState::Captured,
         })
     })
 }
 
 impl AppCreator<'_> {
+    /// The fixed Pending creation stays under the actual App participant and
+    /// SAME enrolled stage. Capture precedes every DB/entropy operation; only
+    /// the successful committed result can subsequently bind this original.
+    pub(super) fn with_pending<T>(
+        &mut self,
+        operation: impl FnOnce(&mut PendingWriter<'_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            self.pending == PendingCaptureState::Captured,
+            "native Pending capture already attempted"
+        );
+        self.pending = PendingCaptureState::Attempted;
+        let result = match &mut self.original {
+            CapturedOriginal::Native(original) => OWNERS.with(|owners| {
+                let mut owners = owners.try_borrow_mut()?;
+                let owners = owners
+                    .get_mut(&self.app)
+                    .context("native Pending executor missing")?;
+                ensure!(
+                    owners.kind == NativeRole::AppHost,
+                    "native Pending requires App owner"
+                );
+                let AppStorage::Participant(participant) = &mut owners.storage else {
+                    anyhow::bail!("native Pending participant unavailable")
+                };
+                let mut role = owners.role.try_borrow_mut()?;
+                let mut stage = role.begin_current_stage()?;
+                stage.check_selection(
+                    &owners.selection.policy,
+                    &owners.selection.store,
+                    owners.kind,
+                )?;
+                crate::security_epoch::serving::with_current_runtime_serving(
+                    participant,
+                    &mut stage,
+                    crate::security_epoch::serving::RuntimeServingUse::PendingCapture,
+                    |current, same| {
+                        let value = PendingWriter {
+                            source: PendingSource::Native {
+                                original,
+                                current,
+                                stage: same,
+                            },
+                            committed: false,
+                        }
+                        .run(operation)?;
+                        same.check_selection(
+                            &owners.selection.policy,
+                            &owners.selection.store,
+                            owners.kind,
+                        )?;
+                        Ok(value)
+                    },
+                )
+            }),
+            #[cfg(test)]
+            CapturedOriginal::Simulated(original) => fixtures::with_pending(original, operation),
+        };
+        if result.is_ok() {
+            self.pending = PendingCaptureState::Committed;
+        }
+        result
+    }
+
     /// Called once AFTER the actual Pending transaction commits.
     pub(super) fn bind(
         self,
@@ -464,6 +639,10 @@ impl AppCreator<'_> {
         ensure!(
             std::ptr::eq(self.start, committed.start()),
             "native App creator changed before commit"
+        );
+        ensure!(
+            self.pending == PendingCaptureState::Committed,
+            "native Pending commit not settled"
         );
         let intent = committed.intent();
         ensure!(
@@ -970,7 +1149,9 @@ pub(crate) fn with_consumer<T>(
         | Phase::FinishCommit
         | Phase::DisconnectCommit
         | Phase::Verification
-        | Phase::Callback => NativeRole::AppHost,
+        | Phase::Callback
+        | Phase::Claim
+        | Phase::Publication => NativeRole::AppHost,
         _ => anyhow::bail!("native consumer purpose unsupported"),
     };
     with_consumer_for_role(intent, phase, wall, role, None, operation)
@@ -978,6 +1159,8 @@ pub(crate) fn with_consumer<T>(
 
 fn serving_use(phase: Phase, role: NativeRole) -> Result<ServingUse> {
     Ok(match phase {
+        Phase::Claim => ServingUse::Claim,
+        Phase::Publication => ServingUse::Publication,
         Phase::StartCommit => ServingUse::StartCommit,
         Phase::DispatchCommit => ServingUse::DispatchCommit,
         Phase::ProviderSend => ServingUse::ProviderSend,
@@ -1103,7 +1286,9 @@ fn with_current_for_role<T>(
             | Phase::ProviderSend
             | Phase::FinishCommit
             | Phase::DisconnectCommit
-            | Phase::Verification => ensure!(
+            | Phase::Verification
+            | Phase::Claim
+            | Phase::Publication => ensure!(
                 owners.kind == NativeRole::AppHost,
                 "native phase requires App owner"
             ),
@@ -1624,6 +1809,27 @@ mod tests {
             // This known exclusion made no native action and cannot burn an
             // unrelated valid simulated operation or turn into native material.
             with_consumer(&intent, Phase::Session, 5, |current| current.check())
+        })
+    }
+
+    #[test]
+    fn shell_original_cannot_claim_or_publish_an_app_original() -> Result<()> {
+        let world = super::super::simulation::World::new(455);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("wrong-role-app-original", 305)?;
+            reserve_shell(&intent, 5)?;
+            for phase in [Phase::Claim, Phase::Publication] {
+                let entered = std::cell::Cell::new(false);
+                assert!(
+                    with_consumer(&intent, phase, 5, |_| {
+                        entered.set(true);
+                        Ok(())
+                    })
+                    .is_err()
+                );
+                assert!(!entered.get());
+            }
+            with_consumer(&intent, Phase::Session, 5, |_| Ok(()))
         })
     }
 
@@ -2209,8 +2415,36 @@ pub(crate) mod fixtures {
                 original: CapturedOriginal::Simulated(capture(fixture, NativeRole::AppHost, app)?),
                 app: app.into(),
                 start,
+                pending: PendingCaptureState::Captured,
             }))
         })
+    }
+
+    pub(super) fn with_pending<T>(
+        original: &mut Original<SimulationClock>,
+        operation: impl FnOnce(&mut PendingWriter<'_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        let hooks = original
+            .clock
+            .hooks
+            .upgrade()
+            .context("fixture Pending supplier ended")?;
+        let origin = hooks.monotonic();
+        let stage = SimulationStage {
+            hooks,
+            origin,
+            latest: origin,
+            thread: std::thread::current().id(),
+            refused: false,
+            role: NativeRole::AppHost,
+            scope: None,
+            owner_refused: original.clock.owner_refused.clone(),
+        };
+        PendingWriter {
+            source: PendingSource::Simulated { original, stage },
+            committed: false,
+        }
+        .run(operation)
     }
     pub(super) fn bind_app(
         intent: &FreshIntent,

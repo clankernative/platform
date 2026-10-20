@@ -295,78 +295,84 @@ impl Manager {
             marker: 0,
             local: std::marker::PhantomData,
         };
-        let original = crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
+        let mut original =
+            crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
         crate::oauth::connect::identifier(registration)?;
-        let mut db = store::open(self.runtime.db())?;
-        iap::bind_subject(&db, identity, now)?;
-        self.authority_in(&db, identity)?;
-        let selection = self.selection(registration, identity, now)?;
-        let suffix = effects::random()?;
-        let challenge = Digest::new(effects::random()?.as_bytes());
-        let captured_at = effects::wall_time()?;
-        ensure!(captured_at >= now, "OAuth management clock moved backwards");
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if action == Action::Connect {
-            Self::unclaimed(&tx, &selection.slot, None)?;
-        }
-        tx.execute(
-            "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
-            [captured_at],
-        )?;
-        let count: i64 =
-            tx.query_row("SELECT count(*) FROM oauth_management_intents", [], |row| {
-                row.get(0)
-            })?;
-        ensure!(count < 1024, "OAuth management capacity reached");
-        let route = crate::oauth::shell_transport::route_prefix(
-            selection.binding.namespace.installation.as_str(),
-            selection.binding.namespace.environment.as_str(),
-            self.runtime.app(),
-        )?;
-        let view = View {
-            id: format!("{route}{suffix}"),
-            app: self.runtime.app().into(),
-            scope: self.runtime.scope().into(),
-            artifact: self.runtime.artifact().id().into(),
-            authority: self.authority_in(&tx, identity)?,
-            registration: registration.into(),
-            logical_id: selection.requirement.logical_id.clone(),
-            action,
-            human: identity.email.clone(),
-            subject: identity.subject.clone(),
-            selection: selection.identity()?,
-            slot: selection.slot.clone(),
-            fence: Self::fence(&tx, &selection.slot)?,
-            binding_namespace: admission::binding_namespace(&selection.binding)?,
-            usage: selection.requirement.usage.clone(),
-            scopes: selection
-                .permission
-                .action_scopes
-                .values()
-                .flatten()
-                .cloned()
-                .collect(),
-            app_origin: selection.instance.app_origin_url.clone(),
-            shell_origin: selection.instance.shell.origin_url.clone(),
-            callback_url: selection.instance.registration.callback_url.clone(),
-            challenge,
-            created_at: captured_at,
-            expires_at: captured_at
-                .checked_add(super::SECONDS)
-                .context("OAuth management deadline overflow")?,
-        };
-        view.validate(identity, captured_at)?;
-        let json = serde_json::to_string(&view)?;
-        ensure!(json.len() <= 16384, "OAuth management context budget");
-        tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
-            params![view.id, json, view.expires_at])?;
-        tx.commit()?;
+        let view = original.with_pending(|current| {
+            let mut db = store::open(self.runtime.db())?;
+            current.check()?;
+            iap::bind_subject(&db, identity, now)?;
+            self.authority_in(&db, identity)?;
+            let selection = self.selection(registration, identity, now)?;
+            let suffix = effects::random()?;
+            let challenge = Digest::new(effects::random()?.as_bytes());
+            let captured_at = effects::wall_time()?;
+            ensure!(captured_at >= now, "OAuth management clock moved backwards");
+            current.check()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if action == Action::Connect {
+                Self::unclaimed(&tx, &selection.slot, None)?;
+            }
+            tx.execute(
+                "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
+                [captured_at],
+            )?;
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM oauth_management_intents", [], |row| {
+                    row.get(0)
+                })?;
+            ensure!(count < 1024, "OAuth management capacity reached");
+            let route = crate::oauth::shell_transport::route_prefix(
+                selection.binding.namespace.installation.as_str(),
+                selection.binding.namespace.environment.as_str(),
+                self.runtime.app(),
+            )?;
+            let view = View {
+                id: format!("{route}{suffix}"),
+                app: self.runtime.app().into(),
+                scope: self.runtime.scope().into(),
+                artifact: self.runtime.artifact().id().into(),
+                authority: self.authority_in(&tx, identity)?,
+                registration: registration.into(),
+                logical_id: selection.requirement.logical_id.clone(),
+                action,
+                human: identity.email.clone(),
+                subject: identity.subject.clone(),
+                selection: selection.identity()?,
+                slot: selection.slot.clone(),
+                fence: Self::fence(&tx, &selection.slot)?,
+                binding_namespace: admission::binding_namespace(&selection.binding)?,
+                usage: selection.requirement.usage.clone(),
+                scopes: selection
+                    .permission
+                    .action_scopes
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect(),
+                app_origin: selection.instance.app_origin_url.clone(),
+                shell_origin: selection.instance.shell.origin_url.clone(),
+                callback_url: selection.instance.registration.callback_url.clone(),
+                challenge,
+                created_at: captured_at,
+                expires_at: captured_at
+                    .checked_add(super::SECONDS)
+                    .context("OAuth management deadline overflow")?,
+            };
+            view.validate(identity, captured_at)?;
+            let json = serde_json::to_string(&view)?;
+            ensure!(json.len() <= 16384, "OAuth management context budget");
+            tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
+                params![view.id, json, view.expires_at])?;
+            current.commit(tx)?;
+            Ok(view)
+        })?;
         original.bind(
             CommittedCapture {
                 start: &start,
                 intent: crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
             },
-            captured_at,
+            view.created_at,
         )?;
         Ok(view)
     }
@@ -421,19 +427,37 @@ impl Manager {
         let expected = self.pending(&call.attempt, identity, now)?;
         let at = effects::wall_time()?;
         ensure!(at >= now, "OAuth management clock moved backwards");
-        let mut db = store::open(self.runtime.db())?;
-        let tx = crate::write_queue::immediate(&mut db)?;
-        let (view, state, _) = self.load(&tx, &call.attempt, identity, at)?;
-        ensure!(
-            state == "pending" && view == expected,
-            "OAuth management pending changed"
-        );
-        self.check_in(&tx, &view, identity)?;
-        let intent = FreshIntent::management(&view, identity)?;
-        let reply =
-            crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, at)?;
-        tx.commit()?;
-        Ok(reply)
+        let intent = FreshIntent::management(&expected, identity)?;
+        call.require_intent(&intent)?;
+        crate::oauth::native_management::with_consumer(
+            &intent,
+            call.native_phase(),
+            at,
+            |current| {
+                // Open/recovery, writer, mutation and known COMMIT all remain under
+                // the same original/role/physical scope. No RPC occurs inside it.
+                current.arm()?;
+                let mut db = store::open(self.runtime.db())?;
+                let tx = crate::write_queue::immediate(&mut db)?;
+                let (view, state, _) =
+                    self.load(&tx, &call.attempt, identity, effects::wall_time()?)?;
+                ensure!(
+                    state == "pending" && view == expected,
+                    "OAuth management pending changed"
+                );
+                self.check_in(&tx, &view, identity)?;
+                let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(
+                    &tx,
+                    &intent,
+                    call,
+                    effects::wall_time()?,
+                )?;
+                current.check()?;
+                tx.commit()?;
+                current.check()?;
+                Ok(reply)
+            },
+        )
     }
 
     pub(super) fn authorize_connect(
@@ -1359,6 +1383,73 @@ mod tests {
             assert!(finish.require_intent(&changed_version).is_err());
             Ok(())
         })
+    }
+
+    #[test]
+    fn pending_writer_expiry_and_second_commit_cannot_publish_a_creator() -> Result<()> {
+        for case in [
+            "before_commit",
+            "after_commit",
+            "second_commit",
+            "missing_commit",
+        ] {
+            let fixture = Fixture::new(false)?;
+            effects::scope(fixture.port.clone(), || -> Result<()> {
+                let start = CaptureStart {
+                    marker: 0,
+                    local: std::marker::PhantomData,
+                };
+                let mut original = crate::oauth::native_management::capture_app(
+                    &start,
+                    fixture.manager.runtime.app(),
+                )?;
+                let mut db = Connection::open_in_memory()?;
+                db.execute_batch("CREATE TABLE pending_probe(value INTEGER)")?;
+                let result = original.with_pending(|current| {
+                    if case == "missing_commit" {
+                        return Ok(());
+                    }
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO pending_probe VALUES(1)", [])?;
+                    if case == "before_commit" {
+                        fixture.port.now.store(105, SeqCst);
+                    }
+                    let committed = current.commit(tx);
+                    if case == "before_commit" {
+                        assert!(committed.is_err());
+                        return Ok(()); // Swallowing refusal cannot restore it.
+                    }
+                    committed?;
+                    if case == "after_commit" {
+                        fixture.port.now.store(105, SeqCst);
+                    }
+                    if case == "second_commit" {
+                        let tx = db.transaction()?;
+                        tx.execute("INSERT INTO pending_probe VALUES(2)", [])?;
+                        assert!(current.commit(tx).is_err());
+                    }
+                    Ok(())
+                });
+                assert!(result.is_err(), "{case}");
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM pending_probe", [], |r| r
+                        .get::<_, i64>(0))?,
+                    i64::from(matches!(case, "after_commit" | "second_commit"))
+                );
+                let entered = std::cell::Cell::new(false);
+                assert!(
+                    original
+                        .with_pending(|_| {
+                            entered.set(true);
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                assert!(!entered.get());
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]

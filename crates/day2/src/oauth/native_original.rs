@@ -35,6 +35,21 @@ impl<C: Clock> Original<C> {
         self.refused = true;
     }
 
+    /// Only during the original creator's current Pending transaction, before
+    /// its exact committed intent can be bound. The native adapter supplies the
+    /// SAME captured clock sampled through the already held enrolled stage.
+    pub(super) fn check_capture_sample(&mut self, sample: Result<Duration>) -> Result<()> {
+        let result = (|| {
+            ensure!(self.binding.is_none(), "native creator already bound");
+            self.check_time(sample?)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     /// Call with a clock captured at creator entry BEFORE DB/entropy/RPC. Clock
     /// construction, not this bookkeeping, fixes the original BOOTTIME origin.
     pub(super) fn capture(clock: C) -> Result<Self> {
@@ -197,6 +212,24 @@ mod tests {
             400,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn pending_capture_samples_keep_the_creator_ceiling_and_refuse_bound_reentry() -> Result<()> {
+        let now = Rc::new(Cell::new(Duration::from_secs(10)));
+        let mut original = Original::capture(clock(&now))?;
+        original.check_capture_sample(Ok(Duration::from_secs(309)))?;
+        assert!(
+            original
+                .check_capture_sample(Ok(Duration::from_secs(310)))
+                .is_err()
+        );
+        assert!(original.bind(&intent(), 100).is_err());
+        let mut original = Original::capture(clock(&now))?;
+        original.bind(&intent(), 100)?;
+        assert!(original.check_capture_sample(Ok(now.get())).is_err());
+        assert!(original.check(&intent(), 100).is_err());
+        Ok(())
     }
 
     #[test]

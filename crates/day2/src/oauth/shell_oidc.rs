@@ -520,7 +520,7 @@ impl Reauthenticated {
         }
         // An owned issuer-order observation is necessary but not a factory for
         // genuine original lifetime/current role/epoch or final app settlement.
-        // No production success branch is installed before those are supplied.
+        // This non-consuming path never activates the management producer.
         anyhow::bail!(PRODUCER_UNAVAILABLE)
     }
 
