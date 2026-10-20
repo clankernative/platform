@@ -4,7 +4,8 @@ use crate::artifact::Instance;
 use crate::security_epoch::{
     bootstrap::{self, ControllerActivationOutcome},
     native_enrollment::{
-        ControllerServingListener, ControllerServingPeer, EnrolledProcessRoleOwner, NativeRole,
+        ControllerServingListener, ControllerServingPeer, EnrolledProcessRoleOwner,
+        InitialHolderListener, NativeRole,
     },
     storage_authority::{self, InitialStorageContinuity, InitialStorageOutcome},
 };
@@ -35,13 +36,24 @@ pub(crate) fn run(instance_path: &Path, app: &str) -> Result<()> {
         &policy.scope,
         NativeRole::EpochController,
     )?;
-    let file = storage_authority::prepare_controller_initial(
+    let mut file = storage_authority::prepare_controller_initial(
         instance_path,
         role.begin_current_stage()?,
         &policy,
         &store,
     )?;
-    let storage = match InitialStorageContinuity::establish(file, role.begin_current_stage()?) {
+    let mut holder_listener =
+        InitialHolderListener::bind(file.begin_initial_phase(role.begin_current_stage()?)?)?;
+    while !holder_listener.idle_ready()? {
+        // No role/file permission remains live while waiting for Kubernetes
+        // startup. Start a fresh same-owner phase only after actual pending DATA.
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    let storage = match InitialStorageContinuity::establish(
+        file,
+        holder_listener,
+        role.begin_current_stage()?,
+    ) {
         InitialStorageOutcome::Established(storage) => *storage,
         InitialStorageOutcome::Refused { file, error } => {
             let _refused_original = file;

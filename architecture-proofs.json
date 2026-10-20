@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:9308e4f62638212eaa05e01dd8dde24dea75b8ff0d5a34efa7bcd89e601d1b60",
+      "fingerprint": "sha256:85ffaef4cd9a95d668a9451c1347ead1ca268568ac0f633311ec0f2bc0327522",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -1904,14 +1904,13 @@
         }
       ],
       "methods": [
-        "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < Self >",
         "fn check (& mut self) -> Result < () >",
         "pub (crate) fn exchange (mut self) -> Result < AuthenticatedControllerFirstHolder < 'file , 'role > >"
       ],
       "factories": [
         {
-          "owner": "InitialHolderServer < 'file , 'role >",
-          "signature": "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < Self >"
+          "owner": "InitialHolderListener",
+          "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -2260,14 +2259,14 @@
         "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
-        "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
+        "pub (crate) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome"
+          "signature": "pub (crate) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome"
         }
       ],
       "material_uses": [
@@ -3085,6 +3084,43 @@
         {
           "owner": "CurrentShellServingPhase < '_ >",
           "signature": "fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> ScopeOutcome < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+      "type_name": "InitialHolderListener",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < '_ , '_ >) -> Result < Self >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
+        "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "InitialHolderListener",
+          "signature": "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < '_ , '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "InitialHolderListener",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "InitialHolderListener",
+          "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
         }
       ],
       "proof_uses": [],

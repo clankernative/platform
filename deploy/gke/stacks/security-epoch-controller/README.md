@@ -34,7 +34,11 @@ The Controller observes `/etc/day2/native-enrollment.json` and
 `/etc/day2-native/storage.json` through regular read-only subPath mounts. Standard
 Kubernetes API/CA and explicit selected TokenReview-audience tokens are projected
 read-only. Private keys are never ConfigMap inputs. App and Shell remain separate
-unprivileged workloads; they receive no Controller GSA, device or host PID access.
+unprivileged workloads. Current S1 requires hostPID=true for their initial PID
+namespace identity as well: UID/GID10001, RuntimeDefault, dropALL, immutable
+subPath policy and read-only enrollment socket mounts. They receive no
+Controller GSA, device, containerd, KMS or ptrace grant. The prerequisite-only
+profile remains separate and gains no native attachments.
 
 No reset/adoption/recovery path exists. An uncertain operation stops the process;
 a Kubernetes restart encounters existing originals and refuses. Do not clear the
@@ -43,3 +47,11 @@ refresh role permits to make a restart succeed. Disposable qualification state
 must be replaced as an explicitly owned fresh installation. Earlier failures
 and their evidence remain historical. Resource requests are unmeasured starting
 bounds, not a capacity qualification.
+
+The activation apply returns the desired workload change without waiting for
+rollout: actual first-holder activation needs the separately deployed App. Once
+the actual fixed listener exists, its idle readiness is DATA only. The
+Controller holds no live role stage while waiting for App startup; it consumes
+the original listener into a fresh same-owner initial-file phase only after a
+pending connection. No offer, P3 or activation is inferred from that readiness.
+The original five-second exchange budget is unchanged.
