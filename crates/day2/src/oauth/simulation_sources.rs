@@ -5,7 +5,12 @@ use syn::visit::Visit;
 
 pub(super) const SOURCES: &[(&str, &str)] = &[
     ("account.rs", include_str!("account.rs")),
+    ("admission", ""),
     ("admission.rs", include_str!("admission.rs")),
+    (
+        "admission/desired_epochs.rs",
+        include_str!("admission/desired_epochs.rs"),
+    ),
     ("approval_keys.rs", include_str!("approval_keys.rs")),
     ("approval_registry.rs", include_str!("approval_registry.rs")),
     ("calendar.rs", include_str!("calendar.rs")),
@@ -18,8 +23,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("exchange.rs", include_str!("exchange.rs")),
     ("external.rs", include_str!("external.rs")),
     ("fresh_auth.rs", include_str!("fresh_auth.rs")),
+    ("fresh_owner.rs", include_str!("fresh_owner.rs")),
     ("gitlab.rs", include_str!("gitlab.rs")),
     ("google.rs", include_str!("google.rs")),
+    ("google_begin.rs", include_str!("google_begin.rs")),
     ("host.rs", include_str!("host.rs")),
     ("inbound.rs", include_str!("inbound.rs")),
     ("live_readiness.rs", include_str!("live_readiness.rs")),
@@ -304,19 +311,27 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         files == expected,
         "OAuth source catalog changed; add effect guard and replay identity coverage"
     );
-    let mut management = std::fs::read_dir(directory.join("management"))?
-        .map(|entry| {
-            entry?
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("non-UTF8 management source"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    management.sort();
-    ensure!(
-        management == ["app.rs", "shell.rs"],
-        "OAuth management source catalog changed"
-    );
+    for (name, expected) in [
+        ("admission", &["desired_epochs.rs"][..]),
+        ("management", &["app.rs", "shell.rs"][..]),
+    ] {
+        let mut children = std::fs::read_dir(directory.join(name))?
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("non-UTF8 {name} source"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        children.sort();
+        ensure!(
+            children
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied()),
+            "OAuth {name} source catalog changed"
+        );
+    }
     for &(name, source) in SOURCES {
         if matches!(
             name,

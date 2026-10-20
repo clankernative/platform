@@ -51,11 +51,13 @@ company hostname default. See [the GKE installation security origin](../deploy/g
 
 The optional `oauth_clients` field uses the shared
 `day2-capabilities::oauth::ClientCatalog` contract. Client IDs are public metadata;
-`credential` names an existing exact-version entry in `control.secrets`:
+`credential` names an existing exact-version entry in `control.secrets`. Version 2
+requires tagged provider clients and independently selected qualification and
+provider accounts:
 
 ```json
 "oauth_clients": {
-  "version": 1,
+  "version": 2,
   "reauthentication": {
     "client_id": "123-reauth.apps.googleusercontent.com",
     "credential": "google_reauth_client"
@@ -63,11 +65,15 @@ The optional `oauth_clients` field uses the shared
   "registrations": {
     "calendar_registration": {
       "client": {
+        "kind": "google",
         "client_id": "123-calendar.apps.googleusercontent.com",
         "credential": "google_calendar_client"
       },
-      "canary_subject": "112233445566",
-      "canary_tenant": "example.com"
+      "canary": {
+        "qualification_subject": "accounts.google.com:112233445566",
+        "provider_subject": "112233445566",
+        "provider_tenant": "example.com"
+      }
     }
   }
 }
@@ -75,19 +81,22 @@ The optional `oauth_clients` field uses the shared
 
 These are example identifiers, not created clients. Registration keys equal the
 selected `OutboundConnectionBinding.registration.id`; app declarations remain
-in admitted artifacts. The reauthentication and Calendar roles require distinct
+in admitted artifacts. The reauthentication and provider roles require distinct
 clients and physical secret versions. Neither client credential may reuse a
 custody or attestation key version. Missing providers, unknown fields, inline
-secrets and aliases such as `latest` are refused. An absent client catalog remains
-compatible with installations without this runtime composition; it cannot start
-the GKE OAuth shell.
+secrets and aliases such as `latest` are refused. Installations without this
+runtime composition may omit the client catalog; the GKE OAuth shell requires it.
+Version 1 and its untagged Google shape are refused.
+Registration confirmation binds the qualification human and provider account
+independently. Native setup derives the current registration selection; a new
+live campaign must qualify that selection before it can supply readiness.
 
 No URL or scope is stored in this client catalog. The shell's selected edge
 derives the reauthentication callback. Admitted app requirements, reviewed
 profiles, full binding namespaces and independent shell evidence derive provider
 callbacks. Company domains stay in the instance's edge configuration.
 
-### Reviewed provider extensions and version 2 clients
+### Reviewed provider extensions
 
 `oauth/catalog.rs` composes the reviewed provider profiles independently of the
 protocol kernels. Declaration admission asks this registry for semantic access;
@@ -98,8 +107,7 @@ Only `apps[app].oauth_connections` selects profiles for that company's declared
 requirements. The client and runtime account catalogs supply the corresponding
 registration and account ceilings. Unselected requirements remain inactive.
 
-Version 1 retains its exact Google shape and evidence pins. Version 2 requires
-tagged provider clients and independently named qualification/provider accounts:
+The same client contract selects other reviewed providers. For GitLab:
 
 ```json
 "oauth_clients": {
@@ -131,10 +139,11 @@ nonempty ceiling of canonical numeric GitLab subject IDs. The app declares
 `GitlabProjects.read_projects` and `explicit_external_account`; the binding
 selects `gitlab_projects_external_v1`. Setup derives current revisions from the
 actual admitted declaration. Missing clients, provider/profile mismatches,
-unsupported owner/account combinations, unknown kinds or versions, mixed v1/v2
-shapes, inline credentials, authored endpoints/scopes and key-role substitutions
-fail admission. Different companies choose clients, exact secret references and
-account ceilings in their ordinary instance documents without kernel changes.
+unsupported owner/account combinations, unknown kinds or versions, retired
+client shapes, inline credentials, authored endpoints/scopes and key-role
+substitutions fail admission. Different companies choose clients, exact secret
+references and account ceilings in their ordinary instance documents without
+kernel changes.
 
 GitLab.com is a second actual native registration adapter, with rotating refresh
 and mandatory reauthorization after uncertainty. Its fixed token-info endpoint
@@ -380,6 +389,14 @@ generation, registration ID, secret names and numeric versions, key binding IDs,
 and approved product-return selection remain operator selections. A missing
 declaration, wrong profile ID, unknown JSON field or overlapping secret role
 fails setup. Serving constructors always require exact derived pins.
+
+For an already selected exact-scoped OAuth store, `oauth-setup` may accept an
+omitted initial `key_set` and derives it from the complete selected native key
+inventory. A supplied value must be a canonical digest; null or malformed values
+refuse. Resource, UID, IAM, alias and lease selections remain required. Serving
+admission always requires complete exact pins. Credential-only sibling stores
+still require complete pins; bootstrap policy references are never rewritten by
+OAuth setup.
 
 The output includes an `instance` document with the recomputed bindings and
 all other selections preserved. Review it before saving it as the installation
@@ -754,9 +771,24 @@ explicit isolated test witnesses exercise successful management transitions;
 actual signed-token conformance inputs remain refused by these gates. The
 production external-approval signing entry accepts the typed approval view and
 session; scalar timestamp signing helpers exist only in isolated tests. Shared
-credential consumers retain their separate behavior and are not qualified by
-these management tests. A real admitted producer and new complete qualification
+credential sessions and confirmation-context projections now require the same
+mandatory producer guard. Signed inputs alone cannot allocate a credential
+session or reach confirmation; explicitly isolated witnesses exercise separate
+native product and ownership properties. A real admitted producer and new complete qualification
 are required before the live connect/read/refresh/disconnect campaign.
+
+The owned Google path commits one two-phase challenge bundle after the owning
+app's original Pending claim. A verified first response establishes the issuer
+baseline. The shell then pauses on its own manual sign-in page; it does not
+immediately send a second Google request. The person may complete a fresh Google
+sign-in in another tab and return to the same-origin, CSRF-protected Continue
+form. Choosing to sign out affects that browser's Google sign-in and may require
+signing into the tool again; the shell never signs the person out automatically.
+The Google account link and Continue action are presentation, not authentication
+evidence. Only the later signed `auth_time` strictly greater than the retained
+baseline's signed `iat`, and no greater than the later token's `iat`, establishes
+the accepted issuer ordering. Original deadlines and the separate mandatory
+native lifetime, role, epoch and final-writer guards still apply.
 
 The initial execution profile is Google Calendar with a mapped current human
 and an empty slot. Other reviewed provider metadata stays admitted; this UI

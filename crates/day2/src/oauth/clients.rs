@@ -1011,10 +1011,10 @@ pub(crate) mod tests {
                     "reauth":{"kind":"gcp_version","project_number":12345,"secret":"reauth_client","version":3},
                     "calendar":{"kind":"gcp_version","project_number":12345,"secret":"calendar_client","version":7}
                 }},
-            "oauth_clients":{"version":1,
+            "oauth_clients":{"version":2,
                 "reauthentication":{"client_id":"123-reauth.apps.googleusercontent.com","credential":"reauth"},
-                "registrations":{"calendar_registration":{"client":{"client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar"},
-                    "canary_subject":"112233","canary_tenant":"example.com"}}}
+                "registrations":{"calendar_registration":{"client":{"kind":"google","client_id":"123-calendar.apps.googleusercontent.com","credential":"calendar"},
+                    "canary":{"qualification_subject":"accounts.google.com:112233","provider_subject":"112233","provider_tenant":"example.com"}}}}
         })
     }
 
@@ -1042,7 +1042,6 @@ pub(crate) mod tests {
     #[test]
     fn tagged_clients_are_closed_and_do_not_confuse_shell_and_provider_identities() -> Result<()> {
         let mut document = document();
-        document["oauth_clients"]["version"] = json!(2);
         document["oauth_clients"]["registrations"]["calendar_registration"] = json!({
             "client":{"kind":"gitlab","client_id":"a".repeat(64),"credential":"calendar"},
             "canary":{"qualification_subject":"accounts.google.com:shell-human","provider_subject":"42","provider_tenant":"gitlab.com"}
@@ -1110,7 +1109,8 @@ pub(crate) mod tests {
     #[test]
     fn malformed_unknown_aliased_missing_or_shared_client_selections_are_refused() -> Result<()> {
         for (path, value) in [
-            ("/oauth_clients/version", json!(2)),
+            ("/oauth_clients/version", json!(1)),
+            ("/oauth_clients/version", json!(3)),
             (
                 "/oauth_clients/reauthentication/client_id",
                 json!("client.apps.googleusercontent.com/attack"),
@@ -1120,11 +1120,11 @@ pub(crate) mod tests {
                 json!("missing"),
             ),
             (
-                "/oauth_clients/registrations/calendar_registration/canary_subject",
+                "/oauth_clients/registrations/calendar_registration/canary/provider_subject",
                 json!(""),
             ),
             (
-                "/oauth_clients/registrations/calendar_registration/canary_tenant",
+                "/oauth_clients/registrations/calendar_registration/canary/provider_tenant",
                 json!("EXAMPLE.com"),
             ),
             (

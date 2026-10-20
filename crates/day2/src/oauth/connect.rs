@@ -11,7 +11,7 @@ use day2_capabilities::oauth::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-const MAX_CONNECT_SECONDS: i64 = 900;
+pub(super) const MAX_CONNECT_SECONDS: i64 = 900;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectIntent {
@@ -237,6 +237,7 @@ fn install_schema_in(db: &Connection) -> Result<()> {
     super::exchange::install_schema(db)?;
     super::custody::install_schema(db)?;
     super::management::app::install(db)?;
+    super::fresh_owner::install(db)?;
     Ok(())
 }
 

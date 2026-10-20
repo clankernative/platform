@@ -742,6 +742,7 @@ mod tests {
             &self,
             _: &iap::Verified,
             _: crate::oauth::fresh_auth::FreshIntent,
+            _: &HeaderMap,
             _: i64,
         ) -> Result<crate::oauth::security_shell::ReauthStart> {
             anyhow::bail!("reauthentication is unrelated to qualification")

@@ -78,6 +78,10 @@ pub(crate) struct Manager {
 }
 
 impl Manager {
+    pub(in crate::oauth) fn app(&self) -> &str {
+        self.runtime.app()
+    }
+
     pub(in crate::oauth) fn new(
         runtime: Runtime,
         authority: Arc<admission::ArtifactApprovalAuthority>,
@@ -337,6 +341,48 @@ impl Manager {
         );
         view.validate(identity, effects::wall_time()?)?;
         Ok(view)
+    }
+
+    pub(in crate::oauth) fn fresh_owner(
+        &self,
+        call: &crate::oauth::fresh_owner::CallData,
+        identity: &iap::Verified,
+        now: i64,
+    ) -> Result<crate::oauth::fresh_owner::ReplyData> {
+        use crate::oauth::{fresh_auth::FreshIntent, fresh_owner::PurposeData};
+        if call.purpose == PurposeData::CredentialIntent {
+            return crate::managed_credentials::browser::fresh_owner(
+                &self.runtime,
+                call,
+                identity,
+                now,
+            );
+        }
+        ensure!(
+            matches!(
+                call.purpose,
+                PurposeData::OAuthConnect | PurposeData::OAuthDisconnect
+            ),
+            "OAuth management fresh purpose refused"
+        );
+        // Current selected registration/key acquisition happens before taking
+        // the app writer; no SQLite transaction spans the private RPC.
+        let expected = self.pending(&call.attempt, identity, now)?;
+        let at = effects::wall_time()?;
+        ensure!(at >= now, "OAuth management clock moved backwards");
+        let mut db = store::open(self.runtime.db())?;
+        let tx = crate::write_queue::immediate(&mut db)?;
+        let (view, state, _) = self.load(&tx, &call.attempt, identity, at)?;
+        ensure!(
+            state == "pending" && view == expected,
+            "OAuth management pending changed"
+        );
+        self.check_in(&tx, &view, identity)?;
+        let intent = FreshIntent::management(&view, identity)?;
+        let reply =
+            crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, at)?;
+        tx.commit()?;
+        Ok(reply)
     }
 
     pub(super) fn authorize_connect(
@@ -898,6 +944,13 @@ mod tests {
     }
 
     impl effects::Hooks for Port {
+        fn provider_observation(
+            &self,
+            _: crate::oauth::shell_oidc::ProviderObservationData,
+        ) -> Result<()> {
+            anyhow::bail!("unscripted provider observation")
+        }
+
         fn domain(&self) -> u64 {
             97831
         }

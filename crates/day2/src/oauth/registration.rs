@@ -351,7 +351,7 @@ impl Target {
         // Stable across renewed probes; clock and secret/token bytes never
         // participate. A receipt is still issuable only after the live campaign.
         let confirmation = Digest::of(&(
-            "oauth-google-registration-canary-v1",
+            "oauth-provider-registration-canary-v2",
             &self.instance,
             &self.namespace,
             &self.permission,
@@ -365,20 +365,8 @@ impl Target {
             &self.credential,
             &self.canary_subject,
             &self.canary_tenant,
+            &self.qualification_subject,
         ))?;
-        // Preserve historical Google evidence pins when its selected human is
-        // the same canary. Other selections bind both independently named IDs.
-        let confirmation = if self.adapter == catalog::Adapter::GoogleCalendar
-            && self.qualification_subject == format!("accounts.google.com:{}", self.canary_subject)
-        {
-            confirmation
-        } else {
-            Digest::of(&(
-                "oauth-provider-registration-canary-v2",
-                confirmation,
-                &self.qualification_subject,
-            ))?
-        };
         let revision = Digest::of(&(
             "oauth-provider-registration-evidence-v1",
             &self.instance,

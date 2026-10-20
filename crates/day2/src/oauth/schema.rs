@@ -1101,6 +1101,7 @@ mod tests {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let expected = [
+            "native_fresh_schema_version",
             "oauth_callback_schema_version",
             "oauth_connect_schema_version",
             "oauth_custody_schema_version",

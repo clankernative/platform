@@ -1,5 +1,6 @@
 //! Private shell/app-host transport. Only identity presentation and a signed
-//! confirmation cross this boundary. Custody and SQLite stay with the app host.
+//! confirmation and closed fresh-owner DATA cross this boundary. Custody and
+//! SQLite stay with the app host; private RP verifier state never crosses.
 
 use super::{account::ProviderAccount, external, security_shell::ApprovalContext};
 use crate::oauth::effects::{self, Client, Instant};
@@ -45,6 +46,7 @@ pub(crate) struct ApprovalView {
     pub terms: Digest,
     pub shell_origin: String,
     pub app_origin: String,
+    pub expires_at: i64,
 }
 
 impl ApprovalView {
@@ -80,6 +82,7 @@ impl ApprovalView {
             ))?,
             shell_origin: context.instance.shell.origin_url.clone(),
             app_origin: context.instance.app_origin_url.clone(),
+            expires_at: context.intent.expires_at,
         };
         view.validate(identity)?;
         Ok(view)
@@ -106,6 +109,11 @@ impl ApprovalView {
                     .any(|c| c.is_whitespace() || c.is_control())
                 && self.claim.generation > 0
                 && self.claim.quarantined_at >= 0
+                && self
+                    .expires_at
+                    .checked_sub(self.claim.quarantined_at)
+                    .is_some_and(|remaining| remaining > 0
+                        && remaining <= super::connect::MAX_CONNECT_SECONDS)
                 && !self.usage.trim().is_empty()
                 && self.usage.len() <= 1024
                 && !self.usage.chars().any(char::is_control)
@@ -198,6 +206,11 @@ pub(crate) trait ApprovalSigner: Send + Sync {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RequestBody {
+    FreshOwner {
+        version: u32,
+        human_assertion: String,
+        call: Box<super::fresh_owner::CallData>,
+    },
     Management {
         version: u32,
         human_assertion: String,
@@ -225,6 +238,11 @@ enum RequestBody {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum ResponseBody {
+    FreshOwner {
+        version: u32,
+        app: String,
+        reply: Box<super::fresh_owner::ReplyData>,
+    },
     Management {
         version: u32,
         app: String,
@@ -260,6 +278,15 @@ pub(crate) struct HostLookup {
 /// calls from inside the SQLite transaction.
 pub(crate) trait AppApprovals: Send + Sync {
     fn app(&self) -> &str;
+
+    fn fresh_owner(
+        &self,
+        _call: &super::fresh_owner::CallData,
+        _identity: &iap::Verified,
+        _now: i64,
+    ) -> Result<super::fresh_owner::ReplyData> {
+        anyhow::bail!("native fresh original app owner unavailable")
+    }
 
     fn lookup(&self, attempt: &str, identity: &iap::Verified, now: i64) -> Result<HostLookup>;
 
@@ -308,6 +335,10 @@ impl AppApprovalReceiver {
         mut self: Arc<Self>,
         manager: Arc<super::management::app::Manager>,
     ) -> Result<Arc<Self>> {
+        ensure!(
+            manager.app() == self.backend.app(),
+            "OAuth receiver manager app mismatch"
+        );
         Arc::get_mut(&mut self)
             .context("OAuth receiver already shared")?
             .management = Some(manager);
@@ -447,6 +478,42 @@ impl AppApprovalReceiver {
         self.workload.verify_workload(one_assertion(headers)?, at)?;
         let request: RequestBody = crate::json::decode(body)?;
         let response = match request {
+            RequestBody::FreshOwner {
+                version,
+                human_assertion,
+                call,
+            } => {
+                use super::fresh_owner::PurposeData;
+                ensure!(version == VERSION, "unsupported OAuth private version");
+                let identity = self.human.verify(&human_assertion, at)?;
+                match call.purpose {
+                    PurposeData::OAuthApproval
+                    | PurposeData::OAuthConnect
+                    | PurposeData::OAuthDisconnect => {
+                        routed_attempt(&call.attempt, &self.route)?;
+                    }
+                    PurposeData::CredentialIntent => {
+                        ensure!(
+                            call.attempt.starts_with("credential-") && call.attempt.len() <= 128,
+                            "invalid credential fresh attempt"
+                        );
+                        attempt(&call.attempt)?;
+                    }
+                }
+                let reply = if call.purpose == PurposeData::OAuthApproval {
+                    self.backend.fresh_owner(&call, &identity, at)?
+                } else {
+                    self.management
+                        .as_ref()
+                        .context("native fresh original app manager unavailable")?
+                        .fresh_owner(&call, &identity, at)?
+                };
+                ResponseBody::FreshOwner {
+                    version: VERSION,
+                    app: self.backend.app().into(),
+                    reply: Box::new(reply),
+                }
+            }
             RequestBody::Management {
                 version,
                 human_assertion,
@@ -557,6 +624,50 @@ pub(crate) struct RemoteApprovals {
 }
 
 impl RemoteApprovals {
+    /// This transport returns committed allocation/publication DATA, never
+    /// freshness or current-enrollment authority. The actual process-local
+    /// owner retains its opaque bundle and refuses restart/replica adoption.
+    pub(in crate::oauth) fn fresh_owner(
+        &self,
+        intent: &super::fresh_auth::FreshIntent,
+        call: super::fresh_owner::CallData,
+        headers: &HeaderMap,
+    ) -> Result<super::fresh_owner::ReplyData> {
+        let app = intent.app();
+        let target = self
+            .targets
+            .get(app)
+            .context("native fresh app receiver missing")?;
+        intent.require_shell_origin(&self.shell_origin)?;
+        call.require_intent(intent)?;
+        if call.purpose != super::fresh_owner::PurposeData::CredentialIntent {
+            routed_attempt(&call.attempt, &target.route)?;
+        }
+        let request = RequestBody::FreshOwner {
+            version: VERSION,
+            human_assertion: one_assertion(headers)?.into(),
+            call: Box::new(call.clone()),
+        };
+        let ResponseBody::FreshOwner {
+            version,
+            app: observed,
+            reply,
+        } = self.send(
+            app,
+            &request,
+            Instant::now() + Duration::from_secs(LOOKUP_SECONDS),
+        )?
+        else {
+            anyhow::bail!("native fresh owner response refused");
+        };
+        ensure!(
+            version == VERSION && observed == app,
+            "native fresh owner receiver changed"
+        );
+        reply.require_call(&call, intent)?;
+        Ok(*reply)
+    }
+
     pub(in crate::oauth) fn management(
         &self,
         app: &str,

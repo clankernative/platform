@@ -45,7 +45,7 @@ impl CredentialContextData {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub(in crate::oauth) enum FreshPurpose {
     OAuthApproval,
     CredentialIntent,
@@ -53,11 +53,13 @@ pub(in crate::oauth) enum FreshPurpose {
     OAuthDisconnect,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 enum Context {
     OAuth {
+        app: String,
         preview: Digest,
         shell_origin: String,
+        expires_at: i64,
     },
     Credential {
         scope: String,
@@ -68,6 +70,7 @@ enum Context {
         expires_at: i64,
     },
     Management {
+        app: String,
         action: super::management::Action,
         view: Digest,
         shell_origin: String,
@@ -79,7 +82,7 @@ enum Context {
 /// The credential challenge hashes the complete immutable Pending, including its
 /// active authority stamp and binding. Mutable Confirm/Reveal/Ack outcomes are
 /// deliberately not part of this original intent.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct FreshIntent {
     context: Context,
     attempt: String,
@@ -90,6 +93,26 @@ pub(crate) struct FreshIntent {
 }
 
 impl FreshIntent {
+    pub(super) fn commitment(&self) -> Result<Digest> {
+        Digest::of(&("original-native-fresh-intent-v1", self))
+    }
+
+    pub(super) fn human(&self) -> &str {
+        &self.human
+    }
+
+    pub(super) fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub(in crate::oauth) fn app(&self) -> &str {
+        match &self.context {
+            Context::OAuth { app, .. }
+            | Context::Credential { app, .. }
+            | Context::Management { app, .. } => app,
+        }
+    }
+
     pub(in crate::oauth) fn management(
         view: &super::management::View,
         identity: &iap::Verified,
@@ -97,6 +120,7 @@ impl FreshIntent {
         view.validate(identity, view.created_at)?;
         Ok(Self {
             context: Context::Management {
+                app: view.app.clone(),
                 action: view.action,
                 view: view.digest()?,
                 shell_origin: admitted_origin(&view.shell_origin)?,
@@ -117,8 +141,10 @@ impl FreshIntent {
         view.validate(identity)?;
         Ok(Self {
             context: Context::OAuth {
+                app: view.app.clone(),
                 preview: view.digest()?,
                 shell_origin: admitted_origin(&view.shell_origin)?,
+                expires_at: view.expires_at,
             },
             attempt: view.attempt().into(),
             challenge: view.challenge().clone(),
@@ -179,11 +205,11 @@ impl FreshIntent {
         self.created_at
     }
 
-    pub(in crate::oauth) fn deadline(&self) -> Option<i64> {
+    pub(in crate::oauth) fn deadline(&self) -> i64 {
         match &self.context {
-            Context::OAuth { .. } => None,
-            Context::Credential { expires_at, .. } => Some(*expires_at),
-            Context::Management { expires_at, .. } => Some(*expires_at),
+            Context::OAuth { expires_at, .. }
+            | Context::Credential { expires_at, .. }
+            | Context::Management { expires_at, .. } => *expires_at,
         }
     }
 
@@ -214,17 +240,25 @@ impl FreshIntent {
         attempt: &str,
         challenge: &Digest,
         origin: &str,
+        created_at: i64,
+        expires_at: i64,
     ) -> Result<Self> {
+        ensure!(
+            created_at >= 0 && expires_at > created_at,
+            "parser fixture original interval"
+        );
         Ok(Self {
             context: Context::OAuth {
+                app: "parserfixture".into(),
                 preview: Digest::new(b"OIDC parser fixture; cannot match an app view"),
                 shell_origin: admitted_origin(origin)?,
+                expires_at,
             },
             attempt: attempt.into(),
             challenge: challenge.clone(),
             human: identity.email.clone(),
             subject: identity.subject.clone(),
-            created_at: 0,
+            created_at,
         })
     }
 }
@@ -262,8 +296,7 @@ impl VerifiedAuthTime {
         identity: &iap::Verified,
         entry_now: i64,
     ) -> Result<CredentialContextData> {
-        self.require_intent(current, identity)?;
-        self.require_current(entry_now)?;
+        self.require_credential_authentication(current, identity, entry_now)?;
         let intent = self.google.intent();
         let Context::Credential {
             scope,
@@ -296,6 +329,25 @@ impl VerifiedAuthTime {
 
     pub(in crate::oauth) fn from_google(google: shell_oidc::Reauthenticated) -> Self {
         Self { google }
+    }
+
+    /// The credential consumer has the same mandatory native producer as the
+    /// OAuth consumers. Signed ordering DATA cannot mint a session, historical
+    /// confirmation context or credential approval while that producer is absent.
+    pub(crate) fn require_credential_authentication(
+        &self,
+        current: &FreshIntent,
+        identity: &iap::Verified,
+        entry_now: i64,
+    ) -> Result<()> {
+        ensure!(
+            self.purpose() == FreshPurpose::CredentialIntent
+                && current.purpose() == FreshPurpose::CredentialIntent,
+            "credential original purpose required"
+        );
+        self.require_intent(current, identity)?;
+        self.require_current(entry_now)?;
+        self.google.require_post_pending_authentication()
     }
 
     pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {

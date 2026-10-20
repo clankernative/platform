@@ -892,6 +892,9 @@ impl Runtime {
             crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
             crate::managed_credentials::store::install_schema(db)?;
             crate::managed_credentials::issuance::install(db)?;
+            // Admit the fresh-owner unit on the actual runtime connection,
+            // under the same cumulative budget as the credential schema.
+            crate::oauth::fresh_owner::install(db)?;
             if !self
                 .artifact()
                 .contract()

@@ -2695,14 +2695,9 @@ fn admission_refuses_when_common_audit_is_unavailable_and_receipts_fail_closed()
 }
 
 #[test]
-fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Result<()> {
+fn current_host_reopen_is_repeatable_and_does_not_invent_event_metadata() -> Result<()> {
     let world = World::new()?;
-    world.seed("legacy-receipt")?;
-    world.db()?.execute_batch(
-        "DROP TRIGGER day2_receipt_event; DROP TRIGGER day2_web_audit_event;
-        DROP TRIGGER day2_audit_no_replace; DROP TRIGGER day2_changes_no_replace; DROP TRIGGER day2_events_no_replace;
-        UPDATE day2_meta SET value='1' WHERE key='host_schema';",
-    )?;
+    world.seed("prior-receipt")?;
     let before = world.count("day2_audit_events")?;
     world.runtime.initialize()?;
     world.runtime.initialize()?;
@@ -2713,13 +2708,6 @@ fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Res
             [],
             |row| row.get::<_, String>(0)
         )?,
-        // Schema 3 recorded the cause of each invocation; 4 widened its
-        // constraint from an enumeration to a shape; 5 gave every application
-        // table its deletion column; 6 added the record of removals; 7 recorded
-        // which applications a call passed through; 8 separated who
-        // authenticated from whom the work is for; 9 bound each address to
-        // the account behind it; 10 let a completed invocation keep a receipt
-        // in place of its trace.
         "10"
     );
     world.seed("new-receipt")?;
@@ -2727,31 +2715,25 @@ fn host_v1_upgrade_is_repeatable_and_does_not_invent_old_event_metadata() -> Res
     Ok(())
 }
 
-/// An instance that predates soft deletion gains the column with its rows intact.
-///
-/// The migration is the only reason existing instances can adopt a platform
-/// rule they were not built under. It has to reach every application table —
-/// discovered from the database, not from the current artifact, because an
-/// instance can hold tables the app no longer declares — and it has to leave
-/// every existing row live, since a default of anything but zero would delete
-/// the entire fleet's data on upgrade.
 #[test]
-fn a_pre_deletion_instance_gains_the_column_with_every_row_still_live() -> Result<()> {
+fn current_instance_deletion_columns_and_live_rows_survive_reopen() -> Result<()> {
     let world = World::new()?;
-    world.seed("legacy-row")?;
-    let before = world.count("links")?;
-    assert!(before > 0, "the fixture holds a row to migrate");
-    // A table the current artifact does not declare, to prove the migration
-    // reads the database rather than the schema.
-    world.db()?.execute_batch(
-        "ALTER TABLE links DROP COLUMN deleted_at;
-        CREATE TABLE retired_model(id INTEGER PRIMARY KEY, version INTEGER NOT NULL,
-            created_at INTEGER NOT NULL);
-        INSERT INTO retired_model VALUES(1,1,100);
-        UPDATE day2_meta SET value='4' WHERE key='host_schema';",
-    )?;
-    world.runtime.initialize()?;
-
+    world.seed("current-row")?;
+    let links = || -> Result<Vec<Vec<rusqlite::types::Value>>> {
+        let db = world.db()?;
+        let mut statement = db.prepare("SELECT * FROM links ORDER BY id")?;
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    };
+    let before = links()?;
+    assert!(!before.is_empty(), "the fixture holds a current live row");
     let column = |table: &str| -> Result<i64> {
         Ok(world.db()?.query_row(
             "SELECT count(*) FROM pragma_table_info(?1) WHERE name='deleted_at'",
@@ -2759,25 +2741,88 @@ fn a_pre_deletion_instance_gains_the_column_with_every_row_still_live() -> Resul
             |row| row.get(0),
         )?)
     };
-    assert_eq!(column("links")?, 1, "the declared table did not migrate");
-    assert_eq!(
-        column("retired_model")?,
-        1,
-        "a table the artifact no longer declares was skipped"
-    );
-    assert_eq!(column("day2_invocations")?, 0, "a platform table migrated");
-    assert_eq!(
-        world.db()?.query_row(
-            "SELECT count(*) FROM links WHERE deleted_at = 0",
-            [],
-            |row| row.get::<_, i64>(0)
-        )?,
-        before,
-        "migrating deleted rows that existed before deletion did"
-    );
-    // Running it again is a no-op rather than an error on the existing column.
-    world.runtime.initialize()?;
-    assert_eq!(column("links")?, 1);
+    for _ in 0..2 {
+        world.runtime.initialize()?;
+        assert_eq!(column("links")?, 1);
+        for table in [
+            "day2_invocations",
+            "native_fresh_schema_version",
+            "native_fresh_owners",
+        ] {
+            assert_eq!(
+                column(table)?,
+                0,
+                "platform table {table} gained deletion state"
+            );
+        }
+        assert_eq!(
+            world.db()?.query_row(
+                "SELECT count(*) FROM links WHERE deleted_at = 0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            i64::try_from(before.len())?
+        );
+        assert_eq!(links()?, before, "reopen changed persisted link contents");
+    }
+    Ok(())
+}
+
+#[test]
+fn current_native_identity_marker_extra_column_refuses_without_repair() -> Result<()> {
+    let world = World::new()?;
+    world.seed("preserved-row")?;
+    world.db()?.execute_batch(
+        "ALTER TABLE native_fresh_schema_version ADD COLUMN deleted_at INTEGER NOT NULL
+         DEFAULT 0 CHECK(deleted_at >= 0)",
+    )?;
+    let snapshot = || -> Result<Vec<(String, Vec<Vec<rusqlite::types::Value>>)>> {
+        let mut db = world.db()?;
+        let tx = db.transaction()?;
+        let mut captured = Vec::new();
+        for query in [
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name",
+            "SELECT * FROM day2_meta ORDER BY key",
+            "SELECT * FROM native_fresh_schema_version ORDER BY version",
+            "SELECT * FROM native_fresh_owners ORDER BY original",
+            "SELECT * FROM links ORDER BY id",
+            "SELECT * FROM day2_invocations ORDER BY id",
+            "SELECT * FROM day2_audit ORDER BY rowid",
+            "SELECT * FROM day2_audit_changes ORDER BY invocation,ordinal",
+            "SELECT * FROM day2_audit_events_meta ORDER BY version",
+            "SELECT * FROM day2_audit_events ORDER BY sequence",
+            "SELECT * FROM day2_retention_removals ORDER BY sequence",
+            "SELECT * FROM day2_audit_cursors ORDER BY token",
+            "SELECT * FROM day2_web_events ORDER BY sequence",
+        ] {
+            let mut statement = tx.prepare(query)?;
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            captured.push((query.to_owned(), rows));
+        }
+        tx.commit()?;
+        Ok(captured)
+    };
+    let before = snapshot()?;
+    for _ in 0..2 {
+        let error = world.runtime.initialize().unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("table shape") && message.contains("native_fresh_schema_version"),
+            "{message}"
+        );
+        assert_eq!(
+            snapshot()?,
+            before,
+            "refusal repaired or changed stored state"
+        );
+    }
     Ok(())
 }
 
