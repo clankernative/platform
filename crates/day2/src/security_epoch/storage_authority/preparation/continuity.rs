@@ -302,6 +302,39 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn check_identity(
+    phase: &mut CurrentVolumePhase<'_, '_>,
+    directory: &File,
+    anchor: &DirectoryIdentity,
+    file: &File,
+    identity: &FileIdentity,
+    length: usize,
+) -> Result<()> {
+    use rustix::fs::{AtFlags, StatxFlags};
+    phase.check_directory(directory, anchor)?;
+    phase.acquisition().remaining()?;
+    let observed = observe_anchored_file(directory, anchor, file, length)?;
+    ensure!(observed == *identity, "retained_initial_file_changed");
+    let flags = StatxFlags::INO | StatxFlags::MNT_ID;
+    let named = rustix::fs::statx(
+        directory,
+        super::INITIAL_FILE,
+        AtFlags::SYMLINK_NOFOLLOW,
+        flags,
+    )?;
+    ensure!(
+        named.stx_mask & flags.bits() == flags.bits()
+            && named.stx_ino == identity.inode
+            && named.stx_mnt_id == identity.mount
+            && named.stx_dev_major == identity.device_major
+            && named.stx_dev_minor == identity.device_minor,
+        "retained_initial_leaf_changed"
+    );
+    phase.acquisition().remaining()?;
+    phase.check_directory(directory, anchor)
+}
+
 #[cfg(test)]
 mod phase_disposition_tests {
     use super::FilePhaseDisposition;
@@ -349,37 +382,4 @@ mod phase_disposition_tests {
         assert!(FilePhaseDisposition::begin(&mut continuation).is_err());
         assert!(!continuation);
     }
-}
-
-#[cfg(target_os = "linux")]
-fn check_identity(
-    phase: &mut CurrentVolumePhase<'_, '_>,
-    directory: &File,
-    anchor: &DirectoryIdentity,
-    file: &File,
-    identity: &FileIdentity,
-    length: usize,
-) -> Result<()> {
-    use rustix::fs::{AtFlags, StatxFlags};
-    phase.check_directory(directory, anchor)?;
-    phase.acquisition().remaining()?;
-    let observed = observe_anchored_file(directory, anchor, file, length)?;
-    ensure!(observed == *identity, "retained_initial_file_changed");
-    let flags = StatxFlags::INO | StatxFlags::MNT_ID;
-    let named = rustix::fs::statx(
-        directory,
-        super::INITIAL_FILE,
-        AtFlags::SYMLINK_NOFOLLOW,
-        flags,
-    )?;
-    ensure!(
-        named.stx_mask & flags.bits() == flags.bits()
-            && named.stx_ino == identity.inode
-            && named.stx_mnt_id == identity.mount
-            && named.stx_dev_major == identity.device_major
-            && named.stx_dev_minor == identity.device_minor,
-        "retained_initial_leaf_changed"
-    );
-    phase.acquisition().remaining()?;
-    phase.check_directory(directory, anchor)
 }
