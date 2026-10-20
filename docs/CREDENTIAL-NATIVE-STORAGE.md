@@ -31,6 +31,14 @@ or ptrace access to AppHost or SecurityShell and makes no hostile-code
 containment claim. Deployment of this profile requires the instance's normal
 review/apply; it has not been applied by this change.
 
+The selected future controller entrypoint is
+`/usr/local/bin/day2-epoch-controller`, a dedicated process owning both storage
+and the fixed peer. That binary and its image/code pin are not supplied yet.
+AppHost and SecurityShell remain `/usr/local/bin/day2-host`; the controller must
+not be admitted under that path as a substitute. An explicit read-only native
+enrollment path allowlist may name the future controller, but a missing binary
+or missing current identity still refuses enrollment.
+
 The controller uses the same selected filesystem UID as the AppHost for the
 private initial-file directory and mode-0600 file. Provider and filesystem
 identity checks still apply; a configured UID alone is not enrollment or P3.
