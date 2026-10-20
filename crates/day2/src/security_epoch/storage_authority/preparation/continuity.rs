@@ -36,11 +36,45 @@ pub(crate) struct PreparedFileContinuity {
     valid: bool,
 }
 
+impl<'role> PreparedInitialFile<'role> {
+    /// Consume only a SUCCESSFULLY checked preparation. On any failure the
+    /// original file/anchor/stage remain owned by the refused outcome. A later
+    /// acquisition cannot restart an expired or failed preparation.
+    pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
+        let binding = (|| {
+            self.check_original()?;
+            let binding = match &mut self.creator.authority.issuer {
+                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => volume.capture_same_owner()?,
+                #[cfg(test)]
+                crate::security_epoch::storage_authority::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
+                    anyhow::bail!("storage_native_retention_requires_enrolled_controller")
+                }
+            };
+            self.check_original()?;
+            Ok(binding)
+        })();
+        match binding {
+            Ok(binding) => {
+                PreparedRetentionOutcome::Retained(PreparedFileContinuity::retain(self, binding))
+            }
+            Err(error) => {
+                self.creator
+                    .authority
+                    .refuse_preparation(&mut self.acquisition);
+                PreparedRetentionOutcome::Refused {
+                    original: self,
+                    error,
+                }
+            }
+        }
+    }
+}
+
 impl PreparedFileContinuity {
     // Only retain_for_current_phases calls this, after the final original-clock
     // file check and genuine same-enrolled-owner capture. No fallible I/O or
     // descriptor reopen occurs between that check and retaining these owners.
-    pub(super) fn retain(original: PreparedInitialFile<'_>, binding: SameEnrolledOwner) -> Self {
+    fn retain(original: PreparedInitialFile<'_>, binding: SameEnrolledOwner) -> Self {
         let OriginalCreatorFd {
             authority,
             file,
