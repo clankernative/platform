@@ -556,7 +556,11 @@ pub(crate) fn with_consumer<T>(
         local: std::marker::PhantomData,
     };
     let result = with_current_original(intent, phase, wall, |role, original| {
-        let mut consumer = Consumer { role, original, armed: &guard.armed };
+        let mut consumer = Consumer {
+            role,
+            original,
+            armed: &guard.armed,
+        };
         consumer.check()?;
         let output = operation(&mut consumer);
         let checked = consumer.check();
@@ -858,6 +862,32 @@ mod tests {
             5,
             deadline,
         )
+    }
+
+    #[test]
+    fn consumer_pure_refusal_is_excluded_and_cannot_burn_a_valid_original() -> Result<()> {
+        let world = super::super::simulation::World::new(399);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("consumer-input-exclusion", 305)?;
+            reserve_shell(&intent, 5)?;
+            let mut db = rusqlite::Connection::open_in_memory()?;
+            db.execute_batch("CREATE TABLE receipt(value INTEGER)")?;
+            let refused = with_consumer(&intent, Phase::Session, 5, |_| -> Result<()> {
+                let tx = db.transaction()?;
+                tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                anyhow::bail!("controlled input refusal BEFORE COMMIT")
+            });
+            assert!(refused.is_err());
+            assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 0);
+            reserve_shell(&intent, 5)?;
+            with_consumer(&intent, Phase::Session, 5, |current| {
+                let tx = db.transaction()?;
+                tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                current.commit(tx)
+            })?;
+            assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+            Ok(())
+        })
     }
 
     #[test]

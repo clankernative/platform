@@ -54,7 +54,10 @@ appropriate unresolved ownership; it must not restart either original or
 create a second permit journal.
 
 `with_consumer` now retains the same original and role through the real consumer
-operation and its result, with pessimistic drop on error or unwinding. The
+operation and its result. Pure input or signature refusals are known exclusions
+and do not burn another human's valid original. The boundary arms immediately
+before a commit, signature, session insertion or provider/socket send; errors
+and unwinding after that point pessimistically retain uncertainty. The
 original remains in its owning registry, permanently refused after ambiguity;
 there is no timer-based regrant or restoration from SQL. App start, dispatch,
 activation and disconnect hold that borrow through the actual SQLite COMMIT

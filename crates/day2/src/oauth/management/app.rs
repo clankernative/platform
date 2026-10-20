@@ -1013,7 +1013,7 @@ impl FinishGuard<'_> {
             entry,
             |current| {
                 self.require_send(entry)?;
-            current.arm()?;
+                current.arm()?;
                 operation()
             },
         )

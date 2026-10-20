@@ -96,6 +96,7 @@
       "type_name": "Consumer",
       "owning_children": [],
       "methods": [
+        "pub (crate) fn arm (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >"
@@ -114,6 +115,10 @@
         {
           "owner": null,
           "signature": "pub (crate) fn with_consumer < T > (intent : & FreshIntent , phase : Phase , wall : i64 , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn arm (& mut self) -> Result < () >"
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
