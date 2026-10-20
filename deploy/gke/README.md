@@ -313,14 +313,16 @@ kubectl -n SHELL_NAMESPACE logs SHELL_POD -c security-shell --timestamps > shell
 
 Each process exports at most 128 consumer lines of at most 2048 bytes. Records
 contain fixed outcomes, checked incarnation and request commitments; they contain
-no tokens, subjects, URLs, paths or raw errors. `completed` follows the actual
+no tokens, subjects, URLs, paths or raw errors. `scope_completed` follows the actual
 known consumer, final peer acknowledgement and same-stage postchecks. App also
 records the final coherent provider snapshot through the existing journal digest.
 Its binding is the actual wrapped storage request binding, matching the Controller
 record. Shell records its actual serving request binding and has no provider
 snapshot or App selection; correlate that binding with the Controller's release.
-Other outcomes are terminal failure observations, never completion. Known input
-exclusions do not produce `completed` records.
+Other outcomes are terminal failure observations, never completion. A native
+scope closed as an exclusion does not produce `scope_completed`. A known read
+result can still be rejected by the application (for example, a bad signature
+after successful key retrieval); scope completion does not assert acceptance.
 
 These are historical diagnostic DATA, not a permission, readiness receipt, or an
 independent proof of the entire OAuth lifecycle. A matching health response,

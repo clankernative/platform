@@ -125,6 +125,7 @@ pub(in crate::security_epoch) struct ConsumerScopeEvidence {
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum ConsumerScopeResult {
+    #[serde(rename = "scope_completed")]
     Completed,
     OperationRefused,
     FinalScopeRefused,
@@ -675,7 +676,7 @@ mod response_tests {
             assert!(record.line(0, ConsumerScopeResult::Completed).is_none());
             assert!(record.line(129, ConsumerScopeResult::Completed).is_none());
             for (result, expected) in [
-                (ConsumerScopeResult::Completed, "completed"),
+                (ConsumerScopeResult::Completed, "scope_completed"),
                 (ConsumerScopeResult::OperationRefused, "operation_refused"),
                 (
                     ConsumerScopeResult::FinalScopeRefused,
