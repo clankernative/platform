@@ -18,7 +18,9 @@ const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
 
 mod app;
+mod continuity;
 pub(crate) use app::AppPreparedFile;
+pub(crate) use continuity::{PreparedFileContinuity, PreparedRetentionOutcome};
 
 /// Complete admitted image DATA with a fixed leaf. There is no caller pathname,
 /// descriptor adoption or arbitrary image constructor.
@@ -167,6 +169,38 @@ impl<'role> PreparedInitialFile<'role> {
     pub(crate) fn check_original(&mut self) -> Result<()> {
         self.creator
             .check_unchanged_initial_file(&self.layout, &mut self.acquisition)
+    }
+
+    /// Consume only a SUCCESSFULLY checked preparation. On any failure the
+    /// original file/anchor/stage remain owned by the refused outcome. A later
+    /// acquisition cannot restart an expired or failed preparation.
+    pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
+        let binding = (|| {
+            self.check_original()?;
+            let binding = match &mut self.creator.authority.issuer {
+                super::StorageIssuerOwner::Native(volume) => volume.capture_same_owner()?,
+                #[cfg(test)]
+                super::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
+                    anyhow::bail!("storage_native_retention_requires_enrolled_controller")
+                }
+            };
+            self.check_original()?;
+            Ok(binding)
+        })();
+        match binding {
+            Ok(binding) => {
+                PreparedRetentionOutcome::Retained(PreparedFileContinuity::retain(self, binding))
+            }
+            Err(error) => {
+                self.creator
+                    .authority
+                    .refuse_preparation(&mut self.acquisition);
+                PreparedRetentionOutcome::Refused {
+                    original: self,
+                    error,
+                }
+            }
+        }
     }
 
     pub(crate) fn projection(&mut self) -> Result<crate::security_epoch::PreparedFileProjection> {
