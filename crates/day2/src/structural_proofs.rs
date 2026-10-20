@@ -32,6 +32,26 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::AppInitialStorageContinuity);
+    assert_not_impl!(
+        crate::security_epoch::AppInitialStorageContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::AppInitialStorageContinuity, Send);
+    assert_not_impl!(crate::security_epoch::AppInitialStorageContinuity, Sync);
+    assert_consuming!(crate::security_epoch::CurrentAppStorageBootstrapPhase<'static>);
+    assert_not_impl!(
+        crate::security_epoch::CurrentAppStorageBootstrapPhase<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentAppStorageBootstrapPhase<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentAppStorageBootstrapPhase<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::InitialStorageOutcome);
     assert_not_impl!(
         crate::security_epoch::InitialStorageOutcome,
