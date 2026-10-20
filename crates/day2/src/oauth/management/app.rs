@@ -77,7 +77,41 @@ pub(crate) struct Manager {
     authority: Arc<admission::ArtifactApprovalAuthority>,
 }
 
+/// A non-transferable creator point, never returned by a request or restored
+/// from a row. The nonzero size preserves identity while this borrow is live.
+pub(crate) struct CaptureStart {
+    marker: u8,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// Constructed only after the actual capture transaction commits, tied to the
+/// same live creator point. FreshIntent DATA alone cannot bind an App owner.
+pub(crate) struct CommittedCapture<'a> {
+    start: &'a CaptureStart,
+    intent: crate::oauth::fresh_auth::FreshIntent,
+}
+
+impl CommittedCapture<'_> {
+    pub(in crate::oauth) fn start(&self) -> &CaptureStart {
+        self.start
+    }
+    pub(in crate::oauth) fn intent(&self) -> &crate::oauth::fresh_auth::FreshIntent {
+        &self.intent
+    }
+}
+
 impl Manager {
+    pub(in crate::oauth) fn native_scopes(
+        &self,
+    ) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+        let instance = crate::artifact::Instance::load(self.runtime.instance_path())?;
+        ensure!(
+            instance.scope(self.runtime.app())? == self.runtime.scope(),
+            "native App scope changed"
+        );
+        crate::oauth::native_management::selected_scopes(&instance, Some(self.runtime.app()))
+    }
+
     pub(in crate::oauth) fn app(&self) -> &str {
         self.runtime.app()
     }
@@ -257,6 +291,11 @@ impl Manager {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<View> {
+        let start = CaptureStart {
+            marker: 0,
+            local: std::marker::PhantomData,
+        };
+        let original = crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
         crate::oauth::connect::identifier(registration)?;
         let mut db = store::open(self.runtime.db())?;
         iap::bind_subject(&db, identity, now)?;
@@ -322,12 +361,24 @@ impl Manager {
         tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
             params![view.id, json, view.expires_at])?;
         tx.commit()?;
+        original.bind(
+            CommittedCapture {
+                start: &start,
+                intent: crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            },
+            captured_at,
+        )?;
         Ok(view)
     }
 
     pub(super) fn pending(&self, id: &str, identity: &iap::Verified, now: i64) -> Result<View> {
         let db = store::open(self.runtime.db())?;
         let (view, state, _) = self.load(&db, id, identity, now)?;
+        crate::oauth::native_management::check(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Pending,
+            now,
+        )?;
         ensure!(
             state == "pending",
             "OAuth management intent already consumed"
@@ -562,6 +613,11 @@ impl Manager {
         ensure!(query.len() <= 8192, "OAuth callback budget");
         let mut db = store::open(self.runtime.db())?;
         let (view, state, stored_session) = self.load(&db, id, identity, now)?;
+        crate::oauth::native_management::check(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback,
+            now,
+        )?;
         ensure!(
             view.action == Action::Connect
                 && state == "authorized"
@@ -759,6 +815,11 @@ impl Manager {
         identity: &iap::Verified,
         now: i64,
     ) -> Result<Reply> {
+        crate::oauth::native_management::check(
+            &crate::oauth::fresh_auth::FreshIntent::management(view, identity)?,
+            crate::oauth::native_management::Phase::DisconnectCommit,
+            now,
+        )?;
         self.authority
             .verify_management(view, proof, identity, now)?;
         let fence = view
@@ -1077,6 +1138,10 @@ mod tests {
 
         fn proof(&self, view: &View, session: Digest) -> Result<Attestation> {
             self.port.now.store(view.created_at + 2, SeqCst);
+            crate::oauth::native_management::reserve_shell(
+                &FreshIntent::management(view, &self.identity)?,
+                view.created_at + 2,
+            )?;
             let proof = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 FreshIntent::management(view, &self.identity)?,
                 self.identity.email.clone(),
@@ -1118,6 +1183,116 @@ mod tests {
                 .append_pair("iss", crate::oauth::google::ISSUER);
             Ok((view, session, query.finish()))
         }
+    }
+
+    #[test]
+    fn original_binding_covers_the_complete_committed_management_context() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            type Mutate = fn(&mut View, &mut iap::Verified);
+            let mutations: &[Mutate] = &[
+                |v, i| {
+                    v.human = "bob@example.com".into();
+                    i.email = v.human.clone();
+                },
+                |v, i| {
+                    v.subject = "accounts.google.com:another".into();
+                    i.subject = v.subject.clone();
+                },
+                |v, _| v.app = "anotherapp".into(),
+                |v, _| v.scope = "another_scope".into(),
+                |v, _| v.artifact = "another_artifact".into(),
+                |v, _| v.authority.revision += 1,
+                |v, _| v.registration = "another_registration".into(),
+                |v, _| v.logical_id = "another_logical".into(),
+                |v, _| v.selection = Digest::new(b"another selection"),
+                |v, _| v.slot = Digest::new(b"another slot"),
+                |v, _| v.challenge = Digest::new(b"another challenge"),
+                |v, _| v.usage = "another use".into(),
+                |v, _| {
+                    v.action = Action::Disconnect;
+                    v.fence = Some(SlotFence {
+                        generation: 1,
+                        epoch: 1,
+                        token_version: 1,
+                        account: "account".into(),
+                        affinity: "affinity".into(),
+                        profile: "profile".into(),
+                        status: "active".into(),
+                    });
+                },
+            ];
+            for mutate in mutations {
+                let view =
+                    fixture
+                        .manager
+                        .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+                let mut changed = view.clone();
+                let mut identity = fixture.identity.clone();
+                mutate(&mut changed, &mut identity);
+                let intent = FreshIntent::management(&changed, &identity)?;
+                assert!(
+                    crate::oauth::native_management::check(
+                        &intent,
+                        crate::oauth::native_management::Phase::Pending,
+                        100
+                    )
+                    .is_err()
+                );
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn persisted_pending_cannot_restore_original_on_restart_or_another_thread() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        let view = effects::scope(fixture.port.clone(), || -> Result<View> {
+            let view =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+            fixture.manager.pending(&view.id, &fixture.identity, 100)?;
+            std::thread::scope(|scope| -> Result<()> {
+                scope
+                    .spawn(|| {
+                        effects::scope(fixture.port.clone(), || {
+                            assert!(
+                                fixture
+                                    .manager
+                                    .pending(&view.id, &fixture.identity, 100)
+                                    .is_err()
+                            );
+                        })
+                    })
+                    .join()
+                    .unwrap();
+                Ok(())
+            })?;
+            fixture.manager.pending(&view.id, &fixture.identity, 100)?;
+            Ok(view)
+        })?;
+        crate::oauth::native_management::fixtures::restart(effects::Hooks::domain(
+            fixture.port.as_ref(),
+        ));
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            let db = store::open(fixture.manager.runtime.db())?;
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM oauth_management_intents WHERE id=?1 AND state='pending'",
+                    [&view.id],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
     }
 
     #[test]

@@ -716,6 +716,14 @@ only the selected route, one-use state, selected human and five-minute shell
 cookie. Query data and forms cannot choose a client, credential, verifier or
 target. Raw codes and tokens never appear in the page or response.
 
+Each round first shows **Google authorization 1 of 3**, **2 of 3** or **3 of 3**,
+with a **Continue to Google** link. Google may show an account chooser, a sign-in
+confirmation and a permission page within each round. Those screens are not
+additional rounds. Complete the three rounds in the same tab; the progress
+pages do not renew the original five-minute deadline. Opening the setup page
+in another tab during authorization returns **Qualification already in progress**
+without replacing the active campaign cookie or state.
+
 An authenticated qualification refusal keeps HTTP 403 and reports only a closed
 native stage/outcome on a no-store page. Code collection, credential loading,
 PKCE rejection/recovery, client authentication, exchange, account identity,

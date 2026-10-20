@@ -20,6 +20,7 @@ import ops.ProviderConformance
 import ops.OAuthRegistration
 import ops.Release
 import ops.GkeRelease
+import ops.NativeEnrollment
 import ops.SecretRetirement
 import ops.UiDependency
 
@@ -67,6 +68,8 @@ run! = |args| match args {
 	["release-step", snapshot] => Release.run(snapshot)
 	["gke-release"] => GkeRelease.run!(call!)
 	["gke-release-build"] => GkeRelease.build!(call!)
+	["native-enrollment"] => NativeEnrollment.run!(call!)
+	["native-enrollment-qualify"] => NativeEnrollment.qualify!(call!)
 	["secret-retirement-step", snapshot] => SecretRetirement.run(snapshot)
 	["ui-dependency"] => UiDependency.install!(call!)
 	["cli"] => Verify.cli!(call!)

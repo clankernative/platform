@@ -198,32 +198,41 @@ impl ArtifactShellSigner {
         now: i64,
     ) -> Result<super::management::Attestation> {
         proof.require_management_authentication()?;
-        let state = self
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
-        let selected = management_selection(&state.selected, view)?;
-        let reference = &selected.shell_attestation;
-        let key = state
-            .keys
-            .as_ref()
-            .context("OAuth shell key provider missing")?
-            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
-        ensure!(
-            key.binding == reference.binding
-                && key.version == reference.version
-                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
-            "OAuth management key changed"
-        );
-        let at = proof.observe_current(now)?;
-        super::management::Attestation::sign(
-            view,
-            proof,
-            identity,
-            session,
-            &key.bytes,
-            key.version,
-            at,
+        let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
+        super::native_management::with_current_original(
+            &intent,
+            super::native_management::Phase::Signature,
+            now,
+            |role, original| {
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("OAuth shell selection lock poisoned"))?;
+                let selected = management_selection(&state.selected, view)?;
+                let reference = &selected.shell_attestation;
+                let key = state
+                    .keys
+                    .as_ref()
+                    .context("OAuth shell key provider missing")?
+                    .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+                ensure!(
+                    key.binding == reference.binding
+                        && key.version == reference.version
+                        && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+                    "OAuth management key changed"
+                );
+                let at = proof.observe_current(now)?;
+                original.check(role)?;
+                super::management::Attestation::sign(
+                    view,
+                    proof,
+                    identity,
+                    session,
+                    (&key.bytes, key.version),
+                    at,
+                    (role, original),
+                )
+            },
         )
     }
 
@@ -4185,14 +4194,22 @@ pub(super) mod tests {
             let refused = signer.attest_management(&view, &actual, &identity, session.clone(), 104);
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
-            let refused = Attestation::sign(
-                &view,
-                &actual,
-                &identity,
-                session.clone(),
-                &[11; 32],
-                "11".into(),
+            super::super::native_management::reserve_shell(&intent, 104)?;
+            let refused = super::super::native_management::with_current_original(
+                &intent,
+                super::super::native_management::Phase::Signature,
                 104,
+                |role, original| {
+                    Attestation::sign(
+                        &view,
+                        &actual,
+                        &identity,
+                        session.clone(),
+                        (&[11; 32], "11".into()),
+                        104,
+                        (role, original),
+                    )
+                },
             );
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(
@@ -4202,6 +4219,7 @@ pub(super) mod tests {
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
+            super::super::native_management::reserve_shell(&intent, 104)?;
             let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 intent,
                 identity.email.clone(),

@@ -121,6 +121,26 @@
           "features": [],
           "kind": "normal",
           "local_path": null,
+          "name": "futures-executor",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "futures-util",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
           "name": "getrandom",
           "optional": false,
           "rename": null,
@@ -149,6 +169,19 @@
         {
           "default_features": true,
           "features": [
+            "http1",
+            "server"
+          ],
+          "kind": "normal",
+          "local_path": null,
+          "name": "hyper",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [
             "tokio"
           ],
           "kind": "normal",
@@ -156,7 +189,7 @@
           "name": "hyper-util",
           "optional": false,
           "rename": null,
-          "target": "cfg(target_os = \"linux\")"
+          "target": null
         },
         {
           "default_features": false,
@@ -588,6 +621,13 @@
           ],
           "name": "day2-native-enrollment",
           "source": "crates/day2/src/bin/day2-native-enrollment.rs"
+        },
+        {
+          "kind": [
+            "bin"
+          ],
+          "name": "day2-native-enrollment-qualify",
+          "source": "crates/day2/src/bin/day2-native-enrollment-qualify.rs"
         },
         {
           "kind": [

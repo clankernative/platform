@@ -30,7 +30,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore};
 
 #[path = "web_live.rs"]
-mod live;
+pub(crate) mod live;
 
 struct Grant {
     hash: String,
@@ -121,7 +121,7 @@ fn page_content_or_acknowledgement(
     }
 }
 
-struct Host {
+pub(crate) struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
     live_ticks: Arc<dyn LiveTicks>,
@@ -469,6 +469,17 @@ impl LocalServer {
         Admission(self.host.admitting.clone())
     }
 
+    pub(crate) fn into_native_parts(
+        mut self,
+        admission: Arc<AtomicBool>,
+    ) -> Result<(Arc<Host>, TcpListener)> {
+        ensure!(self.host.oauth.is_some(), "native App receiver missing");
+        Arc::get_mut(&mut self.host)
+            .context("native App startup host escaped")?
+            .admitting = admission;
+        Ok((self.host, self.listener))
+    }
+
     pub(crate) fn mount_oauth(
         &mut self,
         receiver: Arc<crate::oauth::shell_transport::AppApprovalReceiver>,
@@ -485,30 +496,49 @@ impl LocalServer {
     }
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let background = tokio::spawn(crate::host_loop::run(
-            self.host.runtime.clone(),
-            self.host.clock.clone(),
-            self.host.live_ticks.clone(),
-            self.host.admitting.clone(),
-            stopped,
-        ));
+        let background = if self.host.oauth.is_none() {
+            Some(tokio::spawn(crate::host_loop::run(
+                self.host.runtime.clone(),
+                self.host.clock.clone(),
+                self.host.live_ticks.clone(),
+                self.host.admitting.clone(),
+                stopped,
+            )))
+        } else {
+            None
+        };
         let admitting = self.host.admitting.clone();
         let shutdown_admission = admitting.clone();
         let shutdown_stop = stop.clone();
-        let router = Router::new().fallback(handle).with_state(self.host);
-        let result = axum::serve(self.listener, router)
-            .with_graceful_shutdown(async move {
-                shutdown.await;
-                shutdown_admission.store(false, Ordering::Release);
-                let _ = shutdown_stop.send(true);
-            })
-            .await;
+        let shutdown = async move {
+            shutdown.await;
+            shutdown_admission.store(false, Ordering::Release);
+            let _ = shutdown_stop.send(true);
+        };
+        let result = if self.host.oauth.is_some() {
+            crate::oauth::native_http::serve(
+                crate::oauth::native_http::Endpoint::App(self.host),
+                self.listener,
+                MAX_QUEUED,
+                admitting.clone(),
+                shutdown,
+            )
+            .await
+        } else {
+            let router = Router::new().fallback(handle).with_state(self.host);
+            axum::serve(self.listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await
+                .map_err(Into::into)
+        };
         // Also stop after an unexpected server exit. Already admitted requests
         // and blocking native calls may still finish; shutdown does not undo
         // their transactions or interrupt external calls. Await pump settlement.
         admitting.store(false, Ordering::Release);
         let _ = stop.send(true);
-        background.await??;
+        if let Some(background) = background {
+            background.await??;
+        }
         result?;
         Ok(())
     }
@@ -518,7 +548,7 @@ impl LocalServer {
 const QUEUE_WAIT: Duration = Duration::from_secs(10);
 
 /// Requests that may wait for a permit at once; beyond this, refuse immediately.
-const MAX_QUEUED: usize = 256;
+pub(crate) const MAX_QUEUED: usize = 256;
 
 /// Wait in arrival order for an execution permit. Tokio's semaphore serves waiters
 /// first come, first served, so a burst queues instead of being refused; only a
@@ -535,10 +565,12 @@ async fn queued_permit(host: &Host, wait: Duration) -> Option<tokio::sync::Owned
         return None;
     }
     let _waiting = Waiting(&host.queued);
-    tokio::time::timeout(wait, host.capacity.clone().acquire_owned())
-        .await
-        .ok()?
-        .ok()
+    crate::oauth::native_http::timer(|| {
+        tokio::time::timeout(wait, host.capacity.clone().acquire_owned())
+    })
+    .await
+    .ok()?
+    .ok()
 }
 
 /// Health answers `200 OK` with an empty body, not `204`: a Google Cloud load
@@ -556,6 +588,33 @@ fn health_response(method: &Method, ready: bool) -> Response {
 }
 
 async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
+    handle_native(host, request).await
+}
+
+pub(crate) fn native_scopes(
+    host: &Host,
+) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+    host.oauth
+        .as_ref()
+        .context("native OAuth receiver missing")?
+        .native_scopes()
+}
+
+pub(crate) async fn native_pump(
+    host: Arc<Host>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    crate::host_loop::run_on_owner(
+        host.runtime.clone(),
+        host.clock.clone(),
+        host.live_ticks.clone(),
+        host.admitting.clone(),
+        stopped,
+    )
+    .await
+}
+
+pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> Response {
     host.credential_effects
         .clone()
         .run_async(handle_inner(host, request))
@@ -639,7 +698,8 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
         Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
         Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
     };
-    let response = crate::managed_credentials::effects::spawn_blocking(move || {
+    let native = host.oauth.is_some();
+    let dispatch = move || {
         let _permit = permit;
         let at = if parts
             .uri
@@ -714,10 +774,16 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             response.status().as_u16(),
         )?;
         Ok::<_, anyhow::Error>(response)
-    })
-    .await;
+    };
+    let response = if native {
+        dispatch()
+    } else {
+        crate::managed_credentials::effects::spawn_blocking(dispatch)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("web dispatch task failed")))
+    };
     let response = match response {
-        Ok(Ok(response)) => response,
+        Ok(response) => response,
         _ => transport_error(
             json,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -768,10 +834,12 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     } else {
         200_000
     };
-    let body = match tokio::time::timeout(
-        Duration::from_secs(3),
-        to_bytes(request.into_body(), maximum),
-    )
+    let body = match crate::oauth::native_http::timer(|| {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            to_bytes(request.into_body(), maximum),
+        )
+    })
     .await
     {
         Ok(Ok(body)) => body,
@@ -791,7 +859,8 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
     let Ok(permit) = capacity.clone().try_acquire_owned() else {
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
-    match tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+    let native = host.oauth.is_some();
+    let dispatch = move || -> Result<Vec<u8>> {
         let _permit = permit;
         let at = host.wall_seconds()?;
         host.runtime.web_event(at, None, "app_call", 102)?;
@@ -799,12 +868,16 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
         host.runtime
             .web_event(at, None, "app_call", if result.is_ok() { 200 } else { 403 })?;
         result
-    })
-    .await
-    {
-        Ok(Ok(body)) => {
-            secure(([(header::CONTENT_TYPE, "application/json")], body).into_response())
-        }
+    };
+    let response = if native {
+        dispatch()
+    } else {
+        tokio::task::spawn_blocking(dispatch)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("app call task failed")))
+    };
+    match response {
+        Ok(body) => secure(([(header::CONTENT_TYPE, "application/json")], body).into_response()),
         _ => secure((StatusCode::FORBIDDEN, "{\"error\":\"app_call_refused\"}").into_response()),
     }
 }

@@ -11,11 +11,15 @@ mod birth;
 mod channel;
 #[cfg(target_os = "linux")]
 mod issuer_peer;
+#[cfg(target_os = "linux")]
+mod operations;
 mod owner;
 mod policy;
 #[cfg(target_os = "linux")]
 mod process;
 mod protocol;
+#[cfg(target_os = "linux")]
+mod qualification;
 mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;
@@ -61,11 +65,33 @@ pub(crate) use owner::{
 pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if issuer { service::run() } else { birth::run() }
+        if issuer {
+            service::run().map_err(|error| error.context("native_enrollment_issuer"))
+        } else {
+            operations::run()
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = issuer;
+        anyhow::bail!("native_enrollment_platform_unsupported")
+    }
+}
+
+pub(crate) fn qualify(role: &str) -> anyhow::Result<serde_json::Value> {
+    #[cfg(target_os = "linux")]
+    {
+        let role = match role {
+            "app_host" => NativeRole::AppHost,
+            "security_shell" => NativeRole::SecurityShell,
+            "epoch_controller" => NativeRole::EpochController,
+            _ => anyhow::bail!("native_qualification_role_required"),
+        };
+        qualification::run(role)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = role;
         anyhow::bail!("native_enrollment_platform_unsupported")
     }
 }
