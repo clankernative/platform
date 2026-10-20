@@ -143,9 +143,10 @@ schema, scope and artifact while permitting ordinary App row changes. It
 validates DATA only; a caller Connection cannot construct a native owner.
 
 Positive bootstrap/serving requires current storage authority under the accepted
-mutator/delegation trust boundary and provider durability contract. The selected engineering profile is zonal
-pd-balanced storage with ext4 and the trusted Controller/node/kernel/CSI/block
-path. The user accepted the Google-managed Firebase Rules service agent as a
+mutator/delegation trust boundary and provider durability contract. The selected
+engineering profile is zonal pd-balanced storage with ext4 and the trusted
+Controller/node/kernel/CSI/block path. For the current canary instance, the user
+accepted the Google-managed Firebase Rules service agent as a
 trusted writer/impersonation path, and confirmed Chander, Sebastian and
 internal-tools-infra as governance roots. That decision requests no IAM changes;
 the earlier v2 IAM proposal remains unapplied. The storage-access, impersonation
