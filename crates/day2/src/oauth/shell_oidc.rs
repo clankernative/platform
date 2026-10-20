@@ -1263,11 +1263,19 @@ impl GoogleOidc {
                     bundle.profile == expected_profile,
                     "Google baseline profile changed"
                 );
-                let token = self.exchange.exchange(
-                    code,
-                    &bundle.baseline.verifier,
-                    &self.redirect_uri,
-                    &self.client_id,
+                let token = super::native_management::with_consumer(
+                    &flight.original.intent,
+                    super::native_management::Phase::ShellAuthentication,
+                    now,
+                    |current| {
+                        current.arm()?;
+                        self.exchange.exchange(
+                            code,
+                            &bundle.baseline.verifier,
+                            &self.redirect_uri,
+                            &self.client_id,
+                        )
+                    },
                 )?;
                 let at = Self::owned_now(&flight.original, now)?;
                 let baseline =
@@ -1295,11 +1303,19 @@ impl GoogleOidc {
                     pending.profile == expected_profile,
                     "Google fresh profile changed"
                 );
-                let token = self.exchange.exchange(
-                    code,
-                    &pending.fresh.verifier,
-                    &self.redirect_uri,
-                    &self.client_id,
+                let token = super::native_management::with_consumer(
+                    &flight.original.intent,
+                    super::native_management::Phase::ShellAuthentication,
+                    now,
+                    |current| {
+                        current.arm()?;
+                        self.exchange.exchange(
+                            code,
+                            &pending.fresh.verifier,
+                            &self.redirect_uri,
+                            &self.client_id,
+                        )
+                    },
                 )?;
                 let at = Self::owned_now(&flight.original, now)?;
                 let fresh =

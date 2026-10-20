@@ -755,6 +755,7 @@ pub(crate) enum Phase {
     DisconnectCommit,
     Session,
     Signature,
+    ShellAuthentication,
     Verification,
     Response,
     ResponseComplete,
@@ -1146,7 +1147,7 @@ pub(crate) fn with_consumer<T>(
     operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
 ) -> Result<T> {
     let role = match phase {
-        Phase::Session | Phase::Signature => NativeRole::SecurityShell,
+        Phase::Session | Phase::Signature | Phase::ShellAuthentication => NativeRole::SecurityShell,
         Phase::StartCommit
         | Phase::DispatchCommit
         | Phase::ProviderSend
@@ -1172,6 +1173,7 @@ fn serving_use(phase: Phase, role: NativeRole) -> Result<ServingUse> {
         Phase::DisconnectCommit => ServingUse::DisconnectCommit,
         Phase::Session => ServingUse::Session,
         Phase::Signature => ServingUse::Signature,
+        Phase::ShellAuthentication => ServingUse::Authentication,
         Phase::Verification => ServingUse::Verification,
         Phase::Callback => ServingUse::Callback,
         Phase::Response => ServingUse::Response,
@@ -1296,10 +1298,12 @@ fn with_current_for_role<T>(
                 owners.kind == NativeRole::AppHost,
                 "native phase requires App owner"
             ),
-            Phase::Session | Phase::Signature | Phase::ShellFlow => ensure!(
-                owners.kind == NativeRole::SecurityShell,
-                "native phase requires Shell owner"
-            ),
+            Phase::Session | Phase::Signature | Phase::ShellFlow | Phase::ShellAuthentication => {
+                ensure!(
+                    owners.kind == NativeRole::SecurityShell,
+                    "native phase requires Shell owner"
+                )
+            }
             _ => {}
         }
         let stored = owners
@@ -1831,8 +1835,8 @@ mod tests {
     }
 
     #[test]
-    fn simulated_original_and_serving_phase_cannot_supply_the_native_google_producer() -> Result<()>
-    {
+    fn simulated_original_and_serving_phase_cannot_supply_the_native_management_producer()
+    -> Result<()> {
         let world = super::super::simulation::World::new(454);
         super::super::effects::scope(world, || -> Result<()> {
             let intent = original_intent("native-google-supplier-required", 305)?;
@@ -1869,6 +1873,30 @@ mod tests {
                 assert!(!entered.get());
             }
             with_consumer(&intent, Phase::Session, 5, |_| Ok(()))
+        })
+    }
+
+    #[test]
+    fn provider_authentication_scope_cannot_become_a_session_or_signature() -> Result<()> {
+        let world = super::super::simulation::World::new(457);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("provider-only-scope", 305)?;
+            reserve_shell(&intent, 5)?;
+            assert!(
+                with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+                    current.require_management_producer(&intent)
+                })
+                .is_err()
+            );
+            assert!(
+                with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+                    current.require_signature(&intent)
+                })
+                .is_err()
+            );
+            with_consumer(&intent, Phase::ShellAuthentication, 5, |current| {
+                current.check()
+            })
         })
     }
 
@@ -2710,7 +2738,10 @@ pub(crate) mod fixtures {
                 .as_mut()
                 .context("native simulation supplier missing")?;
             let kind = expected.unwrap_or_else(|| match phase {
-                Phase::ShellFlow | Phase::Session | Phase::Signature => NativeRole::SecurityShell,
+                Phase::ShellFlow
+                | Phase::Session
+                | Phase::Signature
+                | Phase::ShellAuthentication => NativeRole::SecurityShell,
                 Phase::Response => {
                     if fixture
                         .originals
