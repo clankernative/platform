@@ -1,7 +1,7 @@
 //! Google OIDC for the security shell. IAP identifies incoming requests; the
-//! owned two-phase flow verifies issuer ordering. Genuine native original
-//! lifetime/current role/epoch/final settlement are still required, and the
-//! production post-Pending proof guard remains closed until qualified.
+//! owned two-phase flow verifies issuer ordering. Production management consumes
+//! genuine native original, role, epoch and final consumer scopes; provider
+//! observations alone cannot create those owners or authenticate a session.
 
 use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
