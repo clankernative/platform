@@ -3,25 +3,21 @@
 //! A successful exchange alone is neither provider P3 nor a serving writer.
 
 #[cfg(target_os = "linux")]
-mod peer;
-pub(super) mod wire;
-
+use super::storage_peer_native::Peer;
 #[cfg(target_os = "linux")]
 use super::{
     channel::{Channel, StorageListener},
     protocol,
 };
+#[cfg(target_os = "linux")]
+use crate::security_epoch::native_enrollment::storage_peer_wire::Body;
+use crate::security_epoch::native_enrollment::storage_peer_wire::{Exchange, StageStatement};
 use crate::security_epoch::{
     AppPreparedFile, CurrentPreparedFilePhase, PreparedFileProjection,
     native_clock::NativeAcquisition, native_enrollment::EnrolledRoleStage,
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy};
-#[cfg(target_os = "linux")]
-use peer::Peer;
-#[cfg(target_os = "linux")]
-use wire::Body;
-use wire::{Exchange, StageStatement};
 
 pub(crate) struct InitialHolderServer<'file, 'role> {
     phase: CurrentPreparedFilePhase<'file, 'role>,

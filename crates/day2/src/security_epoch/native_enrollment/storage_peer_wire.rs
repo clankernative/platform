@@ -1,7 +1,7 @@
 //! Purpose-bound initial-holder wire DATA. None of these values can adopt a
 //! native stage, process handle, prepared file, first holder or writer.
 
-use super::super::{
+use super::{
     NativeRole,
     policy::{EnrollmentPolicy, decode_key},
     protocol::{self, IssuerCertificate, ProcessData, SignedStage},
