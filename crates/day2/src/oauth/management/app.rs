@@ -902,12 +902,19 @@ pub(in crate::oauth) struct StartGuard<'a> {
     session: &'a Digest,
 }
 
-fn require_connect_intent(view: &View, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+fn require_connect_intent(
+    view: &View,
+    intent: &crate::oauth::connect::ConnectIntent,
+) -> Result<()> {
     ensure!(
-        view.action == Action::Connect && view.fence.is_none()
-            && intent.attempt == view.id && intent.slot == view.slot.as_str()
-            && intent.owner == view.human && intent.expires_at == view.expires_at
-            && intent.expected_generation.is_none() && intent.expected_epoch == 1
+        view.action == Action::Connect
+            && view.fence.is_none()
+            && intent.attempt == view.id
+            && intent.slot == view.slot.as_str()
+            && intent.owner == view.human
+            && intent.expires_at == view.expires_at
+            && intent.expected_generation.is_none()
+            && intent.expected_epoch == 1
             && intent.proposed_generation == 1,
         "OAuth consumer original intent or slot/version changed"
     );
@@ -915,7 +922,10 @@ fn require_connect_intent(view: &View, intent: &crate::oauth::connect::ConnectIn
 }
 
 impl StartGuard<'_> {
-    pub(in crate::oauth) fn require_intent(&self, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+    pub(in crate::oauth) fn require_intent(
+        &self,
+        intent: &crate::oauth::connect::ConnectIntent,
+    ) -> Result<()> {
         require_connect_intent(self.view, intent)
     }
 
@@ -959,7 +969,10 @@ pub(in crate::oauth) struct FinishGuard<'a> {
 }
 
 impl FinishGuard<'_> {
-    pub(in crate::oauth) fn require_intent(&self, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+    pub(in crate::oauth) fn require_intent(
+        &self,
+        intent: &crate::oauth::connect::ConnectIntent,
+    ) -> Result<()> {
         require_connect_intent(self.view, intent)
     }
 
@@ -1273,8 +1286,18 @@ mod tests {
             let db = store::open(fixture.manager.runtime.db())?;
             let (intent_a, _) = fixture.manager.context(&db, &a.id)?;
             let (intent_b, _) = fixture.manager.context(&db, &b.id)?;
-            let start = StartGuard { manager: &fixture.manager, view: &a, identity: &fixture.identity, session: &session };
-            let finish = FinishGuard { manager: &fixture.manager, view: &a, identity: &fixture.identity, session: &session };
+            let start = StartGuard {
+                manager: &fixture.manager,
+                view: &a,
+                identity: &fixture.identity,
+                session: &session,
+            };
+            let finish = FinishGuard {
+                manager: &fixture.manager,
+                view: &a,
+                identity: &fixture.identity,
+                session: &session,
+            };
             start.require_intent(&intent_a)?;
             finish.require_intent(&intent_a)?;
             assert!(start.require_intent(&intent_b).is_err());

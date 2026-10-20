@@ -283,7 +283,6 @@ pub(super) fn begin_prepared(
     now: i64,
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
-    guard.require_intent(intent)?;
     callback.verify(intent)?;
     begin_inner(db, intent, Some(callback), Some((exchange, verifier)), now)
 }
@@ -308,6 +307,7 @@ pub(super) fn begin_managed(
     guard: &super::management::app::StartGuard<'_>,
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
+    guard.require_intent(intent)?;
     callback.verify(intent)?;
     guard.with_current(now, |current| {
         begin_inner_checked(

@@ -691,7 +691,10 @@ impl Sink {
         for ((role, _), binding) in bindings.iter() {
             // Terminal exclusion is not a new action. It must not depend on
             // acquiring a still-current stage or a successful clock read.
-            let _ = binding.effects.clone().run(|| refuse_original(&binding.intent, *role));
+            let _ = binding
+                .effects
+                .clone()
+                .run(|| refuse_original(&binding.intent, *role));
         }
     }
 
@@ -747,9 +750,15 @@ fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {
     }
     OWNERS.with(|owners| {
         let mut owners = owners.try_borrow_mut()?;
-        let owners = owners.get_mut(intent.app()).context("native original executor missing")?;
+        let owners = owners
+            .get_mut(intent.app())
+            .context("native original executor missing")?;
         ensure!(owners.kind == kind, "native terminal owner changed");
-        owners.originals.get_mut(intent.attempt()).context("native terminal original missing")?.refuse();
+        owners
+            .originals
+            .get_mut(intent.attempt())
+            .context("native terminal original missing")?
+            .refuse();
         Ok(())
     })
 }
@@ -1336,8 +1345,12 @@ pub(crate) mod fixtures {
     pub(super) fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {
         FIXTURE.with(|slot| {
             let mut slot = slot.try_borrow_mut()?;
-            slot.as_mut().context("fixture executor missing")?.originals
-                .get_mut(&(kind, intent.attempt().into())).context("fixture original missing")?.refuse();
+            slot.as_mut()
+                .context("fixture executor missing")?
+                .originals
+                .get_mut(&(kind, intent.attempt().into()))
+                .context("fixture original missing")?
+                .refuse();
             Ok(())
         })
     }

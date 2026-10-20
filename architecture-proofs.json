@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:50d5a10cb6c5a8bb649dd754c8a9a648620a9dbd82ef12abfc88898e4046f726",
+      "fingerprint": "sha256:15a7702c381b598841803c8723cac7b4a821839de3ffba3a2ba3c4d847642a1d",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -93,12 +93,54 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "Consumer",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_consumer < T > (intent : & FreshIntent , phase : Phase , wall : i64 , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "pub (super) fn with_current < T > (& self , operation : impl FnOnce () -> T) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_consumer < T > (intent : & FreshIntent , phase : Phase , wall : i64 , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "OriginalPhase",
       "owning_children": [],
       "methods": [
         "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >",
-      "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >",
-      "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >",
+        "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >",
+        "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >",
+        "fn refuse (& mut self)",
         "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
       ],
       "factories": [
@@ -117,16 +159,20 @@
           "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
         },
         {
-      "owner": "OriginalPhase < '_ >",
-      "signature": "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >"
-    },
-    {
-      "owner": "OriginalPhase < '_ >",
-      "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
-    },
-    {
-      "owner": "OriginalPhase < '_ >",
-      "signature": "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >"
+          "owner": "OriginalPhase < '_ >",
+          "signature": "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >"
         },
         {
           "owner": "OriginalPhase < '_ >",
@@ -142,7 +188,7 @@
       "type_name": "RoleStage",
       "owning_children": [],
       "methods": [
-      "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >",
+        "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
@@ -179,19 +225,19 @@
           "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
         },
         {
-      "owner": "RoleStage < 'role >",
-      "signature": "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >"
-    },
-    {
-      "owner": "RoleStage < 'role >",
+          "owner": "RoleStage < 'role >",
+          "signature": "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >"
+        },
+        {
+          "owner": "RoleStage < 'role >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
         },
         {
-      "owner": "RoleStage < 'role >",
+          "owner": "RoleStage < 'role >",
           "signature": "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"
         },
         {
-      "owner": "RoleStage < 'role >",
+          "owner": "RoleStage < 'role >",
           "signature": "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
         }
       ],
