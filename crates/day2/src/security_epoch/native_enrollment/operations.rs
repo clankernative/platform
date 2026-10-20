@@ -2,7 +2,7 @@
 //! The workflow sees no key, certificate, PID or transferable native owner.
 
 use crate::automation::{self, Request};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{path::Path, time::Duration};
@@ -13,6 +13,7 @@ struct Empty {}
 
 pub(super) fn runner() -> Result<std::path::PathBuf> {
     automation::checked_runner(Path::new("/usr/local/lib/day2/day2-workflows"))
+        .context("native_enrollment_runner")
 }
 
 pub(super) fn empty(request: &Request) -> Result<()> {

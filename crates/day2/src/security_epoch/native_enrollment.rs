@@ -39,7 +39,7 @@ pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
         if issuer {
-            service::run()
+            service::run().map_err(|error| error.context("native_enrollment_issuer"))
         } else {
             operations::run()
         }
