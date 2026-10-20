@@ -64,6 +64,10 @@ with the actual consumer-side evidence before claiming a particular consumer
 scope completed. A known native read or key retrieval can also be followed by
 product-level refusal; release and acknowledgement do not mean OAuth approval
 or authentication acceptance. Retain the actual product outcome separately.
+Bindings identify selected purpose/original DATA, not unique native phase or
+invocation IDs. Equal hashes alone cannot establish that two records describe
+the same request; retain the actual consumer original/connection evidence and
+executor context for any such claim.
 The App storage binding wraps the original serving binding and
 completion request under `day2-current-active-app-storage-v1`; the Shell uses its
 actual serving request binding directly. All final snapshot commitments reuse
