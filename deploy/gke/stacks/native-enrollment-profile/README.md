@@ -38,6 +38,11 @@ host, default container and same-role peer labels. It denies trace/control,
 process memory/environment and unrelated files. It grants no blanket file rule,
 mount or administration capability. The required issuer binary can execute
 itself for its private child; containerd and client code are read-only.
+Its supervised private Roc recipe uses only the fixed
+`/usr/local/lib/day2/day2-workflows` executable and read-only
+`/usr/local/lib/day2/day2-workflows.json` source/toolchain manifest. No adjacent
+file read or executable glob is granted. S1 checks the admitted bytes before
+starting that runner; path permission is not code admission.
 Fixed configuration, issuer/storage directories, public TLS roots, projected
 Kubernetes identity and network socket classes support the existing S1 adapters.
 Provider endpoints and current authority remain enforced by those adapters.
@@ -72,6 +77,10 @@ be loaded in enforce mode. ConfigMap content changes update the Pod template
 and reload the policy on every selected node. A reboot/replacement starts a new
 loader Pod. Require one desired/Ready loader on this single-node pool before
 starting the native participants; a missing Localhost profile refuses startup.
+The root annotation binds the complete desired DaemonSet spec. Updating that
+spec marks the controller-owned annotation map computed, avoiding the pinned
+provider's retention of its previous template-generation value. Both a clean
+create and a subsequent policy update were applied and read back successfully.
 The parser emits a cache-interface warning on the qualified node even with
 cache use disabled. Successful loading, enforce-mode readback, actual required
 observations and forbidden-path denial were checked separately.

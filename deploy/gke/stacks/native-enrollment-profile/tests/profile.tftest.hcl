@@ -28,6 +28,9 @@ run "scoped_loader_has_only_policy_admin_and_no_workload_credentials" {
   assert {
     condition = (
       strcontains(local.policy, "ptrace (read) peer=unconfined,") &&
+      strcontains(local.policy, "/usr/local/lib/day2/day2-workflows rix,") &&
+      strcontains(local.policy, "/usr/local/lib/day2/day2-workflows.json r,") &&
+      !strcontains(local.policy, "/usr/local/lib/day2/**") &&
       strcontains(local.policy, "deny ptrace (trace,tracedby),") &&
       strcontains(local.policy, "deny /proc/@{PIDS}/{mem,environ,cmdline,stack,syscall,io} rw,") &&
       !strcontains(local.policy, "\n  file,") &&

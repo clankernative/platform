@@ -10,6 +10,9 @@ profile day2-native-enrollment flags=(attach_disconnected,mediate_deleted) {
 
   # Same binary is the provisioner and its private issuer child.
   /usr/local/bin/day2-native-enrollment rix,
+  # Fixed admitted private Roc runner and its checked source/toolchain manifest.
+  /usr/local/lib/day2/day2-workflows rix,
+  /usr/local/lib/day2/day2-workflows.json r,
   @{CLIENT_EXECUTABLES} r,
   /usr/bin/containerd r,
   /usr/lib/systemd/systemd r,
