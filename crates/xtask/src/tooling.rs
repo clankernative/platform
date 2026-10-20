@@ -192,7 +192,7 @@ pub fn configure_tofu(root: &Path, requested: Option<PathBuf>) -> Result<PathBuf
     Ok(path)
 }
 
-/// Generate notices from the exact locked registry inputs. Run after cargo fetch;
+/// Generate notices from the exact locked Cargo inputs. Run after cargo fetch;
 /// this includes target-specific dependencies so one notice bundle serves every
 /// supported binary. It deliberately includes more than a single target links.
 pub fn notices(root: &Path) -> Result<()> {
@@ -276,9 +276,15 @@ pub fn notices(root: &Path) -> Result<()> {
                 .unwrap_or("see supplied license file"),
             package["source"].as_str().unwrap_or_default()
         ));
-        notice.push_str(&format!(
-            "Unmodified source: https://crates.io/api/v1/crates/{name}/{version}/download\n"
-        ));
+        // A git-pinned fork is identified by the exact Source above. Its
+        // package version need not exist on crates.io; never invent that URL.
+        if package["source"].as_str()
+            == Some("registry+https://github.com/rust-lang/crates.io-index")
+        {
+            notice.push_str(&format!(
+                "Unmodified source: https://crates.io/api/v1/crates/{name}/{version}/download\n"
+            ));
+        }
         for file in &files {
             let label = file
                 .strip_prefix(directory)
