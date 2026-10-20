@@ -285,6 +285,61 @@ impl ObservedInitialImage {
     }
 }
 
+/// Read-only validation of the invariant schema/seed in a current SQLite
+/// transaction. App rows and page bytes may change after activation; the exact
+/// admitted schema and original canonical store/core/marker must not. This
+/// accepts a caller connection only as DATA validation, never as a file,
+/// provider, first-holder or current-writer constructor.
+pub(super) fn check_current_seed(
+    connection: &Connection,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+    core: &OriginalSeedCore,
+) -> Result<()> {
+    core.validate(policy, store)?;
+    ensure!(
+        schema_contract(connection)? == core.schema_contract,
+        "epoch_current_schema_changed"
+    );
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM day2_initial_security_seed",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(count == 1, "epoch_current_seed_cardinality");
+    let (stored, seed, marker): (Vec<u8>, Vec<u8>, Vec<u8>) = connection.query_row(
+        "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    ensure!(
+        stored == serde_json::to_vec(store)?
+            && seed == serde_json::to_vec(core)?
+            && marker == serde_json::to_vec(&core.marker()?)?,
+        "epoch_current_seed_changed"
+    );
+    let scope: String =
+        connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
+            row.get(0)
+        })?;
+    ensure!(
+        scope
+            == format!(
+                "{}/{}/{}",
+                core.scope.installation.as_str(),
+                core.scope.environment.as_str(),
+                core.scope.app.as_str()
+            ),
+        "epoch_current_scope_changed"
+    );
+    let authority = crate::authority_state::current(connection)?;
+    ensure!(
+        authority.artifact_id == core.artifact.as_str(),
+        "epoch_current_artifact_changed"
+    );
+    Ok(())
+}
+
 // Decode only a bounded complete immutable in-memory SQLite image. The caller
 // separately fixes its expected byte digest and selected schema/seed; no
 // filename, writable connection or native permission is accepted or returned.
@@ -755,6 +810,87 @@ pub(super) mod tests {
             "initializer committed outside the callers transaction"
         );
         assert!(!_directory.path().join(".state").exists());
+    }
+
+    #[test]
+    fn current_seed_accepts_real_app_writes_but_not_seed_schema_scope_or_artifact_substitution() {
+        let (_directory, runtime) = runtime();
+        let store = super::super::tests::selection();
+        let policy = policy(&runtime, &store);
+        let image = InitialPreparationImage::prepare(
+            &runtime,
+            &policy,
+            &store,
+            incarnations(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        let decoded = image
+            .decode_exact_readback(image.bytes(), &mut acquisition())
+            .unwrap();
+        check_current_seed(&decoded, &policy, &store, image.core()).unwrap();
+        // The native initial decoder is intentionally read-only; copy its real
+        // complete SQLite image to a new writable memory DB for this DATA test.
+        let mut live = Connection::open_in_memory().unwrap();
+        live.deserialize_read_exact(MAIN_DB, image.bytes(), image.bytes().len(), false)
+            .unwrap();
+        live.execute(
+            "INSERT INTO items(version,created_at,value) VALUES(1,0,'legitimate')",
+            [],
+        )
+        .unwrap();
+        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        for (sql, argument) in [
+            (
+                "UPDATE day2_initial_security_seed SET store=?1",
+                b"{}".to_vec(),
+            ),
+            (
+                "UPDATE day2_initial_security_seed SET core=?1",
+                b"{}".to_vec(),
+            ),
+            (
+                "UPDATE day2_initial_security_seed SET marker=?1",
+                b"{}".to_vec(),
+            ),
+        ] {
+            let tx = live.transaction().unwrap();
+            tx.execute(sql, [argument]).unwrap();
+            assert!(check_current_seed(&tx, &policy, &store, image.core()).is_err());
+            tx.rollback().unwrap();
+            check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        }
+        for sql in [
+            "CREATE TABLE forged(value TEXT)",
+            "DELETE FROM day2_initial_security_seed",
+            "UPDATE day2_meta SET value='other/scope/app' WHERE key='scope'",
+        ] {
+            let tx = live.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            assert!(
+                check_current_seed(&tx, &policy, &store, image.core()).is_err(),
+                "{sql}"
+            );
+            tx.rollback().unwrap();
+        }
+        // Even equal JSON values with a different wire spelling are refused.
+        let tx = live.transaction().unwrap();
+        tx.execute(
+            "UPDATE day2_initial_security_seed SET core=?1",
+            [serde_json::to_vec_pretty(image.core()).unwrap()],
+        )
+        .unwrap();
+        assert!(check_current_seed(&tx, &policy, &store, image.core()).is_err());
+        tx.rollback().unwrap();
+        let mut replaced = image.core().clone();
+        replaced.incarnations.database = Digest::new(b"copied backup incarnation");
+        assert!(check_current_seed(&live, &policy, &store, &replaced).is_err());
+        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        assert_eq!(
+            live.query_row("SELECT value FROM items", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "legitimate"
+        );
     }
 
     #[test]

@@ -267,6 +267,11 @@ const _: () = {
         crate::security_epoch::PreparedRetentionOutcome<'static>,
         Sync
     );
+    assert_consuming!(crate::security_epoch::AppFileContinuity);
+    assert_not_impl!(crate::security_epoch::AppFileContinuity, std::fmt::Debug);
+    assert_not_impl!(crate::security_epoch::AppFileContinuity, serde::Serialize);
+    assert_not_impl!(crate::security_epoch::AppFileContinuity, Send);
+    assert_not_impl!(crate::security_epoch::AppFileContinuity, Sync);
     assert_consuming!(crate::security_epoch::AppPreparedFile<'static, 'static>);
     assert_not_impl!(
         crate::security_epoch::AppPreparedFile<'static, 'static>,
