@@ -1,12 +1,12 @@
 //! Retain the actual successfully prepared file across later bounded phases.
 //! This owns continuity, not P3, activation, an app holder or writer authority.
 
-#[cfg(target_os = "linux")]
-use super::observe_anchored_file;
 use super::{
     FileIdentity, OriginalCreatorFd, PreparedFileProjection, PreparedInitialFile,
     ReviewedFileLayout,
 };
+#[cfg(target_os = "linux")]
+use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
@@ -254,7 +254,7 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
                         self.anchor,
                         self.file,
                         self.identity,
-                        bytes.len(),
+                        Some(bytes.len()),
                     )?;
                     let end = (offset + super::IO_CHUNK_BYTES).min(bytes.len());
                     let read =
@@ -270,7 +270,7 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
                         self.anchor,
                         self.file,
                         self.identity,
-                        bytes.len(),
+                        Some(bytes.len()),
                     )?;
                 }
                 ensure!(
@@ -283,7 +283,7 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
                     self.anchor,
                     self.file,
                     self.identity,
-                    bytes.len(),
+                    Some(bytes.len()),
                 )
             }
         })();
@@ -351,17 +351,16 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
             anyhow::bail!("original_file_platform_unsupported");
             #[cfg(target_os = "linux")]
             {
-                // Length is observed from the retained descriptor, not from the
-                // old initial image. Identity/modes/nlink/mount and fixed named
-                // leaf remain exact; this does not validate the active contents.
-                let length = usize::try_from(self.inner.file.metadata()?.len())?;
+                // Active length/content may change under legitimate writes.
+                // Identity/modes/nlink/mount and fixed named leaf remain exact;
+                // this does not validate or grant the active contents.
                 check_identity(
                     &mut self.inner.phase,
                     self.inner.directory,
                     self.inner.anchor,
                     self.inner.file,
                     self.inner.identity,
-                    length,
+                    None,
                 )
             }
         })();
@@ -397,12 +396,15 @@ fn check_identity(
     anchor: &DirectoryIdentity,
     file: &File,
     identity: &FileIdentity,
-    length: usize,
+    length: Option<usize>,
 ) -> Result<()> {
     use rustix::fs::{AtFlags, StatxFlags};
     phase.check_directory(directory, anchor)?;
     phase.acquisition().remaining()?;
-    let observed = observe_anchored_file(directory, anchor, file, length)?;
+    let observed = match length {
+        Some(length) => observe_anchored_file(directory, anchor, file, length)?,
+        None => observe_current_anchored_file(directory, anchor, file)?,
+    };
     ensure!(observed == *identity, "retained_initial_file_changed");
     let flags = StatxFlags::INO | StatxFlags::MNT_ID;
     let named = rustix::fs::statx(
