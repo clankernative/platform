@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:714e460565cbe3371616f9147a937d77511764e76342172e10f21ecd230ff63f",
+      "fingerprint": "sha256:9decbed7e0ac04f1c0246cbf6e1d976f4e3e52a24ecb711cad534186127b3104",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -71,7 +71,8 @@
       "type_name": "AppCreator",
       "owning_children": [],
       "methods": [
-        "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"
+        "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >",
+        "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
       ],
       "factories": [
         {
@@ -83,6 +84,10 @@
         {
           "owner": "AppCreator < '_ >",
           "signature": "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"
+        },
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
         }
       ],
       "proof_uses": [],
@@ -90,6 +95,48 @@
       "consuming_methods": [
         "bind"
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "PendingWriter",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self) -> Result < () >",
+        "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "fn refuse (& mut self)",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (super) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/oauth/native_management.rs",
