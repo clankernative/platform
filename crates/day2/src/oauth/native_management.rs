@@ -878,14 +878,22 @@ mod tests {
                 anyhow::bail!("controlled input refusal BEFORE COMMIT")
             });
             assert!(refused.is_err());
-            assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 0);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM receipt", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
             reserve_shell(&intent, 5)?;
             with_consumer(&intent, Phase::Session, 5, |current| {
                 let tx = db.transaction()?;
                 tx.execute("INSERT INTO receipt VALUES(1)", [])?;
                 current.commit(tx)
             })?;
-            assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM receipt", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
             Ok(())
         })
     }
