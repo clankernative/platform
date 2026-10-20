@@ -442,7 +442,7 @@
         },
         {
           "owner": null,
-          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: Option<&super::management::app::FinishGuard<'_>>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>)>) -> Result<Option<ExchangeDispatchPermit>>"
         }
       ]
     },

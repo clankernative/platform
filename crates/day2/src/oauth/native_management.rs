@@ -508,6 +508,7 @@ struct ConsumerGuard {
     intent: FreshIntent,
     role: NativeRole,
     settled: bool,
+    local: std::marker::PhantomData<Rc<()>>,
 }
 
 impl Drop for ConsumerGuard {
@@ -526,16 +527,23 @@ pub(crate) fn with_consumer<T>(
 ) -> Result<T> {
     let role = match phase {
         Phase::Session | Phase::Signature => NativeRole::SecurityShell,
-        Phase::StartCommit | Phase::DispatchCommit | Phase::ProviderSend | Phase::FinishCommit |
-        Phase::DisconnectCommit | Phase::Verification | Phase::Callback => NativeRole::AppHost,
+        Phase::StartCommit
+        | Phase::DispatchCommit
+        | Phase::ProviderSend
+        | Phase::FinishCommit
+        | Phase::DisconnectCommit
+        | Phase::Verification
+        | Phase::Callback => NativeRole::AppHost,
         _ => anyhow::bail!("native consumer purpose unsupported"),
     };
-    let mut guard = ConsumerGuard { intent: intent.clone(), role, settled: false };
+    let mut guard = ConsumerGuard {
+        intent: intent.clone(),
+        role,
+        settled: false,
+        local: std::marker::PhantomData,
+    };
     let result = with_current_original(intent, phase, wall, |role, original| {
-        let mut consumer = Consumer {
-            role,
-            original,
-        };
+        let mut consumer = Consumer { role, original };
         consumer.check()?;
         let output = operation(&mut consumer)?;
         consumer.check()?;
@@ -673,7 +681,12 @@ impl Sink {
         match intents.as_slice() {
             [] => Ok(operation()),
             [(role, binding)] => binding.effects.clone().run(|| {
-                let mut guard = ConsumerGuard { intent: binding.intent.clone(), role: *role, settled: false };
+                let mut guard = ConsumerGuard {
+                    intent: binding.intent.clone(),
+                    role: *role,
+                    settled: false,
+                    local: std::marker::PhantomData,
+                };
                 let result = with_current_for_role(
                     &binding.intent,
                     Phase::Response,
