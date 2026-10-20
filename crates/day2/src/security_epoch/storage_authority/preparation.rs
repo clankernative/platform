@@ -5,6 +5,7 @@
 use super::{NativeStorageCreationAuthority, ReviewedStorageSelection};
 use crate::security_epoch::{
     native_clock::NativeAcquisition,
+    native_enrollment::EnrolledRoleStage,
     preparation_image::InitialPreparationImage,
     seed_core::{InitialMarker, OriginalSeedCore},
 };
@@ -169,6 +170,31 @@ impl<'role> PreparedInitialFile<'role> {
     pub(crate) fn check_original(&mut self) -> Result<()> {
         self.creator
             .check_unchanged_initial_file(&self.layout, &mut self.acquisition)
+    }
+
+    /// Lend only the SAME original controller stage to the closed native peer
+    /// operation. The borrower cannot obtain a fresh clock or retain this stage
+    /// after releasing the actual file owner. The fixed peer factory must check
+    /// this file again after its message/key operation and before promotion.
+    pub(crate) fn original_controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.check_original()?;
+        #[cfg(test)]
+        if matches!(
+            self.creator.authority.issuer,
+            super::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. }
+        ) {
+            self.creator
+                .authority
+                .refuse_preparation(&mut self.acquisition);
+            anyhow::bail!("storage_native_peer_requires_enrolled_controller");
+        }
+        match &mut self.creator.authority.issuer {
+            super::StorageIssuerOwner::Native(volume) => volume.original_controller_stage(),
+            #[cfg(test)]
+            super::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
+                unreachable!("filesystem fixture cannot lend an enrolled stage")
+            }
+        }
     }
 
     pub(crate) fn projection(&mut self) -> Result<crate::security_epoch::PreparedFileProjection> {
