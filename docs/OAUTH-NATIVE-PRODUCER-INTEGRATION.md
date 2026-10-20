@@ -39,6 +39,20 @@ not independently construct an authenticated holder or writer owner.
 
 ## Producer and continuation boundary
 
+`control.security_bootstraps` is the trusted native startup selection. An app
+without a selected policy may serve prerequisite/registration HTTP on the same
+fixed executor, but installs no native owner and cannot capture or consume a
+production original. OAuth connections and epoch catalog entries alone do not
+select native enrollment or establish proof readiness. The canary's deliberate
+prerequisite-only selection is an empty bootstrap map.
+
+`Instance::native_bootstrap_for` checks the exact selected app, installation,
+environment and unambiguous policy/epoch relationship. A malformed selected
+profile refuses startup. A valid selected profile requires real S1 enrollment;
+missing operator files, issuer, placement or other enrollment failures remain
+fatal. There is no retry or fallback to prerequisite-only operation after a
+native failure. App and Shell use the same selection rule.
+
 The final implementation belongs in `oauth/shell_oidc.rs` and the actual
 management continuations, rather than returning success from the Google
 timestamp comparison. For OAuthConnect and OAuthDisconnect only, it must

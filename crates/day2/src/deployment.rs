@@ -387,15 +387,6 @@ fn initial_layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimePr
     Ok((instance_path, profile, state))
 }
 
-fn selected_native_storage(instance: &Instance, app: &str) -> bool {
-    instance.control.as_ref().is_some_and(|control| {
-        control
-            .security_bootstraps
-            .values()
-            .any(|policy| policy.scope.app.as_str() == app)
-    })
-}
-
 fn replica_lock(state: &Path, app: &str) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     day2_contracts::names::identifier(app)?;
@@ -672,7 +663,7 @@ async fn serve_configured(
             declared.edge(app)?;
         }
     }
-    let initial_storage = oauth && selected_native_storage(&declared, app);
+    let initial_storage = oauth && declared.native_bootstrap_for(app)?.is_some();
     let (instance_path, profile, state) = if initial_storage {
         initial_layout(instance_path, app)?
     } else {

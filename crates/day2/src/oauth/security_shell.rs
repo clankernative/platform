@@ -1885,6 +1885,37 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn prerequisite_only_profile_serves_health_without_native_enrollment() -> Result<()> {
+        let instance = crate::oauth::clients::tests::security_instance("workspace", true)?;
+        let mut shell = isolated_shell()?;
+        Arc::get_mut(&mut shell).unwrap().native_scopes =
+            crate::oauth::native_management::selected_scopes(&instance, None)?;
+        assert!(shell.native_scopes().is_empty());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(
+            listener,
+            1,
+            Arc::new(AtomicBool::new(true)),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get(format!("http://{address}/health/ready")).send(),
+        )
+        .await??;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn body_deadlines_and_blocking_dispatch_use_the_simulated_environment() -> Result<()> {
         let world = crate::oauth::simulation::World::new(11);

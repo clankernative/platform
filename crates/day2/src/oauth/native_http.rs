@@ -146,9 +146,6 @@ impl Endpoint {
             #[cfg(test)]
             Self::Prepared(_, _) => anyhow::bail!("nested native fixture preparation"),
         };
-        if scopes.is_empty() {
-            return Ok(());
-        } // No selected management consumer.
         super::native_management::install(&scopes, role)
     }
 

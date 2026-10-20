@@ -81,13 +81,12 @@ thread_local! {
     static ACTIVE_SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
 }
 
-/// Install only on the final HTTP executor; enrollment is the real selected
-/// native exchange. No role, origin, FD or clock comes from the HTTP request.
+/// Install only on the final HTTP executor; each explicitly selected scope
+/// requires the real native exchange. Empty selection installs no owner and
+/// cannot capture/consume an original. Errors never become empty selection.
+/// No role, origin, FD or clock comes from the HTTP request.
 pub(super) fn install(scopes: &[AuthorityScope], kind: NativeRole) -> Result<()> {
-    ensure!(
-        !scopes.is_empty() && scopes.len() <= 128,
-        "native enrollment scope capacity"
-    );
+    ensure!(scopes.len() <= 128, "native enrollment scope capacity");
     let mut selected = BTreeMap::new();
     for scope in scopes {
         let role = EnrolledProcessRoleOwner::enroll_current_thread(scope, kind)?;
@@ -133,12 +132,9 @@ pub(crate) fn prepare_initial_app_storage(
         .control
         .as_ref()
         .context("native App control missing")?;
-    let mut selected = control
-        .security_bootstraps
-        .values()
-        .filter(|policy| policy.scope.app.as_str() == metadata.app());
-    let policy = selected.next().context("native App bootstrap missing")?;
-    ensure!(selected.next().is_none(), "native App bootstrap ambiguous");
+    let policy = instance
+        .native_bootstrap_for(metadata.app())?
+        .context("native App bootstrap missing")?;
     let store = control
         .security_epochs
         .get(&policy.epoch_store.id)
@@ -278,29 +274,15 @@ pub(crate) fn selected_scopes(
         {
             continue;
         }
-        let scope = AuthorityScope {
-            installation: instance.installation.clone().try_into()?,
-            environment: instance.environment.clone().try_into()?,
-            app: app.clone().try_into()?,
+        let Some(policy) = instance.native_bootstrap_for(app)? else {
+            // A configured OAuth integration/epoch is metadata, not selection
+            // of the native owner profile. HTTP may serve prerequisites, but
+            // the empty native registry cannot capture or consume an original.
+            continue;
         };
-        ensure!(
-            instance
-                .control
-                .as_ref()
-                .context("native enrollment control missing")?
-                .security_epochs
-                .values()
-                .filter(|epoch| epoch.scope == scope)
-                .count()
-                == 1,
-            "native enrollment scope selection ambiguous"
-        );
-        scopes.push(scope);
+        scopes.push(policy.scope.clone());
     }
-    ensure!(
-        scopes.len() <= 128,
-        "native enrollment scope selection missing"
-    );
+    ensure!(scopes.len() <= 128, "native enrollment scope capacity");
     Ok(scopes)
 }
 
@@ -1204,6 +1186,49 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prerequisite_only_selection_cannot_capture_or_consume_an_original() -> Result<()> {
+        let instance = super::super::clients::tests::security_instance("workspace", true)?;
+        assert!(
+            instance
+                .apps
+                .values()
+                .any(|app| !app.oauth_connections.is_empty())
+        );
+        assert!(
+            !instance
+                .control
+                .as_ref()
+                .unwrap()
+                .security_epochs
+                .is_empty()
+        );
+        assert!(instance.native_bootstrap_for("workspace")?.is_none());
+        assert!(selected_scopes(&instance, None)?.is_empty());
+        assert!(selected_scopes(&instance, Some("workspace"))?.is_empty());
+        assert!(instance.native_bootstrap_for("unknown").is_err());
+
+        // Desired OAuth/epoch metadata is not a live native supplier. This
+        // control deliberately installs no simulated or native role/owner.
+        assert!(!simulation_installed());
+        install(
+            &selected_scopes(&instance, None)?,
+            NativeRole::SecurityShell,
+        )?;
+        let intent = original_intent("prerequisite-only", 305)?;
+        assert!(reserve_shell(&intent, 5).is_err());
+        let entered = std::cell::Cell::new(false);
+        assert!(
+            with_consumer(&intent, Phase::Session, 5, |_| {
+                entered.set(true);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!entered.get());
+        Ok(())
+    }
 
     #[test]
     fn active_app_storage_cannot_resolve_a_native_holder_from_simulated_roles() -> Result<()> {

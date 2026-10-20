@@ -110,6 +110,113 @@ mod runtime_admission_tests {
     use super::*;
     use anyhow::Context;
 
+    fn selected_profile_instance() -> Result<crate::artifact::Instance> {
+        let mut instance = crate::oauth::clients::tests::security_instance("workspace", true)?;
+        let control = instance.control.as_mut().context("fixture control")?;
+        let (alias, store) = control
+            .security_epochs
+            .iter()
+            .find(|(_, store)| store.scope.app.as_str() == "workspace")
+            .map(|(alias, store)| (alias.clone(), store.clone()))
+            .context("fixture epoch")?;
+        let mut policy = super::super::control_slot_tests::policy(&store);
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { project, .. } =
+            &store.provider;
+        policy.cluster.project = project.clone();
+        policy.epoch_store.id = alias;
+        policy.control_store.epoch_store = policy.epoch_store.clone();
+        control
+            .security_bootstraps
+            .insert("native".to_owned().try_into()?, policy);
+        crate::artifact::Instance::from_bytes(&serde_json::to_vec(&instance)?)
+    }
+
+    #[test]
+    fn explicit_native_profile_selection_cannot_downgrade_invalid_metadata() -> Result<()> {
+        let instance = selected_profile_instance()?;
+        let policy = instance
+            .native_bootstrap_for("workspace")?
+            .context("explicit native profile")?;
+        let scope = policy.scope.clone();
+        assert_eq!(
+            crate::oauth::native_management::selected_scopes(&instance, Some("workspace"))?,
+            vec![scope]
+        );
+        for mutation in [
+            "foreign_installation",
+            "foreign_environment",
+            "duplicate_policy",
+            "missing_epoch",
+            "ambiguous_epoch",
+        ] {
+            let mut invalid = instance.clone();
+            let control = invalid.control.as_mut().unwrap();
+            match mutation {
+                "foreign_installation" => {
+                    control
+                        .security_bootstraps
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .scope
+                        .installation = "foreign".to_owned().try_into()?;
+                }
+                "foreign_environment" => {
+                    control
+                        .security_bootstraps
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .scope
+                        .environment = "foreign".to_owned().try_into()?;
+                }
+                "duplicate_policy" => {
+                    let copy = control.security_bootstraps.values().next().unwrap().clone();
+                    control
+                        .security_bootstraps
+                        .insert("second".to_owned().try_into()?, copy);
+                }
+                "missing_epoch" => {
+                    control.security_epochs.remove(&policy.epoch_store.id);
+                }
+                "ambiguous_epoch" => {
+                    let copy = control.security_epochs[&policy.epoch_store.id].clone();
+                    control
+                        .security_epochs
+                        .insert("second".to_owned().try_into()?, copy);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                invalid.native_bootstrap_for("workspace").is_err(),
+                "{mutation}"
+            );
+            assert!(
+                crate::oauth::native_management::selected_scopes(&invalid, Some("workspace"))
+                    .is_err(),
+                "{mutation} became prerequisite-only startup"
+            );
+        }
+        let mut prerequisite_only = instance.clone();
+        prerequisite_only
+            .control
+            .as_mut()
+            .unwrap()
+            .security_bootstraps
+            .clear();
+        let prerequisite_only =
+            crate::artifact::Instance::from_bytes(&serde_json::to_vec(&prerequisite_only)?)?;
+        assert!(
+            prerequisite_only
+                .native_bootstrap_for("workspace")?
+                .is_none()
+        );
+        assert!(
+            crate::oauth::native_management::selected_scopes(&prerequisite_only, None)?.is_empty()
+        );
+        Ok(())
+    }
+
     #[test]
     fn selected_native_bootstrap_refuses_before_state_creation_metadata_or_database_open()
     -> Result<()> {
