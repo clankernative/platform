@@ -142,8 +142,8 @@ Current database validation checks the canonical original store, seed, marker,
 schema, scope and artifact while permitting ordinary App row changes. It
 validates DATA only; a caller Connection cannot construct a native owner.
 
-Positive bootstrap/serving still requires the actual exclusive-mutator and
-provider durability contract. The selected engineering profile is zonal
+Positive bootstrap/serving requires current storage authority under the accepted
+mutator/delegation trust boundary and provider durability contract. The selected engineering profile is zonal
 pd-balanced storage with ext4 and the trusted Controller/node/kernel/CSI/block
 path. The user accepted the Google-managed Firebase Rules service agent as a
 trusted writer/impersonation path, and confirmed Chander, Sebastian and
