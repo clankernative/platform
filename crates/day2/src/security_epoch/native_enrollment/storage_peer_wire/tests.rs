@@ -22,6 +22,11 @@ fn process(code: Digest, process: u32) -> ProcessData {
 }
 
 fn fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
+    let (policy, statement, key, _issuer) = fixture_with_issuer(role);
+    (policy, statement, key)
+}
+
+fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
     let root = KeyOwner::generate().unwrap();
     let issuer = KeyOwner::generate().unwrap();
     let key = KeyOwner::generate().unwrap();
@@ -78,6 +83,7 @@ fn fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
             },
         },
         key,
+        issuer,
     )
 }
 
@@ -335,4 +341,159 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
         )
         .is_err()
     );
+}
+
+#[test]
+fn retained_identity_data_does_not_make_an_expired_grant_current() {
+    let (policy, old, key, issuer) = fixture_with_issuer(NativeRole::AppHost);
+    let mut fresh = old.clone();
+    fresh.stage.data.origin_ns += 10_000_000_000;
+    fresh.stage.data.deadline_ns += 10_000_000_000;
+    fresh.stage.data.challenge = Digest::new(b"fresh-current-issuer-challenge");
+    fresh.stage.data.request = Digest::new(b"fresh-current-role-request");
+    fresh.stage.signature = issuer.sign("role-stage", &fresh.stage.data).unwrap();
+    fresh.original.origin_ns += 10_000_000_000;
+    fresh.original.deadline_ns += 10_000_000_000;
+    fresh.original.domain = Digest::new(b"new-original-acquisition");
+    assert!(old.same_enrollment(&fresh));
+    let now = Duration::from_secs(112);
+    assert!(
+        old.validate(
+            &policy,
+            &old.certificate,
+            NativeRole::AppHost,
+            &old.stage.data.process,
+            now
+        )
+        .is_err()
+    );
+    fresh
+        .validate(
+            &policy,
+            &old.certificate,
+            NativeRole::AppHost,
+            &old.stage.data.process,
+            now,
+        )
+        .unwrap();
+    let hello = signed(
+        &fresh,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(fresh.clone()),
+            initial: Digest::new(b"original-known-exchange"),
+            sequence: 1,
+            request: StoragePeerRequest {
+                purpose: StoragePeerPurpose::BootstrapCreate,
+                binding: Digest::new(b"exact-request"),
+            },
+            nonce: Digest::new(b"fresh-app-nonce"),
+        },
+    );
+    hello.verify(&fresh).unwrap();
+    assert!(hello.verify(&old).is_err());
+    for path in [
+        "/certificate/data/nonce",
+        "/stage/data/public_key",
+        "/stage/data/process/code",
+        "/stage/data/runtime/container/image",
+    ] {
+        let mut changed = serde_json::to_value(&fresh).unwrap();
+        *changed.pointer_mut(path).unwrap() =
+            serde_json::to_value(Digest::new(b"changed")).unwrap();
+        if path.ends_with("public_key") {
+            *changed.pointer_mut(path).unwrap() =
+                serde_json::json!(KeyOwner::generate().unwrap().public());
+        }
+        let changed: StageStatement =
+            crate::json::decode(&serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(!old.same_enrollment(&changed), "identity changed at {path}");
+    }
+}
+
+#[test]
+fn current_exchange_binds_sequence_purpose_request_and_both_fresh_grants() {
+    let exchange = CurrentExchange {
+        initial: Digest::new(b"initial"),
+        sequence: 1,
+        request: StoragePeerRequest {
+            purpose: StoragePeerPurpose::CurrentServing,
+            binding: Digest::new(b"intent-action-body"),
+        },
+        app_stage: Digest::new(b"current-app-stage"),
+        controller_stage: Digest::new(b"current-controller-stage"),
+        app_nonce: Digest::new(b"current-app-nonce"),
+        controller_nonce: Digest::new(b"current-controller-nonce"),
+    };
+    for path in [
+        "/initial",
+        "/app_stage",
+        "/controller_stage",
+        "/app_nonce",
+        "/controller_nonce",
+        "/request/binding",
+        "/request/purpose",
+        "/sequence",
+    ] {
+        let mut changed = serde_json::to_value(&exchange).unwrap();
+        *changed.pointer_mut(path).unwrap() = match path {
+            "/sequence" => serde_json::json!(2),
+            "/request/purpose" => serde_json::json!("bootstrap_complete"),
+            _ => serde_json::to_value(Digest::new(b"changed")).unwrap(),
+        };
+        let changed: CurrentExchange =
+            crate::json::decode(&serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_ne!(
+            exchange.digest().unwrap(),
+            changed.digest().unwrap(),
+            "unbound {path}"
+        );
+    }
+}
+
+#[test]
+fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
+    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let hello = signed(
+        &stage,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(stage.clone()),
+            initial: Digest::new(b"initial"),
+            sequence: 1,
+            request: StoragePeerRequest {
+                purpose: StoragePeerPurpose::BootstrapCreate,
+                binding: Digest::new(b"request"),
+            },
+            nonce: Digest::new(b"nonce"),
+        },
+    );
+    let encoded = serde_json::to_vec(&hello).unwrap();
+    decode(&encoded).unwrap().verify(&stage).unwrap();
+    for path in [
+        "/body/request",
+        "/body/app/stage/data",
+        "/body/app/original",
+    ] {
+        let mut changed = serde_json::to_value(&hello).unwrap();
+        let values = changed
+            .pointer(path)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        *changed.pointer_mut(path).unwrap() = serde_json::Value::Array(values);
+        assert!(
+            decode(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            "accepted array {path}"
+        );
+    }
+    let mut changed = serde_json::to_value(&hello).unwrap();
+    changed["body"]["request"]["extra"] = serde_json::json!(true);
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    let mut changed = serde_json::to_value(&hello).unwrap();
+    changed["body"]["sequence"] = serde_json::json!("1");
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
 }

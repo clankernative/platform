@@ -318,6 +318,38 @@ impl ControllerReceipt {
         crate::security_epoch::native_enrollment::process::live(&self.pidfd, acquisition)
     }
 
+    /// A retained original sender handle is identity/liveness continuity only;
+    /// it does not make the old grant current. Fresh phases verify a newly
+    /// signed role statement and nonce exchange separately.
+    pub(in crate::security_epoch::native_enrollment) fn check_continuity(
+        &mut self,
+        statement: &StageStatement,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_received(acquisition)?;
+            stage.check_storage_acquisition(acquisition)?;
+            let local = stage.storage_statement()?;
+            ensure!(
+                self.statement.as_ref() == Some(&statement.digest()?)
+                    && statement.certificate == local.certificate
+                    && statement.stage.data.policy == local.stage.data.policy
+                    && statement.stage.data.role == NativeRole::EpochController
+                    && local.stage.data.role == NativeRole::AppHost
+                    && statement.stage.data.process.process == self.kernel_process,
+                "storage_peer_original_controller_identity_changed"
+            );
+            self.check_received(acquisition)?;
+            stage.check_storage_acquisition(acquisition)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn check(
         &mut self,
         statement: &StageStatement,
