@@ -775,7 +775,9 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         ],
         "rustix::event" => &["poll"],
         "rustix::process" => &["getppid"],
-        "rustix::fs" => &["open", "openat", "openat2", "fstatfs", "statx", "fsync"],
+        "rustix::fs" => &[
+            "open", "openat", "openat2", "fstatfs", "statx", "fsync", "mkdirat", "fchown", "fchmod",
+        ],
         "rustix::io" => &["pread", "pwrite", "fcntl_dupfd_cloexec"],
         "nix" => &["sys", "poll"],
         "nix::sys" => &["socket"],
@@ -5697,6 +5699,9 @@ fn ambient_binding(target: &str) -> bool {
                 | "rustix::fs::fstatfs"
                 | "rustix::fs::statx"
                 | "rustix::fs::fsync"
+                | "rustix::fs::mkdirat"
+                | "rustix::fs::fchown"
+                | "rustix::fs::fchmod"
                 | "rustix::io"
                 | "rustix::io::pread"
                 | "rustix::io::pwrite"
@@ -5899,6 +5904,9 @@ fn hazard(target: &str) -> Option<&'static str> {
             | "rustix::fs::fstatfs"
             | "rustix::fs::statx"
             | "rustix::fs::fsync"
+            | "rustix::fs::mkdirat"
+            | "rustix::fs::fchown"
+            | "rustix::fs::fchmod"
             | "rustix::io::pread"
             | "rustix::io::pwrite"
             | "rustix::io::fcntl_dupfd_cloexec"
@@ -7325,6 +7333,9 @@ mod tests {
         for (module, operation) in [
             ("fs", "openat2"),
             ("fs", "fsync"),
+            ("fs", "mkdirat"),
+            ("fs", "fchown"),
+            ("fs", "fchmod"),
             ("io", "pread"),
             ("io", "pwrite"),
         ] {
