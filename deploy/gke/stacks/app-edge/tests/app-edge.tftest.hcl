@@ -4,12 +4,115 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "cloudflare" {}
 
+run "basic_runtime_identity_is_narrow_and_explicit" {
+  command = plan
+  variables {
+    runtime_identity = {
+      service_account_id             = "example-runtime"
+      token_creator_service_accounts = ["projects/directory-project/serviceAccounts/directory@directory-project.iam.gserviceaccount.com"]
+    }
+    runtime_secret_ids = []
+  }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 1
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  override_resource {
+    target = google_service_account.runtime_identity
+    values = { email = "example-runtime@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/example-runtime@example-tools.iam.gserviceaccount.com" }
+  }
+  assert {
+    condition = (
+      google_service_account.runtime_identity[0].account_id == "example-runtime" &&
+      google_service_account_iam_member.runtime_workload_identity[0].role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.runtime_workload_identity[0].member == "serviceAccount:example-tools.svc.id.goog[app-example/runtime]" &&
+      google_service_account_iam_member.runtime_token_creator["projects/directory-project/serviceAccounts/directory@directory-project.iam.gserviceaccount.com"].role == "roles/iam.serviceAccountTokenCreator" &&
+      google_service_account_iam_member.runtime_token_creator["projects/directory-project/serviceAccounts/directory@directory-project.iam.gserviceaccount.com"].member == "serviceAccount:example-runtime@example-tools.iam.gserviceaccount.com" &&
+      kubernetes_service_account_v1.runtime.metadata[0].annotations["iam.gke.io/gcp-service-account"] == "example-runtime@example-tools.iam.gserviceaccount.com" &&
+      length(google_project_iam_custom_role.app_call_signer) == 0 &&
+      length(google_project_iam_custom_role.oauth_edge_reads) == 0 &&
+      length(google_secret_manager_secret_iam_member.runtime) == 0 &&
+      length(google_secret_manager_secret_iam_member.oauth_keys) == 0
+    )
+    error_message = "Basic identity must bind only the runtime KSA and explicitly selected token-creator target, without app-call/OAuth/secret authority."
+  }
+}
+
+run "image_pusher_is_limited_to_this_repository" {
+  command = plan
+  variables {
+    image_pushers = ["serviceAccount:builder@example-tools.iam.gserviceaccount.com"]
+  }
+  override_data {
+    target = data.google_compute_backend_service.app
+    values = {
+      generated_id = 1
+      description  = "{\"kubernetes.io/service-name\":\"app-example/app\"}"
+      iap          = [{ enabled = true, oauth2_client_id = "", oauth2_client_secret = "", oauth2_client_secret_sha256 = "" }]
+    }
+  }
+  assert {
+    condition = (
+      google_artifact_registry_repository_iam_member.image_pusher["serviceAccount:builder@example-tools.iam.gserviceaccount.com"].repository == "example" &&
+      google_artifact_registry_repository_iam_member.image_pusher["serviceAccount:builder@example-tools.iam.gserviceaccount.com"].role == "roles/artifactregistry.writer" &&
+      length(google_storage_bucket_iam_member.deployer_state_bucket_object_admin) == 1 &&
+      length(kubernetes_role_binding_v1.deployer) == 1
+    )
+    error_message = "Image pushers must receive writer only on this app repository and must not gain state or Kubernetes deployer access."
+  }
+}
+
+run "rejects_malformed_basic_identity_target" {
+  command = plan
+  variables {
+    runtime_identity = {
+      service_account_id             = "example-runtime"
+      token_creator_service_accounts = ["projects/other-project/serviceAccounts/not-matching@directory-project.iam.gserviceaccount.com"]
+    }
+    backend_service_name = ""
+  }
+  expect_failures = [var.runtime_identity]
+}
+
+run "rejects_basic_identity_with_app_calls" {
+  command = plan
+  variables {
+    runtime_identity = {
+      service_account_id             = "example-runtime"
+      token_creator_service_accounts = ["projects/directory-project/serviceAccounts/directory@directory-project.iam.gserviceaccount.com"]
+    }
+    backend_service_name = ""
+    app_calls = {
+      service_account_id = "example-call"
+      issuer_backend     = ""
+      receiver_backend   = ""
+      incoming_workloads = []
+      serving_readers    = []
+      workload_name      = "day2-example"
+      serving_api_cidr   = "10.1.0.2/32"
+    }
+  }
+  override_resource {
+    target = google_service_account.app_calls
+    values = { email = "example-call@example-tools.iam.gserviceaccount.com", name = "projects/example-tools/serviceAccounts/example-call@example-tools.iam.gserviceaccount.com" }
+  }
+  expect_failures = [var.runtime_identity]
+}
+
 run "credential_api_is_disabled_by_default" {
   command = plan
   variables { backend_service_name = "" }
   assert {
-    condition     = length(kubernetes_service_v1.credential_api) == 0 && length(kubernetes_manifest.credential_api) == 0
-    error_message = "An ordinary app must not publish a managed credential backend."
+    condition = (
+      length(kubernetes_service_v1.credential_api) == 0 && length(kubernetes_manifest.credential_api) == 0 &&
+      length(google_service_account.runtime_identity) == 0 && length(google_service_account_iam_member.runtime_workload_identity) == 0 &&
+      length(google_service_account_iam_member.runtime_token_creator) == 0 && length(google_artifact_registry_repository_iam_member.image_pusher) == 0
+    )
+    error_message = "An ordinary app must have no optional identity, token-creator, image-pusher or credential-backend effects."
   }
 }
 

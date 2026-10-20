@@ -389,6 +389,16 @@ resource "google_artifact_registry_repository_iam_member" "deployer_writer" {
   member     = each.value
 }
 
+resource "google_artifact_registry_repository_iam_member" "image_pusher" {
+  for_each = var.image_pushers
+
+  project    = var.project_id
+  location   = var.region
+  repository = google_artifact_registry_repository.app.repository_id
+  role       = "roles/artifactregistry.writer"
+  member     = each.value
+}
+
 # OpenTofu state of the app's day2-app root (the instance's backend/apps/<app>.hcl).
 resource "google_storage_bucket" "state" {
   name                        = local.state_bucket_name

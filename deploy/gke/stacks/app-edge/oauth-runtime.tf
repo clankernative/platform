@@ -23,7 +23,7 @@ variable "oauth_runtime" {
 }
 
 locals {
-  runtime_google_email = var.app_calls == null && var.oauth_runtime == null ? "" : google_service_account.app_calls[0].email
+  runtime_google_email = var.runtime_identity != null ? google_service_account.runtime_identity[0].email : (var.app_calls == null && var.oauth_runtime == null ? "" : google_service_account.app_calls[0].email)
   oauth_key_ids        = var.oauth_runtime == null ? toset([]) : setunion(var.oauth_runtime.custody_secret_ids, var.oauth_runtime.attestation_secret_ids)
   oauth_runtime_contract = var.oauth_runtime == null ? {} : {
     OAUTH_APP_SERVICE_ACCOUNT = local.runtime_google_email

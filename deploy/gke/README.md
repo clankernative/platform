@@ -111,8 +111,16 @@ The network policy denies everything by default and allows only GFE health/proxy
 ranges to port 8080, kube-dns, the GKE metadata server (Workload Identity), and
 public IPv4 egress (including IAP's public signing keys); cluster ranges are
 excluded. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
-companies needing narrower external egress must supply a controlled proxy. No
-pod service account token or cloud IAM role is granted to the runtime.
+companies needing narrower external egress must supply a controlled proxy. The
+runtime receives no Google identity unless explicitly selected. `runtime_identity`
+provides a basic keyless GKE workload identity and optional token-creator grants
+on only fully qualified, named service-account targets; it cannot be combined
+with `app_calls` or `oauth_runtime` and grants no platform readiness, secret, or
+app-call capability. The selected Google `serviceAccountTokenCreator` role also
+permits signing as each named target, not just access-token creation; review
+that authority explicitly. It is never granted project-wide. `image_pushers`
+grants Artifact Registry writer only on this app's image repository; it does
+not grant workload deployment or state access.
 
 ## Installation security origin
 
