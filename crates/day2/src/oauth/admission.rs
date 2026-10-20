@@ -1131,6 +1131,7 @@ impl ArtifactApprovalAuthority {
             super::native_management::Phase::Verification,
             now,
             |current| {
+                current.arm()?;
                 let state = self
                     .state
                     .read()
@@ -1151,9 +1152,13 @@ impl ArtifactApprovalAuthority {
                 let at = super::effects::wall_time()?;
                 ensure!(at >= now, "OAuth management clock moved backwards");
                 current.check()?;
-                proof.verify(view, identity, &key.bytes, &key.version, at)
+                // Key retrieval completed under this SAME armed scope. A bad
+                // signature is a known input exclusion, not an unknown send or
+                // write; settle that known result without burning the rightful
+                // original. Retrieval/current failures still refuse it.
+                Ok(proof.verify(view, identity, &key.bytes, &key.version, at))
             },
-        )
+        )?
     }
 
     pub(super) fn management_client(&self, view: &super::management::View) -> Result<String> {

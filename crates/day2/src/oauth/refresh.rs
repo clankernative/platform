@@ -103,7 +103,6 @@ pub(crate) struct ClientCredential {
 }
 
 pub(in crate::oauth) struct InitialExchange<'a> {
-    pub db: &'a Connection,
     pub key: &'a crate::managed_credentials::crypto::KeyLease,
     pub selection: &'a usage::Selection,
     pub subject: &'a str,
@@ -123,7 +122,6 @@ impl ClientCredential {
         Option<super::account::ProviderAccount>,
     )> {
         let InitialExchange {
-            db,
             key,
             selection,
             subject,
@@ -145,9 +143,9 @@ impl ClientCredential {
                     && request.registration() == &selection.instance.registration.registration,
                 "OAuth initial credential binding changed"
             );
-            let code = request.load_code(db, key)?;
-            let verifier = request.load_verifier(db, key)?;
-            let raw = guard.send(now, || {
+            let raw = guard.send(now, |db| {
+                let code = request.load_code(db, key)?;
+                let verifier = request.load_verifier(db, key)?;
                 let response = wire
                     .client
                     .post(google::TOKEN)
@@ -185,7 +183,7 @@ impl ClientCredential {
             let mut authorization =
                 reqwest::header::HeaderValue::from_str(&format!("Bearer {}", tokens.access))?;
             authorization.set_sensitive(true);
-            let observed_account = guard.send(now, || {
+            let observed_account = guard.send(now, |_db| {
                 let response = wire
                     .client
                     .get(google::USERINFO)

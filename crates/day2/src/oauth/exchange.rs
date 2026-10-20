@@ -338,13 +338,11 @@ pub(in crate::oauth) fn authorize_managed_exchange(
     input: OutboundQualification<'_>,
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
+    current: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     guard.require_intent(input.intent)?;
-    guard.with_current(
-        super::native_management::Phase::DispatchCommit,
-        now,
-        |current| authorize_checked(db, input, now, Some((guard, current))),
-    )
+    guard.require_consumer(current, super::native_management::Phase::DispatchCommit)?;
+    authorize_checked(db, input, now, Some((guard, current)))
 }
 
 fn authorize_checked(
@@ -441,8 +439,24 @@ fn authorize_checked(
     }))
 }
 
-/// The callback parser owns the one-time claim; the code is encrypted in its
-/// transaction using the current qualified attempt and exact exchange binding.
+/// Parser-selection DATA shared by pure syntax preflight and the actual claim.
+pub(super) fn callback_parameters(
+    reviewed: &super::profiles::ReviewedBrowserCodeProfile,
+) -> super::protocol::CallbackParameters {
+    if reviewed.issuer_url == super::google::ISSUER
+        && reviewed.token_endpoint == super::google::TOKEN
+    {
+        super::catalog::Adapter::GoogleCalendar.callback_parameters()
+    } else {
+        super::protocol::CallbackParameters {
+            require_issuer: true,
+            allowed_extras: Default::default(),
+        }
+    }
+}
+
+/// The parser owns the one-time claim; the code is encrypted in its transaction
+/// using the current qualified attempt and exact exchange binding.
 pub(crate) fn handle_qualified_callback(
     db: &mut Connection,
     input: OutboundQualification<'_>,
@@ -463,16 +477,7 @@ pub(crate) fn handle_qualified_callback(
         "callback attempt mismatch"
     );
     let callback_code_ref = ingress.code_ref;
-    let parameters = if input.reviewed.issuer_url == super::google::ISSUER
-        && input.reviewed.token_endpoint == super::google::TOKEN
-    {
-        super::catalog::Adapter::GoogleCalendar.callback_parameters()
-    } else {
-        super::protocol::CallbackParameters {
-            require_issuer: true,
-            allowed_extras: Default::default(),
-        }
-    };
+    let parameters = callback_parameters(input.reviewed);
     super::outbound::handle_callback_profile(db, ingress, &parameters, current, |tx, code| {
         let binding = load_binding(tx, &qualified.intent().attempt)?
             .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
@@ -607,8 +612,10 @@ pub(in crate::oauth) fn settle_managed(
     revision: &Digest,
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
+    consumer: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<bool> {
     guard.require_intent(current.intent)?;
+    guard.require_consumer(consumer, super::native_management::Phase::FinishCommit)?;
     let qualified = super::profiles::qualify_outbound_connect(
         current.intent,
         current.binding,
@@ -622,23 +629,17 @@ pub(in crate::oauth) fn settle_managed(
     {
         return Ok(false);
     }
-    guard.with_current(
-        super::native_management::Phase::FinishCommit,
+    connect::activate_mapped_bound(
+        db,
+        &prepared.verified,
+        &prepared.binding,
+        revision,
         now,
-        |current| {
-            connect::activate_mapped_bound(
-                db,
-                &prepared.verified,
-                &prepared.binding,
-                revision,
-                now,
-                Some(current),
-                |tx| {
-                    guard.check(tx, now)?;
-                    custody::publish_tokens(tx, prepared.material)?;
-                    guard.complete(tx)
-                },
-            )
+        Some(consumer),
+        |tx| {
+            guard.check(tx, now)?;
+            custody::publish_tokens(tx, prepared.material)?;
+            guard.complete(tx)
         },
     )
 }

@@ -362,6 +362,47 @@ pub(crate) fn load_initial_app_runtime(
     })
 }
 
+// Retained selection DATA only. Resolve it before any SQL, clock or current
+// acquisition so an unknown/foreign caller cannot touch the rightful original.
+fn selected_pending_intent(
+    intent: &FreshIntent,
+    app: &str,
+    attempt: &str,
+    identity: &crate::iap::Verified,
+) -> Result<FreshIntent> {
+    ensure!(
+        intent.app() == app && intent.attempt() == attempt,
+        "native Pending original selection changed"
+    );
+    intent.require_identity(identity)?;
+    intent.require_oauth_management()?;
+    Ok(intent.clone())
+}
+
+pub(super) fn pending_intent(
+    app: &str,
+    attempt: &str,
+    identity: &crate::iap::Verified,
+) -> Result<FreshIntent> {
+    #[cfg(test)]
+    if fixtures::active() {
+        return fixtures::pending_intent(app, attempt, identity);
+    }
+    OWNERS.with(|owners| {
+        let owners = owners.try_borrow()?;
+        let owner = owners.get(app).context("native App executor missing")?;
+        ensure!(
+            owner.kind == NativeRole::AppHost,
+            "native Pending requires App owner"
+        );
+        let original = owner
+            .originals
+            .get(attempt)
+            .context("native Pending original absent; rows cannot restore it")?;
+        selected_pending_intent(&original.response.intent, app, attempt, identity)
+    })
+}
+
 #[cfg(test)]
 pub(super) fn simulation_installed() -> bool {
     fixtures::active()
@@ -837,6 +878,7 @@ impl<'role> RoleStage<'role> {
 #[derive(Clone, Copy)]
 pub(crate) enum RuntimePhase {
     InitialStorage,
+    Registration,
     Read,
     Refresh,
 }
@@ -950,6 +992,9 @@ pub(super) fn with_runtime_consumer<T>(
     operation: impl FnOnce(&mut RuntimeConsumer<'_, '_>) -> Result<T>,
 ) -> Result<T> {
     let purpose = match phase {
+        RuntimePhase::Registration => {
+            crate::security_epoch::serving::RuntimeServingUse::Registration
+        }
         RuntimePhase::Read => crate::security_epoch::serving::RuntimeServingUse::Read,
         RuntimePhase::Refresh => crate::security_epoch::serving::RuntimeServingUse::Refresh,
         RuntimePhase::InitialStorage => {
@@ -1187,6 +1232,7 @@ pub(crate) struct Consumer<'a, 'role, 'original> {
     source: ConsumerSource<'a, 'role>,
     original: &'a mut OriginalPhase<'original>,
     armed: &'a std::cell::Cell<bool>,
+    committed: bool,
 }
 
 enum ConsumerSource<'stage, 'role> {
@@ -1265,7 +1311,7 @@ impl Consumer<'_, '_, '_> {
     /// returns a dispatch permit or rearms the original.
     pub(crate) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
         let result = (|| {
-            self.arm()?;
+            self.prepare_commit()?;
             tx.commit()?;
             self.check()
         })();
@@ -1273,6 +1319,41 @@ impl Consumer<'_, '_, '_> {
             self.refuse();
         }
         result
+    }
+
+    pub(crate) fn commit_write(
+        &mut self,
+        tx: crate::write_queue::WriteTransaction<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            self.prepare_commit()?;
+            tx.commit()?;
+            self.check()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn prepare_commit(&mut self) -> Result<()> {
+        ensure!(!self.committed, "native consumer commit already attempted");
+        if self.armed.get() {
+            self.check()?;
+        } else {
+            self.arm()?;
+        }
+        // Close before the actual COMMIT, including a lost/failed result.
+        self.committed = true;
+        Ok(())
+    }
+
+    pub(super) fn require_context(&mut self, intent: &FreshIntent, phase: Phase) -> Result<()> {
+        ensure!(
+            self.original.intent == intent && self.original.phase == phase,
+            "native consumer original or phase changed"
+        );
+        self.check()
     }
 
     fn refuse(&mut self) {
@@ -1369,7 +1450,8 @@ pub(crate) fn with_consumer<T>(
 ) -> Result<T> {
     let role = match phase {
         Phase::Session | Phase::Signature | Phase::ShellAuthentication => NativeRole::SecurityShell,
-        Phase::StartCommit
+        Phase::Pending
+        | Phase::StartCommit
         | Phase::DispatchCommit
         | Phase::ProviderSend
         | Phase::FinishCommit
@@ -1385,6 +1467,7 @@ pub(crate) fn with_consumer<T>(
 
 fn serving_use(phase: Phase, role: NativeRole) -> Result<ServingUse> {
     Ok(match phase {
+        Phase::Pending => ServingUse::Pending,
         Phase::Claim => ServingUse::Claim,
         Phase::Publication => ServingUse::Publication,
         Phase::StartCommit => ServingUse::StartCommit,
@@ -1444,6 +1527,7 @@ fn with_consumer_for_role<T>(
                         },
                         original,
                         armed: &guard.armed,
+                        committed: false,
                     }
                     .run(operation)
                 },
@@ -1453,6 +1537,7 @@ fn with_consumer_for_role<T>(
                 source: ConsumerSource::Simulated(stage),
                 original,
                 armed: &guard.armed,
+                committed: false,
             }
             .run(operation),
         },
@@ -1508,7 +1593,8 @@ fn with_current_for_role<T>(
             "native response role changed"
         );
         match phase {
-            Phase::StartCommit
+            Phase::Pending
+            | Phase::StartCommit
             | Phase::DispatchCommit
             | Phase::ProviderSend
             | Phase::FinishCommit
@@ -2097,7 +2183,11 @@ mod tests {
         let world = super::super::simulation::World::new(458);
         super::super::effects::scope(world, || -> Result<()> {
             fixtures::select_app_scope(&scope)?;
-            for phase in [RuntimePhase::Read, RuntimePhase::Refresh] {
+            for phase in [
+                RuntimePhase::Registration,
+                RuntimePhase::Read,
+                RuntimePhase::Refresh,
+            ] {
                 let entered = std::cell::Cell::new(false);
                 let error = with_runtime_consumer(&metadata_only, phase, |_| {
                     entered.set(true);
@@ -2177,6 +2267,7 @@ mod tests {
             let mut db = rusqlite::Connection::open_in_memory()?;
             db.execute_batch("CREATE TABLE receipt(value INTEGER)")?;
             let result = with_consumer(&intent, Phase::Session, 5, |current| {
+                current.arm()?;
                 let first = db.transaction()?;
                 first.execute("INSERT INTO receipt VALUES(1)", [])?;
                 current.commit(first)?;
@@ -2231,6 +2322,47 @@ mod tests {
     }
 
     #[test]
+    fn retained_pending_selection_cannot_sign_or_replace_a_current_original() -> Result<()> {
+        let world = super::super::simulation::World::new(459);
+        world.advance(95);
+        super::super::effects::scope(world.clone(), || -> Result<()> {
+            let (_directory, intent) = committed_management_intent()?;
+            let identity = crate::iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "accounts.google.com:alice".into(),
+            };
+            let foreign = crate::iap::Verified {
+                email: identity.email.clone(),
+                subject: "accounts.google.com:other".into(),
+            };
+            assert!(pending_intent(intent.app(), intent.attempt(), &foreign).is_err());
+            assert!(pending_intent("other_app", intent.attempt(), &identity).is_err());
+            assert!(pending_intent(intent.app(), "unknown", &identity).is_err());
+            assert!(pending_intent(intent.app(), intent.attempt(), &identity)? == intent);
+            with_consumer(&intent, Phase::Pending, 100, |current| {
+                assert!(current.require_signature(&intent).is_err());
+                assert!(current.require_management_producer(&intent).is_err());
+                current.arm()?;
+                current.check()
+            })?;
+            world.advance(301);
+            // A retained DATA selection still exists, but cannot renew time or
+            // turn an expired original into a currently authorized read.
+            let retained = pending_intent(intent.app(), intent.attempt(), &identity)?;
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                with_consumer(&retained, Phase::Pending, 100, |_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!entered.get());
+            Ok(())
+        })
+    }
+
+    #[test]
     fn simulated_original_and_serving_phase_cannot_supply_the_native_management_producer()
     -> Result<()> {
         let world = super::super::simulation::World::new(454);
@@ -2258,7 +2390,7 @@ mod tests {
         super::super::effects::scope(world, || -> Result<()> {
             let intent = original_intent("wrong-role-app-original", 305)?;
             reserve_shell(&intent, 5)?;
-            for phase in [Phase::Claim, Phase::Publication] {
+            for phase in [Phase::Pending, Phase::Claim, Phase::Publication] {
                 let entered = std::cell::Cell::new(false);
                 assert!(
                     with_consumer(&intent, phase, 5, |_| {
@@ -2995,6 +3127,23 @@ pub(crate) mod fixtures {
     }
     pub(super) fn active() -> bool {
         FIXTURE.with(|slot| slot.try_borrow().map_or(true, |fixture| fixture.is_some()))
+    }
+
+    pub(super) fn pending_intent(
+        app: &str,
+        attempt: &str,
+        identity: &crate::iap::Verified,
+    ) -> Result<FreshIntent> {
+        FIXTURE.with(|slot| {
+            let slot = slot.try_borrow()?;
+            let original = slot
+                .as_ref()
+                .context("native simulation supplier missing")?
+                .originals
+                .get(&(NativeRole::AppHost, attempt.into()))
+                .context("native Pending original absent; rows cannot restore it")?;
+            selected_pending_intent(&original.response.intent, app, attempt, identity)
+        })
     }
 
     pub(super) fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {

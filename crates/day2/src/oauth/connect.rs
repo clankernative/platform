@@ -305,20 +305,20 @@ pub(super) fn begin_managed(
     prepared: super::exchange::PreparedAuthorization,
     now: i64,
     guard: &super::management::app::StartGuard<'_>,
+    current: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
     guard.require_intent(intent)?;
+    guard.require_consumer(current)?;
     callback.verify(intent)?;
-    guard.with_current(now, |current| {
-        begin_inner_checked(
-            db,
-            intent,
-            Some(callback),
-            Some((exchange, verifier)),
-            now,
-            Some((guard, current)),
-        )
-    })
+    begin_inner_checked(
+        db,
+        intent,
+        Some(callback),
+        Some((exchange, verifier)),
+        now,
+        Some((guard, current)),
+    )
 }
 
 fn begin_inner_checked(
