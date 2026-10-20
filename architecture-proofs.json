@@ -147,7 +147,7 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "fn refuse (& mut self)",
-        "pub (super) fn require_google_producer (& mut self , intent : & FreshIntent) -> Result < () >",
+        "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >",
         "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >",
         "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
       ],
@@ -192,7 +192,7 @@
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
-          "signature": "pub (super) fn require_google_producer (& mut self , intent : & FreshIntent) -> Result < () >"
+          "signature": "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >"
         }
       ],
       "proof_uses": [],

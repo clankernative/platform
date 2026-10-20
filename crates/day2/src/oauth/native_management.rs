@@ -708,13 +708,14 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
             "native Shell role changed"
         );
         if let Some(original) = owners.originals.get_mut(intent.attempt()) {
+            validate_enlist(NativeRole::SecurityShell, intent, &original.response)?;
+            original.original.check(intent, wall)?;
             enlist(
                 NativeRole::SecurityShell,
                 intent,
                 &mut original.response,
                 Some(&mut owners.storage),
             )?;
-            original.original.check(intent, wall)?;
             return Ok(());
         }
         ensure!(owners.originals.len() < 1024, "native original capacity");
@@ -976,19 +977,22 @@ enum ConsumerSource<'stage, 'role> {
 }
 
 impl Consumer<'_, '_, '_> {
-    /// A signed Google observation is consumed only inside the genuine Shell
+    /// A provider observation is consumed only inside the genuine Shell
     /// session/signature phase for this exact retained original. No simulator,
     /// serialized observation or registry DATA can supply native permission.
-    pub(super) fn require_google_producer(&mut self, intent: &FreshIntent) -> Result<()> {
+    pub(super) fn require_management_producer(&mut self, intent: &FreshIntent) -> Result<()> {
+        intent.require_oauth_management()?;
         ensure!(
             self.original.intent == intent
                 && matches!(self.original.phase, Phase::Session | Phase::Signature),
-            "Google producer original or consumer changed"
+            "management producer original or consumer changed"
         );
         match &self.source {
             ConsumerSource::Native { .. } => self.check(),
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => anyhow::bail!(super::shell_oidc::PRODUCER_UNAVAILABLE),
+            ConsumerSource::Simulated(_) => {
+                anyhow::bail!("native management producer supplier unavailable")
+            }
         }
     }
 
@@ -1298,21 +1302,16 @@ fn with_current_for_role<T>(
             ),
             _ => {}
         }
-        let original = owners
+        let stored = owners
             .originals
             .get_mut(intent.attempt())
             .context("native original absent; rows cannot restore it")?;
         if let Some(identity) = response {
-            original.response.require_bound(intent, identity)?;
+            stored.response.require_bound(intent, identity)?;
         } else {
-            enlist(
-                owners.kind,
-                intent,
-                &mut original.response,
-                Some(&mut owners.storage),
-            )?;
+            validate_enlist(owners.kind, intent, &stored.response)?;
         }
-        let role = original.original.clock.role.clone();
+        let role = stored.original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;
         let mut enrolled = role.begin_current_stage()?;
         enrolled.check_selection(
@@ -1324,12 +1323,20 @@ fn with_current_for_role<T>(
             source: RoleSource::Native(Box::new(enrolled)),
         };
         let mut original = OriginalPhase {
-            original: PhaseOriginal::Native(&mut original.original),
+            original: PhaseOriginal::Native(&mut stored.original),
             intent,
             wall,
             phase,
         };
         original.check(&mut stage)?;
+        if response.is_none() {
+            enlist(
+                owners.kind,
+                intent,
+                &mut stored.response,
+                Some(&mut owners.storage),
+            )?;
+        }
         let participant = match &mut owners.storage {
             AppStorage::Participant(participant) => Some(participant.as_mut()),
             _ => None,
@@ -1600,6 +1607,38 @@ fn refuse_response(
     })
 }
 
+/// Reject a different connection before touching the paused owner's clock or
+/// role. This only validates DATA; creation of an actual hold waits for the
+/// current original check, before the protected callback or first I/O poll.
+fn validate_enlist(
+    role: NativeRole,
+    intent: &FreshIntent,
+    response: &ResponseBinding,
+) -> Result<()> {
+    ACTIVE_SINK.with(|slot| {
+        if let Some(sink) = slot.try_borrow()?.as_ref() {
+            ensure!(
+                sink.state.get() == SinkState::Open,
+                "native response sink closed"
+            );
+            let indexes = sink.bindings.try_borrow()?;
+            let key = (role, intent.attempt().into());
+            ensure!(
+                indexes.is_empty() || indexes.contains_key(&key),
+                "native response scope capacity"
+            );
+            if let Some(existing) = indexes.get(&key) {
+                ensure!(
+                    existing.intent == *intent,
+                    "native response original changed"
+                );
+            }
+            response.require(intent, &sink.identity)?;
+        }
+        Ok(())
+    })
+}
+
 fn enlist(
     role: NativeRole,
     intent: &FreshIntent,
@@ -1799,12 +1838,12 @@ mod tests {
             let intent = original_intent("native-google-supplier-required", 305)?;
             reserve_shell(&intent, 5)?;
             let error = with_consumer(&intent, Phase::Session, 5, |current| {
-                current.require_google_producer(&intent)
+                current.require_management_producer(&intent)
             })
             .unwrap_err();
             assert_eq!(
                 error.to_string(),
-                super::super::shell_oidc::PRODUCER_UNAVAILABLE
+                "native management producer supplier unavailable"
             );
             // This known exclusion made no native action and cannot burn an
             // unrelated valid simulated operation or turn into native material.
@@ -2044,6 +2083,25 @@ mod tests {
                 .is_err()
             );
             assert!(!entered.get());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn expired_unbound_request_cannot_acquire_a_response_hold() -> Result<()> {
+        let world = super::super::simulation::World::new(456);
+        super::super::effects::scope(world.clone(), || -> Result<()> {
+            let intent = original_intent("expired-before-response-bind", 6)?;
+            reserve_shell(&intent, 5)?;
+            world.advance(1);
+            let sink = Sink::new();
+            assert!(sink.run(|| reserve_shell(&intent, 6)).is_err());
+            assert!(sink.bindings.borrow().is_empty());
+            // A literal empty refusal may complete; it neither carries the
+            // expired original nor restores a protected consumer permission.
+            sink.with_current(|| ())?;
+            sink.finish()?;
+            assert!(with_consumer(&intent, Phase::Session, 6, |_| Ok(())).is_err());
             Ok(())
         })
     }
@@ -2481,13 +2539,14 @@ pub(crate) mod fixtures {
             };
             let key = (NativeRole::SecurityShell, intent.attempt().into());
             if let Some(original) = fixture.originals.get_mut(&key) {
+                validate_enlist(NativeRole::SecurityShell, intent, &original.response)?;
+                original.original.check(intent, wall)?;
                 enlist(
                     NativeRole::SecurityShell,
                     intent,
                     &mut original.response,
                     None,
                 )?;
-                original.original.check(intent, wall)?;
             } else {
                 ensure!(
                     fixture.originals.len() < 1024,
@@ -2689,22 +2748,25 @@ pub(crate) mod fixtures {
                     owner_refused,
                 }),
             };
-            let original = fixture
+            let stored = fixture
                 .originals
                 .get_mut(&(kind, intent.attempt().into()))
                 .context("fixture original absent; SQL cannot restore it")?;
             if let Some(identity) = response {
-                original.response.require_bound(intent, identity)?;
+                stored.response.require_bound(intent, identity)?;
             } else {
-                enlist(kind, intent, &mut original.response, None)?;
+                validate_enlist(kind, intent, &stored.response)?;
             }
             let mut original = OriginalPhase {
-                original: PhaseOriginal::Simulated(&mut original.original),
+                original: PhaseOriginal::Simulated(&mut stored.original),
                 intent,
                 wall,
                 phase,
             };
             original.check(&mut stage)?;
+            if response.is_none() {
+                enlist(kind, intent, &mut stored.response, None)?;
+            }
             use_current(&mut stage, &mut original)
         })
     }

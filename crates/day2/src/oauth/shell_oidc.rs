@@ -537,7 +537,7 @@ impl Reauthenticated {
             return Ok(());
         }
         let order = self.ordering.as_ref().context(PRODUCER_UNAVAILABLE)?;
-        if let Err(error) = current.require_google_producer(&self.intent) {
+        if let Err(error) = current.require_management_producer(&self.intent) {
             return Err(anyhow::Error::new(ProviderObservationUnavailable(
                 ProviderObservationData {
                     version: 1,
