@@ -13,12 +13,13 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
 mod native_volume;
+use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 mod preparation;
 pub(crate) use preparation::{
     AppPreparedFile, BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
-    PreparationCoordinator, PreparedFileProjection, PreparedInitialFile,
-    RefusedOriginalPreparation,
+    PreparationCoordinator, PreparedFileContinuity, PreparedFileProjection, PreparedInitialFile,
+    PreparedRetentionOutcome, RefusedOriginalPreparation,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +88,7 @@ struct DirectoryIdentity {
 /// Retains the actual enrolled stage and provider/mount owners. The controlled
 /// filesystem fixture remains a distinct test-only variant, never a fallback.
 enum StorageIssuerOwner<'role> {
-    Native(Box<native_volume::NativeVolumeObservation<'role>>),
+    Native(Box<NativeVolumeObservation<'role>>),
     #[cfg(test)]
     UnqualifiedFilesystemFixture {
         domain: Digest,
@@ -154,7 +155,7 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
     ) -> Result<(Self, NativeAcquisition)> {
-        let mut volume = native_volume::NativeVolumeObservation::acquire(stage, policy, store)?;
+        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)?;
         let seed = volume.original_seed()?;
         let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&SelectionData {
             policy: policy.clone(),

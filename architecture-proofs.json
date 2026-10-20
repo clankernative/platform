@@ -1,8 +1,21 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:35dd6b5784c4205e9b992de34f206767df01a749e038c6f6ef83b77f7f7ccb77","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
-    {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
+    {
+      "source": "crates/day2/src/structural_proofs.rs",
+      "scope": "module",
+      "fingerprint": "sha256:6a06871ceef2c98fcf19abf8e2d963ddc57134fd6c0d940cf5f331bdd72a4f46",
+      "registration": {
+        "source": "crates/day2/src/lib.rs",
+        "module": "structural_proofs"
+      }
+    },
+    {
+      "source": "crates/day2-control/src/release.rs",
+      "scope": "const",
+      "fingerprint": "sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3",
+      "registration": null
+    }
   ],
   "proofs": [
     {
@@ -383,28 +396,28 @@
       "type_name": "AuthenticatedReads",
       "owning_children": [],
       "methods": [
-        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >",
+        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole , stage : & 'stage mut EnrolledRoleStage < 'role >) -> Result < Self >",
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "fn sample (& mut self) -> Result < Sample >"
       ],
       "factories": [
         {
-          "owner": "AuthenticatedReads",
-          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >"
+          "owner": "AuthenticatedReads < 'stage , 'role >",
+          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole , stage : & 'stage mut EnrolledRoleStage < 'role >) -> Result < Self >"
         }
       ],
       "material_uses": [
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
         },
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "fn sample (& mut self) -> Result < Sample >"
         },
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >"
         }
       ],
@@ -790,6 +803,13 @@
       "type_name": "NativeStorageCreationAuthority",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "native_volume"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
@@ -802,33 +822,53 @@
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
             "module": "preparation"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
         }
       ],
       "methods": [
+        "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >",
         "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn filesystem_fixture (selection : ReviewedStorageSelection , directory : File , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
       ],
-      "factories": [],
+      "factories": [
+        {
+          "owner": "NativeStorageCreationAuthority < 'role >",
+          "signature": "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >"
+        }
+      ],
       "material_uses": [
         {
           "owner": null,
-          "signature": "fn check_file_identity (authority : & mut NativeStorageCreationAuthority , file : & File , identity : & FileIdentity , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
+          "signature": "fn check_file_identity (authority : & mut NativeStorageCreationAuthority < '_ > , file : & File , identity : & FileIdentity , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
           "owner": null,
-          "signature": "fn observe_file (authority : & NativeStorageCreationAuthority , file : & File , expected_length : usize) -> Result < FileIdentity >"
+          "signature": "fn observe_file (authority : & NativeStorageCreationAuthority < '_ > , file : & File , expected_length : usize) -> Result < FileIdentity >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         },
         {
-          "owner": "NativeStorageCreationAuthority",
+          "owner": "NativeStorageCreationAuthority < 'role >",
           "signature": "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
         },
         {
-          "owner": "NativeStorageCreationAuthority",
+          "owner": "NativeStorageCreationAuthority < 'role >",
           "signature": "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
         }
       ],
@@ -839,12 +879,27 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "BeforeAttemptRefusal",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [],
@@ -855,24 +910,39 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "OriginalCreatorFd",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn check_unchanged_initial_file (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
       ],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [
         {
-          "owner": "OriginalCreatorFd",
+          "owner": "OriginalCreatorFd < '_ >",
           "signature": "pub (super) fn check_unchanged_initial_file (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
-          "owner": "PreparedInitialFile",
-          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
         }
       ],
       "proof_uses": [],
@@ -882,7 +952,22 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "PreparationCoordinator",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [
         "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn file_ref (& self) -> Result < & File >",
@@ -892,24 +977,24 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn file_ref (& self) -> Result < & File >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn prepare (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn validate_plan (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
         }
       ],
@@ -920,12 +1005,27 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "RefusedOriginalPreparation",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [],
@@ -996,31 +1096,57 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "PreparedInitialFile",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn check_original (& mut self) -> Result < () >",
         "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >",
-        "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+        "pub (crate) fn retain_for_current_phases (mut self) -> PreparedRetentionOutcome < 'role >",
+        "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
       ],
       "factories": [
         {
-          "owner": "PreparedInitialFile",
-          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
         }
       ],
       "material_uses": [
         {
-          "owner": "PreparedInitialFile",
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
           "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
         },
         {
-          "owner": "PreparedInitialFile",
+          "owner": "PreparedInitialFile < 'role >",
           "signature": "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn retain_for_current_phases (mut self) -> PreparedRetentionOutcome < 'role >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "retain_for_current_phases"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -1160,6 +1286,166 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+      "type_name": "AppPreparedFile",
+      "owning_children": [],
+      "methods": [
+        "fn check_identity (& mut self) -> Result < () >",
+        "pub (crate) fn check_original (& mut self) -> Result < () >",
+        "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >",
+        "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >"
+      ],
+      "factories": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "fn check_identity (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "PreparedFileContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "NativeVolumeObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >",
+        "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
+        "pub (super) fn check_current (& mut self) -> Result < () >",
+        "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
+        "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >",
+        "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
+        "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn check_current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "retain_resources"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "NativeVolumeContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "CurrentVolumePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
         }
       ],
       "proof_uses": [],

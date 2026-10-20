@@ -238,6 +238,38 @@ mod linux {
     }
 
     #[test]
+    fn local_preparation_cannot_be_promoted_without_a_real_enrolled_controller() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(creator) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture did not prepare");
+        };
+        let fd = creator.file.as_raw_fd();
+        let original = PreparedInitialFile::retain_original(creator, plan, interval);
+        let PreparedRetentionOutcome::Refused {
+            mut original,
+            error,
+        } = original.retain_for_current_phases()
+        else {
+            panic!("a filesystem fixture became native continuity");
+        };
+        assert_eq!(
+            error.to_string(),
+            "storage_native_retention_requires_enrolled_controller"
+        );
+        assert_eq!(original.creator.file.as_raw_fd(), fd);
+        assert!(original.creator.file.metadata().is_ok());
+        assert!(original.acquisition.remaining().is_err());
+        assert!(original.check_original().is_err());
+        assert!(matches!(
+            original.retain_for_current_phases(),
+            PreparedRetentionOutcome::Refused { .. }
+        ));
+    }
+
+    #[test]
     fn complete_exact_file_has_independent_read_only_sqlite_oracle() {
         let (directory, selected, plan, mut interval) = layout();
         let auth = authority(&directory, selected, &mut interval);
