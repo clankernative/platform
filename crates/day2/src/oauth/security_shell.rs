@@ -1943,9 +1943,14 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr()?);
         let admission = Arc::new(AtomicBool::new(true));
         let (stop, shutdown) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission.clone(), async {
-            let _ = shutdown.await;
-        }));
+        let server = tokio::spawn(shell.clone().serve_bounded(
+            listener,
+            1,
+            admission.clone(),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -1960,6 +1965,12 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        let health = client
+            .get(format!("{endpoint}/health/ready"))
+            .send()
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
         let browser = tokio::spawn({
             let client = client.clone();
             let endpoint = endpoint.clone();
@@ -1973,23 +1984,44 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(3), guard.entered.notified()).await?;
         browser.abort();
-        assert_eq!(
-            client
-                .get(format!("{endpoint}/oauth/approvals/attempt"))
-                .header(header::HOST, "security.example.com")
-                .send()
-                .await?
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
+        let _ = browser.await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                client
+                    .get(format!("{endpoint}/oauth/approvals/attempt"))
+                    .header(header::HOST, "security.example.com")
+                    .send()
+            )
+            .await
+            .is_err()
         );
-        let health = client
-            .get(format!("{endpoint}/health/ready"))
-            .send()
-            .await?;
-        assert_eq!(health.status(), StatusCode::OK);
-        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                client.get(format!("{endpoint}/health/ready")).send()
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
         admission.store(false, Ordering::Release);
+        let _ = stop.send(());
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        *guard.released.lock().unwrap() = true;
+        guard.release.notify_all();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+
+        // A blocked owner cannot poll another request. Exercise disabled
+        // readiness on a fresh idle server, preserving the same refusal oracle.
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission, async {
+            let _ = shutdown.await;
+        }));
         assert_eq!(
             client
                 .get(format!("{endpoint}/health/ready"))
@@ -2008,11 +2040,8 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         let _ = stop.send(());
-        tokio::task::yield_now().await;
-        assert!(!server.is_finished());
-        *guard.released.lock().unwrap() = true;
-        guard.release.notify_all();
         tokio::time::timeout(Duration::from_secs(3), server).await???;
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

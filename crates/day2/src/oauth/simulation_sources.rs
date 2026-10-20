@@ -236,6 +236,23 @@ impl Guard {
 }
 
 impl<'ast> Visit<'ast> for Guard {
+    fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+        // Hyper's Timer trait supplies a deadline of this type. Naming that
+        // input type neither samples a clock nor admits an Instant constructor.
+        if matches!(self.native, NativeBoundary::Http)
+            && path.qself.is_none()
+            && path
+                .path
+                .segments
+                .iter()
+                .map(|part| part.ident.to_string())
+                .eq(["std", "time", "Instant"].map(String::from))
+        {
+            return;
+        }
+        syn::visit::visit_type_path(self, path);
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         use syn::Item::*;
         let attributes: &[syn::Attribute] = match item {
@@ -325,6 +342,8 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
             "fn f() { tokio::spawn(work); }",
             "fn f() { reqwest::blocking::Client::new(); }",
             "fn f() { std::time::SystemTime::now(); }",
+            "fn f() { std::time::Instant::now(); }",
+            "use std::time::Instant as Clock; fn f() { Clock::now(); }",
         ] {
             let mut guard = Guard {
                 native: boundary,
@@ -337,6 +356,17 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
             );
         }
     }
+    let mut timer = Guard {
+        native: NativeBoundary::Http,
+        ..Guard::default()
+    };
+    timer.visit_file(&syn::parse_file(
+        "fn timer(deadline: std::time::Instant) {}",
+    )?);
+    ensure!(
+        timer.violations.is_empty(),
+        "Hyper deadline input type refused"
+    );
     Ok(())
 }
 
