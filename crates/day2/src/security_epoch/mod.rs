@@ -22,6 +22,7 @@ mod native_namespace;
 mod preparation_image;
 mod runtime_profile;
 mod seed_core;
+pub(crate) mod serving;
 mod storage_authority;
 mod transport;
 
