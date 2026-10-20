@@ -96,6 +96,22 @@ peer. There is no additional storage sidecar. These are unmeasured starting
 limits; peak admitted-runtime initialization and headroom must be measured before
 qualifying the deployment.
 
+The proposed controller KSA and Deployment live in the provisioner's separate
+enrollment namespace, with the selected existing controller GSA. That namespace
+cannot reference the App namespace's PVC. The proposed controller `/state` mount
+is the selected same-node CSI global mount with private propagation; its exact
+workload path and privileged profile still require review and native admission.
+Names and a host path cannot replace the provider/device/mount joins. AppHost
+and SecurityShell retain their separate unprivileged workload profiles.
+
+The optional `deploy/integrations/gke-security-epoch-access` root supplies the
+missing API metadata and TokenReview prerequisites. Each GSA gets self-token
+mint only, and only the controller gets selected disk/instance and PVC/PV/Node
+reads. It grants no Firestore mutation or cross-account impersonation. The
+instance owns the actual selections and separate state prefix. This source plan
+is unapplied and is not evidence of exclusive effective IAM, qualified storage,
+current serving or available controller capacity.
+
 An authorized counter dispatch retains the known claim through the fixed
 request, response parser and final current check. The prepared dispatch is
 consumed at send, and the response still owns its execution context. It cannot
