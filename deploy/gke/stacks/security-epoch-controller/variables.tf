@@ -91,3 +91,15 @@ variable "node_profile" {
     error_message = "Select the existing protected native placement profile."
   }
 }
+
+variable "disk_device_group_id" {
+  description = "Observed owning group of the selected native block device. Required on activation, absent during registration; retained in the operator's static trusted-runtime profile."
+  type        = number
+  default     = null
+  validation {
+    condition = var.disk_device_group_id == null ? !var.activate : (
+      var.activate && var.disk_device_group_id >= 1 && var.disk_device_group_id <= 2147483647 && floor(var.disk_device_group_id) == var.disk_device_group_id
+    )
+    error_message = "Activation requires the observed disk group as an integer from 1 through 2147483647; dormant registration must omit it."
+  }
+}
