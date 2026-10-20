@@ -78,6 +78,8 @@ Api :: [].{
 		errors : List(Str),
 		required_all_rows : List(Str),
 		observations : List(Str),
+		verification_setup : List(Str),
+		verification_delegation : List({ actor : Str, application : Str }),
 	}
 
 	Presentation : { stylesheet : Str, script : Str }
@@ -98,22 +100,41 @@ Api :: [].{
 		operation : Target,
 		additional_operations : List(Target),
 		verification_actors : List({ operation : Str, actor : Str }),
+		verification_delegations : List({ operation : Str, actor : Str, application : Str }),
 	}
 
-	VerificationPrincipal : [Synthetic(Str)]
+	VerificationPrincipal : [Synthetic(Str), Delegated({ actor : Str, application : Str })]
 
 	verification_principal : Str -> VerificationPrincipal
 	verification_principal = |actor| Synthetic(actor)
 
+	# Delegated positives are host-installed fixture principals, never request data.
+	verification_delegated : { actor : Str, application : Str } -> VerificationPrincipal
+	verification_delegated = |principal| Delegated(principal)
+
 	verification_principal_actor : VerificationPrincipal -> Str
 	verification_principal_actor = |principal| match principal {
 		Synthetic(actor) => actor
+		Delegated(delegated) => delegated.actor
+	}
+
+	verification_principal_delegation : VerificationPrincipal -> [None, Some({ actor : Str, application : Str })]
+	verification_principal_delegation = |principal| match principal {
+		Synthetic(_) => None
+		Delegated(delegated) => Some(delegated)
+	}
+
+	verification_delegation_metadata : VerificationPrincipal -> List({ actor : Str, application : Str })
+	verification_delegation_metadata = |principal| match verification_principal_delegation(principal) {
+		None => []
+		Some(delegation) => [delegation]
 	}
 
 	ErrorExample : {
 		operation : Target,
 		input : (Str, U64 -> Try(Str, Str)),
 		verification_actor : [None, Some(Str)],
+		verification_delegation : [None, Some({ actor : Str, application : Str })],
 	}
 
 	ErrorDef : { description : Str, recovery : Str, verification : {} -> List(ErrorExample) }
@@ -138,6 +159,14 @@ Api :: [].{
 		if scenarios.any(|scenario| scenario.verification_actor == Some("")) {
 			return Err("verification principal must be nonempty")
 		}
+		if scenarios.any(
+			|scenario| match scenario.verification_delegation {
+				Some(delegation) => delegation.actor.is_empty() or delegation.application.is_empty()
+				None => Bool.False
+			},
+		) {
+			return Err("verification delegation must be nonempty")
+		}
 		match scenarios {
 			[] => Err("application error requires a verification case")
 			[first, .. as rest] => Ok({
@@ -153,6 +182,17 @@ Api :: [].{
 						Some(actor) => actors.append({ operation: scenario.operation.operation, actor })
 					},
 				),
+				verification_delegations: scenarios.fold(
+					[],
+					|delegations, scenario| match scenario.verification_delegation {
+						None => delegations
+						Some(delegation) => delegations.append({
+							operation: scenario.operation.operation,
+							actor: delegation.actor,
+							application: delegation.application,
+						})
+					},
+				),
 			})
 		}
 	}
@@ -163,6 +203,7 @@ Api :: [].{
 		{
 			operation: write(operation),
 			verification_actor: None,
+			verification_delegation: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
@@ -174,6 +215,7 @@ Api :: [].{
 	failed_command_as = |operation, principal, generate| {
 		..failed_command(operation, generate),
 		verification_actor: Some(verification_principal_actor(principal)),
+		verification_delegation: verification_principal_delegation(principal),
 	}
 
 	failed_query : Read(input, output), (Str, U64 -> Try(input, Str)) -> ErrorExample
@@ -182,6 +224,7 @@ Api :: [].{
 		{
 			operation: read(operation),
 			verification_actor: None,
+			verification_delegation: None,
 			input: |snapshot, seed| {
 				value = generate(snapshot, seed)?
 				Ok(codec.encode(value))
@@ -193,6 +236,7 @@ Api :: [].{
 	failed_query_as = |operation, principal, generate| {
 		..failed_query(operation, generate),
 		verification_actor: Some(verification_principal_actor(principal)),
+		verification_delegation: verification_principal_delegation(principal),
 	}
 
 	Effect : { kind : Str, model : Str, fields : List(Str), command : Str }
@@ -270,6 +314,8 @@ Api :: [].{
 		contract : Contract(input, output, input_fields, output_fields),
 		execution : Execution(input),
 		credential_access : CredentialAccess,
+		verification_setup : List(Str),
+		verification_principal : [None, Some(VerificationPrincipal)],
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
 		observations : List(Str),
@@ -384,6 +430,34 @@ Api :: [].{
 		credential_access : CommandDef(input, output, input_fields, output_fields) -> CredentialAccess
 		credential_access = |definition| definition.credential_access
 
+		verify_after :
+			CommandDef(input, output, input_fields, output_fields),
+			Write({}, setup_output) -> CommandDef(input, output, input_fields, output_fields)
+		verify_after = |definition, setup| {
+			..definition,
+			verification_setup: definition.verification_setup.append(setup.name()),
+		}
+
+		verification_setup : CommandDef(input, output, input_fields, output_fields) -> List(Str)
+		verification_setup = |definition| definition.verification_setup
+
+		verification_delegation :
+			CommandDef(input, output, input_fields, output_fields) -> List({ actor : Str, application : Str })
+		verification_delegation = |definition| match definition.verification_principal {
+			None => []
+			Some(principal) => verification_delegation_metadata(principal)
+		}
+
+		verify_as :
+			CommandDef(input, output, input_fields, output_fields),
+			VerificationPrincipal ->
+				CommandDef(input, output, input_fields, output_fields)
+		verify_as = |definition, principal| { ..definition, verification_principal: Some(principal) }
+
+		verification_principal :
+			CommandDef(input, output, input_fields, output_fields) -> [None, Some(VerificationPrincipal)]
+		verification_principal = |definition| definition.verification_principal
+
 		verification : CommandDef(input, output, input_fields, output_fields) -> Verification(input, output)
 		verification = |definition| definition.verification
 
@@ -417,6 +491,7 @@ Api :: [].{
 		contract : Contract(input, output, input_fields, output_fields),
 		verification : Verification(input, output),
 		credential_access : CredentialAccess,
+		verification_setup : List(Str),
 		required_all_rows : List(Str),
 		observations : List(Str),
 		export_version : U64,
@@ -486,6 +561,21 @@ Api :: [].{
 			QueryDef(input, output, input_fields, output_fields) -> Contract(input, output, input_fields, output_fields)
 		contract = |definition| definition.contract
 
+		verify_after :
+			QueryDef(input, output, input_fields, output_fields),
+			Write({}, setup_output) -> QueryDef(input, output, input_fields, output_fields)
+		verify_after = |definition, setup| {
+			..definition,
+			verification_setup: definition.verification_setup.append(setup.name()),
+		}
+
+		verification_setup : QueryDef(input, output, input_fields, output_fields) -> List(Str)
+		verification_setup = |definition| definition.verification_setup
+
+		verification_delegation :
+			QueryDef(input, output, input_fields, output_fields) -> List({ actor : Str, application : Str })
+		verification_delegation = |_| []
+
 		verification : QueryDef(input, output, input_fields, output_fields) -> Verification(input, output)
 		verification = |definition| definition.verification
 
@@ -543,6 +633,8 @@ Api :: [].{
 				interactive: handler.requires_interaction(),
 			},
 			verification: definition.verification,
+			verification_setup: [],
+			verification_principal: None,
 			required_all_rows: [],
 			observations: [],
 			export_version: 0,
@@ -564,6 +656,7 @@ Api :: [].{
 			handler: |context, input| Handler.program(handler, context, input, |body| body.as_transaction()),
 			contract: definition.contract,
 			verification: definition.verification,
+			verification_setup: [],
 			credential_access: {
 				enabled: Bool.False,
 				local_reads: [],

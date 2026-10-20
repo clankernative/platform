@@ -47,7 +47,8 @@ fn exact(specs: Vec<Spec>) -> Result<Catalog> {
         pages.push(serde_json::from_value::<Page>(json!({
             "name":spec.name, "path":spec.path, "title":spec.name,
             "operation":operation, "template":format!("pages/{}.html", spec.name),
-            "defaults":spec.defaults.to_string(), "input_type":spec.name, "output_type":"view"
+            "defaults":spec.defaults.to_string(), "input_type":spec.name, "output_type":"view",
+            "preparation":[], "prepare_failure_operation":""
         }))?);
         operations.push(serde_json::from_value::<Operation>(json!({
             "name":operation,"kind":"query","input_type":spec.name,"output_type":"view"
@@ -214,7 +215,8 @@ fn route_input_handle_must_match_even_when_nominal_contracts_have_the_same_wire_
     }];
     let mut page: Page = serde_json::from_value(json!({
         "name":"items", "title":"Items", "path":"/", "operation":"items.list",
-        "defaults":"{\"term\":\"\"}", "template":"pages/directory.html", "input_type":"left", "output_type":"view"
+        "defaults":"{\"term\":\"\"}", "template":"pages/directory.html", "input_type":"left", "output_type":"view",
+        "preparation":[], "prepare_failure_operation":""
     }))?;
     Catalog::compile(&[page.clone()], &operations, &schema)?;
     for mismatched in ["right", ""] {

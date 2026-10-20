@@ -1226,7 +1226,8 @@ fn app_host_mounts_reserved_receiver_before_human_dispatch_and_drains_admission(
             "intent":{"target":{"operation":"app.preview","input_type":"input","output_type":"output"},
                 "title":"Preview","usage":{"purpose":"Host routing conformance","use_when":["Inspect the host fixture"],"avoid_when":["Serving live business data"],"preconditions":["Admitted host fixture"],"effects":[],"result":"Checked result"},"input_sources":[],"follow_ups":[]},
             "request_example":"{}","response_example":"{}","deprecated":false,
-            "execution":{"model":"","id_field":"","version_field":"","effects":[]},"errors":[]
+            "execution":{"model":"","id_field":"","version_field":"","effects":[]},"errors":[],
+            "verification_setup":[],"verification_delegation":[]
         }},"presentation":{"stylesheet":"","script":""},"identities":crate::identity::REGISTRY_FILE,"invariants":{"items":"Host route fixture state"},"domains":{},"errors":{}}
     }))?;
     contract

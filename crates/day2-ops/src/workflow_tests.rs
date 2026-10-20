@@ -198,6 +198,7 @@ fn generated_cases_use_the_same_checks_as_examples_and_empty_apps_are_explicit()
                 match request.action.as_str() {
                 "dev-examples" => Ok(json!([])),
                 "dev-samples" => Ok(json!((0..count).map(|index| json!({"generator":"reports","operation":"submit","seed":index.to_string(),"input":format!("{{\"index\":{index}}}"),"error":""})).collect::<Vec<_>>())),
+                "dev-setups" => Ok(json!([])),
                 "dev-prepare-sample" => Ok(json!({"operation":"submit","input":format!("{{\"index\":{}}}", invoked.len())})),
                 "dev-invoke" => { invoked.push(request.decode::<Value>()?["input"].clone()); Ok(json!({})) }
                 "dev-replay" => { replayed += 1; Ok(json!({})) }
@@ -211,6 +212,84 @@ fn generated_cases_use_the_same_checks_as_examples_and_empty_apps_are_explicit()
         assert_eq!(replayed, count);
         assert_eq!(properties, 1 + count * 2);
         assert!(finished);
+    }
+    Ok(())
+}
+
+#[test]
+fn roc_checks_each_declared_setup_before_generating_the_positive_input() -> Result<()> {
+    for fail_replay in [false, true] {
+        let mut invoked = Vec::new();
+        let mut actions = Vec::new();
+        let result = automation::run(&automation::runner()?, &["exercise", "", "1"], |request| {
+            actions.push(request.action.clone());
+            match request.action.as_str() {
+                "dev-examples" => Ok(json!([])),
+                "dev-samples" => Ok(json!([{
+                    "generator":"read", "operation":"read", "seed":"42", "input":"", "error":""
+                }])),
+                "dev-setups" => Ok(json!([
+                    {"operation":"prepare_first", "input":"{}"},
+                    {"operation":"prepare_second", "input":"{}"}
+                ])),
+                "dev-prepare-sample" => {
+                    assert_eq!(invoked, ["prepare_first", "prepare_second"]);
+                    Ok(json!({"operation":"read", "input":"{}"}))
+                }
+                "dev-invoke" => {
+                    invoked.push(
+                        request.decode::<Value>()?["operation"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    Ok(json!({}))
+                }
+                "dev-replay" if fail_replay => bail!("setup replay mismatch"),
+                _ => Ok(json!({})),
+            }
+        });
+        if fail_replay {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("setup replay mismatch")
+            );
+            assert_eq!(invoked, ["prepare_first"]);
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| action == "dev-prepare-sample" || action == "dev-finish")
+            );
+        } else {
+            result?;
+            assert_eq!(invoked, ["prepare_first", "prepare_second", "read"]);
+            for check in [
+                "dev-assert",
+                "dev-replay",
+                "dev-duplicate",
+                "dev-invalid",
+                "dev-drain",
+                "dev-step-complete",
+            ] {
+                assert_eq!(
+                    actions
+                        .iter()
+                        .filter(|action| action.as_str() == check)
+                        .count(),
+                    3,
+                    "{check}"
+                );
+            }
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| action.as_str() == "dev-properties")
+                    .count(),
+                7
+            );
+        }
     }
     Ok(())
 }

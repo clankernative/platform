@@ -200,6 +200,12 @@ model : Model(Str)
 model = Model.define("items", "ite", |_| Ok("item"), |value| Json.to_str(value))
 read : Read(ListInput, Str)
 read = Read.define("links.list", input, output)
+refresh_input : Input({{}})
+refresh_input = Input.define("refresh", |_| Ok({{}}), |_| "{{}}")
+refresh : Write({{}}, Str)
+refresh = Write.define("links.refresh", refresh_input, output)
+fallback : Read(ListInput, Str)
+fallback = Read.define("links.list_fallback", input, output)
 query = QueryBinding.define(read, |_context, bounds| Query.page(Selection.all(model, bounds.after, bounds.limit)).map(|_| "ok"))
 config = {{ name: "links", title: "Links", path: "/", template: Templates.directory }}
 empty = Page.define(config, read)
@@ -212,6 +218,10 @@ expect partial.register().metadata().defaults == "{{\"limit\":20}}"
 expect unconstrained.register().metadata().defaults == "{{\"limit\":20.0}}"
 expect empty.register().metadata().live == Bool.False
 expect empty.register().metadata().live_refresh_ms == 0
+prepared = empty.before_read(refresh)
+expect prepared.register().metadata().preparation == ["links.refresh"]
+expect empty.on_prepare_failure(fallback).register().metadata().prepare_failure_operation == "links.list_fallback"
+expect empty.register().metadata().preparation == []
 live = empty.live().with_defaults({{ after: Cursor.start, limit: PageSize.default }})
 expect live.register().metadata().live == Bool.True
 expect live.register().metadata().defaults == full.register().metadata().defaults
@@ -279,7 +289,7 @@ step = |_| full.register().metadata().defaults
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        report.contains("All (19) tests passed"),
+        report.contains("All (22) tests passed"),
         "all defaults and registered-query dispatch expectations must execute: {report}"
     );
     Ok(())

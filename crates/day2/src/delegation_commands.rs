@@ -510,6 +510,13 @@ pub fn status(callee: &Runtime, verified: &VerifiedQuery) -> Result<String> {
         query.purpose == Purpose::Status && query.target.runtime_scope() == callee.scope(),
         "app_status_target_changed"
     );
+    crate::delegation::require_contract(
+        callee,
+        &query.operation,
+        &query.schema_digest,
+        query.contract_digest.as_deref(),
+        "command",
+    )?;
     let input: StatusInput = crate::json::decode(&serde_json::to_vec(&query.input)?)?;
     ensure!(
         input.id.len() == 68
@@ -521,22 +528,43 @@ pub fn status(callee: &Runtime, verified: &VerifiedQuery) -> Result<String> {
     let tx = connection.transaction()?;
     callee.check_binding(&tx)?;
     crate::authority_state::authorize_in(&tx, callee, &query.operation, &query.actor)?;
-    let row: Option<(String, String)> = tx.query_row("SELECT i.invocation,v.status FROM day2_app_inbox i JOIN day2_invocations v ON v.id=i.invocation WHERE i.id=?1 AND i.source=?2 AND i.actor=?3 AND i.operation=?4 AND i.contract=?5", params![input.id, query.source.runtime_scope(), query.actor, query.operation, query.contract_digest.as_deref().unwrap_or("")], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-    let state = if let Some((id, status)) = row {
+    let row: Option<(String, String, Option<String>)> = tx.query_row("SELECT i.invocation,v.status,v.outcome FROM day2_app_inbox i JOIN day2_invocations v ON v.id=i.invocation WHERE i.id=?1 AND i.source=?2 AND i.actor=?3 AND i.operation=?4 AND i.contract=?5", params![input.id, query.source.runtime_scope(), query.actor, query.operation, query.contract_digest.as_deref().unwrap_or("")], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+    let (state, output) = if let Some((id, status, raw_outcome)) = row {
         if crate::authority_state::is_blocked(&tx, &id)? {
-            "blocked"
+            ("blocked", String::new())
         } else {
             match status.as_str() {
-                "success" => "success",
-                "failure" => "refused",
-                _ => "pending",
+                "success" => {
+                    let raw = raw_outcome
+                        .ok_or_else(|| anyhow::anyhow!("successful invocation outcome missing"))?;
+                    ensure!(
+                        raw.len() <= crate::output_schema::MAX_JSON_BYTES,
+                        "command result byte budget"
+                    );
+                    let outcome: crate::protocol::Outcome = crate::json::decode(raw.as_bytes())?;
+                    ensure!(
+                        outcome.status == "success",
+                        "command outcome status mismatch"
+                    );
+                    let result = callee
+                        .artifact()
+                        .decode_result(&query.operation, &outcome.result.to_string())?;
+                    let output = serde_json::to_string(&result)?;
+                    ensure!(
+                        output.len() <= crate::output_schema::MAX_JSON_BYTES,
+                        "command result byte budget"
+                    );
+                    ("success", output)
+                }
+                "failure" => ("refused", String::new()),
+                _ => ("pending", String::new()),
             }
         }
     } else {
-        "unknown"
+        ("unknown", String::new())
     };
     tx.commit()?;
-    Ok(json!({"id":input.id,"status":state}).to_string())
+    Ok(json!({"id":input.id,"status":state,"output":output}).to_string())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import Read
 import PageBinding
 import Template
+import Write
 
 # Bind an explicit route to generated read/template handles; the app owns its HTML.
 Page(a) :: { binding : PageBinding, complete : a -> PageBinding }.{
@@ -27,6 +28,25 @@ Page(a) :: { binding : PageBinding, complete : a -> PageBinding }.{
 	# use explicit integer types for numeric literals to avoid accidental decimals.
 	with_query_defaults : Page(a), _ -> Page(a)
 	with_query_defaults = |page, defaults| { ..page, binding: PageBinding.with_query_defaults(page.binding, defaults) }
+
+	# Run a small, ordered set of fixed-empty-input commands before this page's read.
+	# The native page adapter invokes each command through its ordinary command authority.
+	before_read : Page(a), Write({}, b) -> Page(a)
+	before_read = |page, command| {
+		..page,
+		binding: PageBinding.before_read(page.binding, command.name()),
+	}
+
+	# Render this page's normal template and input with a read-only fallback query
+	# when a preparation command fails. Admission verifies both query schemas match.
+	on_prepare_failure : Page(a), Read(a, b) -> Page(a)
+	on_prepare_failure = |page, fallback| {
+		operation = fallback.metadata()
+		{
+			..page,
+			binding: PageBinding.on_prepare_failure(page.binding, operation.name),
+		}
+	}
 
 	# Subscribe to database changes through the platform's Datastar SSE transport.
 	live : Page(a) -> Page(a)

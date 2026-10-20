@@ -19,7 +19,7 @@ use std::{
 pub const ACTOR: &str = "developer";
 pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
-const MAX_STEPS: usize = 128;
+const MAX_STEPS: usize = 256;
 const VERIFICATION_TIME: i64 = 1_700_000_000;
 
 /// Non-interactive invocation and provider-fixture time. Verification uses a
@@ -222,8 +222,14 @@ pub fn samples(artifact: &LoadedArtifact, seed: u64, count: u64) -> Result<Vec<S
     ensure!((1..=100).contains(&count), "generator count must be 1..100");
     if let Some(definition) = &artifact.contract().app_contract {
         ensure!(
-            definition.operations.len() * count as usize <= MAX_STEPS,
-            "verification obligation budget"
+            definition
+                .operations
+                .values()
+                .map(|operation| 1 + operation.verification_setup.len())
+                .sum::<usize>()
+                * count as usize
+                <= MAX_STEPS,
+            "verification obligation and setup budget"
         );
         return Ok((0..count)
             .flat_map(|index| {
@@ -328,30 +334,55 @@ fn verification_membership(
     let mut readers = BTreeSet::from([default_actor.to_owned()]);
     let mut writers = BTreeSet::from([default_actor.to_owned()]);
     if let Some(definition) = definition {
-        for override_actor in definition
-            .errors
-            .values()
-            .flat_map(|failure| &failure.verification_actors)
+        let operation_fixtures = definition.operations.iter().flat_map(|(name, contract)| {
+            contract
+                .verification_delegation
+                .iter()
+                .map(move |fixture| (name.as_str(), fixture.actor.as_str()))
+        });
+        let setup_fixtures = definition.operations.values().flat_map(|contract| {
+            contract.verification_setup.iter().flat_map(|setup| {
+                contract
+                    .verification_delegation
+                    .iter()
+                    .map(move |fixture| (setup.as_str(), fixture.actor.as_str()))
+            })
+        });
+        let failure_fixtures = definition.errors.values().flat_map(|failure| {
+            failure
+                .verification_actors
+                .iter()
+                .map(|entry| (entry.operation.as_str(), entry.actor.as_str()))
+                .chain(
+                    failure
+                        .verification_delegations
+                        .iter()
+                        .map(|entry| (entry.operation.as_str(), entry.actor.as_str())),
+                )
+        });
+        for (operation_name, fixture_actor) in operation_fixtures
+            .chain(setup_fixtures)
+            .chain(failure_fixtures)
         {
             let Some(operation) = operations
                 .iter()
-                .find(|operation| operation.name == override_actor.operation)
+                .find(|operation| operation.name == operation_name)
             else {
                 continue;
             };
             if !policy
                 .operations
                 .get(&operation.name)
-                .is_some_and(|grant| grant.actors.contains(&override_actor.actor))
+                .is_some_and(|grant| grant.actors.contains(fixture_actor))
             {
                 continue;
             }
             match operation.kind.as_str() {
                 "command" => {
-                    writers.insert(override_actor.actor.clone());
+                    writers.insert(fixture_actor.to_owned());
                 }
                 "query" => {
-                    readers.insert(override_actor.actor.clone());
+                    readers.insert(fixture_actor.to_owned());
                 }
                 _ => {}
             }
@@ -360,12 +391,53 @@ fn verification_membership(
     (readers, writers)
 }
 
+fn operation_verification_delegation<'a>(
+    artifact: &'a LoadedArtifact,
+    operation: &str,
+) -> Option<&'a crate::app_contract::VerificationDelegation> {
+    artifact
+        .contract()
+        .app_contract
+        .as_ref()?
+        .operations
+        .get(operation)?
+        .verification_delegation
+        .first()
+}
+
+fn failure_verification_delegation<'a>(
+    failure: &'a crate::app_contract::Failure,
+    target: &crate::operation_metadata::Target,
+    simulated: bool,
+) -> Result<Option<&'a crate::app_contract::VerificationDelegationCase>> {
+    let delegation = failure
+        .verification_delegations
+        .iter()
+        .find(|entry| entry.operation == target.operation);
+    ensure!(
+        delegation.is_none() || simulated,
+        "failure verification delegation requires simulated providers"
+    );
+    Ok(delegation)
+}
+
 fn failure_verification_actor<'a>(
     failure: &'a crate::app_contract::Failure,
     target: &crate::operation_metadata::Target,
     default_actor: &'a str,
     simulated: bool,
 ) -> Result<&'a str> {
+    if let Some(delegation) = failure
+        .verification_delegations
+        .iter()
+        .find(|entry| entry.operation == target.operation)
+    {
+        ensure!(
+            simulated,
+            "failure verification delegation requires simulated providers"
+        );
+        return Ok(&delegation.actor);
+    }
     match failure.verification_actor(target) {
         Some(actor) => {
             ensure!(
@@ -380,6 +452,44 @@ fn failure_verification_actor<'a>(
 
 pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy> {
     let mut operations = BTreeMap::new();
+    let app_definition = artifact.contract().app_contract.as_ref();
+    let mut delegations = BTreeMap::new();
+    if let Some(definition) = app_definition {
+        let fixtures = definition
+            .operations
+            .iter()
+            .flat_map(|(name, contract)| {
+                contract.verification_delegation.iter().map(move |fixture| {
+                    (
+                        name.as_str(),
+                        fixture.actor.as_str(),
+                        fixture.application.as_str(),
+                    )
+                })
+            })
+            .chain(definition.errors.values().flat_map(|failure| {
+                failure.verification_delegations.iter().map(|fixture| {
+                    (
+                        fixture.operation.as_str(),
+                        fixture.actor.as_str(),
+                        fixture.application.as_str(),
+                    )
+                })
+            }));
+        for (operation, actor, application) in fixtures {
+            let key = format!("verification:{application}:{operation}");
+            delegations.insert(
+                key,
+                crate::authority::DelegationRule {
+                    authenticated: BTreeSet::from([format!("app:{application}")]),
+                    may_act_as: crate::authority::ActAs::Actors {
+                        actors: BTreeSet::from([actor.into()]),
+                    },
+                    paths: BTreeSet::from(["delegated".into()]),
+                },
+            );
+        }
+    }
     for operation in &artifact.contract().operations {
         let mode = match operation.kind.as_str() {
             "query" => Mode::Read,
@@ -471,12 +581,41 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                     .app_contract
                     .as_ref()
                     .into_iter()
-                    .flat_map(|definition| definition.errors.values())
-                    .flat_map(|failure| &failure.verification_actors)
-                    .filter(|override_actor| override_actor.operation == operation.name)
-                    .map(|override_actor| override_actor.actor.clone())
+                    .flat_map(|definition| {
+                        let operation_actors = definition
+                            .operations
+                            .get(&operation.name)
+                            .into_iter()
+                            .flat_map(|contract| &contract.verification_delegation)
+                            .map(|fixture| fixture.actor.as_str());
+                        let setup_actors = definition.operations.values().flat_map(|contract| {
+                            contract
+                                .verification_setup
+                                .iter()
+                                .filter(|setup| **setup == operation.name)
+                                .flat_map(|_| &contract.verification_delegation)
+                                .map(|fixture| fixture.actor.as_str())
+                        });
+                        let error_actors = definition.errors.values().flat_map(|failure| {
+                            failure
+                                .verification_actors
+                                .iter()
+                                .filter(|entry| entry.operation == operation.name)
+                                .map(|entry| entry.actor.as_str())
+                                .chain(
+                                    failure
+                                        .verification_delegations
+                                        .iter()
+                                        .filter(|entry| entry.operation == operation.name)
+                                        .map(|entry| entry.actor.as_str()),
+                                )
+                        });
+                        operation_actors.chain(setup_actors).chain(error_actors)
+                    })
+                    .map(str::to_owned)
                     .chain(std::iter::once(actor.into()))
                     .collect(),
+
                 mode,
                 models,
             },
@@ -488,9 +627,10 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
         // it read that instance's platform audit log. Rows are granted to every
         // operation below regardless, so owning them bypasses nothing further.
         admins: BTreeSet::from([actor.into()]),
-        // A disposable development instance grants nobody the right to act as
-        // anybody: impersonation is an operator's decision about real people.
-        delegations: BTreeMap::new(),
+        // Only artifact-declared delegated verification fixtures receive an
+        // exact, synthetic rule. This policy is disposable and never installed
+        // by a production runtime.
+        delegations,
         operations,
         constraints: artifact
             .contract()
@@ -1646,14 +1786,35 @@ mod people_resource_tests {
                 operation: target.operation.clone(),
                 actor: "freetool-denied-synthetic".into(),
             }],
+            verification_delegations: Vec::new(),
         };
         assert_eq!(
             failure_verification_actor(&failure, &target, "developer", true)?,
             "freetool-denied-synthetic"
         );
         assert!(failure_verification_actor(&failure, &target, "developer", false).is_err());
+        let delegated_failure = crate::app_contract::Failure {
+            verification_delegations: vec![crate::app_contract::VerificationDelegationCase {
+                operation: target.operation.clone(),
+                actor: "developer".into(),
+                application: "agent-gateway".into(),
+            }],
+            ..failure.clone()
+        };
+        assert_eq!(
+            failure_verification_actor(&delegated_failure, &target, "other", true)?,
+            "developer"
+        );
+        assert!(failure_verification_actor(&delegated_failure, &target, "other", false).is_err());
+        assert_eq!(
+            failure_verification_delegation(&delegated_failure, &target, true)?
+                .unwrap()
+                .application,
+            "agent-gateway"
+        );
         let default_failure = crate::app_contract::Failure {
             verification_actors: Vec::new(),
+            verification_delegations: Vec::new(),
             ..failure
         };
         assert_eq!(
@@ -1710,6 +1871,7 @@ mod people_resource_tests {
                         operation: operation.into(),
                         actor: actor.into(),
                     }],
+                    verification_delegations: Vec::new(),
                 },
             )
         })
@@ -1904,7 +2066,8 @@ mod people_resource_tests {
                         "inputs":[], "outputs":[], "input_sources":[], "follow_ups":[]},
                     "request_example":"{}", "response_example":"{}", "deprecated":false,
                     "execution":{"model":"","id_field":"","version_field":"","effects":[]},
-                    "errors":[], "observations":["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"]
+                    "errors":[], "observations":["workspace_directory.hierarchy.v1", "workspace_directory.page.v1"],
+                    "verification_setup":[], "verification_delegation":[]
                 }},
                 "presentation":{"stylesheet":"","script":""}, "identities":"",
                 "invariants":{}, "domains":{}, "errors":{}
@@ -2766,6 +2929,7 @@ pub struct Evidence {
     pub snapshot: Value,
     pub failure: Option<String>,
     pub obligations: BTreeMap<String, u64>,
+    pub setup_counts: BTreeMap<String, u64>,
     pub verification_complete: bool,
     pub error_traces: Vec<crate::protocol::Trace>,
 }
@@ -2788,11 +2952,133 @@ pub struct Campaign {
     complete: bool,
     obligations: std::collections::VecDeque<Sample>,
     prepared: bool,
+    setup: SetupState,
     errors_checked: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaseKind {
+    Example,
+    Setup,
+    Positive,
+}
+
+#[derive(Default)]
+enum SetupState {
+    #[default]
+    Unplanned,
+    Pending(std::collections::VecDeque<Step>),
+    InFlight(std::collections::VecDeque<Step>),
+    Ready,
+}
+
+impl SetupState {
+    fn plan(&mut self, steps: Vec<Step>) -> Result<()> {
+        ensure!(
+            matches!(self, Self::Unplanned),
+            "verification setup already planned"
+        );
+        *self = if steps.is_empty() {
+            Self::Ready
+        } else {
+            Self::Pending(steps.into())
+        };
+        Ok(())
+    }
+
+    fn next(&self) -> Option<&Step> {
+        match self {
+            Self::Pending(steps) => steps.front(),
+            _ => None,
+        }
+    }
+
+    fn consume(&mut self, step: &Step) -> Result<()> {
+        let Self::Pending(steps) = self else {
+            bail!("verification setup is not pending")
+        };
+        let expected = steps.front().context("missing verification setup step")?;
+        ensure!(
+            expected.operation == step.operation && expected.input == step.input,
+            "command differs from declared verification setup"
+        );
+        steps.pop_front();
+        let remaining = std::mem::take(steps);
+        *self = Self::InFlight(remaining);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        ensure!(
+            matches!(self, Self::InFlight(_)),
+            "verification setup is not in flight"
+        );
+        let Self::InFlight(remaining) = std::mem::replace(self, Self::Unplanned) else {
+            unreachable!()
+        };
+        *self = if remaining.is_empty() {
+            Self::Ready
+        } else {
+            Self::Pending(remaining)
+        };
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod setup_state_tests {
+    use super::*;
+
+    fn step(operation: &str) -> Step {
+        Step {
+            operation: operation.into(),
+            input: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn setup_order_and_fixed_inputs_cannot_be_skipped_or_consumed_by_a_rejection() -> Result<()> {
+        let mut state = SetupState::Unplanned;
+        assert!(state.consume(&step("first")).is_err());
+        state.plan(vec![step("first"), step("second")])?;
+        assert!(state.plan(Vec::new()).is_err());
+        assert!(state.consume(&step("second")).is_err());
+        assert_eq!(state.next().unwrap().operation, "first");
+        let malformed = Step {
+            operation: "first".into(),
+            input: "{\"actor\":\"other\"}".into(),
+        };
+        assert!(state.consume(&malformed).is_err());
+        assert_eq!(state.next().unwrap().operation, "first");
+        state.consume(&step("first"))?;
+        assert!(matches!(state, SetupState::InFlight(_)));
+        assert!(state.consume(&step("second")).is_err());
+        state.finish()?;
+        state.consume(&step("second"))?;
+        assert!(
+            !matches!(state, SetupState::Ready),
+            "a failed or unchecked last setup cannot unlock input generation"
+        );
+        state.finish()?;
+        assert!(matches!(state, SetupState::Ready));
+        assert!(state.consume(&step("second")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_setup_still_requires_an_explicit_native_plan() -> Result<()> {
+        let mut state = SetupState::Unplanned;
+        assert!(!matches!(state, SetupState::Ready));
+        state.plan(Vec::new())?;
+        assert!(matches!(state, SetupState::Ready));
+        Ok(())
+    }
 }
 
 struct Active {
     step: Step,
+    actor: String,
+    delegation: Option<crate::app_contract::VerificationDelegation>,
     id: String,
     now: i64,
     outcome: crate::protocol::Outcome,
@@ -2800,7 +3086,7 @@ struct Active {
     checks: BTreeSet<String>,
     application_initial: Value,
     application_after: Value,
-    obligation: bool,
+    kind: CaseKind,
 }
 
 impl Campaign {
@@ -2843,6 +3129,7 @@ impl Campaign {
                 snapshot: json!({}),
                 failure: None,
                 obligations: BTreeMap::new(),
+                setup_counts: BTreeMap::new(),
                 verification_complete: false,
                 error_traces: Vec::new(),
             },
@@ -2860,6 +3147,7 @@ impl Campaign {
             complete: false,
             obligations: std::collections::VecDeque::new(),
             prepared: false,
+            setup: SetupState::Unplanned,
             errors_checked: false,
         })
     }
@@ -2971,7 +3259,23 @@ impl Campaign {
                     self.evidence.requested_cases_per_generator,
                 )?;
                 ensure!(
-                    self.evidence.traces.len() + values.len() <= MAX_STEPS,
+                    self.evidence.traces.len()
+                        + values
+                            .iter()
+                            .map(|sample| {
+                                1 + self
+                                    .runtime
+                                    .artifact()
+                                    .contract()
+                                    .app_contract
+                                    .as_ref()
+                                    .and_then(|definition| {
+                                        definition.operations.get(&sample.operation)
+                                    })
+                                    .map_or(0, |operation| operation.verification_setup.len())
+                            })
+                            .sum::<usize>()
+                        <= MAX_STEPS,
                     "development campaign step budget"
                 );
                 self.queue.extend(values.iter().map(|sample| Step {
@@ -2985,10 +3289,43 @@ impl Campaign {
                 self.evidence.generated = values.len();
                 return Ok(serde_json::to_value(values)?);
             }
+            "dev-setups" => {
+                ensure!(
+                    self.sampled && self.active.is_none() && !self.prepared,
+                    "verification setup phase order"
+                );
+                let sample = self.queue.front().context("missing verification sample")?;
+                let steps: Vec<Step> = self
+                    .runtime
+                    .artifact()
+                    .contract()
+                    .app_contract
+                    .as_ref()
+                    .and_then(|definition| definition.operations.get(&sample.operation))
+                    .map(|operation| {
+                        operation
+                            .verification_setup
+                            .iter()
+                            .map(|operation| Step {
+                                operation: operation.clone(),
+                                input: "{}".into(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ensure!(
+                    steps.is_empty() || self.runtime.integrations().uses_simulated_providers(),
+                    "verification setup requires simulated providers"
+                );
+                self.setup.plan(steps.clone())?;
+                return Ok(serde_json::to_value(steps)?);
+            }
             "dev-prepare-sample" => {
                 ensure!(
-                    self.active.is_none() && !self.prepared,
-                    "sample already prepared"
+                    self.active.is_none()
+                        && !self.prepared
+                        && matches!(self.setup, SetupState::Ready),
+                    "sample requires completed verification setup"
                 );
                 let step = self
                     .queue
@@ -3007,7 +3344,11 @@ impl Campaign {
                         &json!({}),
                         &Value::Null,
                         VerificationInvocation {
-                            actor: &self.actor,
+                            actor: operation_verification_delegation(
+                                self.runtime.artifact(),
+                                &sample.operation,
+                            )
+                            .map_or(self.actor.as_str(), |principal| principal.actor.as_str()),
                             input: "",
                             seed: sample.seed.parse()?,
                         },
@@ -3026,20 +3367,41 @@ impl Campaign {
                     "development campaign step budget"
                 );
                 let step: Step = request.decode()?;
-                let expected = self
-                    .queue
-                    .pop_front()
-                    .context("command outside selected examples/generators")?;
-                ensure!(
-                    step.operation == expected.operation && step.input == expected.input,
-                    "command differs from selected case"
-                );
-                let obligation = self.prepared && self.obligations.pop_front().is_some();
-                if !obligation {
+                let kind = if self.setup.next().is_some() {
+                    self.setup.consume(&step)?;
+                    CaseKind::Setup
+                } else {
+                    ensure!(
+                        !self.sampled || (self.prepared && matches!(self.setup, SetupState::Ready)),
+                        "generated invocation requires prepared input and setup"
+                    );
+                    let expected = self
+                        .queue
+                        .front()
+                        .context("command outside selected examples/generators")?;
+                    ensure!(
+                        step.operation == expected.operation && step.input == expected.input,
+                        "command differs from selected case"
+                    );
+                    self.queue.pop_front();
+                    let kind = if self.prepared && self.obligations.pop_front().is_some() {
+                        CaseKind::Positive
+                    } else {
+                        CaseKind::Example
+                    };
+                    self.setup = SetupState::Unplanned;
+                    kind
+                };
+                if kind != CaseKind::Positive {
                     validate_step(self.runtime.artifact(), &step)?;
                 }
                 let index = self.evidence.traces.len();
-                let id = format!("example-{index}");
+                let prefix = if kind == CaseKind::Setup {
+                    "setup"
+                } else {
+                    "example"
+                };
+                let id = format!("{prefix}-{index}");
                 let interactive =
                     crate::managed_credentials::issuance::access(&self.runtime, &step.operation)?
                         .interactive;
@@ -3049,11 +3411,45 @@ impl Campaign {
                     self.provider_clock + index as i64
                 };
                 let input: Value = serde_json::from_str(&step.input)?;
+                let delegated = if kind == CaseKind::Positive {
+                    operation_verification_delegation(self.runtime.artifact(), &step.operation)
+                        .cloned()
+                } else {
+                    None
+                };
+                if delegated.is_some() {
+                    ensure!(
+                        self.runtime.integrations().is_simulated()
+                            && self
+                                .runtime
+                                .artifact()
+                                .contract()
+                                .credential_manifest
+                                .is_empty()
+                            && !interactive,
+                        "delegated verification requires a credential-free simulated campaign"
+                    );
+                }
+                let campaign_actor = if let Some(principal) = &delegated {
+                    principal.actor.as_str()
+                } else if kind == CaseKind::Setup {
+                    self.queue
+                        .front()
+                        .and_then(|sample| {
+                            operation_verification_delegation(
+                                self.runtime.artifact(),
+                                &sample.operation,
+                            )
+                        })
+                        .map_or(self.actor.as_str(), |principal| principal.actor.as_str())
+                } else {
+                    self.actor.as_str()
+                };
                 if interactive {
                     crate::managed_credentials::verification::confirm(
                         &self.runtime,
                         &step.operation,
-                        &self.actor,
+                        campaign_actor,
                         &id,
                         &input,
                         now,
@@ -3063,7 +3459,7 @@ impl Campaign {
                 self.prepared = false;
                 // Internal definitions also have mandatory app-owned verification.
                 // Only this artifact-bound campaign can admit those generated samples.
-                let internal_example = !obligation
+                let internal_example = kind == CaseKind::Example
                     && self
                         .runtime
                         .artifact()
@@ -3073,10 +3469,23 @@ impl Campaign {
                     !internal_example || self.runtime.integrations().is_simulated(),
                     "internal_examples_require_simulated_providers"
                 );
-                if obligation || internal_example {
+                if let Some(principal) = &delegated {
+                    let authenticated = format!("app:{}", principal.application);
+                    self.runtime.accept_delegated(
+                        &step.operation,
+                        &id,
+                        &input,
+                        now,
+                        crate::store::Cause::delegated(
+                            &principal.actor,
+                            &principal.application,
+                            &authenticated,
+                        ),
+                    )?;
+                } else if kind == CaseKind::Positive || internal_example {
                     self.runtime.accept_route(
                         &step.operation,
-                        &self.actor,
+                        campaign_actor,
                         &id,
                         &input,
                         now,
@@ -3102,6 +3511,8 @@ impl Campaign {
                 );
                 self.active = Some(Active {
                     step,
+                    actor: campaign_actor.to_owned(),
+                    delegation: delegated,
                     id,
                     now,
                     outcome,
@@ -3109,12 +3520,16 @@ impl Campaign {
                     checks: BTreeSet::new(),
                     application_initial,
                     application_after: self.runtime.verification_snapshot()?,
-                    obligation,
+                    kind,
                 });
             }
             "dev-assert" => {
                 let active = self.active.as_mut().context("active operation required")?;
-                if active.obligation {
+                ensure!(
+                    !active.checks.contains("assert"),
+                    "duplicate operation assertion"
+                );
+                if active.kind != CaseKind::Example {
                     verification(
                         self.runtime.artifact(),
                         "check",
@@ -3123,16 +3538,17 @@ impl Campaign {
                         &active.application_initial,
                         &active.outcome.result,
                         VerificationInvocation {
-                            actor: &self.actor,
+                            actor: &active.actor,
                             input: &active.step.input,
                             seed: 0,
                         },
                     )?;
-                    *self
-                        .evidence
-                        .obligations
-                        .entry(active.step.operation.clone())
-                        .or_default() += 1;
+                    let counts = if active.kind == CaseKind::Setup {
+                        &mut self.evidence.setup_counts
+                    } else {
+                        &mut self.evidence.obligations
+                    };
+                    *counts.entry(active.step.operation.clone()).or_default() += 1;
                 }
                 ensure!(
                     active.checks.insert("assert".into()),
@@ -3176,16 +3592,37 @@ impl Campaign {
                                 )?;
                                 let input: Value = serde_json::from_str(&input)?;
                                 let id = format!("failure-{}", self.evidence.error_traces.len());
-                                // These typed, admitted cases have the same access
-                                // to internal workers as ordinary generated checks.
-                                self.runtime.accept_route(
-                                    &target.operation,
-                                    verification_actor,
-                                    &id,
-                                    &input,
-                                    1_700_100_000 + index as i64,
-                                    crate::audit::Trigger::Request,
+                                // Error cases may select only an artifact-declared host
+                                // fixture. Direct cases remain direct; no input field can
+                                // select the caller or authentication path.
+                                let delegation = failure_verification_delegation(
+                                    error,
+                                    target,
+                                    self.runtime.integrations().is_simulated(),
                                 )?;
+                                if let Some(delegation) = delegation {
+                                    let authenticated = format!("app:{}", delegation.application);
+                                    self.runtime.accept_delegated(
+                                        &target.operation,
+                                        &id,
+                                        &input,
+                                        1_700_100_000 + index as i64,
+                                        crate::store::Cause::delegated(
+                                            verification_actor,
+                                            &delegation.application,
+                                            &authenticated,
+                                        ),
+                                    )?;
+                                } else {
+                                    self.runtime.accept_route(
+                                        &target.operation,
+                                        verification_actor,
+                                        &id,
+                                        &input,
+                                        1_700_100_000 + index as i64,
+                                        crate::audit::Trigger::Request,
+                                    )?;
+                                }
                                 // A business-error witness must reject before
                                 // provider dispatch; do not advance a pending
                                 // effects phase merely to obtain a later error.
@@ -3205,14 +3642,29 @@ impl Campaign {
                                     "required application failure scenario did not reject atomically: {verification_key}"
                                 );
                                 crate::store::replay(self.runtime.artifact(), &trace)?;
-                                self.runtime.accept_route(
-                                    &target.operation,
-                                    verification_actor,
-                                    &id,
-                                    &input,
-                                    1_700_100_000 + index as i64,
-                                    crate::audit::Trigger::Request,
-                                )?;
+                                if let Some(delegation) = delegation {
+                                    let authenticated = format!("app:{}", delegation.application);
+                                    self.runtime.accept_delegated(
+                                        &target.operation,
+                                        &id,
+                                        &input,
+                                        1_700_100_000 + index as i64,
+                                        crate::store::Cause::delegated(
+                                            verification_actor,
+                                            &delegation.application,
+                                            &authenticated,
+                                        ),
+                                    )?;
+                                } else {
+                                    self.runtime.accept_route(
+                                        &target.operation,
+                                        verification_actor,
+                                        &id,
+                                        &input,
+                                        1_700_100_000 + index as i64,
+                                        crate::audit::Trigger::Request,
+                                    )?;
+                                }
                                 ensure!(
                                     self.runtime.execute(&id, Fault::None)? == outcome
                                         && self.runtime.inspect()? == before,
@@ -3243,7 +3695,21 @@ impl Campaign {
             }
             "dev-duplicate" => {
                 let active = self.active.as_mut().context("active command required")?;
-                let duplicate = if self
+                let duplicate = if let Some(delegation) = &active.delegation {
+                    let authenticated = format!("app:{}", delegation.application);
+                    self.runtime.accept_delegated(
+                        &active.step.operation,
+                        &active.id,
+                        &serde_json::from_str(&active.step.input)?,
+                        active.now,
+                        crate::store::Cause::delegated(
+                            &delegation.actor,
+                            &delegation.application,
+                            &authenticated,
+                        ),
+                    )?;
+                    self.runtime.execute(&active.id, Fault::None)?
+                } else if self
                     .runtime
                     .artifact()
                     .contract()
@@ -3345,11 +3811,18 @@ impl Campaign {
                     .all(|check| active.checks.contains(*check)),
                     "incomplete command verification"
                 );
+                if active.kind == CaseKind::Setup {
+                    self.setup.finish()?;
+                }
                 self.active = None;
             }
             "dev-finish" => {
                 ensure!(
-                    self.empty_checked && self.active.is_none() && self.queue.is_empty(),
+                    self.empty_checked
+                        && self.active.is_none()
+                        && self.queue.is_empty()
+                        && !self.prepared
+                        && matches!(self.setup, SetupState::Unplanned),
                     "incomplete development campaign"
                 );
                 let catalog = self.catalog.as_ref().context("example catalog required")?;
@@ -3386,6 +3859,17 @@ impl Campaign {
                         ensure!(
                             self.evidence.obligations == expected,
                             "verification obligations incomplete"
+                        );
+                        let mut expected_setups = BTreeMap::<String, u64>::new();
+                        for operation in definition.operations.values() {
+                            for setup in &operation.verification_setup {
+                                *expected_setups.entry(setup.clone()).or_default() +=
+                                    self.evidence.requested_cases_per_generator;
+                            }
+                        }
+                        ensure!(
+                            self.evidence.setup_counts == expected_setups,
+                            "verification setup checks incomplete"
                         );
                         self.evidence.verification_complete = true;
                     }

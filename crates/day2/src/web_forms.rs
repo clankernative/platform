@@ -927,6 +927,8 @@ mod query_form_tests {
             output_type: "Empty".into(),
             live: false,
             live_refresh_ms: 0,
+            preparation: vec![],
+            prepare_failure_operation: String::new(),
         };
         let (fields, defaults, path) = if path_parameter {
             (
@@ -956,6 +958,8 @@ mod query_form_tests {
             output_type: "Target".into(),
             live: false,
             live_refresh_ms: 0,
+            preparation: vec![],
+            prepare_failure_operation: String::new(),
         };
         let operations = vec![
             crate::artifact::Operation {
