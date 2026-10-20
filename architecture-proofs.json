@@ -1127,7 +1127,7 @@
       "material_uses": [
         {
           "owner": "PreparedFileContinuity",
-          "signature": "pub (super) fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+          "signature": "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
         },
         {
           "owner": "PreparedInitialFile < 'role >",
@@ -1300,7 +1300,8 @@
         "fn check_identity (& mut self) -> Result < () >",
         "pub (crate) fn check_original (& mut self) -> Result < () >",
         "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >",
-        "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >"
+        "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
+        "fn read_current (& mut self) -> Result < Vec < u8 > >"
       ],
       "factories": [
         {
@@ -1312,6 +1313,10 @@
         {
           "owner": "AppPreparedFile < 'stage , 'role >",
           "signature": "fn check_identity (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "fn read_current (& mut self) -> Result < Vec < u8 > >"
         },
         {
           "owner": "AppPreparedFile < 'stage , 'role >",

@@ -16,9 +16,9 @@ use anyhow::{Result, ensure};
 use std::{fs::File, thread::ThreadId};
 
 pub(crate) enum PreparedRetentionOutcome<'role> {
-    Retained(PreparedFileContinuity),
+    Retained(Box<PreparedFileContinuity>),
     Refused {
-        original: PreparedInitialFile<'role>,
+        original: Box<PreparedInitialFile<'role>>,
         error: anyhow::Error,
     },
 }
@@ -54,15 +54,15 @@ impl<'role> PreparedInitialFile<'role> {
             Ok(binding)
         })();
         match binding {
-            Ok(binding) => {
-                PreparedRetentionOutcome::Retained(PreparedFileContinuity::retain(self, binding))
-            }
+            Ok(binding) => PreparedRetentionOutcome::Retained(Box::new(
+                PreparedFileContinuity::retain(self, binding),
+            )),
             Err(error) => {
                 self.creator
                     .authority
                     .refuse_preparation(&mut self.acquisition);
                 PreparedRetentionOutcome::Refused {
-                    original: self,
+                    original: Box::new(self),
                     error,
                 }
             }
