@@ -14,9 +14,10 @@ exchange is included, but genuine P3/current serving authority is still absent.
   holder still cannot substitute for P3/current serving authority.
   Credential owns the fixed issuer entrypoint, operational composition and
   live enrollment qualification; G1 is implementing the exchange against S1.
-- G1 owns provider P3 and exclusive-mutator qualification, counter activation,
-  and current serving/writer authority. Product owns final consumer settlement
-  on this branch. The current
+- Product owns provider P3/bootstrap/current-writer/serving implementation and
+  Runtime admission on this branch, alongside final consumer settlement. G1
+  retains authenticated peer helpers, IAM governance remediation and native
+  access coordination. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
   `PreparedFileContinuity` retain real resources, but cannot authorize serving
   mutations. `CurrentBootstrapExecution` has no production constructor.
@@ -88,7 +89,7 @@ Completed sockets cannot write or complete again.
 
 S3 deliberately registers no native implementation yet: the factory refuses
 before the callback, SQL or provider I/O. The actual P3/current writer/serving
-owner remains G1's supplier work, so the production proof producer stays closed.
+owner remains unimplemented, so the production proof producer stays closed.
 Preparation-only files, snapshots and an epoch boolean cannot fill this gap;
 the scripted simulator cannot enter the native variant or implement its sealed
 trait. This is consuming code against that contract, not a native readiness claim.
@@ -120,3 +121,31 @@ must then be paired with missing, expired, changed-selection and wrong-holder
 cases at every protected continuation. No fixture-success factory, boolean
 supplier matrix or unimplemented production owner is added here to stand in
 for that campaign.
+
+## Storage continuation in progress
+
+The App can consume its checked original file into `AppFileContinuity` while
+its original stage is still valid. The same directory/file descriptors and
+actual enrollment identity survive; no pathname, projection, old grant or
+serialized value can recreate them. Current physical checks take a fresh
+bounded stage from that same enrollment. The initial-image check remains
+separate and still rejects modified bytes. Physical continuity alone grants no
+first-holder, activation, provider durability or current writer authority.
+
+The Controller's `CurrentPhysicalFilePhase` is distinct from the initial-file
+phase accepted by the first-holder exchange. It retains the actual volume,
+provider, mount, directory and file checks while allowing SQLite length/content
+to change after legitimate writes. Entry closes the parent continuation gate;
+abandonment or failure cannot reopen it. Known physical completion is still
+not a P3 or current-writer result.
+
+Current database validation checks the canonical original store, seed, marker,
+schema, scope and artifact while permitting ordinary App row changes. It
+validates DATA only; a caller Connection cannot construct a native owner.
+
+Positive bootstrap/serving still requires the actual exclusive-mutator and
+provider durability contract. The existing unapplied governance proposal has
+not supplied that authority: it records a Firebase Rules bypass and unresolved
+administrative/impersonation paths. Enrollment, local fsync, previous readback
+and an authenticated first holder cannot replace that missing contract. Native
+production factories remain closed while those requirements are unresolved.
