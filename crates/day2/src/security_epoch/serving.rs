@@ -21,6 +21,8 @@ pub(crate) enum ServingUse {
     Verification,
     Callback,
     Response,
+    AppResponseComplete,
+    ShellResponseComplete,
 }
 
 mod sealed {
@@ -63,5 +65,16 @@ pub(crate) fn with_current_serving<'role, T>(
     _purpose: ServingUse,
     _operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> Result<T> {
+    anyhow::bail!("native current-serving authority unavailable")
+}
+
+/// Terminal lookup of an EXISTING logical response hold on its owning executor.
+/// It may only refuse: never create/rebind a hold, settle a paused winner as
+/// complete/excluded, release unknown resources, or restore a terminal owner.
+/// The future implementation must bind the original hold/incarnation; the
+/// intent/purpose DATA alone cannot supply it or a new permission. No native
+/// owner/registry implementation exists yet, so no successful refusal receipt
+/// is returned here, and no stage/clock/provider request is attempted.
+pub(crate) fn refuse_current_serving(_intent: &FreshIntent, _purpose: ServingUse) -> Result<()> {
     anyhow::bail!("native current-serving authority unavailable")
 }
