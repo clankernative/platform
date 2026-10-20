@@ -59,6 +59,9 @@ const _: () = {
     assert_consuming!(crate::oauth::native_management::RoleStage<'static>);
     assert_not_impl!(crate::oauth::native_management::RoleStage<'static>, Send);
     assert_not_impl!(crate::oauth::native_management::RoleStage<'static>, Sync);
+    assert_consuming!(crate::oauth::native_management::Consumer<'static, 'static, 'static>);
+    assert_not_impl!(crate::oauth::native_management::Consumer<'static, 'static, 'static>, Send);
+    assert_not_impl!(crate::oauth::native_management::Consumer<'static, 'static, 'static>, Sync);
     assert_consuming!(crate::security_epoch::native_enrollment::SameEnrolledOwner);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::SameEnrolledOwner,

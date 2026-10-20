@@ -851,35 +851,35 @@ impl Manager {
                     crate::oauth::native_management::Phase::DisconnectCommit,
                     finished,
                     |current| {
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
-                ensure!(
-                    state == "pending" && stored == *view,
-                    "OAuth disconnect pending changed"
-                );
-                self.check_in(&tx, view, identity)?;
-                let changed = tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1
+                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
+                        ensure!(
+                            state == "pending" && stored == *view,
+                            "OAuth disconnect pending changed"
+                        );
+                        self.check_in(&tx, view, identity)?;
+                        let changed = tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1
                 WHERE slot=?1 AND generation=?2 AND token_version=?3 AND security_epoch=?4 AND status='active'",
                 params![view.slot.as_str(), fence.generation, fence.token_version, fence.epoch])?;
-                ensure!(changed == 1, "OAuth disconnect fence lost");
-                tx.execute(
+                        ensure!(changed == 1, "OAuth disconnect fence lost");
+                        tx.execute(
                     "UPDATE oauth_refresh_attempts SET state='publication_rejected' WHERE slot=?1
                 AND state IN ('ready','may_have_been_sent','uncertain')",
                     [view.slot.as_str()],
                 )?;
-                tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
+                        tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
                 AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute(
-                    "DELETE FROM oauth_private_tokens WHERE slot=?1",
-                    [view.slot.as_str()],
-                )?;
-                tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
+                        tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute(
+                            "DELETE FROM oauth_private_tokens WHERE slot=?1",
+                            [view.slot.as_str()],
+                        )?;
+                        tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
-                current.commit(tx)?;
-                Ok(true)
+                        current.commit(tx)?;
+                        Ok(true)
                     },
                 )
             },
@@ -949,22 +949,37 @@ impl FinishGuard<'_> {
         now: i64,
         operation: impl FnOnce(&mut crate::oauth::native_management::Consumer<'_, '_, '_>) -> Result<T>,
     ) -> Result<T> {
-        ensure!(matches!(phase,
-            crate::oauth::native_management::Phase::DispatchCommit |
-            crate::oauth::native_management::Phase::ProviderSend |
-            crate::oauth::native_management::Phase::FinishCommit), "OAuth finish consumer phase refused");
+        ensure!(
+            matches!(
+                phase,
+                crate::oauth::native_management::Phase::DispatchCommit
+                    | crate::oauth::native_management::Phase::ProviderSend
+                    | crate::oauth::native_management::Phase::FinishCommit
+            ),
+            "OAuth finish consumer phase refused"
+        );
         crate::oauth::native_management::with_consumer(
             &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
-            phase, now, operation,
+            phase,
+            now,
+            operation,
         )
     }
 
-    pub(in crate::oauth) fn send<T>(&self, entry: i64, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.with_current(crate::oauth::native_management::Phase::ProviderSend, entry, |current| {
-            self.require_send(entry)?;
-            current.check()?;
-            operation()
-        })
+    pub(in crate::oauth) fn send<T>(
+        &self,
+        entry: i64,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_current(
+            crate::oauth::native_management::Phase::ProviderSend,
+            entry,
+            |current| {
+                self.require_send(entry)?;
+                current.check()?;
+                operation()
+            },
+        )
     }
 
     pub(in crate::oauth) fn require_send(&self, entry: i64) -> Result<()> {

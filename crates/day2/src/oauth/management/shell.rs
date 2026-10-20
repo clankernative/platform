@@ -135,19 +135,24 @@ impl Shell {
                     "OAuth management session capacity reached"
                 );
                 current.check()?;
-                ensure!(!sessions.contains_key(digest.as_str()), "OAuth management session collision");
+                ensure!(
+                    !sessions.contains_key(digest.as_str()),
+                    "OAuth management session collision"
+                );
                 sessions.insert(digest.as_str().into(), session);
                 // An expired/changed owner after insertion must not leave a
                 // usable session even if the response is never constructed.
                 let response = (|| {
-                current.check()?;
-                with_cookie(
-                    redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
-                    &token,
-                    view.expires_at - now,
-                )
+                    current.check()?;
+                    with_cookie(
+                        redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
+                        &token,
+                        view.expires_at - now,
+                    )
                 })();
-                if response.is_err() { sessions.remove(digest.as_str()); }
+                if response.is_err() {
+                    sessions.remove(digest.as_str());
+                }
                 response
             },
         )

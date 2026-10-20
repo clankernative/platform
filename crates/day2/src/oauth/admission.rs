@@ -1130,27 +1130,27 @@ impl ArtifactApprovalAuthority {
             super::native_management::Phase::Verification,
             now,
             |current| {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let selected = management_selection(&state.selected, view)?;
-        let reference = &selected.shell_attestation;
-        let key = state
-            .keys
-            .as_ref()
-            .context("OAuth selected key provider missing")?
-            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
-        ensure!(
-            key.binding == reference.binding
-                && key.version == reference.version
-                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
-            "OAuth management key changed"
-        );
-        let at = super::effects::wall_time()?;
-        ensure!(at >= now, "OAuth management clock moved backwards");
-        current.check()?;
-        proof.verify(view, identity, &key.bytes, &key.version, at)
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+                let selected = management_selection(&state.selected, view)?;
+                let reference = &selected.shell_attestation;
+                let key = state
+                    .keys
+                    .as_ref()
+                    .context("OAuth selected key provider missing")?
+                    .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+                ensure!(
+                    key.binding == reference.binding
+                        && key.version == reference.version
+                        && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+                    "OAuth management key changed"
+                );
+                let at = super::effects::wall_time()?;
+                ensure!(at >= now, "OAuth management clock moved backwards");
+                current.check()?;
+                proof.verify(view, identity, &key.bytes, &key.version, at)
             },
         )
     }
@@ -4238,7 +4238,8 @@ pub(super) mod tests {
                 identity.subject.clone(),
                 103,
             ));
-            let accepted = signer.attest_management(&isolated_view, &isolated, &identity, session, 104)?;
+            let accepted =
+                signer.attest_management(&isolated_view, &isolated, &identity, session, 104)?;
             accepted.verify(&isolated_view, &identity, &[11; 32], "11", 104)?;
             assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
             assert_eq!(

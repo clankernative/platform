@@ -339,16 +339,21 @@ pub(in crate::oauth) fn authorize_managed_exchange(
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
-    guard.with_current(super::native_management::Phase::DispatchCommit, now, |current| {
-        authorize_checked(db, input, now, Some((guard, current)))
-    })
+    guard.with_current(
+        super::native_management::Phase::DispatchCommit,
+        now,
+        |current| authorize_checked(db, input, now, Some((guard, current))),
+    )
 }
 
 fn authorize_checked(
     db: &mut Connection,
     input: OutboundQualification<'_>,
     now: i64,
-    mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>)>,
+    mut guard: Option<(
+        &super::management::app::FinishGuard<'_>,
+        &mut super::native_management::Consumer<'_, '_, '_>,
+    )>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
@@ -614,17 +619,23 @@ pub(in crate::oauth) fn settle_managed(
     {
         return Ok(false);
     }
-    guard.with_current(super::native_management::Phase::FinishCommit, now, |current| connect::activate_mapped_bound(
-        db,
-        &prepared.verified,
-        &prepared.binding,
-        revision,
+    guard.with_current(
+        super::native_management::Phase::FinishCommit,
         now,
-        Some(current),
-        |tx| {
-            guard.check(tx, now)?;
-            custody::publish_tokens(tx, prepared.material)?;
-            guard.complete(tx)
+        |current| {
+            connect::activate_mapped_bound(
+                db,
+                &prepared.verified,
+                &prepared.binding,
+                revision,
+                now,
+                Some(current),
+                |tx| {
+                    guard.check(tx, now)?;
+                    custody::publish_tokens(tx, prepared.material)?;
+                    guard.complete(tx)
+                },
+            )
         },
-    ))
+    )
 }

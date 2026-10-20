@@ -490,9 +490,13 @@ impl Consumer<'_, '_, '_> {
     /// and afterwards. An error (even after a possibly successful commit) never
     /// returns a dispatch permit or rearms the original.
     pub(crate) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
-        self.check()?;
-        tx.commit()?;
-        self.check()
+        let result = (|| {
+            self.check()?;
+            tx.commit()?;
+            self.check()
+        })();
+        if result.is_err() { self.original.refuse(); }
+        result
     }
 }
 
@@ -511,7 +515,11 @@ pub(crate) fn with_consumer<T>(
     operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
 ) -> Result<T> {
     with_current_original(intent, phase, wall, |role, original| {
-        let mut consumer = Consumer { role, original, settled: false };
+        let mut consumer = Consumer {
+            role,
+            original,
+            settled: false,
+        };
         consumer.check()?;
         let output = operation(&mut consumer)?;
         consumer.check()?;
@@ -614,7 +622,10 @@ struct SinkBinding {
 
 impl Sink {
     pub(super) fn new() -> Self {
-        Self { bindings: Rc::new(RefCell::new(BTreeMap::new())), refused: Rc::new(std::cell::Cell::new(false)) }
+        Self {
+            bindings: Rc::new(RefCell::new(BTreeMap::new())),
+            refused: Rc::new(std::cell::Cell::new(false)),
+        }
     }
 
     /// A synchronous fixture RPC still has its own response scope. It must not
@@ -632,7 +643,10 @@ impl Sink {
     }
 
     pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
-        ensure!(!self.refused.get(), "native response outcome unknown or excluded");
+        ensure!(
+            !self.refused.get(),
+            "native response outcome unknown or excluded"
+        );
         let intents: Vec<_> = self
             .bindings
             .try_borrow()?
@@ -648,7 +662,11 @@ impl Sink {
                     super::effects::wall_time()?,
                     Some(*role),
                     |stage, original| {
-                        let mut consumer = Consumer { role: stage, original, settled: false };
+                        let mut consumer = Consumer {
+                            role: stage,
+                            original,
+                            settled: false,
+                        };
                         consumer.check()?;
                         let output = operation();
                         consumer.check()?;
@@ -665,20 +683,41 @@ impl Sink {
     /// Shell. Neither a handler/RPC success nor a later socket can erase it.
     pub(super) fn abort(&self) {
         self.refused.set(true);
-        let Ok(bindings) = self.bindings.try_borrow() else { return; };
+        let Ok(bindings) = self.bindings.try_borrow() else {
+            return;
+        };
         for ((role, _), binding) in bindings.iter() {
-            let _ = binding.effects.clone().run(|| with_current_for_role(
-                &binding.intent, Phase::Response, super::effects::wall_time()?, Some(*role),
-                |_, original| { original.refuse(); Ok(()) },
-            ));
+            let _ = binding.effects.clone().run(|| {
+                with_current_for_role(
+                    &binding.intent,
+                    Phase::Response,
+                    super::effects::wall_time()?,
+                    Some(*role),
+                    |_, original| {
+                        original.refuse();
+                        Ok(())
+                    },
+                )
+            });
         }
     }
 
-    pub(super) fn poll_io<T>(&self, operation: impl FnOnce() -> Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
+    pub(super) fn poll_io<T>(
+        &self,
+        operation: impl FnOnce() -> Poll<std::io::Result<T>>,
+    ) -> Poll<std::io::Result<T>> {
         match self.with_current(operation) {
-            Ok(Poll::Ready(Err(error))) => { self.abort(); Poll::Ready(Err(error)) }
+            Ok(Poll::Ready(Err(error))) => {
+                self.abort();
+                Poll::Ready(Err(error))
+            }
             Ok(output) => output,
-            Err(_) => { self.abort(); Poll::Ready(Err(std::io::Error::other("native response authority or delivery unavailable"))) }
+            Err(_) => {
+                self.abort();
+                Poll::Ready(Err(std::io::Error::other(
+                    "native response authority or delivery unavailable",
+                )))
+            }
         }
     }
 
@@ -775,8 +814,15 @@ mod tests {
                     current.commit(tx)
                 });
                 assert_eq!(result.is_ok(), elapsed == 0);
-                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, i64::from(elapsed == 0));
-                assert_eq!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_ok(), elapsed == 0);
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM receipt", [], |row| row
+                        .get::<_, i64>(0))?,
+                    i64::from(elapsed == 0)
+                );
+                assert_eq!(
+                    with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_ok(),
+                    elapsed == 0
+                );
                 Ok(())
             })?;
         }
@@ -792,17 +838,35 @@ mod tests {
                 reserve_shell(&intent, 5)?;
                 let mut db = rusqlite::Connection::open_in_memory()?;
                 db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE receipt(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")?;
-                if lost_reply { db.execute("INSERT INTO parent VALUES(1)", [])?; }
+                if lost_reply {
+                    db.execute("INSERT INTO parent VALUES(1)", [])?;
+                }
                 let result = with_consumer(&intent, Phase::Session, 5, |current| -> Result<()> {
                     let tx = db.transaction()?;
                     tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                    if !lost_reply {
+                        assert!(current.commit(tx).is_err());
+                        // Even swallowing a native commit error cannot make
+                        // the outer operation or a later phase succeed.
+                        return Ok(());
+                    }
                     current.commit(tx)?;
                     anyhow::bail!("controlled reply loss AFTER actual commit")
                 });
                 assert!(result.is_err());
-                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, i64::from(lost_reply));
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM receipt", [], |row| row
+                        .get::<_, i64>(0))?,
+                    i64::from(lost_reply)
+                );
                 let mut entered = false;
-                assert!(with_consumer(&intent, Phase::Session, 5, |_| { entered = true; Ok(()) }).is_err());
+                assert!(
+                    with_consumer(&intent, Phase::Session, 5, |_| {
+                        entered = true;
+                        Ok(())
+                    })
+                    .is_err()
+                );
                 assert!(!entered);
                 assert!(reserve_shell(&intent, 5).is_err());
                 Ok(())
@@ -820,16 +884,28 @@ mod tests {
                 reserve_shell(&intent, 5)?;
                 let mut db = rusqlite::Connection::open_in_memory()?;
                 db.execute_batch("CREATE TABLE receipt(value INTEGER)")?;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_consumer(&intent, Phase::Session, 5, |current| {
-                    let tx = db.transaction()?;
-                    tx.execute("INSERT INTO receipt VALUES(1)", [])?;
-                    current.commit(tx)?;
-                    if panic { panic!("controlled cancellation after known SQL commit"); }
-                    world.advance(5);
-                    Ok(())
-                })));
-                if panic { assert!(result.is_err()); } else { assert!(result.unwrap().is_err()); }
-                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_consumer(&intent, Phase::Session, 5, |current| {
+                        let tx = db.transaction()?;
+                        tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                        current.commit(tx)?;
+                        if panic {
+                            panic!("controlled cancellation after known SQL commit");
+                        }
+                        world.advance(5);
+                        Ok(())
+                    })
+                }));
+                if panic {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_err());
+                }
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM receipt", [], |row| row
+                        .get::<_, i64>(0))?,
+                    1
+                );
                 assert!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_err());
                 Ok(())
             })?;
@@ -845,10 +921,24 @@ mod tests {
             let sink = Sink::new();
             sink.run(|| reserve_shell(&intent, 5))?;
             assert!(sink.poll_io::<usize>(|| Poll::Pending).is_pending());
-            assert!(matches!(sink.poll_io(|| Poll::Ready(Ok(3))), Poll::Ready(Ok(3))));
-            assert!(matches!(sink.poll_io::<usize>(|| Poll::Ready(Err(std::io::Error::other("controlled disconnect")))), Poll::Ready(Err(_))));
+            assert!(matches!(
+                sink.poll_io(|| Poll::Ready(Ok(3))),
+                Poll::Ready(Ok(3))
+            ));
+            assert!(matches!(
+                sink.poll_io::<usize>(|| Poll::Ready(Err(std::io::Error::other(
+                    "controlled disconnect"
+                )))),
+                Poll::Ready(Err(_))
+            ));
             let mut retried = false;
-            assert!(matches!(sink.poll_io(|| { retried = true; Poll::Ready(Ok(2)) }), Poll::Ready(Err(_))));
+            assert!(matches!(
+                sink.poll_io(|| {
+                    retried = true;
+                    Poll::Ready(Ok(2))
+                }),
+                Poll::Ready(Err(_))
+            ));
             assert!(!retried);
             // A different response/socket cannot erase the same owner's unknown
             // disposition. App and Shell registries remain independent.

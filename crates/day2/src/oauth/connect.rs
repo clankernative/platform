@@ -308,14 +308,16 @@ pub(super) fn begin_managed(
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
     callback.verify(intent)?;
-    guard.with_current(now, |current| begin_inner_checked(
-        db,
-        intent,
-        Some(callback),
-        Some((exchange, verifier)),
-        now,
-        Some((guard, current)),
-    ))
+    guard.with_current(now, |current| {
+        begin_inner_checked(
+            db,
+            intent,
+            Some(callback),
+            Some((exchange, verifier)),
+            now,
+            Some((guard, current)),
+        )
+    })
 }
 
 fn begin_inner_checked(
@@ -327,7 +329,10 @@ fn begin_inner_checked(
         &super::custody::PreparedVerifier,
     )>,
     now: i64,
-    mut guard: Option<(&super::management::app::StartGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>)>,
+    mut guard: Option<(
+        &super::management::app::StartGuard<'_>,
+        &mut super::native_management::Consumer<'_, '_, '_>,
+    )>,
 ) -> Result<bool> {
     validate(intent)?;
     ensure!(

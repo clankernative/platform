@@ -148,29 +148,29 @@ impl ClientCredential {
             let code = request.load_code(db, key)?;
             let verifier = request.load_verifier(db, key)?;
             let raw = guard.send(now, || {
-            let response = wire
-                .client
-                .post(google::TOKEN)
-                .timeout(
-                    BUDGET
-                        .checked_sub(started.elapsed())
-                        .context("OAuth initial deadline reached")?,
-                )
-                .form(&[
-                    ("grant_type", "authorization_code"),
-                    ("client_id", self.client.as_str()),
-                    ("client_secret", self.secret.as_str()),
-                    ("code", code.as_str()),
-                    ("code_verifier", verifier.as_str()),
-                    ("redirect_uri", request.callback_url()),
-                ])
-                .send()
-                .map_err(|_| anyhow::anyhow!("OAuth initial exchange outcome unknown"))?;
-            ensure!(
-                response.status().as_u16() == 200,
-                "OAuth initial exchange refused"
-            );
-            body(response)
+                let response = wire
+                    .client
+                    .post(google::TOKEN)
+                    .timeout(
+                        BUDGET
+                            .checked_sub(started.elapsed())
+                            .context("OAuth initial deadline reached")?,
+                    )
+                    .form(&[
+                        ("grant_type", "authorization_code"),
+                        ("client_id", self.client.as_str()),
+                        ("client_secret", self.secret.as_str()),
+                        ("code", code.as_str()),
+                        ("code_verifier", verifier.as_str()),
+                        ("redirect_uri", request.callback_url()),
+                    ])
+                    .send()
+                    .map_err(|_| anyhow::anyhow!("OAuth initial exchange outcome unknown"))?;
+                ensure!(
+                    response.status().as_u16() == 200,
+                    "OAuth initial exchange refused"
+                );
+                body(response)
             })?;
             let (normalized, tokens) = google::normalized_tokens(
                 &raw,
@@ -186,22 +186,22 @@ impl ClientCredential {
                 reqwest::header::HeaderValue::from_str(&format!("Bearer {}", tokens.access))?;
             authorization.set_sensitive(true);
             let observed_account = guard.send(now, || {
-            let response = wire
-                .client
-                .get(google::USERINFO)
-                .header(reqwest::header::AUTHORIZATION, authorization)
-                .timeout(
-                    BUDGET
-                        .checked_sub(started.elapsed())
-                        .context("OAuth initial deadline reached")?,
-                )
-                .send()
-                .map_err(|_| anyhow::anyhow!("OAuth initial account outcome unknown"))?;
-            ensure!(
-                response.status().as_u16() == 200,
-                "OAuth initial account refused"
-            );
-            google::observe_account(&body(response)?)
+                let response = wire
+                    .client
+                    .get(google::USERINFO)
+                    .header(reqwest::header::AUTHORIZATION, authorization)
+                    .timeout(
+                        BUDGET
+                            .checked_sub(started.elapsed())
+                            .context("OAuth initial deadline reached")?,
+                    )
+                    .send()
+                    .map_err(|_| anyhow::anyhow!("OAuth initial account outcome unknown"))?;
+                ensure!(
+                    response.status().as_u16() == 200,
+                    "OAuth initial account refused"
+                );
+                google::observe_account(&body(response)?)
             })?;
             account = Some(observed_account);
             Ok(super::exchange::TokenHttpResponse {
