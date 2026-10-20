@@ -72,11 +72,25 @@ cancelled connection refuses its original; a handler/RPC success cannot erase
 that outcome. The App and Shell own their independent response lifetimes.
 Successful transport completion means local completion only, not human receipt.
 
-This consumer boundary currently checks the original and enrolled role. It must
-also consume G1's genuine current serving/storage owner before the production
-producer can be enabled. The published preparation-only file phase cannot
-supply that authority. No native serving factory or substitute epoch boolean
-is introduced by this branch.
+The native consumer now enters S3's sealed `with_current_serving` factory and
+holds its `CurrentServingPhase` with the same enrolled stage and original.
+Checks, arming and known/excluded/unknown settlement all occur inside that
+borrow. An original failure after `finish_known` still refuses the serving
+owner before the scope can admit another consumer. Unwinding records terminal
+refusal while the real borrow is held, then resumes the original panic.
+
+Socket poll progress and whole response completion have separate serving uses.
+Only actual successful HTTP completion selects AppResponseComplete or
+ShellResponseComplete. Timeout/disconnect/drop performs terminal refusal in
+the existing serving owner without acquiring a new stage or reading a clock.
+Completed sockets cannot write or complete again.
+
+S3 deliberately registers no native implementation yet: the factory refuses
+before the callback, SQL or provider I/O. The actual P3/current writer/serving
+owner remains G1's supplier work, so the production proof producer stays closed.
+Preparation-only files, snapshots and an epoch boolean cannot fill this gap;
+the scripted simulator cannot enter the native variant or implement its sealed
+trait. This is consuming code against that contract, not a native readiness claim.
 
 When a storage consumer already holds the native stage,
 `OriginalPhase::check_with_native` checks the same retained original through

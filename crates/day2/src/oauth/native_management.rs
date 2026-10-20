@@ -421,7 +421,10 @@ impl OriginalPhase<'_> {
     }
 
     fn require_signature_intent(&self, expected: &FreshIntent) -> Result<()> {
-        ensure!(self.phase == Phase::Signature && self.intent == expected, "native signature phase required");
+        ensure!(
+            self.phase == Phase::Signature && self.intent == expected,
+            "native signature phase required"
+        );
         Ok(())
     }
 
@@ -494,13 +497,17 @@ enum ConsumerSource<'stage, 'role> {
 impl Consumer<'_, '_, '_> {
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = match &mut self.source {
-            ConsumerSource::Native { stage, current } => current.check(stage).and_then(|()| {
-                self.original.check_with_native(stage, self.original.wall)
-            }),
+            ConsumerSource::Native { stage, current } => current
+                .check(stage)
+                .and_then(|()| self.original.check_with_native(stage, self.original.wall)),
             #[cfg(test)]
-            ConsumerSource::Simulated(stage) => self.original.check_at(BorrowedRoleStage::Simulated(stage), self.original.wall),
+            ConsumerSource::Simulated(stage) => self
+                .original
+                .check_at(BorrowedRoleStage::Simulated(stage), self.original.wall),
         };
-        if result.is_err() { self.refuse(); }
+        if result.is_err() {
+            self.refuse();
+        }
         result
     }
 
@@ -520,7 +527,9 @@ impl Consumer<'_, '_, '_> {
             #[cfg(test)]
             ConsumerSource::Simulated(_) => Ok(()),
         };
-        if result.is_err() { self.refuse(); }
+        if result.is_err() {
+            self.refuse();
+        }
         result
     }
 
@@ -544,7 +553,7 @@ impl Consumer<'_, '_, '_> {
         match &mut self.source {
             ConsumerSource::Native { current, .. } => current.refuse(),
             #[cfg(test)]
-            ConsumerSource::Simulated(_) => {},
+            ConsumerSource::Simulated(_) => {}
         }
     }
 
@@ -562,13 +571,13 @@ impl Consumer<'_, '_, '_> {
                     checked?;
                     match &mut self.source {
                         ConsumerSource::Native { current, stage } => {
-                        current.finish_known(stage)?;
-                        // finish_known has not released the owner scope. A
-                        // later original failure still refuses that owner.
-                        self.original.check_with_native(stage, self.original.wall)?;
+                            current.finish_known(stage)?;
+                            // finish_known has not released the owner scope. A
+                            // later original failure still refuses that owner.
+                            self.original.check_with_native(stage, self.original.wall)?;
                         }
                         #[cfg(test)]
-                        ConsumerSource::Simulated(_) => {},
+                        ConsumerSource::Simulated(_) => {}
                     }
                     Ok(output)
                 }
@@ -576,13 +585,14 @@ impl Consumer<'_, '_, '_> {
                     if checked.is_err() {
                         // Preserve the original commit/send cause. The failed
                         // check has already refused both retained owners.
-                        return Err(error.context("consumer current check also refused after the operation"));
+                        return Err(error
+                            .context("consumer current check also refused after the operation"));
                     }
                     if !self.armed.get() {
                         match &mut self.source {
                             ConsumerSource::Native { current, .. } => current.finish_excluded()?,
                             #[cfg(test)]
-                            ConsumerSource::Simulated(_) => {},
+                            ConsumerSource::Simulated(_) => {}
                         }
                         excluded = true;
                     }
@@ -592,7 +602,9 @@ impl Consumer<'_, '_, '_> {
         }));
         match result {
             Ok(result) => {
-                if result.is_err() && !excluded { self.refuse(); }
+                if result.is_err() && !excluded {
+                    self.refuse();
+                }
                 result
             }
             Err(payload) => {
@@ -678,22 +690,38 @@ fn with_consumer_for_role<T>(
         settled: false,
         local: std::marker::PhantomData,
     };
-    let result = with_current_for_role(intent, phase, wall, Some(role), |role, original| {
-        match &mut role.source {
-            RoleSource::Native(stage) => crate::security_epoch::serving::with_current_serving(
-                stage, intent, purpose, |current, same_stage| {
-                    Consumer {
-                        source: ConsumerSource::Native { stage: same_stage, current },
-                        original, armed: &guard.armed,
-                    }.run(operation)
-                },
-            ),
-            #[cfg(test)]
-            RoleSource::Simulated(stage) => Consumer {
-                source: ConsumerSource::Simulated(stage), original, armed: &guard.armed,
-            }.run(operation),
-        }
-    });
+    let result =
+        with_current_for_role(
+            intent,
+            phase,
+            wall,
+            Some(role),
+            |role, original| match &mut role.source {
+                RoleSource::Native(stage) => crate::security_epoch::serving::with_current_serving(
+                    stage,
+                    intent,
+                    purpose,
+                    |current, same_stage| {
+                        Consumer {
+                            source: ConsumerSource::Native {
+                                stage: same_stage,
+                                current,
+                            },
+                            original,
+                            armed: &guard.armed,
+                        }
+                        .run(operation)
+                    },
+                ),
+                #[cfg(test)]
+                RoleSource::Simulated(stage) => Consumer {
+                    source: ConsumerSource::Simulated(stage),
+                    original,
+                    armed: &guard.armed,
+                }
+                .run(operation),
+            },
+        );
     guard.settled = result.is_ok();
     result
 }
@@ -777,7 +805,11 @@ pub(super) struct Sink {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SinkState { Open, Complete, Refused }
+enum SinkState {
+    Open,
+    Complete,
+    Refused,
+}
 
 pub(super) fn current_sink() -> Result<Sink> {
     ACTIVE_SINK.with(|slot| {
@@ -827,7 +859,11 @@ impl Sink {
         Ok(())
     }
 
-    fn with_current_result<T>(&self, phase: Phase, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn with_current_result<T>(
+        &self,
+        phase: Phase,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         ensure!(
             self.state.get() == SinkState::Open,
             "native response outcome unknown or excluded"
@@ -859,7 +895,9 @@ impl Sink {
     /// Retain uncertainty in each ORIGINAL owner, independently for App and
     /// Shell. Neither a handler/RPC success nor a later socket can erase it.
     pub(super) fn abort(&self) {
-        if self.state.get() == SinkState::Complete { return; }
+        if self.state.get() == SinkState::Complete {
+            return;
+        }
         self.state.set(SinkState::Refused);
         let Ok(bindings) = self.bindings.try_borrow() else {
             return;
@@ -867,18 +905,20 @@ impl Sink {
         for ((role, _), binding) in bindings.iter() {
             // Terminal exclusion is not a new action. It must not depend on
             // acquiring a still-current stage or a successful clock read.
-            let _ = binding
-                .effects
-                .clone()
-                .run(|| -> Result<()> {
-                    // Refuse BOTH retained owners without a new stage/clock.
-                    // The simulator never calls a native serving factory.
-                    let original = refuse_original(&binding.intent, *role);
-                    #[cfg(test)]
-                    if fixtures::active() { return original; }
-                    let serving = crate::security_epoch::serving::refuse_current_serving(&binding.intent, ServingUse::Response);
-                    original.and(serving)
-                });
+            let _ = binding.effects.clone().run(|| -> Result<()> {
+                // Refuse BOTH retained owners without a new stage/clock.
+                // The simulator never calls a native serving factory.
+                let original = refuse_original(&binding.intent, *role);
+                #[cfg(test)]
+                if fixtures::active() {
+                    return original;
+                }
+                let serving = crate::security_epoch::serving::refuse_current_serving(
+                    &binding.intent,
+                    ServingUse::Response,
+                );
+                original.and(serving)
+            });
         }
     }
 
@@ -949,7 +989,10 @@ fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {
 fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
     ACTIVE_SINK.with(|slot| {
         if let Some(sink) = slot.try_borrow()?.as_ref() {
-            ensure!(sink.state.get() == SinkState::Open, "native response sink closed");
+            ensure!(
+                sink.state.get() == SinkState::Open,
+                "native response sink closed"
+            );
             let mut indexes = sink.bindings.try_borrow_mut()?;
             let key = (role, intent.attempt().into());
             ensure!(
@@ -1153,10 +1196,19 @@ mod tests {
             let intent = original_intent("consumer-body-completed", 305)?;
             let sink = Sink::new();
             sink.run(|| reserve_shell(&intent, 5))?;
-            assert!(matches!(sink.poll_io(|| Poll::Ready(Ok(3))), Poll::Ready(Ok(3))));
+            assert!(matches!(
+                sink.poll_io(|| Poll::Ready(Ok(3))),
+                Poll::Ready(Ok(3))
+            ));
             sink.finish()?;
             let mut wrote_again = false;
-            assert!(matches!(sink.poll_io(|| { wrote_again = true; Poll::Ready(Ok(1)) }), Poll::Ready(Err(_))));
+            assert!(matches!(
+                sink.poll_io(|| {
+                    wrote_again = true;
+                    Poll::Ready(Ok(1))
+                }),
+                Poll::Ready(Err(_))
+            ));
             assert!(!wrote_again);
             assert!(sink.finish().is_err());
             sink.abort(); // Late cleanup cannot turn known completion into a regrant.
