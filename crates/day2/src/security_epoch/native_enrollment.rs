@@ -23,6 +23,8 @@ mod runtime;
 mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
+#[cfg(target_os = "linux")]
+mod storage_socket_directory;
 
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{
