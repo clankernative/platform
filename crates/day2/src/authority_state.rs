@@ -602,7 +602,8 @@ fn scope_matches(connection: &Connection, runtime: &Runtime) -> Result<()> {
 }
 
 fn initial(
-    runtime: &Runtime,
+    host: &dyn crate::host::Host,
+    scope: &str,
     document: AuthorityDocument,
     artifact: &LoadedArtifact,
 ) -> Result<ActiveAuthority> {
@@ -611,11 +612,7 @@ fn initial(
         stamp: AuthorityStamp {
             // Every fresh installation has its own lineage. Simulation supplies
             // a deterministic host before initialization instead of weakening it.
-            epoch: crate::digest(
-                &runtime
-                    .host()
-                    .entropy(runtime.scope(), "$authority-bootstrap")?,
-            ),
+            epoch: crate::digest(&host.entropy(scope, "$authority-bootstrap")?),
             revision: 1,
         },
         document,
@@ -626,7 +623,10 @@ fn initial(
 
 pub(crate) fn initialize_new(
     tx: &Transaction<'_>,
-    runtime: &Runtime,
+    scope: &str,
+    app: &str,
+    artifact: &LoadedArtifact,
+    host: &dyn crate::host::Host,
     instance: &Instance,
 ) -> Result<()> {
     upgrade(tx)?;
@@ -635,22 +635,19 @@ pub(crate) fn initialize_new(
         row.get(0)
     })?;
     ensure!(invocations == 0, "legacy_authority_requires_activation");
-    scope_matches(tx, runtime)?;
-    ensure!(
-        instance.scope(runtime.app())? == runtime.scope(),
-        Failure::InstallationChanged
-    );
+    let stored_scope: String =
+        tx.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
+            row.get(0)
+        })?;
+    ensure!(stored_scope == scope, Failure::InstallationChanged);
+    ensure!(instance.scope(app)? == scope, Failure::InstallationChanged);
     store(
         tx,
         &initial(
-            runtime,
-            AuthorityDocument::resolve_at(
-                instance,
-                runtime.app(),
-                runtime.artifact(),
-                runtime.host().now_ms()?,
-            )?,
-            runtime.artifact(),
+            host,
+            scope,
+            AuthorityDocument::resolve_at(instance, app, artifact, host.now_ms()?)?,
+            artifact,
         )?,
         "platform-initialize",
         "initialize",
@@ -1142,7 +1139,12 @@ pub(crate) fn apply_binding_in(
             artifact_path: target.directory().to_string_lossy().into_owned(),
         }
     } else {
-        initial(runtime, change.document.clone(), target)?
+        initial(
+            runtime.host(),
+            runtime.scope(),
+            change.document.clone(),
+            target,
+        )?
     };
     apply_transition_in(
         connection,
