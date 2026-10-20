@@ -125,6 +125,26 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::PreparedInitialFile<'static>, Send);
     assert_not_impl!(crate::security_epoch::PreparedInitialFile<'static>, Sync);
+    assert_consuming!(crate::security_epoch::PreparedFileContinuity);
+    assert_not_impl!(
+        crate::security_epoch::PreparedFileContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Send);
+    assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Sync);
+    assert_consuming!(crate::security_epoch::PreparedRetentionOutcome<'static>);
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::AppPreparedFile<'static, 'static>);
     assert_not_impl!(
         crate::security_epoch::AppPreparedFile<'static, 'static>,

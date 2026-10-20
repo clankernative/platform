@@ -7,7 +7,7 @@ use crate::security_epoch::{
     credential_material::CredentialMaterial,
     identity_protocol,
     native_clock::NativeAcquisition,
-    native_enrollment::{EnrolledRoleStage, NativeRole},
+    native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner},
     transport::{NativeHttp, Route},
 };
 use anyhow::{Context, Result, ensure};
@@ -34,6 +34,26 @@ struct ProviderReader<'role> {
 
 pub(super) struct NativeVolumeObservation<'role> {
     reader: ProviderReader<'role>,
+    resources: NativeVolumeResources,
+}
+
+/// The original descriptors survive a successful preparation. These resources
+/// have no clock or permission of their own. Every use requires a fresh stage
+/// from the SAME still-live enrollment owner and a new actual provider read.
+pub(super) struct NativeVolumeContinuity {
+    resources: NativeVolumeResources,
+    owner: SameEnrolledOwner,
+    policy: InitialBootstrapPolicy,
+    store: EpochStore,
+    profile: PersistentDiskSelection,
+}
+
+pub(super) struct CurrentVolumePhase<'volume, 'role> {
+    resources: &'volume mut NativeVolumeResources,
+    reader: ProviderReader<'role>,
+}
+
+struct NativeVolumeResources {
     directory: File,
     identity: DirectoryIdentity,
     block: File,
@@ -270,13 +290,13 @@ impl<'role> NativeVolumeObservation<'role> {
             // A failed create is not permission to adopt or retry. Any created
             // leaf remains, and all later constructors refuse EEXIST.
             rustix::fs::mkdirat(
-                &self.directory,
+                &self.resources.directory,
                 PRIVATE_DIRECTORY,
                 Mode::from_raw_mode(0o700),
             )?;
             self.check_current()?;
             let directory = File::from(rustix::fs::openat2(
-                &self.directory,
+                &self.resources.directory,
                 PRIVATE_DIRECTORY,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
                 Mode::empty(),
@@ -302,7 +322,80 @@ impl<'role> NativeVolumeObservation<'role> {
         directory: &File,
         identity: &DirectoryIdentity,
     ) -> Result<()> {
+        self.resources
+            .check_directory(&mut self.reader, directory, identity)
+    }
+
+    /// Capture only while the original preparation remains valid. The caller
+    /// performs its final original-file check before the infallible move below.
+    pub(super) fn capture_same_owner(&mut self) -> Result<SameEnrolledOwner> {
         self.check_current()?;
+        self.reader.stage.capture_same_owner()
+    }
+
+    pub(super) fn retain_resources(self, owner: SameEnrolledOwner) -> NativeVolumeContinuity {
+        NativeVolumeContinuity {
+            resources: self.resources,
+            owner,
+            policy: self.reader.policy,
+            store: self.reader.store,
+            profile: self.reader.profile,
+        }
+    }
+
+    pub(super) fn acquire(
+        stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<Self> {
+        let mut reader = ProviderReader::acquire(stage, policy, store)?;
+        let device_name = reader.observe_provider()?;
+        reader.check()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = device_name;
+            anyhow::bail!("storage_native_platform_unsupported")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let directory = File::from(rustix::fs::open(
+                ROOT,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )?);
+            let identity = directory_identity(&directory)?;
+            let block = open_device(&device_name, &mut reader.acquisition)?;
+            let mut owner = Self {
+                reader,
+                resources: NativeVolumeResources {
+                    directory,
+                    identity,
+                    block,
+                    device_name,
+                    valid: true,
+                },
+            };
+            owner.check_current()?;
+            Ok(owner)
+        }
+    }
+
+    pub(super) fn check_current(&mut self) -> Result<()> {
+        self.resources.check_current(&mut self.reader)
+    }
+}
+
+impl NativeVolumeResources {
+    fn check_directory(
+        &mut self,
+        reader: &mut ProviderReader<'_>,
+        directory: &File,
+        identity: &DirectoryIdentity,
+    ) -> Result<()> {
+        self.check_current(reader)?;
         ensure!(
             directory_identity(directory)? == *identity,
             "storage_native_private_anchor_changed"
@@ -338,52 +431,14 @@ impl<'role> NativeVolumeObservation<'role> {
                     && named.stx_dev_minor == identity.device_minor,
                 "storage_native_private_anchor_path_changed"
             );
-            self.check_current()
+            self.check_current(reader)
         }
     }
 
-    pub(super) fn acquire(
-        stage: EnrolledRoleStage<'role>,
-        policy: &InitialBootstrapPolicy,
-        store: &EpochStore,
-    ) -> Result<Self> {
-        let mut reader = ProviderReader::acquire(stage, policy, store)?;
-        let device_name = reader.observe_provider()?;
-        reader.check()?;
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = device_name;
-            anyhow::bail!("storage_native_platform_unsupported")
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let directory = File::from(rustix::fs::open(
-                ROOT,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::CLOEXEC
-                    | rustix::fs::OFlags::NOFOLLOW,
-                rustix::fs::Mode::empty(),
-            )?);
-            let identity = directory_identity(&directory)?;
-            let block = open_device(&device_name, &mut reader.acquisition)?;
-            let mut owner = Self {
-                reader,
-                directory,
-                identity,
-                block,
-                device_name,
-                valid: true,
-            };
-            owner.check_current()?;
-            Ok(owner)
-        }
-    }
-
-    pub(super) fn check_current(&mut self) -> Result<()> {
+    fn check_current(&mut self, reader: &mut ProviderReader<'_>) -> Result<()> {
         let result = (|| {
             ensure!(self.valid, "storage_native_volume_refused");
-            self.reader.check()?;
+            reader.check()?;
             ensure!(
                 directory_identity(&self.directory)? == self.identity,
                 "storage_native_mount_changed"
@@ -420,7 +475,7 @@ impl<'role> NativeVolumeObservation<'role> {
                     directory_identity(&named)? == self.identity,
                     "storage_native_anchor_path_changed"
                 );
-                let current = open_device(&self.device_name, &mut self.reader.acquisition)?;
+                let current = open_device(&self.device_name, &mut reader.acquisition)?;
                 let current = rustix::fs::statx(current, "", AtFlags::EMPTY_PATH, flags)?;
                 ensure!(
                     current.stx_mask & flags.bits() == flags.bits()
@@ -433,7 +488,7 @@ impl<'role> NativeVolumeObservation<'role> {
                 let mounts = read_fixed(
                     "/proc/thread-self/mountinfo",
                     65_536,
-                    &mut self.reader.acquisition,
+                    &mut reader.acquisition,
                 )?;
                 mount(
                     &mounts,
@@ -441,14 +496,67 @@ impl<'role> NativeVolumeObservation<'role> {
                     self.identity.device_major,
                     self.identity.device_minor,
                 )?;
-                self.reader.check()
+                reader.check()
             }
         })();
         if result.is_err() {
             self.valid = false;
-            self.reader.acquisition.refuse();
+            reader.acquisition.refuse();
         }
         result
+    }
+}
+
+impl NativeVolumeContinuity {
+    pub(super) fn begin_current<'volume, 'role>(
+        &'volume mut self,
+        mut stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        let result = (|| {
+            ensure!(self.resources.valid, "storage_native_volume_refused");
+            self.owner.check(&mut stage)?;
+            let mut reader = ProviderReader::acquire(stage, &self.policy, &self.store)?;
+            ensure!(
+                reader.profile == self.profile,
+                "storage_native_profile_changed"
+            );
+            // The reply is read again inside this fresh original bounded phase;
+            // a previous successful attachment observation is never authority.
+            ensure!(
+                reader.observe_provider()? == self.resources.device_name,
+                "storage_native_device_selection_changed"
+            );
+            self.resources.check_current(&mut reader)?;
+            self.owner.check(&mut reader.stage)?;
+            Ok(reader)
+        })();
+        match result {
+            Ok(reader) => Ok(CurrentVolumePhase {
+                resources: &mut self.resources,
+                reader,
+            }),
+            Err(error) => {
+                self.resources.valid = false;
+                Err(error)
+            }
+        }
+    }
+}
+
+impl CurrentVolumePhase<'_, '_> {
+    pub(super) fn check_directory(
+        &mut self,
+        directory: &File,
+        identity: &DirectoryIdentity,
+    ) -> Result<()> {
+        self.resources
+            .check_directory(&mut self.reader, directory, identity)
+    }
+
+    // Only the owning fixed file operation uses this interval. No stage, native
+    // descriptor or reusable permission is exposed to the application.
+    pub(super) fn acquisition(&mut self) -> &mut NativeAcquisition {
+        &mut self.reader.acquisition
     }
 }
 
