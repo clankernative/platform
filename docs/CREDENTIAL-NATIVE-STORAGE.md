@@ -68,6 +68,16 @@ identity. Failure remains latched even after restoration. A replacement interval
 cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
 there is no inverse projection-to-owner constructor.
 
+The App reads the controller's exact initial bytes through its own existing
+read-only descriptor. It matches the creator projection's digest and validates
+the complete bounded read-only SQLite image, selected schema, canonical store,
+seed and marker. It does not independently initialize another database: fresh
+runtime initialization generates a new random authority lineage. The distinct
+`ObservedInitialImage` is readback DATA and cannot enter the original creation
+layout. Authenticating that projection through the real enrolled controller
+peer is still mandatory before holder participation or activation; this decoder
+supplies neither permission.
+
 Only a successfully checked preparation may consume the original creator into
 `PreparedFileContinuity`. That transition captures the real `SameEnrolledOwner`
 while the original preparation still passes, then moves the same file, directory

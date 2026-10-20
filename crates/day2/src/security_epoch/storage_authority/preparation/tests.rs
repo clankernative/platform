@@ -135,40 +135,106 @@ fn prepared_projection_is_closed_selection_data_without_an_owner_constructor() {
 }
 
 #[test]
-fn app_admission_reconstructs_the_complete_initial_image_without_file_adoption() {
+fn app_admits_the_exact_creator_image_without_reinitializing_random_authority() {
+    use crate::security_epoch::preparation_image::ObservedInitialImage;
     let (_directory, runtime) = image_fixture::runtime();
     let store = epoch_fixture::selection();
     let policy = image_fixture::policy(&runtime, &store);
-    let mut original = acquisition();
     let first = InitialPreparationImage::prepare(
         &runtime,
         &policy,
         &store,
         image_fixture::incarnations(),
-        &mut original,
+        &mut acquisition(),
     )
     .unwrap();
-    let mut independent = acquisition();
-    let expected = InitialPreparationImage::prepare(
+    let digest = Digest::new(first.bytes());
+    let observed = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        first.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .unwrap();
+    assert!(observed.bytes() == first.bytes());
+    let decoded = observed
+        .decode_exact_readback(first.bytes(), &mut acquisition())
+        .unwrap();
+    assert!(decoded.is_readonly(rusqlite::MAIN_DB).unwrap());
+    assert!(
+        decoded
+            .execute("DELETE FROM day2_initial_security_seed", [])
+            .is_err()
+    );
+    // Valid SQLite initialized independently has a different genuine authority
+    // lineage. It cannot replace the creator's exact projected image.
+    let second = InitialPreparationImage::prepare(
         &runtime,
         &policy,
         &store,
         image_fixture::incarnations(),
-        &mut independent,
+        &mut acquisition(),
     )
     .unwrap();
-    assert_eq!(first.bytes(), expected.bytes());
-    expected
-        .decode_exact_readback(first.bytes(), &mut independent)
-        .unwrap();
+    let changed_creator = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        second.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .err()
+    .expect("independent authority replaced exact creator bytes");
+    assert_eq!(
+        changed_creator.to_string(),
+        "epoch_preparation_creator_image_mismatch"
+    );
+    let mut foreign_incarnations = first.core().incarnations.clone();
+    foreign_incarnations.record = Digest::new(b"foreign-record");
+    let foreign_core = OriginalSeedCore::new(&policy, &store, foreign_incarnations).unwrap();
+    let wrong_seed = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        foreign_core,
+        first.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .err()
+    .expect("a different valid seed replaced the creator seed");
+    assert_eq!(
+        wrong_seed.to_string(),
+        "epoch_preparation_seed_marker_readback_mismatch"
+    );
+    let mut trailing = first.bytes().to_vec();
+    trailing.extend_from_slice(&[0; 4096]);
+    let extra_pages = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        &trailing,
+        &Digest::new(&trailing),
+        &mut acquisition(),
+    )
+    .err()
+    .expect("trailing bytes were admitted as the complete SQLite image");
+    assert_eq!(extra_pages.to_string(), "epoch_preparation_image_length");
     let mut changed = first.bytes().to_vec();
     *changed.last_mut().unwrap() ^= 1;
+    let mut interval = acquisition();
     assert!(
-        expected
-            .decode_exact_readback(&changed, &mut independent)
+        observed
+            .decode_exact_readback(&changed, &mut interval)
             .is_err()
     );
-    assert!(independent.remaining().is_err());
+    assert!(interval.remaining().is_err());
 }
 
 #[cfg(target_os = "linux")]
