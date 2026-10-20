@@ -307,6 +307,23 @@ mod linux {
     }
 
     #[test]
+    fn local_file_cannot_supply_an_original_controller_peer_stage() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(creator) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture did not prepare");
+        };
+        let fd = creator.file.as_raw_fd();
+        let mut original = PreparedInitialFile::retain_original(creator, plan, interval);
+        assert!(original.original_controller_stage().is_err());
+        assert_eq!(original.creator.file.as_raw_fd(), fd);
+        assert!(original.creator.file.metadata().is_ok());
+        assert!(original.check_original().is_err());
+    }
+
+    #[test]
     fn local_preparation_cannot_be_promoted_without_a_real_enrolled_controller() {
         let (directory, selected, plan, mut interval) = layout();
         let auth = authority(&directory, selected, &mut interval);
