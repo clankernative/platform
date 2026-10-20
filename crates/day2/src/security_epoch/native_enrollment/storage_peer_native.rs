@@ -43,6 +43,50 @@ impl Peer {
         &self.statement
     }
 
+    /// Original peer identity/liveness only. Deliberately does NOT renew or
+    /// accept the old signed stage as current. A new exchange must authenticate
+    /// fresh grants before CurrentStoragePeerPhase can be constructed.
+    pub(super) fn check_continuity(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.valid && !self.processes.is_empty() && self.processes.len() <= 3,
+                "storage_peer_retained_process_refused"
+            );
+            stage.check_storage_acquisition(acquisition)?;
+            let local = stage.storage_statement()?;
+            ensure!(
+                self.statement.certificate == local.certificate
+                    && self.statement.stage.data.policy == local.stage.data.policy
+                    && self.statement.stage.data.role == stage.storage_peer_role()?,
+                "storage_peer_original_issuer_or_role_changed"
+            );
+            for sender in &mut self.processes {
+                match sender {
+                    StorageSender::App(process) => {
+                        ensure!(
+                            process.data() == &self.statement.stage.data.process,
+                            "storage_peer_message_sender_changed"
+                        );
+                        process.check_identity(acquisition)?;
+                    }
+                    StorageSender::Controller(receipt) => {
+                        receipt.check_continuity(&self.statement, stage, acquisition)?;
+                    }
+                }
+            }
+            stage.check_storage_acquisition(acquisition)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
     pub(super) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,

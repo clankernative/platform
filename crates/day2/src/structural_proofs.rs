@@ -135,6 +135,45 @@ const _: () = {
         crate::security_epoch::native_enrollment::InitialHolderServer<'static, 'static>,
         Sync
     );
+    assert_consuming!(crate::security_epoch::native_enrollment::AppHolderPeerContinuity);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AppHolderPeerContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AppHolderPeerContinuity,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::AppHolderPeerContinuity,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::ControllerHolderPeerContinuity);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerHolderPeerContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerHolderPeerContinuity,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerHolderPeerContinuity,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::CurrentStoragePeerPhase<'static>);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentStoragePeerPhase<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentStoragePeerPhase<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentStoragePeerPhase<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::AuthenticatedInitialHolderOffer,

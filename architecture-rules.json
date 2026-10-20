@@ -340,6 +340,7 @@
     "crates/day2/src/security_epoch/native_enrollment/runtime_wire.rs",
     "crates/day2/src/security_epoch/native_enrollment/service.rs",
     "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+    "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
     "crates/day2/src/security_epoch/native_enrollment/storage_peer_native.rs",
     "crates/day2/src/security_epoch/native_enrollment/storage_peer_wire.rs",
     "crates/day2/src/security_epoch/native_enrollment/storage_peer_wire/tests.rs",

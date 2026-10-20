@@ -2,6 +2,11 @@
 //! native channel/process/file composition below constructs holder owners.
 //! A successful exchange alone is neither provider P3 nor a serving writer.
 
+mod continuation;
+pub(crate) use continuation::{
+    AppHolderPeerContinuity, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
+};
+
 #[cfg(target_os = "linux")]
 use super::storage_peer_native::Peer;
 #[cfg(target_os = "linux")]
