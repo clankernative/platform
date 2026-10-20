@@ -153,7 +153,7 @@ fn unsupported_directory_profile_never_qualifies_a_test_owner() {
 #[cfg(target_os = "linux")]
 fn fixture() -> (
     tempfile::TempDir,
-    NativeStorageCreationAuthority,
+    NativeStorageCreationAuthority<'static>,
     NativeAcquisition,
 ) {
     let directory = tempfile::tempdir().unwrap();
