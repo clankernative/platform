@@ -138,8 +138,8 @@ resource "kubernetes_manifest" "issuer" {
               seccompProfile           = { type = "RuntimeDefault" }
             }
             resources = {
-              requests = { cpu = "1000m", memory = "512Mi" }
-              limits   = { cpu = "2000m", memory = "512Mi" }
+              requests = { cpu = "1", memory = "512Mi" }
+              limits   = { cpu = "2", memory = "512Mi" }
             }
             volumeMounts = [
               { name = "policy", mountPath = "/etc/day2/native-enrollment.json", subPath = "native-enrollment.json", readOnly = true },
