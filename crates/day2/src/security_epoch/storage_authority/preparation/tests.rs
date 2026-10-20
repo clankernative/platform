@@ -32,7 +32,7 @@ fn layout() -> (
     )
     .unwrap();
     let mut interval = acquisition();
-    let plan = ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).unwrap();
+    let plan = ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval).unwrap();
     (directory, selection, plan, interval)
 }
 
@@ -73,8 +73,24 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
     )
     .unwrap();
     let mut interval = acquisition();
-    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).is_err());
+    assert!(ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval).is_err());
     assert!(interval.remaining().is_err());
+}
+
+#[test]
+fn failed_layout_artifact_admission_refuses_the_original_acquisition() {
+    let (directory, selection, _plan, _interval) = layout();
+    let mut interval = acquisition();
+    assert!(
+        ReviewedFileLayout::prepare(
+            &directory.path().join("instance.json"),
+            &selection,
+            &mut interval
+        )
+        .is_err()
+    );
+    assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
 }
 
 #[test]
