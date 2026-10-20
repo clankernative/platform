@@ -21,7 +21,8 @@ mod app;
 mod continuity;
 pub(crate) use app::{AppFileContinuity, AppPreparedFile};
 pub(crate) use continuity::{
-    CurrentPreparedFilePhase, PreparedFileContinuity, PreparedRetentionOutcome,
+    CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
+    PreparedRetentionOutcome,
 };
 
 /// Complete admitted image DATA with a fixed leaf. There is no caller pathname,
