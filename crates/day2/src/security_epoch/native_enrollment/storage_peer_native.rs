@@ -53,7 +53,7 @@ impl Peer {
     ) -> Result<()> {
         let result = (|| {
             ensure!(
-                self.valid && !self.processes.is_empty() && self.processes.len() <= 3,
+                self.valid && !self.processes.is_empty() && self.processes.len() <= 4,
                 "storage_peer_retained_process_refused"
             );
             stage.check_storage_acquisition(acquisition)?;
@@ -94,7 +94,7 @@ impl Peer {
     ) -> Result<()> {
         let result = (|| {
             ensure!(
-                self.valid && !self.processes.is_empty() && self.processes.len() <= 3,
+                self.valid && !self.processes.is_empty() && self.processes.len() <= 4,
                 "storage_peer_retained_process_refused"
             );
             stage.check_storage_acquisition(acquisition)?;
@@ -134,7 +134,7 @@ impl Peer {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(self.processes.len() < 3, "storage_peer_message_count");
+            ensure!(self.processes.len() < 4, "storage_peer_message_count");
             // Retain the actual newly received handle before fallible checks.
             self.processes.push(process);
             self.check(stage, acquisition)?;

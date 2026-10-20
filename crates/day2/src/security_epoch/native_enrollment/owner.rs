@@ -297,6 +297,12 @@ impl EnrolledRoleStage<'_> {
         self.check_for(&policy.scope, role)
     }
 
+    /// DATA from this actual checked executor, never a current grant factory.
+    pub(in crate::security_epoch) fn incarnation_data(&mut self) -> Result<Digest> {
+        self.check()?;
+        Ok(self.owner.incarnation.clone())
+    }
+
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
         let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
