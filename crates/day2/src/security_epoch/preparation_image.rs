@@ -71,7 +71,7 @@ pub(super) struct InitialPreparationImage {
 
 impl InitialPreparationImage {
     pub(super) fn prepare(
-        runtime: &crate::store::Runtime,
+        runtime: &crate::store::InitialStoreMetadata,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         incarnations: Incarnations,
@@ -201,7 +201,7 @@ pub(super) struct ObservedInitialImage {
 
 impl ObservedInitialImage {
     pub(super) fn admit(
-        runtime: &crate::store::Runtime,
+        runtime: &crate::store::InitialStoreMetadata,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         core: OriginalSeedCore,
@@ -567,7 +567,8 @@ pub(super) mod tests {
 
     // Synthetic host-boundary contract DATA; no compiler/artifact admission,
     // actual native role, file ownership or Linux volume qualification.
-    pub(in crate::security_epoch) fn runtime() -> (tempfile::TempDir, crate::store::Runtime) {
+    pub(in crate::security_epoch) fn runtime()
+    -> (tempfile::TempDir, crate::store::InitialStoreMetadata) {
         let directory = tempfile::tempdir().unwrap();
         let instance_path = directory.path().join("instance.json");
         std::fs::write(
@@ -592,10 +593,9 @@ pub(super) mod tests {
             directory.path().into(),
             contract,
         );
-        let runtime = crate::store::Runtime::from_artifact_for_tests(
+        let runtime = crate::store::InitialStoreMetadata::from_artifact_for_tests(
             instance_path,
-            "calendar".into(),
-            directory.path().join("must-not-create.sqlite"),
+            "calendar",
             artifact,
         )
         .unwrap();
@@ -611,7 +611,7 @@ pub(super) mod tests {
     }
 
     pub(in crate::security_epoch) fn policy(
-        runtime: &crate::store::Runtime,
+        runtime: &crate::store::InitialStoreMetadata,
         store: &EpochStore,
     ) -> InitialBootstrapPolicy {
         let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
@@ -655,6 +655,75 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn initial_metadata_never_opens_poisoned_ordinary_state() {
+        let (directory, metadata) = runtime();
+        let state = directory.path().join(".state");
+        std::fs::write(&state, b"must never be opened as SQLite or replaced").unwrap();
+        let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
+        let tx = memory.connection.transaction().unwrap();
+        metadata.initialize_in_transaction(&tx).unwrap();
+        assert_eq!(
+            tx.query_row("SELECT count(*) FROM day2_authority", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            std::fs::read(&state).unwrap(),
+            b"must never be opened as SQLite or replaced"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        let tx = memory.connection.transaction().unwrap();
+        assert_eq!(
+            metadata
+                .initialize_in_transaction(&tx)
+                .unwrap_err()
+                .to_string(),
+            "initial_schema_requires_empty_database"
+        );
+        tx.rollback().unwrap();
+    }
+
+    #[test]
+    fn initial_metadata_refuses_selection_change_within_the_same_scope() {
+        let (directory, metadata) = runtime();
+        let path = directory.path().join("instance.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["apps"]["calendar"]["writers"] = serde_json::json!(["changed@example.com"]);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
+        let tx = memory.connection.transaction().unwrap();
+        let error = metadata.initialize_in_transaction(&tx).unwrap_err();
+        assert!(error.downcast_ref::<crate::error::Failure>().is_some());
+        tx.rollback().unwrap();
+        assert_eq!(
+            memory
+                .connection
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(!directory.path().join(".state").exists());
+    }
+
+    #[test]
+    fn failed_real_artifact_admission_leaves_serving_state_absent() {
+        let (directory, _metadata) = runtime();
+        assert!(
+            crate::store::InitialStoreMetadata::load(
+                &directory.path().join("instance.json"),
+                "calendar"
+            )
+            .is_err()
+        );
+        assert!(!directory.path().join(".state").exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn complete_framework_and_seed_marker_share_the_callers_transaction() {
         let (_directory, runtime) = runtime();
         let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
@@ -685,7 +754,7 @@ pub(super) mod tests {
             tables, 0,
             "initializer committed outside the callers transaction"
         );
-        assert!(!runtime.db().exists());
+        assert!(!_directory.path().join(".state").exists());
     }
 
     #[test]
@@ -733,7 +802,7 @@ pub(super) mod tests {
                 )
                 .is_err()
         );
-        assert!(!runtime.db().exists());
+        assert!(!_directory.path().join(".state").exists());
     }
 
     #[test]
@@ -767,6 +836,6 @@ pub(super) mod tests {
             )
             .is_err()
         );
-        assert!(!runtime.db().exists());
+        assert!(!_directory.path().join(".state").exists());
     }
 }

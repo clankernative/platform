@@ -76,6 +76,16 @@ identity. Failure remains latched even after restoration. A replacement interval
 cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
 there is no inverse projection-to-owner constructor.
 
+Fresh image preparation takes `InitialStoreMetadata`, not `Runtime::load`.
+The metadata loader admits the desired Instance and artifact, checks schedule
+and ingress bindings, and retains the exact selected Instance digest. It has no
+serving database path and does not create, open or inspect `.state`. The same
+framework initializer operates only on the caller's fresh memory transaction;
+a changed Instance selection or an already initialized database refuses. The
+ordinary Runtime retains its existing active-database selection behavior. This
+separation is schema admission only: the authenticated first-holder and current
+serving factories must still supply their actual native owners before file use.
+
 The App reads the controller's exact initial bytes through its own existing
 read-only descriptor. It matches the creator projection's digest and validates
 the complete bounded read-only SQLite image, selected schema, canonical store,

@@ -34,8 +34,30 @@ pub(super) struct ReviewedFileLayout {
 }
 
 impl ReviewedFileLayout {
+    /// Artifact admission and memory initialization both spend the caller's
+    /// already-started native acquisition. No ordinary Runtime is constructed.
     pub(super) fn prepare(
-        runtime: &crate::store::Runtime,
+        instance_path: &std::path::Path,
+        selection: &ReviewedStorageSelection,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let result = (|| {
+            acquisition.remaining()?;
+            let metadata = crate::store::InitialStoreMetadata::load(
+                instance_path,
+                selection.policy().scope.app.as_str(),
+            )?;
+            acquisition.remaining()?;
+            Self::prepare_metadata(&metadata, selection, acquisition)
+        })();
+        if result.is_err() {
+            acquisition.refuse();
+        }
+        result
+    }
+
+    fn prepare_metadata(
+        runtime: &crate::store::InitialStoreMetadata,
         selection: &ReviewedStorageSelection,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
