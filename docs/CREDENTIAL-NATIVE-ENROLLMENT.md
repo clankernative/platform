@@ -89,6 +89,16 @@ message retains the actual received `SCM_PIDFD`; malformed, truncated, extra-FD
 or unsupported ancillary data refuse. `SO_PEERPIDFD` alone cannot identify a
 sender after socket inheritance or transfer.
 
+The provisioner retains the root-owned `0755` parent directory and creates or
+checks its fixed `storage` child, owned by UID/GID 10001 with mode `0700`. It
+never repairs an existing wrong owner or mode. Descriptor-relative opens refuse
+symlinks and mount crossings; the supervisor rechecks the retained child and
+named entry. The controller mounts only that child read/write for
+`/run/day2-native-enrollment/storage/peer.sock`; App and Shell mount the parent
+read-only. The provisioner needs `CAP_CHOWN` for the initial ownership transfer;
+it sets the mode before transferring ownership. These directory checks grant no
+storage or first-holder permission.
+
 The issuer joins the retained process to one running container task init using
 the fixed containerd socket and read-only version, Tasks.List/Get,
 Containers.Get and CRI Version/ContainerStatus calls. Lists over 128 tasks or
