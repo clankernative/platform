@@ -959,6 +959,7 @@ impl Runtime {
         let instance_path = instance_path.canonicalize()?;
         let instance = Instance::load(&instance_path)?;
         let binding = instance.apps.get(app).context("app_not_installed")?;
+        crate::security_epoch::serving::require_runtime_admission(&instance, app)?;
         let parent = instance_path.parent().context("instance directory")?;
         let directory = parent.join(".state");
         fs::create_dir_all(&directory)?;

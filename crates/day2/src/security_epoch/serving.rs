@@ -78,3 +78,101 @@ pub(crate) fn with_current_serving<'role, T>(
 pub(crate) fn refuse_current_serving(_intent: &FreshIntent, _purpose: ServingUse) -> Result<()> {
     anyhow::bail!("native current-serving authority unavailable")
 }
+
+/// The ordinary database path cannot adopt or initialize storage selected for
+/// native bootstrap. Check this BEFORE `.state` metadata, directory creation,
+/// active-authority reads or SQLite open. Desired policy and an old SQL row do
+/// not recreate a current physical holder after executor/process loss.
+///
+/// There is no successful native Runtime admission constructor yet. A future
+/// path must consume the actual activated same-file/current-owner composition;
+/// it must not replace this refusal with a boolean or a stored receipt. Apps
+/// without a native bootstrap selection retain their ordinary storage path.
+pub(crate) fn require_runtime_admission(
+    instance: &crate::artifact::Instance,
+    app: &str,
+) -> Result<()> {
+    let Some(control) = &instance.control else {
+        return Ok(());
+    };
+    if control
+        .security_bootstraps
+        .values()
+        .any(|policy| policy.scope.app.as_str() == app)
+    {
+        anyhow::bail!("native runtime storage authority unavailable");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runtime_admission_tests {
+    use super::*;
+    use anyhow::Context;
+
+    #[test]
+    fn selected_native_bootstrap_refuses_before_state_creation_metadata_or_database_open()
+    -> Result<()> {
+        let mut instance = crate::oauth::clients::tests::security_instance("workspace", false)?;
+        let control = instance.control.as_mut().context("fixture control")?;
+        let (alias, store) = control
+            .security_epochs
+            .iter()
+            .find(|(_, store)| store.scope.app.as_str() == "workspace")
+            .map(|(alias, store)| (alias.clone(), store.clone()))
+            .context("fixture epoch")?;
+        let mut policy = super::super::control_slot_tests::policy(&store);
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { project, .. } =
+            &store.provider;
+        policy.cluster.project = project.clone();
+        policy.epoch_store.id = alias;
+        policy.control_store.epoch_store = policy.epoch_store.clone();
+        control
+            .security_bootstraps
+            .insert("native".to_owned().try_into()?, policy);
+        // Pass the ACTUAL strict operator loader, not a fixture-only relaxed
+        // decoder or a fabricated permission/supplier matrix.
+        let bytes = serde_json::to_vec(&instance)?;
+        crate::artifact::Instance::from_bytes(&bytes)?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        std::fs::write(&path, bytes)?;
+        let state = directory.path().join(".state");
+        let refused = || -> Result<()> {
+            let error = crate::store::Runtime::load(&path, "workspace")
+                .err()
+                .context("native Runtime unexpectedly admitted")?;
+            assert_eq!(
+                error.to_string(),
+                "native runtime storage authority unavailable"
+            );
+            Ok(())
+        };
+        refused()?;
+        assert!(
+            !state.exists(),
+            "startup created ordinary state before native admission"
+        );
+        // Even querying/chmodding the ordinary state directory is too early.
+        std::fs::write(&state, b"must not inspect this as a directory")?;
+        refused()?;
+        assert_eq!(
+            std::fs::read(&state)?,
+            b"must not inspect this as a directory"
+        );
+        std::fs::remove_file(&state)?;
+        std::fs::create_dir(&state)?;
+        let database = state.join("workspace.sqlite");
+        std::fs::write(
+            &database,
+            b"old copied authority/receipt is not a native owner",
+        )?;
+        refused()?;
+        assert_eq!(
+            std::fs::read(&database)?,
+            b"old copied authority/receipt is not a native owner"
+        );
+        assert_eq!(std::fs::read_dir(&state)?.count(), 1);
+        Ok(())
+    }
+}

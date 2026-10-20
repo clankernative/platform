@@ -149,3 +149,10 @@ not supplied that authority: it records a Firebase Rules bypass and unresolved
 administrative/impersonation paths. Enrollment, local fsync, previous readback
 and an authenticated first holder cannot replace that missing contract. Native
 production factories remain closed while those requirements are unresolved.
+
+`Runtime::load` now refuses an explicitly selected native bootstrap profile
+before inspecting or creating `.state` or opening SQLite. Existing SQL authority
+rows cannot recreate the missing current native holder. This closes ordinary
+startup for that selection while the real consuming Runtime admission factory
+is absent. It does not claim that ordinary apps or explicit synthetic
+verification installations have native storage authority.
