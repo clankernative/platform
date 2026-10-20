@@ -535,6 +535,48 @@ pub(super) fn schema_contract(connection: &Connection) -> Result<Digest> {
     Digest::of(&("day2-initial-framework-schema-v1", definitions))
 }
 
+/// Strict existing-selection DATA check on the actual scoped Runtime connection.
+/// It performs no create, initializer, repair or ownership conversion.
+pub(super) fn require_existing_selection(
+    connection: &Connection,
+    core: &OriginalSeedCore,
+    store: &EpochStore,
+) -> Result<()> {
+    ensure!(
+        schema_contract(connection)? == core.schema_contract,
+        "native_runtime_schema_changed"
+    );
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM day2_initial_security_seed",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(count == 1, "native_runtime_seed_cardinality");
+    let expected = [
+        serde_json::to_vec(store)?,
+        serde_json::to_vec(core)?,
+        serde_json::to_vec(&core.marker()?)?,
+    ];
+    let matches: bool = connection.query_row(
+        "SELECT store,core,marker FROM day2_initial_security_seed WHERE singleton=1",
+        [],
+        |row| {
+            for (index, expected) in expected.iter().enumerate() {
+                let value = row.get_ref(index)?;
+                let rusqlite::types::ValueRef::Blob(bytes) = value else {
+                    return Ok(false);
+                };
+                if bytes.len() > 65536 || bytes != expected.as_slice() {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )?;
+    ensure!(matches, "native_runtime_seed_selection_changed");
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

@@ -31,9 +31,10 @@ or ptrace access to AppHost or SecurityShell and makes no hostile-code
 containment claim. Deployment of this profile requires the instance's normal
 review/apply; it has not been applied by this change.
 
-The selected future controller entrypoint is
+The Controller entrypoint is
 `/usr/local/bin/day2-epoch-controller`, a dedicated process owning both storage
-and the fixed peer. That binary and its image/code pin are not supplied yet.
+and the fixed peer. Its source and runtime-image packaging are included; actual
+image/native-code pins must come from the qualified built image.
 AppHost and SecurityShell remain `/usr/local/bin/day2-host`; the controller must
 not be admitted under that path as a substitute. An explicit read-only native
 enrollment path allowlist may name the future controller, but a missing binary
@@ -306,5 +307,59 @@ write cannot race an obsolete initial-byte comparison after release. The App
 cannot construct its active owner before all six checked native steps finish.
 Active observations retain the complete four-document provider-version binding,
 not just receipt values. The new owners remain private and cannot be cloned,
-serialized or transferred to another thread. Native deployment qualification
-and actual serving/Runtime composition remain separate owed work.
+serialized or transferred to another thread. Native deployment qualification remains separate owed work.
+
+
+## Current App serving and existing-file Runtime admission
+
+An active App participant now supplies the sealed serving borrow from its real
+retained initial file and Controller channel. Every operation uses a fresh role
+stage, fresh signed peer transcript, and coherent four-document observation
+matching the original activation, including provider version tokens. Controller
+release follows the App consumption acknowledgement and a fresh provider read.
+Unknown outcomes close the same retained continuation; a later stage cannot
+reopen it. The Controller path has no consumer callback.
+
+The actual response connection reserves its identity before its first poll.
+Connection clones share that identity; another connection cannot complete or
+refuse a paused winner. Terminal refusal requires an existing exact hold and
+performs no role, clock or provider acquisition. These connection records are
+ownership DATA and cannot manufacture a serving scope.
+
+Native Runtime admission is separate from ordinary loading. It requires the
+actual active App participant and same current serving stage before opening
+`/state/day2-native/day2-initial.sqlite`. The fixed existing-file SQLite open
+omits CREATE and enables NOFOLLOW; it cannot initialize, adopt, repair or
+select an activated artifact path. Current metadata, explicit bootstrap policy,
+original seed/schema, activated artifact and storage binding must all match
+inside the retained scope. SQLite recovery is considered an attempted effect,
+so the scope is armed before open. Ordinary startup fences and final Product
+startup integration are composed separately.
+
+The Shell supplier now retains the actual separately enrolled Shell/Controller
+channel. Its current phase waits for the Controller's signed known result, then
+keeps the same channel and original role interval through consumer settlement
+and original postchecks. Only that known completion acknowledges consumption;
+the Controller rereads the fixed epoch and checks actual physical/P3 continuity
+before releasing the same transcript. A forgotten/dropped phase leaves its
+parent busy; there is no replacement/reconnect or expiry regrant. The Shell has
+no Runtime admission or App database identity.
+
+`day2-epoch-controller INSTANCE APP` runs the fixed preparation, first-holder,
+create/activation and dispatch lifecycle on its final owning OS thread. Actual
+App work and Shell work acquire fresh stages only after idle readiness DATA.
+Every failure stops processing and preserves the original protocol's refusal;
+no timer clears slots or adopts an existing initial file. The optional
+`deploy/gke/stacks/security-epoch-controller` source selects that actual binary,
+existing separate KSA, artifact-bearing image and same observed App CSI volume.
+The default dormant registration is not an executor or native permission.
+
+Ordinary Runtime load and initialization refuse an explicit native profile
+before state opening/creation. Absent native profile remains the separately
+refusing prerequisite-only configuration; epoch catalog DATA alone does not
+select native mode. Native Runtime connection opens retain existing-file and
+NOFOLLOW semantics and never chmod/initialize the original.
+
+No local filesystem test, mock deployment plan, static proof inventory or
+earlier CI receipt establishes actual native P3, serving or end-to-end OAuth
+success. Live provider/kernel/deployment qualification remains separate.

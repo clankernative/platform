@@ -559,6 +559,12 @@ impl AppStartupRuntime {
 }
 
 impl NativeAppStartup {
+    pub(crate) fn selections(
+        &self,
+    ) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
+        crate::oauth::native_management::selected_profiles(&self.declared, Some(self.runtime.app()))
+    }
+
     pub(crate) fn scopes(&self) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
         crate::oauth::native_management::selected_scopes(&self.declared, Some(self.runtime.app()))
     }
@@ -572,6 +578,7 @@ impl NativeAppStartup {
             "native App startup admission closed"
         );
         let scopes = self.scopes()?;
+        let native_initial = matches!(&self.runtime, AppStartupRuntime::Initial(_));
         let runtime = match self.runtime {
             AppStartupRuntime::Ordinary(runtime) => {
                 for scope in scopes {
@@ -584,17 +591,24 @@ impl NativeAppStartup {
                 *runtime
             }
             AppStartupRuntime::Initial(metadata) => {
+                let [scope] = scopes.as_slice() else {
+                    anyhow::bail!("native App startup scope required")
+                };
                 crate::oauth::native_management::prepare_initial_app_storage(
                     &metadata,
                     &self.declared,
                 )?;
-                // S3's active constructor must borrow the retained same-file
-                // owner here. Do not fall through to ordinary Runtime::load:
-                // first-holder success cannot select or open serving SQL.
-                anyhow::bail!("native activated Runtime admission unavailable")
+                crate::oauth::native_management::load_initial_app_runtime(scope, *metadata)?
             }
         };
-        let security = admit_store(&runtime)?;
+        // Native admission already checked the existing store while its actual
+        // participant and stage were held. It must never run an initializer or
+        // open ordinary serving SQL again outside that native scope.
+        let security = if native_initial {
+            None
+        } else {
+            admit_store(&runtime)?
+        };
         ensure!(
             admission.load(Ordering::Acquire),
             "native App startup admission closed"
@@ -837,6 +851,12 @@ async fn serve_configured(
 /// runtime endpoint or process to enroll.
 pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
     crate::security_epoch::native_enrollment::run(issuer)
+}
+
+/// Dedicated Controller on its final owning OS thread. No caller PID, URL,
+/// signing key, database path or callback selects operational authority.
+pub fn run_epoch_controller(instance: &Path, app: &str) -> Result<()> {
+    crate::security_epoch::controller::run(instance, app)
 }
 
 #[cfg(test)]

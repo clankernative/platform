@@ -9,7 +9,9 @@ use super::{
 use crate::security_epoch::native_enrollment::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
 };
-use crate::security_epoch::serving::{CurrentServingPhase, ServingUse};
+use crate::security_epoch::serving::{
+    CurrentServingPhase, ResponseIdentity, ServingParticipant, ServingUse,
+};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
 use std::{
@@ -23,6 +25,21 @@ use std::{
 };
 
 type Role = Rc<RefCell<EnrolledProcessRoleOwner>>;
+
+/// Checked desired selection DATA. This cannot enroll, open storage, create a
+/// serving participant or replace any missing native supplier.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct NativeSelection {
+    policy: day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    store: day2_capabilities::security_epoch::EpochStore,
+}
+
+impl NativeSelection {
+    pub(crate) fn scope(&self) -> &AuthorityScope {
+        &self.policy.scope
+    }
+}
+
 struct EnrolledClock {
     clock: EnrolledOriginalClock,
     role: Role,
@@ -44,8 +61,55 @@ impl Clock for EnrolledClock {
 struct Owners {
     role: Role,
     kind: NativeRole,
-    originals: BTreeMap<String, Original<EnrolledClock>>,
+    selection: NativeSelection,
+    originals: BTreeMap<String, StoredOriginal<EnrolledClock>>,
     storage: AppStorage,
+}
+
+struct StoredOriginal<C: Clock> {
+    original: Original<C>,
+    response: ResponseBinding,
+}
+
+impl<C: Clock> StoredOriginal<C> {
+    fn new(original: Original<C>, intent: &FreshIntent) -> Self {
+        Self {
+            original,
+            response: ResponseBinding {
+                intent: intent.clone(),
+                connection: None,
+            },
+        }
+    }
+}
+
+// Connection matching DATA only. Current authority always comes from the
+// original, enrolled role and genuine serving participant, never this record.
+struct ResponseBinding {
+    intent: FreshIntent,
+    connection: Option<ResponseIdentity>,
+}
+
+impl ResponseBinding {
+    fn require(&self, intent: &FreshIntent, identity: &ResponseIdentity) -> Result<()> {
+        ensure!(self.intent == *intent, "native response original changed");
+        ensure!(
+            self.connection
+                .as_ref()
+                .is_none_or(|current| current.same(identity)),
+            "native original belongs to another response"
+        );
+        Ok(())
+    }
+
+    fn require_bound(&self, intent: &FreshIntent, identity: &ResponseIdentity) -> Result<()> {
+        self.require(intent, identity)?;
+        ensure!(
+            self.connection.is_some(),
+            "native response original not bound"
+        );
+        Ok(())
+    }
 }
 
 // Neither absence nor a refusal is a storage witness. Live variants consume
@@ -55,9 +119,9 @@ enum AppStorage {
     Unstarted,
     Refused,
     Bootstrapping(Box<crate::security_epoch::AppStorageBootstrap>),
-    Active(Box<crate::security_epoch::ActiveAppStorageContinuity>),
+    Participant(Box<ServingParticipant>),
     RefusedBootstrap(Box<crate::security_epoch::AppStorageBootstrap>),
-    RefusedActive(Box<crate::security_epoch::ActiveAppStorageContinuity>),
+    RefusedParticipant(Box<ServingParticipant>),
 }
 
 impl AppStorage {
@@ -67,9 +131,9 @@ impl AppStorage {
                 storage.refuse();
                 Self::RefusedBootstrap(storage)
             }
-            Self::Active(mut storage) | Self::RefusedActive(mut storage) => {
+            Self::Participant(mut storage) | Self::RefusedParticipant(mut storage) => {
                 storage.refuse();
-                Self::RefusedActive(storage)
+                Self::RefusedParticipant(storage)
             }
             Self::Unstarted | Self::Refused => Self::Refused,
         };
@@ -85,20 +149,38 @@ thread_local! {
 /// requires the real native exchange. Empty selection installs no owner and
 /// cannot capture/consume an original. Errors never become empty selection.
 /// No role, origin, FD or clock comes from the HTTP request.
-pub(super) fn install(scopes: &[AuthorityScope], kind: NativeRole) -> Result<()> {
-    ensure!(scopes.len() <= 128, "native enrollment scope capacity");
+pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Result<()> {
+    ensure!(selections.len() <= 128, "native enrollment scope capacity");
     let mut selected = BTreeMap::new();
-    for scope in scopes {
-        let role = EnrolledProcessRoleOwner::enroll_current_thread(scope, kind)?;
+    for selection in selections {
+        let mut role = EnrolledProcessRoleOwner::enroll_current_thread(selection.scope(), kind)?;
+        let storage = {
+            let mut stage = role.begin_current_stage()?;
+            stage.check_selection(&selection.policy, &selection.store, kind)?;
+            match kind {
+                NativeRole::AppHost => AppStorage::Unstarted,
+                NativeRole::SecurityShell => {
+                    let peer = crate::security_epoch::native_enrollment::ShellServingPeer::connect(
+                        &mut stage,
+                    )?;
+                    stage.check_selection(&selection.policy, &selection.store, kind)?;
+                    AppStorage::Participant(Box::new(ServingParticipant::shell(peer)))
+                }
+                NativeRole::EpochController => {
+                    anyhow::bail!("native HTTP controller role refused")
+                }
+            }
+        };
         ensure!(
             selected
                 .insert(
-                    scope.app.as_str().into(),
+                    selection.scope().app.as_str().into(),
                     Owners {
                         role: Rc::new(RefCell::new(role)),
                         kind,
+                        selection: selection.clone(),
                         originals: BTreeMap::new(),
-                        storage: AppStorage::Unstarted,
+                        storage,
                     }
                 )
                 .is_none(),
@@ -149,6 +231,10 @@ pub(crate) fn prepare_initial_app_storage(
             "native initial storage requires App owner"
         );
         ensure!(
+            owners.selection.policy == *policy && owners.selection.store == *store,
+            "native App selected policy changed"
+        );
+        ensure!(
             matches!(owners.storage, AppStorage::Unstarted),
             "native App storage attempt already spent"
         );
@@ -191,7 +277,8 @@ pub(crate) fn prepare_initial_app_storage(
             };
             match storage.into_active() {
                 Ok(storage) => {
-                    owners.storage = AppStorage::Active(Box::new(storage));
+                    owners.storage =
+                        AppStorage::Participant(Box::new(ServingParticipant::app(storage)));
                     Ok(())
                 }
                 Err(storage) => {
@@ -218,12 +305,9 @@ pub(crate) fn prepare_initial_app_storage(
 /// executor. This is still not current serving authority: S3's consuming
 /// Runtime/serving constructor must check the actual owner inside the callback.
 /// No lookup can construct a holder or return its ownership.
-pub(crate) fn with_active_app_storage<T>(
+fn with_app_participant<T>(
     scope: &AuthorityScope,
-    operation: impl FnOnce(
-        &mut crate::security_epoch::ActiveAppStorageContinuity,
-        &mut EnrolledRoleStage<'_>,
-    ) -> Result<T>,
+    operation: impl FnOnce(&mut ServingParticipant, &mut EnrolledRoleStage<'_>) -> Result<T>,
 ) -> Result<T> {
     OWNERS.with(|owners| {
         let mut owners = owners.try_borrow_mut()?;
@@ -234,14 +318,24 @@ pub(crate) fn with_active_app_storage<T>(
             owners.kind == NativeRole::AppHost,
             "native storage requires App owner"
         );
-        let AppStorage::Active(storage) = &mut owners.storage else {
+        let AppStorage::Participant(storage) = &mut owners.storage else {
             anyhow::bail!("native active App holder unavailable")
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut role = owners.role.try_borrow_mut()?;
             let mut stage = role.begin_current_stage()?;
             stage.check_for(scope, NativeRole::AppHost)?;
+            stage.check_selection(
+                &owners.selection.policy,
+                &owners.selection.store,
+                owners.kind,
+            )?;
             let value = operation(storage, &mut stage)?;
+            stage.check_selection(
+                &owners.selection.policy,
+                &owners.selection.store,
+                owners.kind,
+            )?;
             stage.check_for(scope, NativeRole::AppHost)?;
             Ok(value)
         }));
@@ -259,6 +353,15 @@ pub(crate) fn with_active_app_storage<T>(
     })
 }
 
+pub(crate) fn load_initial_app_runtime(
+    scope: &AuthorityScope,
+    metadata: crate::store::InitialStoreMetadata,
+) -> Result<crate::store::Runtime> {
+    with_app_participant(scope, |participant, stage| {
+        crate::security_epoch::serving::load_native_runtime(participant, stage, metadata)
+    })
+}
+
 #[cfg(test)]
 pub(super) fn simulation_installed() -> bool {
     fixtures::active()
@@ -268,6 +371,16 @@ pub(crate) fn selected_scopes(
     instance: &crate::artifact::Instance,
     only_app: Option<&str>,
 ) -> Result<Vec<AuthorityScope>> {
+    Ok(selected_profiles(instance, only_app)?
+        .into_iter()
+        .map(|selection| selection.policy.scope)
+        .collect())
+}
+
+pub(crate) fn selected_profiles(
+    instance: &crate::artifact::Instance,
+    only_app: Option<&str>,
+) -> Result<Vec<NativeSelection>> {
     let mut scopes = Vec::new();
     for (app, binding) in &instance.apps {
         if binding.oauth_connections.is_empty() || only_app.is_some_and(|selected| selected != app)
@@ -280,7 +393,17 @@ pub(crate) fn selected_scopes(
             // the empty native registry cannot capture or consume an original.
             continue;
         };
-        scopes.push(policy.scope.clone());
+        let store = instance
+            .control
+            .as_ref()
+            .context("native bootstrap control missing")?
+            .security_epochs
+            .get(&policy.epoch_store.id)
+            .context("native bootstrap epoch missing")?;
+        scopes.push(NativeSelection {
+            policy: policy.clone(),
+            store: store.clone(),
+        });
     }
     ensure!(scopes.len() <= 128, "native enrollment scope capacity");
     Ok(scopes)
@@ -374,8 +497,16 @@ impl AppCreator<'_> {
                     && !owners.originals.contains_key(intent.attempt()),
                 "native App original cannot be replaced"
             );
-            owners.originals.insert(intent.attempt().into(), original);
-            enlist(NativeRole::AppHost, intent)?;
+            owners.originals.insert(
+                intent.attempt().into(),
+                StoredOriginal::new(original, intent),
+            );
+            enlist(
+                NativeRole::AppHost,
+                intent,
+                &mut owners.originals.get_mut(intent.attempt()).unwrap().response,
+                Some(&mut owners.storage),
+            )?;
             Ok(())
         })
     }
@@ -398,8 +529,14 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
             "native Shell role changed"
         );
         if let Some(original) = owners.originals.get_mut(intent.attempt()) {
-            original.check(intent, wall)?;
-            return enlist(NativeRole::SecurityShell, intent);
+            enlist(
+                NativeRole::SecurityShell,
+                intent,
+                &mut original.response,
+                Some(&mut owners.storage),
+            )?;
+            original.original.check(intent, wall)?;
+            return Ok(());
         }
         ensure!(owners.originals.len() < 1024, "native original capacity");
         let mut original = capture(owners, NativeRole::SecurityShell)?;
@@ -409,8 +546,16 @@ pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<()> {
             "native original wall clock moved backwards"
         );
         original.bind(intent, current_wall)?;
-        owners.originals.insert(intent.attempt().into(), original);
-        enlist(NativeRole::SecurityShell, intent)?;
+        owners.originals.insert(
+            intent.attempt().into(),
+            StoredOriginal::new(original, intent),
+        );
+        enlist(
+            NativeRole::SecurityShell,
+            intent,
+            &mut owners.originals.get_mut(intent.attempt()).unwrap().response,
+            Some(&mut owners.storage),
+        )?;
         Ok(())
     })
 }
@@ -812,7 +957,7 @@ pub(crate) fn with_consumer<T>(
         | Phase::Callback => NativeRole::AppHost,
         _ => anyhow::bail!("native consumer purpose unsupported"),
     };
-    with_consumer_for_role(intent, phase, wall, role, operation)
+    with_consumer_for_role(intent, phase, wall, role, None, operation)
 }
 
 fn serving_use(phase: Phase, role: NativeRole) -> Result<ServingUse> {
@@ -841,6 +986,7 @@ fn with_consumer_for_role<T>(
     phase: Phase,
     wall: i64,
     role: NativeRole,
+    response: Option<&ResponseIdentity>,
     operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
 ) -> Result<T> {
     let purpose = serving_use(phase, role)?;
@@ -851,38 +997,40 @@ fn with_consumer_for_role<T>(
         settled: false,
         local: std::marker::PhantomData,
     };
-    let result =
-        with_current_for_role(
-            intent,
-            phase,
-            wall,
-            Some(role),
-            |role, original| match &mut role.source {
-                RoleSource::Native(stage) => crate::security_epoch::serving::with_current_serving(
-                    stage,
-                    intent,
-                    purpose,
-                    |current, same_stage| {
-                        Consumer {
-                            source: ConsumerSource::Native {
-                                stage: same_stage,
-                                current,
-                            },
-                            original,
-                            armed: &guard.armed,
-                        }
-                        .run(operation)
-                    },
-                ),
-                #[cfg(test)]
-                RoleSource::Simulated(stage) => Consumer {
-                    source: ConsumerSource::Simulated(stage),
-                    original,
-                    armed: &guard.armed,
-                }
-                .run(operation),
-            },
-        );
+    let result = with_current_for_role(
+        intent,
+        phase,
+        wall,
+        Some(role),
+        response,
+        |role, original, participant| match &mut role.source {
+            RoleSource::Native(stage) => crate::security_epoch::serving::with_current_serving(
+                participant.context("native serving participant unavailable")?,
+                stage,
+                intent,
+                purpose,
+                response,
+                |current, same_stage| {
+                    Consumer {
+                        source: ConsumerSource::Native {
+                            stage: same_stage,
+                            current,
+                        },
+                        original,
+                        armed: &guard.armed,
+                    }
+                    .run(operation)
+                },
+            ),
+            #[cfg(test)]
+            RoleSource::Simulated(stage) => Consumer {
+                source: ConsumerSource::Simulated(stage),
+                original,
+                armed: &guard.armed,
+            }
+            .run(operation),
+        },
+    );
     guard.settled = result.is_ok();
     result
 }
@@ -896,7 +1044,9 @@ pub(crate) fn with_current_original<T>(
     wall: i64,
     use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
 ) -> Result<T> {
-    with_current_for_role(intent, phase, wall, None, use_current)
+    with_current_for_role(intent, phase, wall, None, None, |role, original, _| {
+        use_current(role, original)
+    })
 }
 
 fn with_current_for_role<T>(
@@ -904,11 +1054,23 @@ fn with_current_for_role<T>(
     phase: Phase,
     wall: i64,
     expected: Option<NativeRole>,
-    use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
+    response: Option<&ResponseIdentity>,
+    use_current: impl FnOnce(
+        &mut RoleStage<'_>,
+        &mut OriginalPhase<'_>,
+        Option<&mut ServingParticipant>,
+    ) -> Result<T>,
 ) -> Result<T> {
     #[cfg(test)]
     if fixtures::active() {
-        return fixtures::with_current(intent, phase, wall, expected, use_current);
+        return fixtures::with_current(
+            intent,
+            phase,
+            wall,
+            expected,
+            response,
+            |role, original| use_current(role, original, None),
+        );
     }
     OWNERS.with(|owners| {
         let mut owners = owners.try_borrow_mut()?;
@@ -939,20 +1101,52 @@ fn with_current_for_role<T>(
             .originals
             .get_mut(intent.attempt())
             .context("native original absent; rows cannot restore it")?;
-        let role = original.clock.role.clone();
+        if let Some(identity) = response {
+            original.response.require_bound(intent, identity)?;
+        } else {
+            enlist(
+                owners.kind,
+                intent,
+                &mut original.response,
+                Some(&mut owners.storage),
+            )?;
+        }
+        let role = original.original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;
+        let mut enrolled = role.begin_current_stage()?;
+        enrolled.check_selection(
+            &owners.selection.policy,
+            &owners.selection.store,
+            owners.kind,
+        )?;
         let mut stage = RoleStage {
-            source: RoleSource::Native(Box::new(role.begin_current_stage()?)),
+            source: RoleSource::Native(Box::new(enrolled)),
         };
         let mut original = OriginalPhase {
-            original: PhaseOriginal::Native(original),
+            original: PhaseOriginal::Native(&mut original.original),
             intent,
             wall,
             phase,
         };
         original.check(&mut stage)?;
-        enlist(owners.kind, intent)?;
-        use_current(&mut stage, &mut original)
+        let participant = match &mut owners.storage {
+            AppStorage::Participant(participant) => Some(participant.as_mut()),
+            _ => None,
+        };
+        let value = use_current(&mut stage, &mut original, participant)?;
+        let checked = stage.with_native(|enrolled| {
+            enrolled.check_selection(
+                &owners.selection.policy,
+                &owners.selection.store,
+                owners.kind,
+            )
+        });
+        if let Err(error) = checked {
+            original.refuse();
+            owners.storage.refuse();
+            return Err(error);
+        }
+        Ok(value)
     })
 }
 
@@ -961,6 +1155,7 @@ fn with_current_for_role<T>(
 /// write/flush/shutdown. Disconnect drops this list, not the originals.
 #[derive(Clone)]
 pub(super) struct Sink {
+    identity: ResponseIdentity,
     bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
     state: Rc<std::cell::Cell<SinkState>>,
 }
@@ -989,6 +1184,7 @@ struct SinkBinding {
 impl Sink {
     pub(super) fn new() -> Self {
         Self {
+            identity: ResponseIdentity::new(),
             bindings: Rc::new(RefCell::new(BTreeMap::new())),
             state: Rc::new(std::cell::Cell::new(SinkState::Open)),
         }
@@ -1016,6 +1212,9 @@ impl Sink {
     /// completion/partial progress never takes this terminal branch.
     pub(super) fn finish(&self) -> Result<()> {
         self.with_current_result(Phase::ResponseComplete, || Ok(()))?;
+        for ((role, _), binding) in self.bindings.try_borrow()?.iter() {
+            complete_response(&binding.intent, *role, &self.identity)?;
+        }
         self.state.set(SinkState::Complete);
         Ok(())
     }
@@ -1043,6 +1242,7 @@ impl Sink {
                     phase,
                     super::effects::wall_time()?,
                     *role,
+                    Some(&self.identity),
                     |consumer| {
                         consumer.arm()?;
                         operation()
@@ -1066,20 +1266,10 @@ impl Sink {
         for ((role, _), binding) in bindings.iter() {
             // Terminal exclusion is not a new action. It must not depend on
             // acquiring a still-current stage or a successful clock read.
-            let _ = binding.effects.clone().run(|| -> Result<()> {
-                // Refuse BOTH retained owners without a new stage/clock.
-                // The simulator never calls a native serving factory.
-                let original = refuse_original(&binding.intent, *role);
-                #[cfg(test)]
-                if fixtures::active() {
-                    return original;
-                }
-                let serving = crate::security_epoch::serving::refuse_current_serving(
-                    &binding.intent,
-                    ServingUse::Response,
-                );
-                original.and(serving)
-            });
+            let _ = binding
+                .effects
+                .clone()
+                .run(|| -> Result<()> { refuse_response(&binding.intent, *role, &self.identity) });
         }
     }
 
@@ -1142,12 +1332,79 @@ fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {
             .originals
             .get_mut(intent.attempt())
             .context("native terminal original missing")?
+            .original
             .refuse();
         Ok(())
     })
 }
 
-fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
+fn complete_response(
+    intent: &FreshIntent,
+    kind: NativeRole,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    #[cfg(test)]
+    if fixtures::active() {
+        return fixtures::complete_response(intent, kind, identity);
+    }
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(intent.app())
+            .context("native response executor missing")?;
+        ensure!(owners.kind == kind, "native response owner changed");
+        let original = owners
+            .originals
+            .get_mut(intent.attempt())
+            .context("native response original missing")?;
+        original.response.require_bound(intent, identity)?;
+        original.response.connection = None;
+        Ok(())
+    })
+}
+
+fn refuse_response(
+    intent: &FreshIntent,
+    kind: NativeRole,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    #[cfg(test)]
+    if fixtures::active() {
+        return fixtures::refuse_response(intent, kind, identity);
+    }
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let owners = owners
+            .get_mut(intent.app())
+            .context("native response executor missing")?;
+        ensure!(owners.kind == kind, "native response owner changed");
+        let original = owners
+            .originals
+            .get_mut(intent.attempt())
+            .context("native response original missing")?;
+        original.response.require_bound(intent, identity)?;
+        let AppStorage::Participant(participant) = &mut owners.storage else {
+            anyhow::bail!("native response participant unavailable")
+        };
+        // Exact S3 hold first: a retired/losing sink cannot burn an original
+        // after a different connection acquired this participant.
+        crate::security_epoch::serving::refuse_current_serving(
+            participant,
+            intent,
+            ServingUse::Response,
+            identity,
+        )?;
+        original.original.refuse();
+        Ok(())
+    })
+}
+
+fn enlist(
+    role: NativeRole,
+    intent: &FreshIntent,
+    response: &mut ResponseBinding,
+    storage: Option<&mut AppStorage>,
+) -> Result<()> {
     ACTIVE_SINK.with(|slot| {
         if let Some(sink) = slot.try_borrow()?.as_ref() {
             ensure!(
@@ -1165,7 +1422,16 @@ fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
                     existing.intent == *intent,
                     "native response original changed"
                 );
-            } else {
+            }
+            response.require(intent, &sink.identity)?;
+            if let Some(storage) = storage {
+                let AppStorage::Participant(participant) = storage else {
+                    anyhow::bail!("native response participant unavailable")
+                };
+                crate::security_epoch::serving::bind_response(participant, intent, &sink.identity)?;
+            }
+            response.connection = Some(sink.identity.clone());
+            if !indexes.contains_key(&key) {
                 indexes.insert(
                     key,
                     SinkBinding {
@@ -1213,7 +1479,7 @@ mod tests {
         // control deliberately installs no simulated or native role/owner.
         assert!(!simulation_installed());
         install(
-            &selected_scopes(&instance, None)?,
+            &selected_profiles(&instance, None)?,
             NativeRole::SecurityShell,
         )?;
         let intent = original_intent("prerequisite-only", 305)?;
@@ -1240,7 +1506,7 @@ mod tests {
                 app: "reports".to_owned().try_into()?,
             };
             let entered = std::cell::Cell::new(false);
-            let result = with_active_app_storage(&scope, |_, _| {
+            let result = with_app_participant(&scope, |_, _| {
                 entered.set(true);
                 Ok(())
             });
@@ -1473,6 +1739,78 @@ mod tests {
     }
 
     #[test]
+    fn response_loser_and_retired_identity_cannot_refuse_a_paused_winner() -> Result<()> {
+        let world = super::super::simulation::World::new(452);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("response-paused-winner", 305)?;
+            let winner = Sink::new();
+            winner.run(|| reserve_shell(&intent, 5))?;
+            let loser = Sink::new();
+            assert!(loser.run(|| reserve_shell(&intent, 5)).is_err());
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                with_consumer_for_role(
+                    &intent,
+                    Phase::ResponseComplete,
+                    5,
+                    NativeRole::SecurityShell,
+                    Some(&loser.identity),
+                    |_| {
+                        entered.set(true);
+                        Ok(())
+                    }
+                )
+                .is_err()
+            );
+            assert!(!entered.get());
+            assert!(refuse_response(&intent, NativeRole::SecurityShell, &loser.identity).is_err());
+            loser.abort();
+            assert!(
+                winner
+                    .clone()
+                    .poll_io::<usize>(|| Poll::Pending)
+                    .is_pending()
+            );
+            winner.finish()?;
+            let replacement = Sink::new();
+            replacement.run(|| reserve_shell(&intent, 5))?;
+            assert!(refuse_response(&intent, NativeRole::SecurityShell, &winner.identity).is_err());
+            winner.abort();
+            assert!(matches!(
+                replacement.poll_io(|| Poll::Ready(Ok(7))),
+                Poll::Ready(Ok(7))
+            ));
+            replacement.finish()?;
+            with_consumer(&intent, Phase::Session, 5, |_| Ok(()))
+        })
+    }
+
+    #[test]
+    fn pre_poll_owner_abort_is_terminal_without_a_clock_or_new_native_stage() -> Result<()> {
+        let world = super::super::simulation::World::new(453);
+        super::super::effects::scope(world.clone(), || -> Result<()> {
+            let intent = original_intent("response-before-poll-abort", 305)?;
+            let winner = Sink::new();
+            winner.run(|| reserve_shell(&intent, 5))?;
+            world.advance(301);
+            refuse_response(&intent, NativeRole::SecurityShell, &winner.identity)?;
+            winner.abort();
+            let replacement = Sink::new();
+            assert!(replacement.run(|| reserve_shell(&intent, 306)).is_err());
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                with_consumer(&intent, Phase::Session, 306, |_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!entered.get());
+            Ok(())
+        })
+    }
+
+    #[test]
     fn consumer_socket_pending_and_partial_write_do_not_settle_a_failed_delivery() -> Result<()> {
         let world = super::super::simulation::World::new(430);
         super::super::effects::scope(world, || -> Result<()> {
@@ -1669,7 +2007,7 @@ pub(crate) mod fixtures {
     struct Fixture {
         hooks: std::sync::Weak<dyn Hooks>,
         domain: u64,
-        originals: BTreeMap<(NativeRole, String), Original<SimulationClock>>,
+        originals: BTreeMap<(NativeRole, String), StoredOriginal<SimulationClock>>,
         scopes: BTreeMap<String, AuthorityScope>,
         roles: BTreeMap<(NativeRole, String), Rc<Cell<bool>>>,
     }
@@ -1849,14 +2187,24 @@ pub(crate) mod fixtures {
         FIXTURE.with(|slot| {
             let mut slot = slot.try_borrow_mut()?;
             let fixture = slot.as_mut().context("fixture executor missing")?;
+            let key = (NativeRole::AppHost, intent.attempt().into());
             ensure!(
-                fixture
-                    .originals
-                    .insert((NativeRole::AppHost, intent.attempt().into()), original)
-                    .is_none(),
+                !fixture.originals.contains_key(&key),
                 "fixture original replaced"
             );
-            enlist(NativeRole::AppHost, intent)
+            fixture
+                .originals
+                .insert(key, StoredOriginal::new(original, intent));
+            enlist(
+                NativeRole::AppHost,
+                intent,
+                &mut fixture
+                    .originals
+                    .get_mut(&(NativeRole::AppHost, intent.attempt().into()))
+                    .unwrap()
+                    .response,
+                None,
+            )
         })
     }
     pub(super) fn reserve_shell(intent: &FreshIntent, wall: i64) -> Result<bool> {
@@ -1867,7 +2215,13 @@ pub(crate) mod fixtures {
             };
             let key = (NativeRole::SecurityShell, intent.attempt().into());
             if let Some(original) = fixture.originals.get_mut(&key) {
-                original.check(intent, wall)?;
+                enlist(
+                    NativeRole::SecurityShell,
+                    intent,
+                    &mut original.response,
+                    None,
+                )?;
+                original.original.check(intent, wall)?;
             } else {
                 ensure!(
                     fixture.originals.len() < 1024,
@@ -1875,9 +2229,16 @@ pub(crate) mod fixtures {
                 );
                 let mut original = capture(fixture, NativeRole::SecurityShell, intent.app())?;
                 original.bind(intent, wall)?;
-                fixture.originals.insert(key, original);
+                fixture
+                    .originals
+                    .insert(key.clone(), StoredOriginal::new(original, intent));
+                enlist(
+                    NativeRole::SecurityShell,
+                    intent,
+                    &mut fixture.originals.get_mut(&key).unwrap().response,
+                    None,
+                )?;
             }
-            enlist(NativeRole::SecurityShell, intent)?;
             Ok(true)
         })
     }
@@ -1893,7 +2254,46 @@ pub(crate) mod fixtures {
                 .originals
                 .get_mut(&(kind, intent.attempt().into()))
                 .context("fixture original missing")?
+                .original
                 .refuse();
+            Ok(())
+        })
+    }
+
+    pub(super) fn complete_response(
+        intent: &FreshIntent,
+        kind: NativeRole,
+        identity: &ResponseIdentity,
+    ) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let mut slot = slot.try_borrow_mut()?;
+            let original = slot
+                .as_mut()
+                .context("fixture executor missing")?
+                .originals
+                .get_mut(&(kind, intent.attempt().into()))
+                .context("fixture original missing")?;
+            original.response.require_bound(intent, identity)?;
+            original.response.connection = None;
+            Ok(())
+        })
+    }
+
+    pub(super) fn refuse_response(
+        intent: &FreshIntent,
+        kind: NativeRole,
+        identity: &ResponseIdentity,
+    ) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let mut slot = slot.try_borrow_mut()?;
+            let original = slot
+                .as_mut()
+                .context("fixture executor missing")?
+                .originals
+                .get_mut(&(kind, intent.attempt().into()))
+                .context("fixture original missing")?;
+            original.response.require_bound(intent, identity)?;
+            original.original.refuse();
             Ok(())
         })
     }
@@ -1976,6 +2376,7 @@ pub(crate) mod fixtures {
         phase: Phase,
         wall: i64,
         expected: Option<NativeRole>,
+        response: Option<&ResponseIdentity>,
         use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
     ) -> Result<T> {
         FIXTURE.with(|slot| {
@@ -2001,6 +2402,7 @@ pub(crate) mod fixtures {
                 .originals
                 .get(&(kind, intent.attempt().into()))
                 .context("fixture original absent; SQL cannot restore it")?
+                .original
                 .clock
                 .owner_refused
                 .clone();
@@ -2025,14 +2427,18 @@ pub(crate) mod fixtures {
                 .originals
                 .get_mut(&(kind, intent.attempt().into()))
                 .context("fixture original absent; SQL cannot restore it")?;
+            if let Some(identity) = response {
+                original.response.require_bound(intent, identity)?;
+            } else {
+                enlist(kind, intent, &mut original.response, None)?;
+            }
             let mut original = OriginalPhase {
-                original: PhaseOriginal::Simulated(original),
+                original: PhaseOriginal::Simulated(&mut original.original),
                 intent,
                 wall,
                 phase,
             };
             original.check(&mut stage)?;
-            enlist(kind, intent)?;
             use_current(&mut stage, &mut original)
         })
     }

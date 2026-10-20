@@ -101,15 +101,15 @@ impl CommittedCapture<'_> {
 }
 
 impl Manager {
-    pub(in crate::oauth) fn native_scopes(
+    pub(in crate::oauth) fn native_selections(
         &self,
-    ) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+    ) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
         let instance = crate::artifact::Instance::load(self.runtime.instance_path())?;
         ensure!(
             instance.scope(self.runtime.app())? == self.runtime.scope(),
             "native App scope changed"
         );
-        crate::oauth::native_management::selected_scopes(&instance, Some(self.runtime.app()))
+        crate::oauth::native_management::selected_profiles(&instance, Some(self.runtime.app()))
     }
 
     pub(in crate::oauth) fn app(&self) -> &str {

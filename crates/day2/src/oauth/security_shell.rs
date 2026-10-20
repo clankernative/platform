@@ -286,7 +286,7 @@ pub(crate) struct SecurityShell {
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
     management: Option<Arc<super::management::shell::Shell>>,
-    native_scopes: Vec<day2_capabilities::security_epoch::AuthorityScope>,
+    native_selections: Vec<super::native_management::NativeSelection>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -486,7 +486,7 @@ impl SecurityShell {
         )?;
         Arc::get_mut(&mut shell)
             .context("security shell already shared")?
-            .native_scopes = super::native_management::selected_scopes(&instance, None)?;
+            .native_selections = super::native_management::selected_profiles(&instance, None)?;
         Arc::get_mut(&mut shell)
             .context("security shell already shared")?
             .management = Some(Arc::new(super::management::shell::Shell::new(
@@ -538,7 +538,7 @@ impl SecurityShell {
             canaries: None,
             guard: None,
             management: None,
-            native_scopes: Vec::new(),
+            native_selections: Vec::new(),
         }))
     }
 
@@ -582,8 +582,8 @@ impl SecurityShell {
         Ok(self)
     }
 
-    pub(super) fn native_scopes(&self) -> &[day2_capabilities::security_epoch::AuthorityScope] {
-        &self.native_scopes
+    pub(super) fn native_selections(&self) -> &[super::native_management::NativeSelection] {
+        &self.native_selections
     }
 
     pub(crate) async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
@@ -1889,9 +1889,9 @@ mod tests {
     async fn prerequisite_only_profile_serves_health_without_native_enrollment() -> Result<()> {
         let instance = crate::oauth::clients::tests::security_instance("workspace", true)?;
         let mut shell = isolated_shell()?;
-        Arc::get_mut(&mut shell).unwrap().native_scopes =
-            crate::oauth::native_management::selected_scopes(&instance, None)?;
-        assert!(shell.native_scopes().is_empty());
+        Arc::get_mut(&mut shell).unwrap().native_selections =
+            crate::oauth::native_management::selected_profiles(&instance, None)?;
+        assert!(shell.native_selections().is_empty());
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let (stop, shutdown) = tokio::sync::oneshot::channel();

@@ -335,10 +335,65 @@ impl ControllerHolderPeerContinuity {
         self.owner.disposition.refuse();
     }
 
+    pub(in crate::security_epoch) fn pending(&mut self) -> Result<bool> {
+        ensure!(
+            matches!(self.owner.disposition, Disposition::Ready(_)),
+            "storage_peer_retained_busy_or_refused"
+        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.refuse();
+            anyhow::bail!("storage_peer_platform_unsupported")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let result = self.owner.channel.storage_pending();
+            if result.is_err() {
+                self.refuse();
+            }
+            result
+        }
+    }
+
+    /// Identity/liveness of the original App holder only. This deliberately
+    /// grants no fresh App role/file possession or serving authority.
+    pub(in crate::security_epoch) fn check_retained_identity(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                matches!(self.owner.disposition, Disposition::Ready(_)),
+                "storage_peer_retained_busy_or_refused"
+            );
+            let mut acquisition = stage.narrow_io_acquisition(5)?;
+            self.owner.check_resources(stage, &mut acquisition)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn accept_serving_current<'peer>(
+        &'peer mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<CurrentStoragePeerPhase<'peer>> {
+        self.accept_selected_current(stage, None)
+    }
+
     pub(crate) fn accept_current<'peer>(
         &'peer mut self,
         stage: &mut EnrolledRoleStage<'_>,
         expected: &StoragePeerRequest,
+    ) -> Result<CurrentStoragePeerPhase<'peer>> {
+        self.accept_selected_current(stage, Some(expected))
+    }
+
+    fn accept_selected_current<'peer>(
+        &'peer mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        expected: Option<&StoragePeerRequest>,
     ) -> Result<CurrentStoragePeerPhase<'peer>> {
         let (acquisition, local, sequence) =
             self.owner.start(stage, NativeRole::EpochController)?;
@@ -354,7 +409,7 @@ impl ControllerHolderPeerContinuity {
                 .owner
                 .channel
                 .receive_storage(stage, &mut acquisition)?;
-            let (remote, nonce) = match &hello.body {
+            let (remote, nonce, request) = match &hello.body {
                 Body::CurrentHello {
                     app,
                     initial,
@@ -365,10 +420,14 @@ impl ControllerHolderPeerContinuity {
                     ensure!(
                         *initial == self.owner.initial
                             && *selected == sequence
-                            && request == expected,
+                            && expected.map_or_else(
+                                || request.purpose
+                                    == super::super::StoragePeerPurpose::CurrentServing,
+                                |expected| request == expected
+                            ),
                         "storage_peer_current_request_changed"
                     );
-                    (app.as_ref().clone(), nonce.clone())
+                    (app.as_ref().clone(), nonce.clone(), request.clone())
                 }
                 _ => anyhow::bail!("storage_peer_expected_current_hello"),
             };
@@ -381,7 +440,7 @@ impl ControllerHolderPeerContinuity {
             let exchange = CurrentExchange {
                 initial: self.owner.initial.clone(),
                 sequence,
-                request: expected.clone(),
+                request,
                 app_stage: peer.statement().digest()?,
                 controller_stage: local.digest()?,
                 app_nonce: nonce,

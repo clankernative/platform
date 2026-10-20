@@ -138,9 +138,12 @@ impl Endpoint {
         }
         use crate::security_epoch::native_enrollment::NativeRole;
         let (scopes, role) = match self {
-            Self::Shell(shell) => (shell.native_scopes().to_vec(), NativeRole::SecurityShell),
-            Self::App(host) => (crate::web::native_scopes(host)?, NativeRole::AppHost),
-            Self::Receiver(receiver) => (receiver.native_scopes()?, NativeRole::AppHost),
+            Self::Shell(shell) => (
+                shell.native_selections().to_vec(),
+                NativeRole::SecurityShell,
+            ),
+            Self::App(host) => (crate::web::native_selections(host)?, NativeRole::AppHost),
+            Self::Receiver(receiver) => (receiver.native_selections()?, NativeRole::AppHost),
             #[cfg(test)]
             Self::Test(_) => return Ok(()),
             #[cfg(test)]
@@ -229,14 +232,14 @@ impl Launch {
                 admission,
             } => run(endpoint, listener, capacity, admission, shutdown, false).await,
             Self::App(startup, admission) => {
-                let scopes = startup.scopes()?;
+                let scopes = startup.selections()?;
                 super::native_management::install(
                     &scopes,
                     crate::security_epoch::native_enrollment::NativeRole::AppHost,
                 )?;
                 let (host, listener) = (*startup).prepare(admission.clone())?;
                 ensure!(
-                    crate::web::native_scopes(&host)? == scopes,
+                    crate::web::native_selections(&host)? == scopes,
                     "native App startup scope changed"
                 );
                 run(
