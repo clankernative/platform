@@ -88,6 +88,34 @@ file continuation was already pessimistically closed before the exchange, so
 drop, error, expiry or unknown disposition cannot restart either side with a
 fresh stage. These owners still grant neither P3 nor current serving authority.
 
+Known initial completion may consume the authenticated holders into peer
+continuity. The App also consumes its original checked file into
+`AppFileContinuity`; the Controller finishes its known initial file phase so
+its caller can retain the same `PreparedFileContinuity`. The original channel,
+sender handles, transcript and enrollment identity remain retained. The actual
+key stays with the original enrollment owner; losing that owner refuses every
+future phase. Nothing recreates a key or descriptor from a projection.
+
+A later peer phase performs CurrentHello, CurrentOffer, CurrentAck and
+CurrentReady on that same connected socket. Both participants must supply new
+issuer-signed stages. The exchange binds the initial transcript, checked
+nonwrapping sequence, closed purpose, exact request digest and both fresh
+nonces. Original identity/liveness checks do not renew the historical grant.
+The returned current-peer phase retains the actual narrowed acquisition and
+fresh signed statement. Every check and known completion borrows the same
+stage again and verifies its owner, acquisition domain/origin/deadline and exact
+statement. It does not hold a long mutable stage borrow that would prevent the
+physical/provider owner's own postchecks.
+
+Beginning a phase closes the local socket disposition before fallible work.
+Drop, uncertainty and expiry cannot reopen it. A late completion cannot settle
+a different paused sequence. Terminal refusal remains possible after known
+completion without a live stage, clock or request. `finish_checked` releases
+the peer scope only after all physical/provider/original/consumer postchecks;
+it is distinct from recording a consumer's known result. This in-memory socket
+disposition is neither another distributed permit journal nor storage authority.
+Current peer identity alone still supplies no P3, active epoch or writer.
+
 ## Retained boundaries
 
 `PreparedInitialFile` packages the original creator, admitted layout and the

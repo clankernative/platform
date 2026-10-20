@@ -18,13 +18,53 @@ use crate::security_epoch::{
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 
+/// Local socket replay/disposition state only, not a distributed permit
+/// journal, storage authority, P3 proof or native owner constructor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Disposition {
+    Ready(u64),
+    Busy(u64),
+    Refused,
+}
+
+impl Disposition {
+    fn begin(&mut self) -> Result<u64> {
+        let Self::Ready(previous) = *self else {
+            anyhow::bail!("storage_peer_continuation_busy_or_refused");
+        };
+        let Some(sequence) = previous.checked_add(1) else {
+            self.refuse();
+            anyhow::bail!("storage_peer_sequence_exhausted");
+        };
+        *self = Self::Busy(sequence);
+        Ok(sequence)
+    }
+
+    fn check(&self, sequence: u64) -> Result<()> {
+        ensure!(
+            *self == Self::Busy(sequence),
+            "storage_peer_current_phase_refused"
+        );
+        Ok(())
+    }
+
+    fn complete(&mut self, sequence: u64) -> Result<()> {
+        self.check(sequence)?;
+        *self = Self::Ready(sequence);
+        Ok(())
+    }
+
+    fn refuse(&mut self) {
+        *self = Self::Refused;
+    }
+}
+
 struct RetainedPeer {
     same: SameEnrolledOwner,
     local: StageStatement,
     initial: Digest,
     projection: PreparedFileProjection,
-    sequence: u64,
-    valid: bool,
+    disposition: Disposition,
     #[cfg(target_os = "linux")]
     peer: Peer,
     #[cfg(target_os = "linux")]
@@ -51,7 +91,6 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     acquisition: NativeAcquisition,
     local: StageStatement,
     exchange: CurrentExchange,
-    active: bool,
     #[cfg(target_os = "linux")]
     peer: Peer,
 }
@@ -76,8 +115,7 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
                     local: self.offer.local,
                     initial,
                     projection,
-                    sequence: 0,
-                    valid: true,
+                    disposition: Disposition::Ready(0),
                     #[cfg(target_os = "linux")]
                     peer: self.offer.peer,
                     #[cfg(target_os = "linux")]
@@ -105,8 +143,7 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
                 local: self.local,
                 initial,
                 projection,
-                sequence: 0,
-                valid: true,
+                disposition: Disposition::Ready(0),
                 #[cfg(target_os = "linux")]
                 peer: self.peer,
                 #[cfg(target_os = "linux")]
@@ -122,10 +159,9 @@ impl RetainedPeer {
         stage: &mut EnrolledRoleStage<'_>,
         role: NativeRole,
     ) -> Result<(NativeAcquisition, StageStatement, u64)> {
-        ensure!(self.valid, "storage_peer_continuation_refused");
         // Close before ANY fallible current work. No destructor, timeout or
         // later role can rearm an abandoned/unknown exchange.
-        self.valid = false;
+        let sequence = self.disposition.begin()?;
         self.same.check(stage)?;
         ensure!(
             self.local.stage.data.role == role,
@@ -138,11 +174,7 @@ impl RetainedPeer {
             "storage_peer_enrollment_changed"
         );
         self.check_resources(stage, &mut acquisition)?;
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("storage_peer_sequence_exhausted"))?;
-        Ok((acquisition, local, self.sequence))
+        Ok((acquisition, local, sequence))
     }
 
     fn check_resources(
@@ -177,7 +209,7 @@ impl AppHolderPeerContinuity {
     }
 
     pub(crate) fn refuse(&mut self) {
-        self.owner.valid = false;
+        self.owner.disposition.refuse();
     }
 
     pub(crate) fn begin_current<'peer>(
@@ -256,7 +288,6 @@ impl AppHolderPeerContinuity {
                 acquisition,
                 local,
                 exchange,
-                active: true,
                 peer,
             };
             phase.check(stage)?;
@@ -271,7 +302,7 @@ impl ControllerHolderPeerContinuity {
     }
 
     pub(crate) fn refuse(&mut self) {
-        self.owner.valid = false;
+        self.owner.disposition.refuse();
     }
 
     pub(crate) fn accept_current<'peer>(
@@ -356,7 +387,6 @@ impl ControllerHolderPeerContinuity {
                 acquisition,
                 local,
                 exchange,
-                active: true,
                 peer,
             };
             phase.check(stage)?;
@@ -368,10 +398,7 @@ impl ControllerHolderPeerContinuity {
 impl CurrentStoragePeerPhase<'_> {
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
-            ensure!(
-                self.active && !self.owner.valid,
-                "storage_peer_current_phase_refused"
-            );
+            self.owner.disposition.check(self.exchange.sequence)?;
             self.owner.check_resources(stage, &mut self.acquisition)?;
             ensure!(
                 self.local == stage.storage_statement()?,
@@ -397,15 +424,63 @@ impl CurrentStoragePeerPhase<'_> {
     /// a consumer: it releases the peer scope and must follow those postchecks.
     pub(crate) fn finish_checked(mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.check(stage)?;
-        self.active = false;
-        self.owner.valid = true;
-        Ok(())
+        self.owner.disposition.complete(self.exchange.sequence)
     }
 
     /// Terminal refusal has no live clock, stage check, network or replacement.
     pub(crate) fn refuse(&mut self) {
-        self.active = false;
-        self.owner.valid = false;
+        self.owner.disposition.refuse();
         self.acquisition.refuse();
+    }
+}
+
+#[cfg(test)]
+mod disposition_tests {
+    use super::Disposition;
+
+    #[test]
+    fn unknown_or_abandoned_phase_never_reopens_from_time_or_another_begin() {
+        let mut state = Disposition::Ready(0);
+        assert_eq!(state.begin().unwrap(), 1);
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Busy(1));
+        assert!(state.complete(2).is_err());
+        assert_eq!(state, Disposition::Busy(1));
+        state.refuse();
+        assert!(state.complete(1).is_err());
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Refused);
+    }
+
+    #[test]
+    fn late_known_completion_cannot_settle_a_different_paused_phase() {
+        let mut state = Disposition::Ready(0);
+        let first = state.begin().unwrap();
+        state.complete(first).unwrap();
+        let second = state.begin().unwrap();
+        assert!(state.complete(first).is_err());
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Busy(second));
+        state.complete(second).unwrap();
+        assert_eq!(state, Disposition::Ready(second));
+    }
+
+    #[test]
+    fn refusal_after_known_result_stays_terminal() {
+        let mut state = Disposition::Ready(0);
+        let sequence = state.begin().unwrap();
+        state.complete(sequence).unwrap();
+        state.refuse();
+        assert!(state.complete(sequence).is_err());
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Refused);
+    }
+
+    #[test]
+    fn sequence_exhaustion_refuses_before_another_exchange() {
+        let mut state = Disposition::Ready(u64::MAX);
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Refused);
+        assert!(state.complete(0).is_err());
     }
 }
