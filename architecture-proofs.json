@@ -1114,6 +1114,7 @@
       ],
       "methods": [
         "pub (crate) fn check_original (& mut self) -> Result < () >",
+        "pub (crate) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >",
         "pub (crate) fn retain_for_current_phases (mut self) -> PreparedRetentionOutcome < 'role >",
         "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
@@ -1132,6 +1133,10 @@
         {
           "owner": "PreparedInitialFile < 'role >",
           "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         },
         {
           "owner": "PreparedInitialFile < 'role >",
@@ -1365,6 +1370,7 @@
         "pub (super) fn check_current (& mut self) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
         "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >",
+        "pub (super) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
       ],
@@ -1390,6 +1396,10 @@
         {
           "owner": "NativeVolumeObservation < 'role >",
           "signature": "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         },
         {
           "owner": "NativeVolumeObservation < 'role >",
