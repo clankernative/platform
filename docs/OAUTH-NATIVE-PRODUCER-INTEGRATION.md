@@ -2,15 +2,16 @@
 
 This branch composes PRs 214 (enrollment), 211 (original owners and HTTP
 executors), and 209 (native storage preparation and file continuity). It does
-not enable the production fresh-human producer. The prerequisite suppliers
-below are still missing from those PRs, as confirmed by their owners.
+not enable the production fresh-human producer. The authenticated first-holder
+exchange is included, but genuine P3/current serving authority is still absent.
 
 ## Required suppliers
 
-- G1 owns the closed authenticated initial-holder peer exchange. It
-  must join the actual enrolled Controller and App messages within their
-  original stages, before the App parses SQLite. S1's `SameEnrolledOwner` is
-  enrollment continuity, not that exchange or a first-holder grant.
+- G1's authenticated initial-holder peer exchange joins enrolled Controller and
+  App messages within their original stages, before the App opens/parses the
+  prepared file. It retains the actual message handles, socket, live issuer and
+  original intervals. Its native deployment qualification is separate; a first
+  holder still cannot substitute for P3/current serving authority.
   Credential owns the fixed issuer entrypoint, operational composition and
   live enrollment qualification; G1 is implementing the exchange against S1.
 - G1 owns provider P3 and exclusive-mutator qualification, counter activation,
