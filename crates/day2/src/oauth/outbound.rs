@@ -57,7 +57,9 @@ pub(super) fn handle_callback_profile(
     mut current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
 ) -> Result<CallbackOutcome> {
-    if let Some(current) = &mut current { current.check()?; }
+    if let Some(current) = &mut current {
+        current.check()?;
+    }
     connect::identifier(ingress.attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(String, i64, String, String)> = tx
@@ -123,7 +125,11 @@ pub(super) fn handle_callback_profile(
             }
         }
     };
-    if let Some(current) = current { current.commit(tx)?; } else { tx.commit()?; }
+    if let Some(current) = current {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(outcome)
 }
 

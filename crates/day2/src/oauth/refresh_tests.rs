@@ -507,7 +507,8 @@ fn activate(runtime: &Runtime, fixture: &profiles::tests::QualificationFixture) 
                 code_ref: &code_ref,
                 now: 2
             },
-            &key, None,
+            &key,
+            None,
         )?,
         outbound::CallbackOutcome::CodeAccepted { .. }
     ));

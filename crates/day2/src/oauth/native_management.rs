@@ -533,7 +533,8 @@ impl Consumer<'_, '_, '_> {
         if result.is_err() {
             self.refuse();
         }
-        result
+        result?;
+        self.check()
     }
 
     /// Hold the same borrow before COMMIT, through the actual SQLite result,
@@ -1061,7 +1062,11 @@ mod tests {
                 Ok(()) // Swallowing the refusal still cannot report success.
             });
             assert!(result.is_err());
-            assert_eq!(db.query_row("SELECT sum(value) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(
+                db.query_row("SELECT sum(value) FROM receipt", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
             assert!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_err());
             Ok(())
         })
