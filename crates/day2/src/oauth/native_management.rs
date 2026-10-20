@@ -474,6 +474,7 @@ impl OriginalPhase<'_> {
 pub(crate) struct Consumer<'a, 'role, 'original> {
     role: &'a mut RoleStage<'role>,
     original: &'a mut OriginalPhase<'original>,
+    armed: &'a std::cell::Cell<bool>,
 }
 
 impl Consumer<'_, '_, '_> {
@@ -482,7 +483,17 @@ impl Consumer<'_, '_, '_> {
     }
 
     pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
-        self.original.require_signature(self.role, expected)
+        self.original.require_signature(self.role, expected)?;
+        self.arm()
+    }
+
+    /// Enter only immediately before the actual mutation/disclosure. Pure
+    /// input refusals remain known exclusions and cannot burn another human's
+    /// valid original. Once armed, error/unwind is permanently unresolved.
+    pub(crate) fn arm(&mut self) -> Result<()> {
+        self.check()?;
+        self.armed.set(true);
+        Ok(())
     }
 
     /// Hold the same borrow before COMMIT, through the actual SQLite result,
@@ -490,7 +501,7 @@ impl Consumer<'_, '_, '_> {
     /// returns a dispatch permit or rearms the original.
     pub(crate) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
         let result = (|| {
-            self.check()?;
+            self.arm()?;
             tx.commit()?;
             self.check()
         })();
@@ -507,13 +518,14 @@ impl Consumer<'_, '_, '_> {
 struct ConsumerGuard {
     intent: FreshIntent,
     role: NativeRole,
+    armed: std::cell::Cell<bool>,
     settled: bool,
     local: std::marker::PhantomData<Rc<()>>,
 }
 
 impl Drop for ConsumerGuard {
     fn drop(&mut self) {
-        if !self.settled {
+        if self.armed.get() && !self.settled {
             let _ = refuse_original(&self.intent, self.role);
         }
     }
@@ -539,14 +551,17 @@ pub(crate) fn with_consumer<T>(
     let mut guard = ConsumerGuard {
         intent: intent.clone(),
         role,
+        armed: std::cell::Cell::new(false),
         settled: false,
         local: std::marker::PhantomData,
     };
     let result = with_current_original(intent, phase, wall, |role, original| {
-        let mut consumer = Consumer { role, original };
+        let mut consumer = Consumer { role, original, armed: &guard.armed };
         consumer.check()?;
-        let output = operation(&mut consumer)?;
-        consumer.check()?;
+        let output = operation(&mut consumer);
+        let checked = consumer.check();
+        let output = output?;
+        checked?;
         Ok(output)
     });
     guard.settled = result.is_ok();
@@ -684,6 +699,7 @@ impl Sink {
                 let mut guard = ConsumerGuard {
                     intent: binding.intent.clone(),
                     role: *role,
+                    armed: std::cell::Cell::new(false),
                     settled: false,
                     local: std::marker::PhantomData,
                 };
@@ -696,8 +712,9 @@ impl Sink {
                         let mut consumer = Consumer {
                             role: stage,
                             original,
+                            armed: &guard.armed,
                         };
-                        consumer.check()?;
+                        consumer.arm()?;
                         let output = operation();
                         consumer.check()?;
                         Ok(output)

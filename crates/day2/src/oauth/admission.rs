@@ -4227,10 +4227,8 @@ pub(super) mod tests {
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
-            assert!(super::super::native_management::reserve_shell(&intent, 104).is_err());
-            let mut isolated_view = view.clone();
-            isolated_view.id.push_str("_isolated");
-            let intent = FreshIntent::management(&isolated_view, &identity)?;
+            // The refused prerequisite never reached signing. This is a known
+            // exclusion, not an ambiguous mutation that burns the original.
             super::super::native_management::reserve_shell(&intent, 104)?;
             let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 intent,
@@ -4238,9 +4236,8 @@ pub(super) mod tests {
                 identity.subject.clone(),
                 103,
             ));
-            let accepted =
-                signer.attest_management(&isolated_view, &isolated, &identity, session, 104)?;
-            accepted.verify(&isolated_view, &identity, &[11; 32], "11", 104)?;
+            let accepted = signer.attest_management(&view, &isolated, &identity, session, 104)?;
+            accepted.verify(&view, &identity, &[11; 32], "11", 104)?;
             assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 super::super::simulation::snapshot(&crate::store::open(&database)?)?,

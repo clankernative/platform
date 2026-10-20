@@ -139,6 +139,7 @@ impl Shell {
                     !sessions.contains_key(digest.as_str()),
                     "OAuth management session collision"
                 );
+                current.arm()?;
                 sessions.insert(digest.as_str().into(), session);
                 // An expired/changed owner after insertion must not leave a
                 // usable session even if the response is never constructed.
