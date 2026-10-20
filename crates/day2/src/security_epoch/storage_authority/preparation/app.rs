@@ -305,6 +305,13 @@ impl AppFileContinuity {
                 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags};
                 let acquisition = &mut stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
                 acquisition.remaining()?;
+                use std::os::unix::fs::MetadataExt;
+                let directory_metadata = self.directory.metadata()?;
+                ensure!(
+                    directory_metadata.mode() & 0o7777 == 0o700
+                        && directory_metadata.uid() == self.identity.uid,
+                    "app_file_continuity_directory_profile_changed"
+                );
                 let length = usize::try_from(self.file.metadata()?.len())?;
                 let observed =
                     observe_anchored_file(&self.directory, &self.anchor, &self.file, length)?;

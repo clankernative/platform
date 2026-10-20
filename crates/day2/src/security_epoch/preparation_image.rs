@@ -864,6 +864,7 @@ pub(super) mod tests {
             "CREATE TABLE forged(value TEXT)",
             "DELETE FROM day2_initial_security_seed",
             "UPDATE day2_meta SET value='other/scope/app' WHERE key='scope'",
+            "UPDATE day2_authority SET artifact_id='sha256:0000000000000000000000000000000000000000000000000000000000000000' WHERE singleton=1",
         ] {
             let tx = live.transaction().unwrap();
             tx.execute_batch(sql).unwrap();
