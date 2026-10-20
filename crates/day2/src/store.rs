@@ -867,8 +867,13 @@ impl SchemaInitialization<'_> {
 
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
-    let connection = Connection::open(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let connection = if native_storage::is_native_database(path) {
+        native_storage::open_existing(path)?
+    } else {
+        let connection = Connection::open(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        connection
+    };
     configure_connection(&connection)?;
     Ok(connection)
 }
@@ -1008,6 +1013,10 @@ impl Runtime {
     pub fn load(instance_path: &Path, app: &str) -> Result<Self> {
         let instance_path = instance_path.canonicalize()?;
         let instance = Instance::load(&instance_path)?;
+        ensure!(
+            instance.native_bootstrap_for(app)?.is_none(),
+            "native_runtime_current_serving_required"
+        );
         let binding = instance.apps.get(app).context("app_not_installed")?;
         let parent = instance_path.parent().context("instance directory")?;
         let directory = parent.join(".state");
@@ -1073,6 +1082,12 @@ impl Runtime {
         Ok(runtime)
     }
     pub fn initialize(&self) -> Result<()> {
+        ensure!(
+            Instance::load(&self.instance_path)?
+                .native_bootstrap_for(&self.app)?
+                .is_none(),
+            "native_runtime_initializer_forbidden"
+        );
         let mut connection = open(&self.db)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let tx = crate::write_queue::immediate(&mut connection)?;

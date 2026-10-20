@@ -1455,6 +1455,43 @@ fn insert_security_key(
 }
 
 impl Instance {
+    /// Explicit native profile selection DATA only. An absent profile never
+    /// supplies an owner; a selected but invalid profile must not become the
+    /// prerequisite-only path after validation or enrollment fails.
+    pub(crate) fn native_bootstrap_for(
+        &self,
+        app: &str,
+    ) -> Result<Option<&day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy>> {
+        ensure!(self.apps.contains_key(app), "native bootstrap app missing");
+        let Some(control) = &self.control else {
+            return Ok(None);
+        };
+        let mut policies = control
+            .security_bootstraps
+            .values()
+            .filter(|policy| policy.scope.app.as_str() == app);
+        let Some(policy) = policies.next() else {
+            return Ok(None);
+        };
+        ensure!(policies.next().is_none(), "native bootstrap ambiguous");
+        ensure!(
+            policy.scope.installation.as_str() == self.installation
+                && policy.scope.environment.as_str() == self.environment,
+            "native bootstrap scope mismatch"
+        );
+        policy.validate(&control.security_epochs)?;
+        ensure!(
+            control
+                .security_epochs
+                .values()
+                .filter(|store| store.scope == policy.scope)
+                .count()
+                == 1,
+            "native bootstrap epoch selection ambiguous"
+        );
+        Ok(Some(policy))
+    }
+
     /// Desired identity and shell selectors, with no live provider observation.
     pub(crate) fn credential_identity_revision(
         &self,

@@ -289,3 +289,38 @@ fn directory_identity(_file: &File) -> Result<DirectoryIdentity> {
 
 #[cfg(test)]
 mod tests;
+
+/// One fixed Controller startup operation. Only a successfully checked native
+/// creator can be retained. All error paths stop the caller; there is no
+/// conversion of a refused/unknown original into a new candidate or adoption.
+pub(in crate::security_epoch) fn prepare_controller_initial(
+    instance: &std::path::Path,
+    stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+) -> Result<PreparedFileContinuity> {
+    let (authority, mut acquisition) =
+        NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
+    let layout =
+        preparation::ReviewedFileLayout::prepare(instance, &authority.selection, &mut acquisition)?;
+    match preparation::prepare_original_file(authority, &layout, &mut acquisition) {
+        NativeOriginalPreparationOutcome::Prepared(creator) => {
+            let original = PreparedInitialFile::retain_original(creator, layout, acquisition);
+            match original.retain_for_current_phases() {
+                PreparedRetentionOutcome::Retained(file) => Ok(*file),
+                PreparedRetentionOutcome::Refused { original, error } => {
+                    let _refused_original = original;
+                    Err(error)
+                }
+            }
+        }
+        NativeOriginalPreparationOutcome::RefusedBeforeAttempt(original) => {
+            let _refused_original = original;
+            anyhow::bail!("native_controller_initial_preparation_refused")
+        }
+        NativeOriginalPreparationOutcome::RefusedAfterAttempt(original) => {
+            let _refused_original = original;
+            anyhow::bail!("native_controller_initial_preparation_unknown")
+        }
+    }
+}

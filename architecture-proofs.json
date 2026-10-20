@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:428509e134f0ba02207df4cd0f27b1bf748f1ff93bb5e4e2618774a3f862cd58",
+      "fingerprint": "sha256:9308e4f62638212eaa05e01dd8dde24dea75b8ff0d5a34efa7bcd89e601d1b60",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -2512,7 +2512,8 @@
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (crate) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < () >"
       ],
       "factories": [
         {
@@ -2532,6 +2533,10 @@
         {
           "owner": "ActiveControllerStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -2722,15 +2727,28 @@
     {
       "source": "crates/day2/src/security_epoch/serving.rs",
       "type_name": "ServingParticipant",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/serving/shell.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/serving.rs",
+            "module": "shell"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn app (app : super :: ActiveAppStorageContinuity) -> Self",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self"
       ],
       "factories": [
         {
           "owner": "ServingParticipant",
           "signature": "pub (crate) fn app (app : super :: ActiveAppStorageContinuity) -> Self"
+        },
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self"
         }
       ],
       "material_uses": [
@@ -3021,6 +3039,52 @@
         {
           "owner": "ShellServingPeer",
           "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/serving.rs",
+      "type_name": "CurrentShellServingPhase",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/serving/shell.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/serving.rs",
+            "module": "shell"
+          }
+        }
+      ],
+      "methods": [
+        "fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn finish_scope (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn refuse (& mut self)",
+        "fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> ScopeOutcome < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn with_current < 'role , T > (peer : & mut ShellServingPeer , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> ScopeOutcome < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentShellServingPhase < '_ >",
+          "signature": "fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentShellServingPhase < '_ >",
+          "signature": "fn finish_scope (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentShellServingPhase < '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentShellServingPhase < '_ >",
+          "signature": "fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> ScopeOutcome < T >"
         }
       ],
       "proof_uses": [],

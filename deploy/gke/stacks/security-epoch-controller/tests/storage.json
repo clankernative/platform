@@ -1,0 +1,11 @@
+{
+  "disk_id": "123456",
+  "instance_id": "234567",
+  "node": {
+    "name": "fixture-node",
+    "uid": "fixture-node-uid"
+  },
+  "claim": {
+    "name": "data"
+  }
+}
