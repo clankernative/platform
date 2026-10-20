@@ -1,0 +1,200 @@
+use super::Credentials;
+use anyhow::{Context, Result, ensure};
+use ring::{
+    digest::{SHA256, digest},
+    rand::{SecureRandom, SystemRandom},
+};
+use std::io::Read;
+
+const PATH: &str = "/v1/executor";
+
+pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Result<Vec<u8>> {
+    ensure!(body.len() <= 1_100_000, "freetool_service_request_budget");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .to_string();
+    let mut nonce_bytes = [0_u8; 24];
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("freetool_nonce_unavailable"))?;
+    let nonce = crate::hex(&nonce_bytes);
+    let body_digest = crate::hex(digest(&SHA256, body).as_ref());
+    let canonical = format!("POST\n{PATH}\n{timestamp}\n{nonce}\n{body_digest}");
+    let signature = crate::hex(&credential.sign_executor_request(canonical.as_bytes())?);
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let response = client
+        .post(format!("{}{PATH}", endpoint.trim_end_matches('/')))
+        .header("content-type", "application/json")
+        .header("x-freetool-timestamp", timestamp)
+        .header("x-freetool-nonce", nonce)
+        .header("x-freetool-body-sha256", body_digest)
+        .header("x-freetool-signature", signature)
+        .body(body.to_vec())
+        .send()
+        .context("freetool_service_unavailable")?;
+    ensure!(response.status().is_success(), "freetool_service_rejected");
+    ensure!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value
+                .split(';')
+                .next()
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))),
+        "freetool_service_response_invalid"
+    );
+    let mut bytes = Vec::new();
+    response.take(1_100_001).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 1_100_000, "freetool_service_response_budget");
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::hmac;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    fn read_request(stream: &mut std::net::TcpStream) -> Result<(String, Vec<u8>)> {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut chunk)?;
+            ensure!(count > 0, "loopback request ended before headers");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+            ensure!(bytes.len() <= 16 * 1024, "loopback headers exceeded limit");
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec())?;
+        let length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .context("missing content length")?;
+        while bytes.len() - header_end < length {
+            let count = stream.read(&mut chunk)?;
+            ensure!(count > 0, "loopback request body truncated");
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        Ok((headers, bytes[header_end..header_end + length].to_vec()))
+    }
+
+    #[test]
+    fn loopback_transport_authenticates_exact_body_and_trusted_route() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let key = vec![0x5a; 32];
+        let key_hex = crate::hex(&key);
+        let expected_body = br#"{"operation":"status","identity":{"installation":"i/e","application":"freetool","actor":"alice","artifact":"a","operation":"freetool.run","resource_id":"r","configuration_id":"c","immutable_version":1,"configuration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_id":"run","arguments_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#.to_vec();
+        let expected = expected_body.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let (headers, body) = read_request(&mut stream)?;
+            ensure!(
+                headers.starts_with("POST /v1/executor HTTP/1.1\r\n"),
+                "unexpected route"
+            );
+            ensure!(body == expected, "the signed bytes changed in transit");
+            let header = |name: &str| -> Result<String> {
+                headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case(name)
+                            .then(|| value.trim().to_owned())
+                    })
+                    .context("missing executor auth header")
+            };
+            let timestamp = header("x-freetool-timestamp")?;
+            let nonce = header("x-freetool-nonce")?;
+            let supplied_digest = header("x-freetool-body-sha256")?;
+            let signature = header("x-freetool-signature")?;
+            ensure!(nonce.len() == 48, "nonce is not 24 random bytes");
+            ensure!(
+                supplied_digest == crate::hex(digest(&SHA256, &body).as_ref()),
+                "body digest mismatch"
+            );
+            let canonical = format!("POST\n/v1/executor\n{timestamp}\n{nonce}\n{supplied_digest}");
+            let signing_key = hmac::Key::new(hmac::HMAC_SHA256, &key);
+            let signature = decode_hex(&signature).context("bad signature hex")?;
+            hmac::verify(&signing_key, canonical.as_bytes(), &signature)
+                .map_err(|_| anyhow::anyhow!("bad signature"))?;
+            let response = br#"{"state":"status","receipt":null}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response.len()
+            )?;
+            stream.write_all(response)?;
+            Ok(())
+        });
+        let credential = Credentials::bearer(key_hex)?;
+        let response = send(&endpoint, &credential, &expected_body)?;
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback server panicked"))??;
+        let parsed: crate::freetool_executor::ServiceResponse = serde_json::from_slice(&response)?;
+        ensure!(
+            matches!(
+                parsed,
+                crate::freetool_executor::ServiceResponse::Status { receipt: None }
+            ),
+            "unexpected loopback response"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn loopback_transport_does_not_follow_redirects() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request(&mut stream)?;
+            stream.write_all(b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")?;
+            Ok(())
+        });
+        let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
+        assert!(send(&endpoint, &credential, b"{}").is_err());
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback server panicked"))??;
+        Ok(())
+    }
+
+    fn decode_hex(value: &str) -> Option<Vec<u8>> {
+        if value.len() % 2 != 0 {
+            return None;
+        }
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    _ => None,
+                };
+                Some(digit(pair[0])? * 16 + digit(pair[1])?)
+            })
+            .collect()
+    }
+}

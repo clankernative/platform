@@ -1,6 +1,7 @@
 //! Closed live adapters. Only already-authorized, pinned profiles enter here.
 //! Provider wire data and credentials never become error strings or logs.
 
+mod freetool_executor;
 mod gitea_actions;
 mod github_actions;
 mod linear_work;
@@ -17,6 +18,14 @@ pub(crate) use transport::{
     Authorization, CredentialResolver, Credentials, HttpTransport, Method, Transport,
 };
 pub(crate) use transport::{TransportError, WireRequest, WireResponse};
+
+pub(crate) fn freetool_executor_request(
+    endpoint: &str,
+    credential: &Credentials,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    freetool_executor::send(endpoint, credential, body)
+}
 
 use day2_capabilities::{
     integrations::LiveConnection,

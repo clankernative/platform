@@ -532,6 +532,10 @@ mod connections {
                 project_id: "proj_example".into(),
                 organization_id: None,
             }),
+            Provider::FreetoolExecutor => Some(LiveConnection::FreetoolExecutor {
+                credential_ref: reference("freetool_transport_key"),
+                endpoint: "http://127.0.0.1:43210".into(),
+            }),
         }
     }
 
@@ -848,6 +852,10 @@ mod narrowing {
                     input_nanos_per_token: 1000,
                     output_nanos_per_token: 1000,
                 },
+            },
+            ResourceKind::FreetoolExecutorResource => ResourceTarget::FreetoolExecutor {
+                service_id: "freetool_local".into(),
+                allowed_resources: BTreeSet::from(["resource_test".into()]),
             },
         }
     }

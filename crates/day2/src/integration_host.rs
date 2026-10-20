@@ -89,6 +89,32 @@ impl Host {
         )
     }
 
+    pub(crate) fn freetool_request(
+        &self,
+        database: &Path,
+        connection: &LiveConnection,
+        request: crate::freetool_executor::ServiceRequest,
+    ) -> Result<crate::freetool_executor::ServiceResponse> {
+        let LiveConnection::FreetoolExecutor { endpoint, .. } = connection else {
+            anyhow::bail!("freetool_executor_connection_mismatch");
+        };
+        if self.simulated_providers {
+            let world = database
+                .parent()
+                .context("application_database_parent_missing")?
+                .join("freetool_executor.simulated.sqlite");
+            return crate::freetool_executor::simulated_call(&world, request);
+        }
+        let credential = self
+            .resolver
+            .resolve(connection)
+            .map_err(|_| anyhow::anyhow!("freetool_service_key_unavailable"))?;
+        let body = serde_json::to_vec(&request)?;
+        let response = integrations::freetool_executor_request(endpoint, &credential, &body)
+            .map_err(|_| anyhow::anyhow!("freetool_service_transport_failed"))?;
+        serde_json::from_slice(&response).context("freetool_service_response_invalid")
+    }
+
     #[cfg(test)]
     pub(crate) fn injected(
         resolver: Arc<dyn CredentialResolver>,

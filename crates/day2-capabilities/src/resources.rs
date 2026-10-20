@@ -158,6 +158,12 @@ pub enum ResourceTarget {
     OpenAiText {
         profile: crate::integrations::OpenAiText,
     },
+    /// Private Freetool executor service and the business resource IDs the
+    /// operator allows this application binding to submit.
+    FreetoolExecutor {
+        service_id: String,
+        allowed_resources: BTreeSet<String>,
+    },
 }
 
 /// Whether a live Carta capture publishes grant child records.
@@ -237,6 +243,7 @@ impl ResourceTarget {
             Self::SlackChannel { .. } => ResourceKind::SlackChannel,
             Self::SnowflakeView { .. } => ResourceKind::SnowflakeView,
             Self::OpenAiText { .. } => ResourceKind::OpenAiText,
+            Self::FreetoolExecutor { .. } => ResourceKind::FreetoolExecutorResource,
             Self::ObjectBucket { .. } => ResourceKind::ObjectBucket,
             Self::AppOperation { .. } => ResourceKind::AppOperation,
         }
@@ -285,6 +292,20 @@ impl ResourceTarget {
             Self::SlackChannel { channel } => channel.validate(),
             Self::SnowflakeView { query } => query.validate(),
             Self::OpenAiText { profile } => profile.validate(),
+            Self::FreetoolExecutor {
+                service_id,
+                allowed_resources,
+            } => {
+                name(service_id)?;
+                ensure!(
+                    !allowed_resources.is_empty() && allowed_resources.len() <= 256,
+                    "invalid_freetool_resource_scope"
+                );
+                for resource in allowed_resources {
+                    bounded_text(resource, 256)?;
+                }
+                Ok(())
+            }
             Self::NotificationMailbox { topics } => topics.validate(),
             Self::CartaIssuer { issuer_id, .. } => bounded_text(issuer_id, 256),
             Self::ObjectBucket { bucket, key_prefix } => {
@@ -388,6 +409,16 @@ impl ResourceTarget {
             (Self::OpenAiText { profile }, Self::OpenAiText { profile: parent }) => {
                 profile == parent
             }
+            (
+                Self::FreetoolExecutor {
+                    service_id,
+                    allowed_resources,
+                },
+                Self::FreetoolExecutor {
+                    service_id: parent_service,
+                    allowed_resources: parent_resources,
+                },
+            ) => service_id == parent_service && allowed_resources.is_subset(parent_resources),
             (
                 Self::NotificationMailbox { topics },
                 Self::NotificationMailbox { topics: parent },
@@ -843,7 +874,8 @@ fn validate_connection(
         | (Provider::GiteaActions, Some(value @ LiveConnection::GiteaActions { .. }))
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
         | (Provider::Carta, Some(value @ LiveConnection::Carta { .. }))
-        | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. })) => value.validate(),
+        | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. }))
+        | (Provider::FreetoolExecutor, Some(value @ LiveConnection::FreetoolExecutor { .. })) => value.validate(),
         (
             Provider::LocalNotifications
             // Delegation reaches another application in this same instance, so

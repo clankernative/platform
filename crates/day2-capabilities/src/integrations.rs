@@ -94,6 +94,13 @@ pub enum LiveConnection {
         /// a remaining page token fails the capture rather than truncating it.
         max_pages_per_collection: u16,
     },
+    /// Private operator-configured service endpoint. The mounted key authenticates
+    /// only host-to-executor protocol requests and is never sent as a bearer token.
+    FreetoolExecutor {
+        credential_ref: VersionRef,
+        endpoint: String,
+
+    },
 }
 
 /// The two Carta deployments an operator may select. Closed: each names a fixed
@@ -137,7 +144,8 @@ impl LiveConnection {
             | Self::GitHubActions { credential_ref, .. }
             | Self::GiteaActions { credential_ref, .. }
             | Self::Carta { credential_ref, .. }
-            | Self::OpenAi { credential_ref, .. } => Some(credential_ref),
+            | Self::OpenAi { credential_ref, .. }
+            | Self::FreetoolExecutor { credential_ref, .. } => Some(credential_ref),
             Self::WorkspaceDirectory { .. } => None,
         }
     }
@@ -159,6 +167,7 @@ impl LiveConnection {
             | Self::LinearWork { .. }
             | Self::GitHubActions { .. }
             | Self::Carta { .. }
+            | Self::FreetoolExecutor { .. }
             | Self::WorkspaceDirectory { .. } => None,
         }
     }
@@ -175,6 +184,10 @@ impl LiveConnection {
     pub fn credential_refs(&self) -> Vec<&VersionRef> {
         match self {
             Self::WorkspaceDirectory { .. } => vec![],
+            Self::FreetoolExecutor {
+                credential_ref,
+                endpoint: _,
+            } => vec![credential_ref],
             Self::SlackWebhook { credential_ref } => vec![credential_ref],
             Self::Slack {
                 credential_ref,
@@ -246,6 +259,18 @@ impl LiveConnection {
         );
         match self {
             Self::SlackWebhook { .. } => Ok(()),
+            Self::FreetoolExecutor { endpoint, .. } => {
+                let host = endpoint
+                    .strip_prefix("http://127.0.0.1:")
+                    .unwrap_or_default();
+                ensure!(
+                    !host.is_empty()
+                        && host.bytes().all(|byte| byte.is_ascii_digit())
+                        && host.parse::<u16>().is_ok_and(|port| port != 0),
+                    "invalid_freetool_executor_endpoint"
+                );
+                Ok(())
+            }
             Self::Slack { workspace_id, .. } => slack_id(workspace_id, b"T"),
             Self::ObjectStore {
                 endpoint,

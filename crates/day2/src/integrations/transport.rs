@@ -10,6 +10,25 @@ use std::{io::Read, time::Duration};
 /// No Debug/Serialize implementation: credential bytes cannot enter receipts.
 pub(crate) struct Credentials(String);
 
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            Some(digit(pair[0])? * 16 + digit(pair[1])?)
+        })
+        .collect()
+}
+
 impl Credentials {
     pub(super) fn slack_webhook_url(&self, digest: &str) -> Result<&str, AdapterError> {
         super::slack_webhook::validate_url(&self.0, digest)?;
@@ -27,6 +46,16 @@ impl Credentials {
             return Err(AdapterError::CredentialUnavailable);
         }
         Ok(())
+    }
+
+    /// Sign executor transport metadata without exposing mounted key material.
+    pub(crate) fn sign_executor_request(&self, message: &[u8]) -> Result<Vec<u8>, AdapterError> {
+        let bytes = decode_hex(&self.0).ok_or(AdapterError::CredentialUnavailable)?;
+        if bytes.len() < 32 {
+            return Err(AdapterError::CredentialUnavailable);
+        }
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &bytes);
+        Ok(ring::hmac::sign(&key, message).as_ref().to_vec())
     }
 }
 
