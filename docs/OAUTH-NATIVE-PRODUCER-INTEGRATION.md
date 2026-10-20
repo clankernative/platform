@@ -25,6 +25,12 @@ actual Controller stage through a bounded operation, and an abandoned or
 refused phase permanently closes continuity. It is physical continuity, not
 current writer authority.
 
+The stack also includes `InitialStoreMetadata`, which admits instance and
+artifact/schema inputs without opening or creating the serving database.
+Initial image preparation and App file observation use it instead of a
+previously opened `Runtime`. This closes a preparation-ordering gap, but does
+not construct the missing authenticated holder or writer owner.
+
 ## Producer and continuation boundary
 
 The final implementation belongs in `oauth/shell_oidc.rs` and the actual
