@@ -281,7 +281,7 @@ pub(crate) struct RoleStage<'a> {
 }
 
 enum RoleSource<'a> {
-    Native(EnrolledRoleStage<'a>),
+    Native(Box<EnrolledRoleStage<'a>>),
     #[cfg(test)]
     Simulated(fixtures::SimulationStage),
 }
@@ -351,7 +351,7 @@ pub(crate) fn with_current_app_role<T>(
         );
         let mut role = owners.role.try_borrow_mut()?;
         let mut stage = RoleStage {
-            source: RoleSource::Native(role.begin_current_stage()?),
+            source: RoleSource::Native(Box::new(role.begin_current_stage()?)),
         };
         stage.check_for(scope, NativeRole::AppHost)?;
         let _ = phase;
@@ -473,7 +473,7 @@ fn with_current_for_role<T>(
         let role = original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;
         let mut stage = RoleStage {
-            source: RoleSource::Native(role.begin_current_stage()?),
+            source: RoleSource::Native(Box::new(role.begin_current_stage()?)),
         };
         let mut original = OriginalPhase {
             original: PhaseOriginal::Native(original),

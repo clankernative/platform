@@ -57,7 +57,6 @@ nix = { version = "=0.31.3", default-features = false, features = ["socket", "po
 prost = "=0.14.4"
 tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen"] }
 tonic-prost = "=0.14.6"
-hyper-util = { version = "=0.1.20", features = ["tokio"] }
 tower = { version = "=0.5.3", features = ["util"] }
 
 [dev-dependencies]
