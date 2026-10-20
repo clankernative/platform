@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:d2441576577ee715b1c5525699bd45ba75e08f07ee8e4e2b9ba365cb8c7b1e24",
+      "fingerprint": "sha256:76c92c592cb29807cf47528a1bd0a14da98d59744f2081c9ba4f0aae15ea914c",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -1380,7 +1380,8 @@
         "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: InitialStoreMetadata , policy : & InitialBootstrapPolicy , store : & EpochStore , offer : & mut AuthenticatedInitialHolderOffer) -> Result < Self >",
         "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
         "fn read_current (& mut self) -> Result < Vec < u8 > >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
       ],
       "factories": [
         {
@@ -1412,11 +1413,17 @@
         {
           "owner": "AppPreparedFile < 'stage , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "retain_physical"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
@@ -1424,6 +1431,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
+        "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >",
         "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
         "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
       ],
@@ -1437,6 +1445,10 @@
         {
           "owner": "PreparedFileContinuity",
           "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PreparedFileContinuity",
@@ -1569,6 +1581,10 @@
         {
           "owner": "PreparedFileContinuity",
           "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -1602,9 +1618,18 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
       "type_name": "AuthenticatedAppFirstHolder",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
       "methods": [
-        "pub (crate) fn check (& mut self) -> Result < () >"
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn retain_for_activation (mut self) -> Result < (AppFileContinuity , AppHolderPeerContinuity) >"
       ],
       "factories": [
         {
@@ -1616,18 +1641,33 @@
         {
           "owner": "AuthenticatedAppFirstHolder < '_ , '_ >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedAppFirstHolder < '_ , '_ >",
+          "signature": "pub (crate) fn retain_for_activation (mut self) -> Result < (AppFileContinuity , AppHolderPeerContinuity) >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "retain_for_activation"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
       "type_name": "AuthenticatedControllerFirstHolder",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
       "methods": [
-        "pub (crate) fn check (& mut self) -> Result < () >"
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn retain_for_activation (mut self) -> Result < ControllerHolderPeerContinuity >"
       ],
       "factories": [
         {
@@ -1639,16 +1679,30 @@
         {
           "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
+          "signature": "pub (crate) fn retain_for_activation (mut self) -> Result < ControllerHolderPeerContinuity >"
         }
       ],
       "proof_uses": [],
       "kind": "private_material",
-      "consuming_methods": []
+      "consuming_methods": [
+        "retain_for_activation"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
       "type_name": "AuthenticatedInitialHolderOffer",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn check_file (& mut self , file : & mut AppPreparedFile < '_ , '_ >) -> Result < () >",
@@ -1689,7 +1743,15 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
       "type_name": "InitialHolderServer",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < Self >",
         "fn check (& mut self) -> Result < () >",
@@ -1715,6 +1777,189 @@
       "kind": "private_material",
       "consuming_methods": [
         "exchange"
+      ]
+    },
+    {
+      "kind": "private_material",
+      "consuming_methods": [],
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+      "type_name": "AppFileContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn check_initial (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn retain_physical (mut self) -> Result < AppFileContinuity >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn check_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn check_initial (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppFileContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ],
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "CurrentPhysicalFilePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+      "type_name": "AppHolderPeerContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedAppFirstHolder < '_ , '_ >",
+          "signature": "pub (crate) fn retain_for_activation (mut self) -> Result < (AppFileContinuity , AppHolderPeerContinuity) >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection"
+        },
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+      "type_name": "ControllerHolderPeerContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
+          "signature": "pub (crate) fn retain_for_activation (mut self) -> Result < ControllerHolderPeerContinuity >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+      "type_name": "CurrentStoragePeerPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn request (& self) -> & StoragePeerRequest"
+      ],
+      "factories": [
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn request (& self) -> & StoragePeerRequest"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
       ]
     }
   ],
