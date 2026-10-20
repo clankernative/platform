@@ -3,8 +3,10 @@
 
 #[cfg(target_os = "linux")]
 use super::observe_anchored_file;
-use super::{FileIdentity, OriginalCreatorFd, PreparedInitialFile, ReviewedFileLayout};
-#[cfg(target_os = "linux")]
+use super::{
+    FileIdentity, OriginalCreatorFd, PreparedFileProjection, PreparedInitialFile,
+    ReviewedFileLayout,
+};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
@@ -34,6 +36,59 @@ pub(crate) struct PreparedFileContinuity {
     process: u32,
     thread: ThreadId,
     valid: bool,
+}
+
+/// Borrows the SAME retained file/device owners and owns one fresh actual
+/// controller stage. It is neither a first-holder proof nor a writer permit.
+/// An unfinished phase leaves its parent refused without relying on Drop.
+pub(crate) struct CurrentPreparedFilePhase<'file, 'role> {
+    phase: CurrentVolumePhase<'file, 'role>,
+    selection: &'file ReviewedStorageSelection,
+    directory: &'file File,
+    anchor: &'file DirectoryIdentity,
+    file: &'file File,
+    identity: &'file FileIdentity,
+    layout: &'file ReviewedFileLayout,
+    process: u32,
+    thread: ThreadId,
+    disposition: FilePhaseDisposition<'file>,
+}
+
+/// Pessimistically close continuity before any fallible phase work. Only the
+/// fixed operation's known successful final check may restore it. This helper
+/// has no native constructor, clock, descriptor or authority of its own.
+struct FilePhaseDisposition<'file> {
+    continuation: &'file mut bool,
+    active: bool,
+}
+
+impl<'file> FilePhaseDisposition<'file> {
+    fn begin(continuation: &'file mut bool) -> Result<Self> {
+        ensure!(*continuation, "retained_preparation_refused");
+        *continuation = false;
+        Ok(Self {
+            continuation,
+            active: true,
+        })
+    }
+
+    fn check(&self) -> Result<()> {
+        ensure!(
+            self.active && !*self.continuation,
+            "retained_file_phase_refused"
+        );
+        Ok(())
+    }
+
+    fn refuse(&mut self) {
+        self.active = false;
+    }
+
+    fn complete(self) -> Result<()> {
+        self.check()?;
+        *self.continuation = true;
+        Ok(())
+    }
 }
 
 impl<'role> PreparedInitialFile<'role> {
@@ -102,13 +157,42 @@ impl PreparedFileContinuity {
         }
     }
 
-    /// A fixed unchanged-initial-file operation inside a fresh stage belonging
-    /// to the SAME still-live controller. This does not resume preparation or
-    /// create a current-use token. Legitimate later SQLite writes require a
-    /// separately qualified activation/serving transition and refuse here.
+    /// Completed preparation is not renewed. All provider reads, file checks
+    /// and later peer work spend THIS stage's original interval. An abandoned,
+    /// failed or unknown operation cannot start another phase on this file.
+    pub(crate) fn begin_initial_phase<'file, 'role>(
+        &'file mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
+        let phase = self.volume.begin_current(stage)?;
+        let mut current = CurrentPreparedFilePhase {
+            phase,
+            selection: &self.selection,
+            directory: &self.directory,
+            anchor: &self.anchor,
+            file: &self.file,
+            identity: &self.identity,
+            layout: &self.layout,
+            process: self.process,
+            thread: self.thread,
+            disposition,
+        };
+        current.check()?;
+        Ok(current)
+    }
+
+    /// Read-only continuity observation; it grants no peer, P3 or writer
+    /// authority. Legitimate later writes need the serving transition.
     pub(crate) fn check_initial(&mut self, stage: EnrolledRoleStage<'_>) -> Result<()> {
+        self.begin_initial_phase(stage)?.finish_checked()
+    }
+}
+
+impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
+    pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
-            ensure!(self.valid, "retained_preparation_refused");
+            self.disposition.check()?;
             ensure!(
                 self.process == std::process::id() && self.thread == std::thread::current().id(),
                 "retained_preparation_owner_changed"
@@ -119,10 +203,8 @@ impl PreparedFileContinuity {
                     && self.layout.proposal.length == self.layout.image.bytes().len(),
                 "retained_preparation_layout_changed"
             );
-            let mut phase = self.volume.begin_current(stage)?;
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = &mut phase;
                 anyhow::bail!("original_file_platform_unsupported")
             }
             #[cfg(target_os = "linux")]
@@ -131,27 +213,27 @@ impl PreparedFileContinuity {
                 let mut offset = 0;
                 while offset < bytes.len() {
                     check_identity(
-                        &mut phase,
-                        &self.directory,
-                        &self.anchor,
-                        &self.file,
-                        &self.identity,
+                        &mut self.phase,
+                        self.directory,
+                        self.anchor,
+                        self.file,
+                        self.identity,
                         bytes.len(),
                     )?;
                     let end = (offset + super::IO_CHUNK_BYTES).min(bytes.len());
                     let read =
-                        rustix::io::pread(&self.file, &mut bytes[offset..end], offset as u64)?;
+                        rustix::io::pread(self.file, &mut bytes[offset..end], offset as u64)?;
                     ensure!(
                         read > 0 && read <= end - offset,
                         "retained_initial_read_progress"
                     );
                     offset += read;
                     check_identity(
-                        &mut phase,
-                        &self.directory,
-                        &self.anchor,
-                        &self.file,
-                        &self.identity,
+                        &mut self.phase,
+                        self.directory,
+                        self.anchor,
+                        self.file,
+                        self.identity,
                         bytes.len(),
                     )?;
                 }
@@ -160,19 +242,112 @@ impl PreparedFileContinuity {
                     "retained_initial_bytes_changed"
                 );
                 check_identity(
-                    &mut phase,
-                    &self.directory,
-                    &self.anchor,
-                    &self.file,
-                    &self.identity,
+                    &mut self.phase,
+                    self.directory,
+                    self.anchor,
+                    self.file,
+                    self.identity,
                     bytes.len(),
                 )
             }
         })();
         if result.is_err() {
-            self.valid = false;
+            self.disposition.refuse();
         }
         result
+    }
+
+    /// A statement only, after current file/provider checks. The closed S1
+    /// exchange must authenticate it before the App parses any SQLite bytes.
+    pub(crate) fn projection(&mut self) -> Result<PreparedFileProjection> {
+        let result = (|| {
+            self.check()?;
+            let value = PreparedFileProjection {
+                core: self.layout.proposal.core.clone(),
+                marker: self.layout.proposal.marker.clone(),
+                image: self.layout.proposal.image.clone(),
+                length: self.layout.proposal.length.try_into()?,
+                identity: self.identity.clone(),
+            };
+            self.check()?;
+            Ok(value)
+        })();
+        if result.is_err() {
+            self.disposition.refuse();
+        }
+        result
+    }
+
+    /// Lend the SAME phase's controller stage, never a replacement acquisition.
+    /// The fixed peer releases this borrow and checks the file again after I/O.
+    pub(crate) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.check()?;
+        let result = self.phase.controller_stage();
+        if result.is_err() {
+            self.disposition.refuse();
+        }
+        result
+    }
+
+    /// The fixed consumer calls this only after a known successful operation
+    /// and final message/result checks. An unknown or failed handshake must
+    /// retain/refuse this phase, never complete it. This creates no peer proof.
+    pub(crate) fn finish_checked(mut self) -> Result<()> {
+        self.check()?;
+        self.disposition.complete()
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        self.disposition.refuse();
+    }
+}
+
+#[cfg(test)]
+mod phase_disposition_tests {
+    use super::FilePhaseDisposition;
+
+    #[test]
+    fn abandoning_an_unsettled_phase_cannot_rearm_continuity() {
+        let mut continuation = true;
+        {
+            let phase = FilePhaseDisposition::begin(&mut continuation).unwrap();
+            phase.check().unwrap();
+        }
+        assert!(!continuation);
+        assert!(FilePhaseDisposition::begin(&mut continuation).is_err());
+    }
+
+    #[test]
+    fn a_refused_phase_cannot_complete_or_start_another_phase() {
+        let mut continuation = true;
+        let mut phase = FilePhaseDisposition::begin(&mut continuation).unwrap();
+        phase.check().unwrap();
+        phase.refuse();
+        assert!(phase.check().is_err());
+        assert!(phase.complete().is_err());
+        assert!(!continuation);
+        assert!(FilePhaseDisposition::begin(&mut continuation).is_err());
+    }
+
+    #[test]
+    fn only_known_completion_restores_the_continuation_gate() {
+        let mut continuation = true;
+        FilePhaseDisposition::begin(&mut continuation)
+            .unwrap()
+            .complete()
+            .unwrap();
+        assert!(continuation);
+        let next = FilePhaseDisposition::begin(&mut continuation).unwrap();
+        next.check().unwrap();
+        next.complete().unwrap();
+        assert!(continuation);
+    }
+
+    #[test]
+    fn a_previously_refused_file_stays_refused() {
+        let mut continuation = false;
+        assert!(FilePhaseDisposition::begin(&mut continuation).is_err());
+        assert!(!continuation);
     }
 }
 

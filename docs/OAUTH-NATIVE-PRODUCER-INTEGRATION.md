@@ -19,9 +19,11 @@ below are still missing from those PRs, as confirmed by their owners.
 
 `AuthenticatedReads` and `EpochObservation` are read-only observations. A file
 projection, successful bootstrap receipt, selected role, or decoded epoch row
-must not substitute for either missing supplier. The separate startup
-`CurrentPreparedFilePhase` work is also physical continuity, not current writer
-authority; it is not included in this dependency stack.
+must not substitute for either missing supplier. S3's startup
+`CurrentPreparedFilePhase` is included: it retains the same file descriptors and
+actual Controller stage through a bounded operation, and an abandoned or
+refused phase permanently closes continuity. It is physical continuity, not
+current writer authority.
 
 ## Producer and continuation boundary
 

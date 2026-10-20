@@ -98,6 +98,23 @@ This is physical continuity, not a renewed preparation, first-holder or writer
 grant. All initial-image changes still refuse; serving after legitimate SQLite
 writes requires its own qualified activation transition.
 
+`begin_initial_phase` borrows that same retained file and owns a fresh actual
+Controller stage. Provider checks, exact unchanged-image checks and the closed
+first-holder exchange all spend this phase's original deadline, including work
+already done before the exchange. This does not restart preparation. The typed
+phase lends only its same stage to the fixed peer and rechecks the file before
+and after peer work. App scheduling need not fit inside an already completed
+preparation's interval.
+
+Phase entry pessimistically closes the parent continuation gate. Dropping or
+abandoning the phase needs no destructor to keep it refused. Error or unknown
+handshake outcome cannot restore that gate or begin a replacement phase. Only
+the fixed operation's known success and final current checks may call
+`finish_checked`; this method alone creates no authenticated peer, first holder,
+P3 or writer authority. The peer factory must still retain actual identities,
+keys, channel and original handshake disposition, and authenticate the offer
+before any App SQLite parsing.
+
 The initial controller qualification budget is a 250m CPU / 256Mi memory request
 and a 1 CPU / 512Mi memory limit, in one process that also owns the fixed storage
 peer. There is no additional storage sidecar. These are unmeasured starting
