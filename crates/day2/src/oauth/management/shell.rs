@@ -117,6 +117,7 @@ impl Shell {
             now,
             |current| {
                 proof.require_management_authentication(current)?;
+                current.arm()?;
                 let token = effects::random()?;
                 let digest = Digest::new(token.as_bytes());
                 let session = Session {
@@ -140,7 +141,6 @@ impl Shell {
                     !sessions.contains_key(digest.as_str()),
                     "OAuth management session collision"
                 );
-                current.arm()?;
                 sessions.insert(digest.as_str().into(), session);
                 // An expired/changed owner after insertion must not leave a
                 // usable session even if the response is never constructed.

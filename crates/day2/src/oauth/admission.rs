@@ -205,6 +205,9 @@ impl ArtifactShellSigner {
             now,
             |current| {
                 proof.require_management_authentication(current)?;
+                // Key retrieval is a disclosure attempt on this SAME scope.
+                // Final signing consumes its one finalization below.
+                current.arm()?;
                 let state = self
                     .state
                     .read()

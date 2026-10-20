@@ -1282,7 +1282,11 @@ impl Consumer<'_, '_, '_> {
 
     pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
         self.original.require_signature_intent(expected)?;
-        self.arm()
+        let result = self.prepare_commit();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
     }
 
     /// Enter only immediately before the actual mutation/disclosure. Pure
@@ -1337,13 +1341,16 @@ impl Consumer<'_, '_, '_> {
     }
 
     fn prepare_commit(&mut self) -> Result<()> {
-        ensure!(!self.committed, "native consumer commit already attempted");
+        ensure!(
+            !self.committed,
+            "native consumer finalization already attempted"
+        );
         if self.armed.get() {
             self.check()?;
         } else {
             self.arm()?;
         }
-        // Close before the actual COMMIT, including a lost/failed result.
+        // Close before the actual COMMIT/signature, including a lost result.
         self.committed = true;
         Ok(())
     }
