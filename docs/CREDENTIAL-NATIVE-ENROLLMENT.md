@@ -113,6 +113,9 @@ then join exact namespace, KSA, Pod, owner lineage, image/restart and node/boot
 selections. Labels alone do not enroll a process. Connection-level peer pidfd is
 used only for the fixed trusted, non-forwarding containerd endpoint, with its
 actual selected executable and common-node checks. No existing epoch is read.
+The revision field is required even when a reviewed containerd build reports
+an empty string; that explicit value is still compared exactly, together with
+the selected version and executable.
 
 `EnrolledProcessRoleOwner` is installed on the final owning OS thread. A fresh
 borrowing `EnrolledRoleStage` rechecks the original issuer, current self/native

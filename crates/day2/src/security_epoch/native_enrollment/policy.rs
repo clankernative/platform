@@ -47,9 +47,18 @@ impl EnrollmentPolicy {
             )]))?;
         self.root.validate()?;
         self.root_key()?;
+        // Some reviewed distro builds report an explicitly empty revision.
+        // It remains required selection DATA and is compared exactly at RPC.
+        let revision = &self.runtime.containerd_revision;
+        ensure!(
+            revision.len() <= 253
+                && !revision
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
+            "native_enrollment_runtime_revision_selection"
+        );
         for value in [
             &self.runtime.containerd_version,
-            &self.runtime.containerd_revision,
             &self.runtime.cri_version,
             &self.runtime.node_name,
             &self.runtime.node_uid,
