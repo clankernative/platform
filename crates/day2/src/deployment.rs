@@ -639,6 +639,10 @@ pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
     crate::security_epoch::native_enrollment::run(issuer)
 }
 
+pub fn qualify_native_enrollment(role: &str) -> anyhow::Result<serde_json::Value> {
+    crate::security_epoch::native_enrollment::qualify(role)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

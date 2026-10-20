@@ -10,7 +10,7 @@ use crate::security_epoch::native_enrollment::{
     root_kms::RootKms,
     storage_socket_directory::StorageSocketDirectory,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
     io::Read,
@@ -65,6 +65,10 @@ fn selected_file(
 struct IssuerBirthOwner {
     child: Child,
     peer: Option<MessageProcess>,
+    // Keep the actual startup peer alive while the child admits the queued
+    // grant. A buffered packet plus HUP must remain a refusal, even if the
+    // sending provisioner itself is still alive.
+    startup: Channel,
     _listener: Listener,
     socket_identity: (u64, u64),
     storage: StorageSocketDirectory,
@@ -82,20 +86,29 @@ impl Drop for IssuerBirthOwner {
     }
 }
 
-pub(super) fn run() -> Result<()> {
+pub(super) struct Provisioner {
+    directory: File,
+    birth: IssuerBirthOwner,
+}
+
+pub(super) fn start() -> Result<Provisioner> {
     // Original origin precedes policy/key reads, executable checks and spawn.
-    let mut acquisition = NativeAcquisition::begin(5)?;
-    let policy = load_policy(&mut acquisition)?;
-    let mut current = SelfSnapshot::acquire(&policy.provisioner_code, &mut acquisition)?;
-    current.require_node_init(&mut acquisition)?;
-    let root = RootSigner::Kms(RootKms::new()?);
+    let mut acquisition =
+        NativeAcquisition::begin(5).context("native_enrollment_original_clock")?;
+    let policy = load_policy(&mut acquisition).context("native_enrollment_policy")?;
+    let mut current = SelfSnapshot::acquire(&policy.provisioner_code, &mut acquisition)
+        .context("native_enrollment_provisioner_self")?;
+    current
+        .require_node_init(&mut acquisition)
+        .context("native_enrollment_node_init")?;
+    let root = RootSigner::Kms(RootKms::new().context("native_enrollment_root_client")?);
     match std::fs::create_dir("/run/day2-native-enrollment") {
         Ok(()) => std::fs::set_permissions(
             "/run/day2-native-enrollment",
             std::fs::Permissions::from_mode(0o755),
         )?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error).context("native_enrollment_socket_directory"),
     }
     let directory = File::from(rustix::fs::open(
         "/run/day2-native-enrollment",
@@ -111,49 +124,60 @@ pub(super) fn run() -> Result<()> {
         "native_enrollment_operator_directory"
     );
     acquisition.remaining()?;
-    let storage = StorageSocketDirectory::prepare(&directory)?;
+    let storage = StorageSocketDirectory::prepare(&directory)
+        .context("native_enrollment_storage_directory")?;
     acquisition.remaining()?;
-    let (listener, listener_child) = Listener::create(&mut acquisition)?;
+    let (listener, listener_child) =
+        Listener::create(&mut acquisition).context("native_enrollment_listener")?;
     let metadata = std::fs::symlink_metadata("/run/day2-native-enrollment/issuer.sock")?;
-    let (mut channel, child_channel) = Channel::pair(&mut acquisition)?;
+    let (channel, child_channel) =
+        Channel::pair(&mut acquisition).context("native_enrollment_startup_channel")?;
     let child = Command::new(ISSUER)
         .arg("issuer")
         .env_clear()
         .stdin(Stdio::from(child_channel))
         .stdout(Stdio::from(listener_child))
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("native_enrollment_child_spawn")?;
     let mut birth = IssuerBirthOwner {
         child,
         peer: None,
+        startup: channel,
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
         storage,
     };
-    birth.peer = Some(grant_child(
-        &mut birth.child,
-        &mut channel,
-        &root,
-        &mut current,
-        &policy,
-        &mut acquisition,
-    )?);
-    // Provisioner stays alive and retains actual child ownership. The root key
-    // remains in KMS. There is no saved-row adoption or successful-reply retry.
-    loop {
+    birth.peer = Some(
+        grant_child(
+            &mut birth.child,
+            &mut birth.startup,
+            &root,
+            &mut current,
+            &policy,
+            &mut acquisition,
+        )
+        .context("native_enrollment_birth_grant")?,
+    );
+    Ok(Provisioner { directory, birth })
+}
+
+impl Provisioner {
+    // Fresh checks never extend the completed original birth acquisition.
+    pub(super) fn check(&mut self) -> Result<()> {
         ensure!(
-            birth.child.try_wait()?.is_none(),
+            self.birth.child.try_wait()?.is_none(),
             "native_enrollment_issuer_stopped"
         );
         let mut check = NativeAcquisition::begin(5)?;
-        birth.storage.check(&directory)?;
+        self.birth.storage.check(&self.directory)?;
         check.remaining()?;
-        birth
+        self.birth
             .peer
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_birth_missing"))?
             .check_identity(&mut check)?;
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        Ok(())
     }
 }
 

@@ -147,3 +147,23 @@ ownership on both Linux backends. These tests do not qualify the selected live
 GKE/runtime profile or turn the existing human/storage refusals into success.
 The immutable dependency pin and real operator boot/profile qualification must
 be in place before publishing or deploying the supplier.
+
+## Fixed operations and deployment
+
+The provisioner's lifecycle is selected by `ops/NativeEnrollment.roc`: create
+the owned child once, check that actual child and storage directory, then wait
+250 milliseconds before another current check. Rust retains native ownership
+throughout. The checked fixed workflow runner cannot supply a PID, key, CSR or
+saved native owner, and a stopped recipe drops the child. The issuer's private
+startup path still bypasses no birth, code or current-parent check.
+
+The [native-enrollment deployment root](../deploy/gke/stacks/native-enrollment/README.md)
+mounts immutable public policy, uses the selected Localhost AppArmor profile,
+and grants only the selected metadata reads. KMS and Google observer IAM are
+separate instance-owned grants. Process readiness alone is not native enrollment.
+
+The finite `day2-native-enrollment-qualify` client exercises the actual supplier
+with explicitly selected disposable native executable/workload identities. Its
+Roc campaign checks current stages, original-clock continuity and permanent
+wrong-role refusal. Its receipt is historical test DATA, never a native owner or
+production App/Shell lifecycle, human, storage, writer or OAuth permission.
