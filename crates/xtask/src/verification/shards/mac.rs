@@ -393,7 +393,13 @@ pub(in super::super) struct Joined {
 pub(in super::super) fn join(root: &Path, snapshot: &str) -> Result<Joined> {
     let joined = super::combine(root, snapshot, "mac-all")?;
     let fixtures = super::fixtures(root, &joined)?;
-    let prepared = prepare(root, snapshot, &fixtures, &joined.passed, &joined.timings_ms)?;
+    let prepared = prepare(
+        root,
+        snapshot,
+        &fixtures,
+        &joined.passed,
+        &joined.timings_ms,
+    )?;
     ensure!(
         joined.binaries == prepared.binaries
             && joined.programs == prepared.programs

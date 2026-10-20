@@ -655,7 +655,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&inputs)?)?,
             serde_json::from_value(serde_json::to_value(&tests)?)?,
             &current,
-         "all",)?;
+            "all",
+        )?;
         let compiler = BuildIdentity {
             snapshot: current.snapshot.clone(),
             workflow: current.workflow.clone(),

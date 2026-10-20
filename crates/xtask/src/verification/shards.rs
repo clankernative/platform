@@ -1142,7 +1142,10 @@ fn preparation_steps() -> Result<BTreeSet<String>> {
 
 fn part_steps(part: &str) -> Result<BTreeSet<String>> {
     if let Some(part) = part.strip_prefix("mac-") {
-        ensure!(["all", "inputs", "tests"].contains(&part), "unknown Mac preparation part");
+        ensure!(
+            ["all", "inputs", "tests"].contains(&part),
+            "unknown Mac preparation part"
+        );
         return Ok(mac::preparation_effects()
             .into_iter()
             .filter(|step| match part {
@@ -1335,11 +1338,19 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     Ok(())
 }
 
-fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity, part: &str) -> Result<Prepared> {
+fn combine_parts(
+    mut inputs: Prepared,
+    tests: Prepared,
+    expected: &Identity,
+    part: &str,
+) -> Result<Prepared> {
     let (inputs_part, tests_part) = match part {
         "all" => ("inputs", "tests"),
         "mac-all" => {
-            ensure!(expected.host == "macos" && expected.architecture == "aarch64", "native Mac preparation host required");
+            ensure!(
+                expected.host == "macos" && expected.architecture == "aarch64",
+                "native Mac preparation host required"
+            );
             ("mac-inputs", "mac-tests")
         }
         _ => anyhow::bail!("unknown complete preparation"),
@@ -1380,7 +1391,10 @@ pub(super) fn combine(root: &Path, snapshot: &str, part: &str) -> Result<Prepare
 }
 
 pub(super) fn load(root: &Path, snapshot: &str, part: &str) -> Result<Prepared> {
-    ensure!(["all", "mac-all"].contains(&part), "complete preparation required");
+    ensure!(
+        ["all", "mac-all"].contains(&part),
+        "complete preparation required"
+    );
     let prepared: Prepared = day2::json::decode(&fs::read(root.join(PREPARED))?)?;
     ensure!(
         prepared.identity == identity(root, snapshot)?,
@@ -2136,14 +2150,18 @@ mod tests {
             sample_part("inputs")?,
             sample_part("tests")?,
             &sample_identity(),
-         "all",)?;
+            "all",
+        )?;
         assert_eq!(complete.passed, preparation_steps()?);
         assert_eq!(complete.fixtures.len(), 23);
         for fixture in ["lifecycle", "verification-actors", "chart-live"] {
             assert!(complete.fixtures.contains_key(fixture));
             let mut incomplete = sample_part("inputs")?;
             incomplete.fixtures.remove(fixture);
-            assert!(combine_parts(incomplete, sample_part("tests")?, &sample_identity(), "all").is_err());
+            assert!(
+                combine_parts(incomplete, sample_part("tests")?, &sample_identity(), "all")
+                    .is_err()
+            );
         }
         for field in [
             "checkout",
@@ -2193,8 +2211,9 @@ mod tests {
             combine_parts(
                 sample_part("tests")?,
                 sample_part("inputs")?,
-                &sample_identity()
-            , "all")
+                &sample_identity(),
+                "all"
+            )
             .is_err()
         );
         assert!(part_steps("unknown").is_err());
@@ -2202,9 +2221,13 @@ mod tests {
     }
 
     #[test]
-    fn mac_preparation_join_requires_both_complete_current_parts_without_runtime_outcomes() -> Result<()> {
+    fn mac_preparation_join_requires_both_complete_current_parts_without_runtime_outcomes()
+    -> Result<()> {
         let complete = combine_parts(
-            sample_part("mac-inputs")?, sample_part("mac-tests")?, &sample_identity(), "mac-all",
+            sample_part("mac-inputs")?,
+            sample_part("mac-tests")?,
+            &sample_identity(),
+            "mac-all",
         )?;
         assert_eq!(complete.passed, mac::preparation_effects());
         assert_eq!(complete.fixtures.len(), 4);
@@ -2213,7 +2236,18 @@ mod tests {
         assert!(!complete.passed.contains("test-isolated-build"));
         assert!(!complete.passed.contains("test-installation-build"));
         for part in ["mac-inputs", "mac-tests"] {
-            for field in ["checkout", "tree", "source_identity", "workspace", "run", "attempt", "host", "architecture", "workflow", "snapshot"] {
+            for field in [
+                "checkout",
+                "tree",
+                "source_identity",
+                "workspace",
+                "run",
+                "attempt",
+                "host",
+                "architecture",
+                "workflow",
+                "snapshot",
+            ] {
                 let mut value = serde_json::to_value(sample_part(part)?)?;
                 value["identity"][field] = json!("foreign");
                 let invalid = serde_json::from_value(value)?;
@@ -2228,22 +2262,56 @@ mod tests {
         for step in mac::preparation_effects() {
             let mut inputs = sample_part("mac-inputs")?;
             let mut tests = sample_part("mac-tests")?;
-            if step == "test-binaries" { tests.passed.remove(&step); } else { inputs.passed.remove(&step); }
+            if step == "test-binaries" {
+                tests.passed.remove(&step);
+            } else {
+                inputs.passed.remove(&step);
+            }
             assert!(combine_parts(inputs, tests, &sample_identity(), "mac-all").is_err());
         }
-        for extra in ["test-docs", "test-mac-native", "test-isolated-build", "test-installation-build"] {
+        for extra in [
+            "test-docs",
+            "test-mac-native",
+            "test-isolated-build",
+            "test-installation-build",
+        ] {
             let mut inputs = sample_part("mac-inputs")?;
             inputs.passed.insert(extra.into());
             inputs.timings_ms.insert(extra.into(), 1);
-            assert!(combine_parts(inputs, sample_part("mac-tests")?, &sample_identity(), "mac-all").is_err());
+            assert!(
+                combine_parts(
+                    inputs,
+                    sample_part("mac-tests")?,
+                    &sample_identity(),
+                    "mac-all"
+                )
+                .is_err()
+            );
         }
-        assert!(combine_parts(sample_part("inputs")?, sample_part("mac-tests")?, &sample_identity(), "mac-all").is_err());
-        assert!(combine_parts(sample_part("mac-inputs")?, sample_part("mac-tests")?, &sample_identity(), "all").is_err());
+        assert!(
+            combine_parts(
+                sample_part("inputs")?,
+                sample_part("mac-tests")?,
+                &sample_identity(),
+                "mac-all"
+            )
+            .is_err()
+        );
+        assert!(
+            combine_parts(
+                sample_part("mac-inputs")?,
+                sample_part("mac-tests")?,
+                &sample_identity(),
+                "all"
+            )
+            .is_err()
+        );
         let mut current = sample_identity();
         current.host = "linux".into();
         let mut inputs = sample_part("mac-inputs")?;
         let mut tests = sample_part("mac-tests")?;
-        inputs.identity.host = current.host.clone(); tests.identity.host = current.host.clone();
+        inputs.identity.host = current.host.clone();
+        tests.identity.host = current.host.clone();
         assert!(combine_parts(inputs, tests, &current, "mac-all").is_err());
         assert!(part_steps("mac-unknown").is_err());
         Ok(())
@@ -2596,7 +2664,12 @@ mod tests {
             });
             Ok(tests)
         };
-        let complete = combine_parts(sample_part("inputs")?, make_tests()?, &sample_identity(), "all")?;
+        let complete = combine_parts(
+            sample_part("inputs")?,
+            make_tests()?,
+            &sample_identity(),
+            "all",
+        )?;
         assert_eq!(complete.programs.len(), 1);
         assert!(!expected_binaries(&complete, "workspace-day2").contains(&program_output("day2")));
         for field in ["programs", "executable", "target", "kind", "directory"] {
@@ -2611,7 +2684,9 @@ mod tests {
                 };
             }
             let invalid = serde_json::from_value(value)?;
-            assert!(combine_parts(sample_part("inputs")?, invalid, &sample_identity(), "all").is_err());
+            assert!(
+                combine_parts(sample_part("inputs")?, invalid, &sample_identity(), "all").is_err()
+            );
         }
         Ok(())
     }

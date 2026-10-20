@@ -791,7 +791,10 @@ fn main() -> Result<()> {
             );
             verification::queue_receipt(&root, &action)?;
         }
-        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac"
+        "verify-prepare"
+        | "verify-prepare-join"
+        | "verify-compose"
+        | "verify-mac"
         | "verify-mac-runtime" => {
             ensure!(
                 args.next().is_none(),
@@ -810,8 +813,13 @@ fn main() -> Result<()> {
             verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
         }
         "verify-mac-prepare" => {
-            let part = args.next().context("usage: xtask verify-mac-prepare PART")?;
-            ensure!(args.next().is_none(), "usage: xtask verify-mac-prepare PART");
+            let part = args
+                .next()
+                .context("usage: xtask verify-mac-prepare PART")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask verify-mac-prepare PART"
+            );
             verification::execute(&root, &format!("verify-mac-prepare-{part}"))?;
         }
         "verify-shard" => {

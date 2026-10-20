@@ -339,7 +339,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
+      # Keep the previously measured three-CPU Mac setting in every part.
+      CARGO_BUILD_JOBS: '3'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_GHA_VERSION: day2-platform-ci-v2
@@ -500,7 +501,8 @@ jobs:
       # fixture artifacts, the CLI distribution or generated worker sources.
       - name: Archive native Mac fixture and CLI preparation
         if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-mac-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
+        run: tar -czf /tmp/day2-mac-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' platform/target platform/artifacts/ci-preparation-inputs.json platform/artifacts/???????????????????????????????????????????????????????????????? platform/cli platform/crates/worker/generated .toolchains
+        working-directory: ${{ github.workspace }}/..
       - name: Archive native Mac test compilation
         if: ${{ matrix.part == 'tests' }}
         run: tar -czf /tmp/day2-mac-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target/debug platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-test-programs platform/artifacts/ci-preparation-tests.json
@@ -521,7 +523,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
+      # Keep the previously measured three-CPU Mac setting in every part.
+      CARGO_BUILD_JOBS: '3'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_GHA_VERSION: day2-platform-ci-v2

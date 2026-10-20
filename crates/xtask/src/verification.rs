@@ -410,12 +410,20 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     "closed native Mac preparation part required"
                 );
                 ensure_stable(root, recipe, &snapshot)?;
-                shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, &format!("mac-{part}"))?;
+                shards::save(
+                    root,
+                    &snapshot,
+                    &fixtures,
+                    &passed,
+                    &timings.steps_ms,
+                    &format!("mac-{part}"),
+                )?;
                 return Ok(json!({}));
             }
             "verify-mac-preparation-join" => {
                 ensure!(
-                    recipe == "verify-mac-runtime" && parameters.is_empty()
+                    recipe == "verify-mac-runtime"
+                        && parameters.is_empty()
                         && std::env::consts::OS == "macos"
                         && std::env::consts::ARCH == "aarch64",
                     "closed native Mac preparation join required"
@@ -1981,10 +1989,17 @@ mod tests {
     #[test]
     fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
         let mut jobs: Vec<_> = include_str!("../../../.github/workflows/ci.yml")
+            .split_once("\njobs:\n")
+            .unwrap()
+            .1
             .lines()
-            .filter(|line| line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':'))
+            .filter(|line| {
+                line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':')
+            })
             .map(|line| ci_job(line.trim().trim_end_matches(':')))
-            .filter(|job| job.contains("runs-on: macos-15") && job.contains("id: cargo_intermediates"))
+            .filter(|job| {
+                job.contains("runs-on: macos-15") && job.contains("id: cargo_intermediates")
+            })
             .collect();
         assert_eq!(jobs.len(), 1, "one native Mac intermediate-cache producer");
         let job = jobs.pop().unwrap();
@@ -2036,7 +2051,9 @@ mod tests {
         let source = job
             .find("      - run: cargo run --locked -p xtask -- source-check\n")
             .unwrap();
-        let verify = job.find("      - run: target/debug/xtask verify-mac").unwrap();
+        let verify = job
+            .find("      - run: target/debug/xtask verify-mac")
+            .unwrap();
         let saved = job
             .find("      - name: Save compatible Cargo intermediates\n")
             .unwrap();
