@@ -25,6 +25,9 @@ mod runtime_wire;
 mod service;
 mod storage_peer;
 #[cfg(target_os = "linux")]
+mod storage_peer_native;
+mod storage_peer_wire;
+#[cfg(target_os = "linux")]
 mod storage_socket_directory;
 
 pub(crate) use storage_peer::{

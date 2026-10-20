@@ -7,8 +7,7 @@ use crate::security_epoch::native_enrollment::{
     EnrolledRoleStage, NativeRole,
     process::MessageProcess,
     protocol::MAX_PACKET,
-    storage_peer::wire::StageStatement,
-    storage_peer::wire::{self, Message},
+    storage_peer_wire::{Message, StageStatement},
     storage_socket_directory::StorageSocketDirectory,
 };
 use anyhow::{Result, ensure};
@@ -132,7 +131,9 @@ impl Channel {
                     Err(error) => return Err(error.into()),
                 }
             };
-            let message = wire::decode(&bytes[..received.bytes])?;
+            let message = crate::security_epoch::native_enrollment::storage_peer_wire::decode(
+                &bytes[..received.bytes],
+            )?;
             let process = match stage.storage_peer_role()? {
                 NativeRole::AppHost => StorageSender::App(Box::new(MessageProcess::receive(
                     received,
