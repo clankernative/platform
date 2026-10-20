@@ -377,6 +377,18 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 }
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
+    pub(in crate::security_epoch) fn check_current_durability(&mut self) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            self.inner.phase.check_durability_profile()?;
+            self.check()
+        })();
+        if result.is_err() {
+            self.inner.disposition.refuse();
+        }
+        result
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.inner.disposition.check()?;

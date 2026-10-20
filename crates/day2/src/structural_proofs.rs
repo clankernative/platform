@@ -563,3 +563,33 @@ const _: () = {
         Sync
     );
 };
+
+const _: () = {
+    assert_consuming!(crate::security_epoch::RetainedEpochReads);
+    assert_not_impl!(crate::security_epoch::RetainedEpochReads, Send);
+    assert_not_impl!(crate::security_epoch::RetainedEpochReads, Sync);
+};
+
+const _: () = {
+    assert_consuming!(crate::security_epoch::CurrentAppStoragePhase<'static>);
+    assert_consuming!(crate::security_epoch::CurrentControllerStoragePhase<'static, 'static>);
+    assert_not_impl!(crate::security_epoch::CurrentAppStoragePhase<'static>, Send);
+    assert_not_impl!(crate::security_epoch::CurrentAppStoragePhase<'static>, Sync);
+    assert_not_impl!(
+        crate::security_epoch::CurrentControllerStoragePhase<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentControllerStoragePhase<'static, 'static>,
+        Sync
+    );
+};
+
+const _: () = {
+    assert_consuming!(crate::security_epoch::ServingParticipant);
+    assert_consuming!(crate::security_epoch::CurrentAppServingPhase<'static>);
+    assert_not_impl!(crate::security_epoch::ServingParticipant, Send);
+    assert_not_impl!(crate::security_epoch::ServingParticipant, Sync);
+    assert_not_impl!(crate::security_epoch::CurrentAppServingPhase<'static>, Send);
+    assert_not_impl!(crate::security_epoch::CurrentAppServingPhase<'static>, Sync);
+};

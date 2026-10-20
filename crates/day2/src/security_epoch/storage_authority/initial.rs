@@ -1,7 +1,9 @@
 //! Own the SAME joined durable initial file and authenticated App peer. This
 //! is conditional PD/ext4 durability, not effective IAM or active writer proof.
 
-use super::{AppFileContinuity, CurrentPreparedFilePhase, PreparedFileContinuity};
+use super::{
+    AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
+};
 use crate::security_epoch::{
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
@@ -51,6 +53,25 @@ pub(crate) struct CurrentStorageBootstrapPhase<'storage, 'role> {
     peer: CurrentStoragePeerPhase<'storage>,
     continuation: &'storage mut bool,
     request: Request,
+}
+
+/// Physical inputs only. Active admission additionally requires the genuine
+/// active owner, exact current provider observation and purpose-bound scope.
+pub(crate) struct CurrentAppStoragePhase<'storage> {
+    file: &'storage mut AppFileContinuity,
+    peer: CurrentStoragePeerPhase<'storage>,
+    continuation: &'storage mut bool,
+}
+
+pub(crate) struct CurrentControllerStoragePhase<'storage, 'role> {
+    file: CurrentPhysicalFilePhase<'storage, 'role>,
+    peer: PeerFence<'storage>,
+    continuation: &'storage mut bool,
+}
+
+enum PeerFence<'storage> {
+    Current(Box<CurrentStoragePeerPhase<'storage>>),
+    Retained(&'storage mut ControllerHolderPeerContinuity),
 }
 
 impl InitialStorageContinuity {
@@ -116,6 +137,50 @@ impl InitialStorageContinuity {
             peer,
             continuation: &mut self.ready,
             request: request.clone(),
+        };
+        phase.check()?;
+        Ok(phase)
+    }
+
+    pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {
+        ensure!(self.ready, "controller_storage_continuation_refused");
+        self.peer.pending()
+    }
+
+    pub(in crate::security_epoch) fn begin_current_app<'storage, 'role>(
+        &'storage mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
+        ensure!(self.ready, "controller_storage_continuation_refused");
+        self.ready = false;
+        let mut file = self.file.begin_physical_phase(stage)?;
+        file.check_current_durability()?;
+        let peer = self.peer.accept_serving_current(file.controller_stage()?)?;
+        let mut phase = CurrentControllerStoragePhase {
+            file,
+            peer: PeerFence::Current(Box::new(peer)),
+            continuation: &mut self.ready,
+        };
+        phase.check()?;
+        Ok(phase)
+    }
+
+    /// Historical first-App identity is not a fresh App role/file permission.
+    /// Shell gets its OWN role/channel and only a current Controller fence.
+    pub(in crate::security_epoch) fn begin_current_controller<'storage, 'role>(
+        &'storage mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
+        ensure!(self.ready, "controller_storage_continuation_refused");
+        self.ready = false;
+        let mut file = self.file.begin_physical_phase(stage)?;
+        file.check_current_durability()?;
+        self.peer
+            .check_retained_identity(file.controller_stage()?)?;
+        let mut phase = CurrentControllerStoragePhase {
+            file,
+            peer: PeerFence::Retained(&mut self.peer),
+            continuation: &mut self.ready,
         };
         phase.check()?;
         Ok(phase)
@@ -242,6 +307,28 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
 }
 
 impl AppInitialStorageContinuity {
+    pub(in crate::security_epoch) fn begin_current<'storage>(
+        &'storage mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        request: StoragePeerRequest,
+    ) -> Result<CurrentAppStoragePhase<'storage>> {
+        ensure!(self.ready, "app_storage_continuation_refused");
+        self.ready = false;
+        ensure!(
+            request.purpose == StoragePeerPurpose::CurrentServing,
+            "app_storage_serving_purpose_required"
+        );
+        self.file.check_current(stage)?;
+        let peer = self.peer.begin_current(stage, request)?;
+        let mut phase = CurrentAppStoragePhase {
+            file: &mut self.file,
+            peer,
+            continuation: &mut self.ready,
+        };
+        phase.check(stage)?;
+        Ok(phase)
+    }
+
     pub(in crate::security_epoch) fn bootstrap_core(
         &self,
     ) -> Result<crate::security_epoch::seed_core::OriginalSeedCore> {
@@ -354,6 +441,140 @@ impl CurrentAppStorageBootstrapPhase<'_> {
         *self.continuation = false;
         self.file.refuse();
         self.peer.refuse();
+    }
+}
+
+impl CurrentAppStoragePhase<'_> {
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(!*self.continuation, "app_storage_phase_released");
+            self.file.check_current(stage)?;
+            self.peer.check(stage)?;
+            self.file.check_current(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn await_known(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.peer.await_known(stage)?;
+        self.check(stage)
+    }
+
+    pub(in crate::security_epoch) fn finish_checked(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.peer.acknowledge_known(stage)?;
+        self.peer.await_release(stage)?;
+        self.check(stage)?;
+        self.peer.finish_checked(stage)?;
+        self.file.check_current(stage)?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        *self.continuation = false;
+        self.file.refuse();
+        self.peer.refuse();
+    }
+}
+
+impl<'role> CurrentControllerStoragePhase<'_, 'role> {
+    pub(in crate::security_epoch) fn check(&mut self) -> Result<()> {
+        let result = (|| {
+            ensure!(!*self.continuation, "controller_storage_phase_released");
+            self.file.check_current_durability()?;
+            match &mut self.peer {
+                PeerFence::Current(peer) => peer.check(self.file.controller_stage()?)?,
+                PeerFence::Retained(peer) => {
+                    peer.check_retained_identity(self.file.controller_stage()?)?
+                }
+            }
+            self.file.check()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn controller_stage(
+        &mut self,
+    ) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.check()?;
+        self.file.controller_stage()
+    }
+
+    pub(in crate::security_epoch) fn app_request(&self) -> Result<&StoragePeerRequest> {
+        match &self.peer {
+            PeerFence::Current(peer) => Ok(peer.request()),
+            PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
+        }
+    }
+
+    pub(in crate::security_epoch) fn announce_app_known(&mut self) -> Result<()> {
+        self.check()?;
+        match &mut self.peer {
+            PeerFence::Current(peer) => peer.announce_known(self.file.controller_stage()?)?,
+            PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
+        }
+        self.check()
+    }
+
+    pub(in crate::security_epoch) fn await_app_consumed(&mut self) -> Result<()> {
+        self.check()?;
+        match &mut self.peer {
+            PeerFence::Current(peer) => {
+                peer.await_acknowledgement(self.file.controller_stage()?)?
+            }
+            PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
+        }
+        self.check()
+    }
+
+    pub(in crate::security_epoch) fn finish_app_known(mut self) -> Result<()> {
+        self.check()?;
+        let PeerFence::Current(mut peer) = self.peer else {
+            anyhow::bail!("controller_storage_has_no_app_request")
+        };
+        self.file.check_current_durability()?;
+        peer.release_known(self.file.controller_stage()?)?;
+        peer.finish_checked(self.file.controller_stage()?)?;
+        self.file.finish_checked()?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn finish_controller_known(mut self) -> Result<()> {
+        self.check()?;
+        ensure!(
+            matches!(self.peer, PeerFence::Retained(_)),
+            "controller_storage_app_scope_requires_peer_settlement"
+        );
+        self.file.finish_checked()?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        *self.continuation = false;
+        self.file.refuse();
+        match &mut self.peer {
+            PeerFence::Current(peer) => peer.refuse(),
+            PeerFence::Retained(peer) => peer.refuse(),
+        }
     }
 }
 

@@ -19,6 +19,32 @@ use day2_capabilities::{
 };
 use std::{cell::RefCell, rc::Rc};
 
+mod app_serving;
+mod controller_serving;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServingDisposition {
+    Unarmed,
+    Armed,
+    Known,
+    Excluded,
+    Refused,
+}
+
+pub(crate) struct CurrentAppServingPhase<'storage> {
+    physical: super::CurrentAppStoragePhase<'storage>,
+    reads: super::RetainedEpochReads,
+    observed: super::EpochObservation,
+    selection: EpochStore,
+    completion: Request,
+    activation: Digest,
+    seed: super::seed_core::OriginalSeedCore,
+    policy: InitialBootstrapPolicy,
+    continuation: &'storage mut bool,
+    disposition: ServingDisposition,
+    purpose: super::serving::ScopePurpose,
+}
+
 /// Fixed lifecycle step selection DATA. None is a write permit. An uncertain
 /// write stops the lifecycle; this native entrypoint never rearms/resends May.
 #[derive(Clone, Copy)]
@@ -436,7 +462,7 @@ fn action_at(index: u8) -> Result<Action> {
     }
 }
 
-fn request_names(selection: &EpochStore, request: &Request) -> Result<Names> {
+pub(super) fn request_names(selection: &EpochStore, request: &Request) -> Result<Names> {
     Names::new(
         selection,
         request.bootstrap(),
@@ -568,7 +594,7 @@ pub(super) fn activate_controller(
 /// A current coherent snapshot must retain the exact activation, including all
 /// provider version tokens. Even an identical-value administrative rewrite is
 /// a changed authority observation, not a renewable lease.
-fn check_active_snapshot(
+pub(super) fn check_active_snapshot(
     selection: &EpochStore,
     completion: &Request,
     activation: &Digest,

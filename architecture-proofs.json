@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:56597375000dd3291346f02c047cafc4126ee6cf14594726dbb79ca8b1810746",
+      "fingerprint": "sha256:428509e134f0ba02207df4cd0f27b1bf748f1ff93bb5e4e2618774a3f862cd58",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -402,6 +402,13 @@
       "type_name": "AuthenticatedReads",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
+            "module": "retained"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
@@ -414,6 +421,7 @@
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "pub (super) fn read_slot (& mut self , selection : & EpochStore , core : & super :: control_slot :: LogicalCore) -> Result < super :: control_slot_io :: SlotObservation >",
+        "pub (in crate :: security_epoch) fn retain_current (mut self) -> Result < RetainedEpochReads >",
         "fn sample (& mut self) -> Result < Sample >"
       ],
       "factories": [
@@ -423,6 +431,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "AuthenticatedReads < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn retain_current (mut self) -> Result < RetainedEpochReads >"
+        },
         {
           "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
@@ -1878,6 +1890,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_current_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)"
@@ -1908,6 +1921,10 @@
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check_current_durability (& mut self) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -1956,8 +1973,12 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (in crate :: security_epoch) fn check_retained_identity (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder",
         "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
+        "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
@@ -1967,6 +1988,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
         {
           "owner": "ControllerHolderPeerContinuity",
           "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
@@ -1981,7 +2006,19 @@
         },
         {
           "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn check_retained_identity (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
           "signature": "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >"
         }
       ],
       "proof_uses": [],
@@ -2012,7 +2049,15 @@
         },
         {
           "owner": "ControllerHolderPeerContinuity",
+          "signature": "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
           "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
         }
       ],
       "material_uses": [
@@ -2128,7 +2173,10 @@
       "type_name": "InitialStorageContinuity",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
@@ -2147,7 +2195,19 @@
         },
         {
           "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         },
         {
           "owner": "InitialStorageContinuity",
@@ -2169,6 +2229,7 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >",
+        "pub (in crate :: security_epoch) fn begin_current < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentAppStoragePhase < 'storage > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)",
@@ -2188,6 +2249,10 @@
         {
           "owner": "AppInitialStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >"
+        },
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentAppStoragePhase < 'storage > >"
         },
         {
           "owner": "AppInitialStorageContinuity",
@@ -2299,9 +2364,26 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap.rs",
       "type_name": "ActiveAppStorageContinuity",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "app_serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/controller_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "controller_serving"
+          }
+        }
+      ],
       "methods": [
-        "pub (crate) fn refuse (& mut self)"
+        "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
       ],
       "factories": [
         {
@@ -2312,7 +2394,15 @@
       "material_uses": [
         {
           "owner": "ActiveAppStorageContinuity",
+          "signature": "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >"
+        },
+        {
+          "owner": "ActiveAppStorageContinuity",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
         }
       ],
       "proof_uses": [],
@@ -2322,9 +2412,26 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap.rs",
       "type_name": "ActiveControllerStorageContinuity",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "app_serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/controller_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "controller_serving"
+          }
+        }
+      ],
       "methods": [
-        "pub (crate) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -2336,6 +2443,14 @@
         {
           "owner": "ActiveControllerStorageContinuity",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -2345,7 +2460,22 @@
     {
       "source": "crates/day2/src/security_epoch/bootstrap.rs",
       "type_name": "AppStorageBootstrap",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "app_serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/controller_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "controller_serving"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn advance (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >",
@@ -2381,6 +2511,276 @@
       "consuming_methods": [
         "into_active"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+      "type_name": "RetainedEpochReads",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",
+        "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
+        "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Sample >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthenticatedReads < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn retain_current (mut self) -> Result < RetainedEpochReads >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
+        },
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Sample >"
+        },
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >"
+        },
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >"
+        },
+        {
+          "owner": "RetainedEpochReads",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap.rs",
+      "type_name": "CurrentAppServingPhase",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "app_serving"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/controller_serving.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "controller_serving"
+          }
+        }
+      ],
+      "methods": [
+        "pub (in crate :: security_epoch) fn admit_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn arm (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_runtime_selection (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_excluded (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn finish_scope (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+      ],
+      "factories": [
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "fn finish_scope (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn admit_runtime_database (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata , db : & rusqlite :: Connection) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn arm (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn check_runtime_selection (& mut self , stage : & mut EnrolledRoleStage < '_ > , metadata : & crate :: store :: InitialStoreMetadata) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn finish_excluded (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn finish_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/serving.rs",
+      "type_name": "ServingParticipant",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn app (app : super :: ActiveAppStorageContinuity) -> Self",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn app (app : super :: ActiveAppStorageContinuity) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (crate) fn bind_response (participant : & mut ServingParticipant , intent : & FreshIntent , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn load_native_runtime (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < '_ > , metadata : crate :: store :: InitialStoreMetadata) -> Result < crate :: store :: Runtime >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn refuse_current_serving (participant : & mut ServingParticipant , intent : & FreshIntent , purpose : ServingUse , identity : & ResponseIdentity) -> Result < () >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_runtime_serving < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , purpose : RuntimeServingUse , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_serving < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , intent : & FreshIntent , purpose : ServingUse , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "CurrentAppStoragePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentAppStoragePhase < 'storage > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStoragePhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "CurrentControllerStoragePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn announce_app_known (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >",
+        "pub (in crate :: security_epoch) fn await_app_consumed (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_controller_known (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn announce_app_known (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn await_app_consumed (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn finish_controller_known (mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     }
   ],
   "buffer_destructors": [
