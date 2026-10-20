@@ -25,12 +25,14 @@ mod preparation_image;
 mod runtime_profile;
 mod seed_core;
 pub(crate) mod serving;
+pub(crate) use serving::ServingParticipant;
 mod storage_authority;
 mod transport;
 
-pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort};
+pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort, RetainedEpochReads};
 pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
+    CurrentAppServingPhase,
 };
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;
@@ -41,11 +43,11 @@ pub(crate) use native_namespace::NativeNamespaceObservation;
 pub(crate) use storage_authority::NativeStorageCreationAuthority;
 pub(crate) use storage_authority::{
     AppFileContinuity, AppInitialStorageContinuity, AppPreparedFile, BeforeAttemptRefusal,
-    CurrentAppStorageBootstrapPhase, CurrentPhysicalFilePhase, CurrentPreparedFilePhase,
-    CurrentStorageBootstrapPhase, InitialStorageContinuity, InitialStorageOutcome,
-    NativeOriginalPreparationOutcome, OriginalCreatorFd, PreparationCoordinator,
-    PreparedFileContinuity, PreparedFileProjection, PreparedInitialFile, PreparedRetentionOutcome,
-    RefusedOriginalPreparation,
+    CurrentAppStorageBootstrapPhase, CurrentAppStoragePhase, CurrentControllerStoragePhase,
+    CurrentPhysicalFilePhase, CurrentPreparedFilePhase, CurrentStorageBootstrapPhase,
+    InitialStorageContinuity, InitialStorageOutcome, NativeOriginalPreparationOutcome,
+    OriginalCreatorFd, PreparationCoordinator, PreparedFileContinuity, PreparedFileProjection,
+    PreparedInitialFile, PreparedRetentionOutcome, RefusedOriginalPreparation,
 };
 
 #[cfg(test)]

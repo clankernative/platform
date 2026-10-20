@@ -22,6 +22,34 @@ use std::{fs::File, io::IoSliceMut, marker::PhantomData, rc::Rc};
 const PATH: &str = "/run/day2-native-enrollment/storage/peer.sock";
 
 impl Channel {
+    /// Readiness DATA on the SAME retained descriptor. No packet is consumed,
+    /// role stage issued or clock/holder authority created while idle.
+    pub(in crate::security_epoch::native_enrollment) fn storage_pending(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(!self.refused, "storage_peer_channel_refused");
+            let mut fds = [PollFd::new(&self.socket, PollFlags::IN | PollFlags::RDHUP)];
+            rustix::event::poll(
+                &mut fds,
+                Some(&rustix::time::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }),
+            )?;
+            let flags = fds[0].revents();
+            ensure!(
+                !flags.intersects(
+                    PollFlags::HUP | PollFlags::RDHUP | PollFlags::ERR | PollFlags::NVAL
+                ),
+                "storage_peer_idle_channel_closed"
+            );
+            Ok(flags.contains(PollFlags::IN))
+        })();
+        if result.is_err() {
+            self.refused = true;
+        }
+        result
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn connect_storage(
         stage: &mut EnrolledRoleStage<'_>,
         acquisition: &mut NativeAcquisition,

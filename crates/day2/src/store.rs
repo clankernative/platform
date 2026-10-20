@@ -580,6 +580,54 @@ pub(crate) struct InitialStoreMetadata {
 }
 
 impl InitialStoreMetadata {
+    /// Desired configuration checks only, inside an already genuine native
+    /// scope. Neither this metadata nor the returned Instance grants authority.
+    pub(crate) fn require_native_selection(
+        &self,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+        artifact: &day2_capabilities::Digest,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    ) -> Result<Instance> {
+        let instance = Instance::load(&self.instance_path)?;
+        ensure!(
+            day2_capabilities::Digest::of(&instance)? == self.instance_digest,
+            crate::error::Failure::InstallationChanged
+        );
+        ensure!(
+            self.app == selected.scope.app.as_str()
+                && self.scope
+                    == format!(
+                        "{}/{}/{}",
+                        selected.scope.installation.as_str(),
+                        selected.scope.environment.as_str(),
+                        selected.scope.app.as_str()
+                    )
+                && self.artifact.id() == artifact.as_str(),
+            "native_runtime_metadata_selection_changed"
+        );
+        let control = instance
+            .control
+            .as_ref()
+            .context("native_runtime_epoch_catalog_missing")?;
+        let mut policies = control
+            .security_bootstraps
+            .values()
+            .filter(|policy| policy.scope.app.as_str() == self.app);
+        ensure!(
+            policies.next() == Some(policy) && policies.next().is_none(),
+            "native_runtime_bootstrap_selection_missing_or_changed"
+        );
+        let mut stores = control
+            .security_epochs
+            .values()
+            .filter(|store| store.scope.app.as_str() == self.app);
+        ensure!(
+            stores.next() == Some(selected) && stores.next().is_none(),
+            "native_runtime_epoch_selection_changed"
+        );
+        Ok(instance)
+    }
+
     pub(crate) fn load(instance_path: &Path, app: &str) -> Result<Self> {
         let instance_path = instance_path.canonicalize()?;
         let instance = Instance::load(&instance_path)?;
@@ -842,6 +890,8 @@ pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
     )?;
     Ok(())
 }
+
+mod native_storage;
 
 impl Runtime {
     pub(crate) fn credential_authority(

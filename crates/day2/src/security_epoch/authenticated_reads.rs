@@ -22,6 +22,8 @@ use day2_capabilities::{
 use std::{collections::BTreeMap, io::Read, time::Duration};
 use zeroize::Zeroizing;
 
+mod retained;
+pub(crate) use retained::RetainedEpochReads;
 mod writer;
 pub(in crate::security_epoch) use writer::ControllerBorrow;
 pub(crate) use writer::ControllerPort;
