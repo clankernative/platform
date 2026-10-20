@@ -272,6 +272,7 @@ pub(crate) enum Phase {
     DisconnectCommit,
     Session,
     Signature,
+    Verification,
     Response,
     ShellFlow,
 }
@@ -400,6 +401,14 @@ enum PhaseOriginal<'a> {
 
 /* The two borrows remain inside the callback; neither is a response DTO. */
 impl OriginalPhase<'_> {
+    fn refuse(&mut self) {
+        match &mut self.original {
+            PhaseOriginal::Native(original) => original.refuse(),
+            #[cfg(test)]
+            PhaseOriginal::Simulated(original) => original.refuse(),
+        }
+    }
+
     pub(crate) fn require_signature(
         &mut self,
         role: &mut RoleStage<'_>,
@@ -451,14 +460,64 @@ impl OriginalPhase<'_> {
             }
         })();
         if result.is_err() {
-            match &mut self.original {
-                PhaseOriginal::Native(original) => original.refuse(),
-                #[cfg(test)]
-                PhaseOriginal::Simulated(original) => original.refuse(),
-            }
+            self.refuse();
         }
         result
     }
+}
+
+/// A borrow through an actual consumer operation, including its commit/result.
+/// Dropping an armed borrow (error, panic or ambiguous result) closes the retained
+/// original permanently. SQL readback, elapsed time and a later request cannot
+/// turn an unknown result into a new permission. This supplies original/role
+/// settlement, not the missing S3 current-serving/storage producer.
+pub(crate) struct Consumer<'a, 'role, 'original> {
+    role: &'a mut RoleStage<'role>,
+    original: &'a mut OriginalPhase<'original>,
+    settled: bool,
+}
+
+impl Consumer<'_, '_, '_> {
+    pub(crate) fn check(&mut self) -> Result<()> {
+        self.original.check(self.role)
+    }
+
+    pub(crate) fn require_signature(&mut self, expected: &FreshIntent) -> Result<()> {
+        self.original.require_signature(self.role, expected)
+    }
+
+    /// Hold the same borrow before COMMIT, through the actual SQLite result,
+    /// and afterwards. An error (even after a possibly successful commit) never
+    /// returns a dispatch permit or rearms the original.
+    pub(crate) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
+        self.check()?;
+        tx.commit()?;
+        self.check()
+    }
+}
+
+impl Drop for Consumer<'_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.original.refuse();
+        }
+    }
+}
+
+pub(crate) fn with_consumer<T>(
+    intent: &FreshIntent,
+    phase: Phase,
+    wall: i64,
+    operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
+) -> Result<T> {
+    with_current_original(intent, phase, wall, |role, original| {
+        let mut consumer = Consumer { role, original, settled: false };
+        consumer.check()?;
+        let output = operation(&mut consumer)?;
+        consumer.check()?;
+        consumer.settled = true;
+        Ok(output)
+    })
 }
 
 /// This callback cannot escape the local borrow or return a transferable
@@ -498,7 +557,8 @@ fn with_current_for_role<T>(
             | Phase::DispatchCommit
             | Phase::ProviderSend
             | Phase::FinishCommit
-            | Phase::DisconnectCommit => ensure!(
+            | Phase::DisconnectCommit
+            | Phase::Verification => ensure!(
                 owners.kind == NativeRole::AppHost,
                 "native phase requires App owner"
             ),
@@ -533,7 +593,10 @@ fn with_current_for_role<T>(
 /// actual socket resolves them back to the retained executor owners on every
 /// write/flush/shutdown. Disconnect drops this list, not the originals.
 #[derive(Clone)]
-pub(super) struct Sink(Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>);
+pub(super) struct Sink {
+    bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
+    refused: Rc<std::cell::Cell<bool>>,
+}
 
 pub(super) fn current_sink() -> Result<Sink> {
     ACTIVE_SINK.with(|slot| {
@@ -551,7 +614,7 @@ struct SinkBinding {
 
 impl Sink {
     pub(super) fn new() -> Self {
-        Self(Rc::new(RefCell::new(BTreeMap::new())))
+        Self { bindings: Rc::new(RefCell::new(BTreeMap::new())), refused: Rc::new(std::cell::Cell::new(false)) }
     }
 
     /// A synchronous fixture RPC still has its own response scope. It must not
@@ -569,8 +632,9 @@ impl Sink {
     }
 
     pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
+        ensure!(!self.refused.get(), "native response outcome unknown or excluded");
         let intents: Vec<_> = self
-            .0
+            .bindings
             .try_borrow()?
             .iter()
             .map(|((role, _), binding)| (*role, binding.clone()))
@@ -584,12 +648,37 @@ impl Sink {
                     super::effects::wall_time()?,
                     Some(*role),
                     |stage, original| {
-                        original.check(stage)?;
-                        Ok(operation())
+                        let mut consumer = Consumer { role: stage, original, settled: false };
+                        consumer.check()?;
+                        let output = operation();
+                        consumer.check()?;
+                        consumer.settled = true;
+                        Ok(output)
                     },
                 )
             }),
             _ => anyhow::bail!("native response must have exactly one original"),
+        }
+    }
+
+    /// Retain uncertainty in each ORIGINAL owner, independently for App and
+    /// Shell. Neither a handler/RPC success nor a later socket can erase it.
+    pub(super) fn abort(&self) {
+        self.refused.set(true);
+        let Ok(bindings) = self.bindings.try_borrow() else { return; };
+        for ((role, _), binding) in bindings.iter() {
+            let _ = binding.effects.clone().run(|| with_current_for_role(
+                &binding.intent, Phase::Response, super::effects::wall_time()?, Some(*role),
+                |_, original| { original.refuse(); Ok(()) },
+            ));
+        }
+    }
+
+    pub(super) fn poll_io<T>(&self, operation: impl FnOnce() -> Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
+        match self.with_current(operation) {
+            Ok(Poll::Ready(Err(error))) => { self.abort(); Poll::Ready(Err(error)) }
+            Ok(output) => output,
+            Err(_) => { self.abort(); Poll::Ready(Err(std::io::Error::other("native response authority or delivery unavailable"))) }
         }
     }
 
@@ -622,7 +711,8 @@ impl Sink {
 fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
     ACTIVE_SINK.with(|slot| {
         if let Some(sink) = slot.try_borrow()?.as_ref() {
-            let mut indexes = sink.0.try_borrow_mut()?;
+            ensure!(!sink.refused.get(), "native response sink refused");
+            let mut indexes = sink.bindings.try_borrow_mut()?;
             let key = (role, intent.attempt().into());
             ensure!(
                 indexes.is_empty() || indexes.contains_key(&key),
@@ -667,6 +757,104 @@ mod tests {
             5,
             deadline,
         )
+    }
+
+    #[test]
+    fn consumer_retains_known_commit_and_excludes_expiry_before_commit() -> Result<()> {
+        for elapsed in [0, 5] {
+            let world = super::super::simulation::World::new(400 + elapsed);
+            super::super::effects::scope(world.clone(), || -> Result<()> {
+                let intent = original_intent("consumer-known-commit", 305)?;
+                reserve_shell(&intent, 5)?;
+                let mut db = rusqlite::Connection::open_in_memory()?;
+                db.execute_batch("CREATE TABLE receipt(value INTEGER NOT NULL)")?;
+                let result = with_consumer(&intent, Phase::Session, 5, |current| {
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                    world.advance(elapsed);
+                    current.commit(tx)
+                });
+                assert_eq!(result.is_ok(), elapsed == 0);
+                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, i64::from(elapsed == 0));
+                assert_eq!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_ok(), elapsed == 0);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consumer_sqlite_commit_failure_and_lost_reply_never_rearm() -> Result<()> {
+        for (seed, lost_reply) in [(410, false), (411, true)] {
+            let world = super::super::simulation::World::new(seed);
+            super::super::effects::scope(world, || -> Result<()> {
+                let intent = original_intent("consumer-unknown-commit", 305)?;
+                reserve_shell(&intent, 5)?;
+                let mut db = rusqlite::Connection::open_in_memory()?;
+                db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE receipt(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")?;
+                if lost_reply { db.execute("INSERT INTO parent VALUES(1)", [])?; }
+                let result = with_consumer(&intent, Phase::Session, 5, |current| -> Result<()> {
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                    current.commit(tx)?;
+                    anyhow::bail!("controlled reply loss AFTER actual commit")
+                });
+                assert!(result.is_err());
+                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, i64::from(lost_reply));
+                let mut entered = false;
+                assert!(with_consumer(&intent, Phase::Session, 5, |_| { entered = true; Ok(()) }).is_err());
+                assert!(!entered);
+                assert!(reserve_shell(&intent, 5).is_err());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consumer_expiry_after_commit_and_unwind_preserve_refused_original() -> Result<()> {
+        for panic in [false, true] {
+            let world = super::super::simulation::World::new(if panic { 421 } else { 420 });
+            super::super::effects::scope(world.clone(), || -> Result<()> {
+                let intent = original_intent("consumer-postcommit-cutoff", 305)?;
+                reserve_shell(&intent, 5)?;
+                let mut db = rusqlite::Connection::open_in_memory()?;
+                db.execute_batch("CREATE TABLE receipt(value INTEGER)")?;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_consumer(&intent, Phase::Session, 5, |current| {
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO receipt VALUES(1)", [])?;
+                    current.commit(tx)?;
+                    if panic { panic!("controlled cancellation after known SQL commit"); }
+                    world.advance(5);
+                    Ok(())
+                })));
+                if panic { assert!(result.is_err()); } else { assert!(result.unwrap().is_err()); }
+                assert_eq!(db.query_row("SELECT count(*) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+                assert!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_err());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consumer_socket_pending_and_partial_write_do_not_settle_a_failed_delivery() -> Result<()> {
+        let world = super::super::simulation::World::new(430);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("consumer-body-unknown", 305)?;
+            let sink = Sink::new();
+            sink.run(|| reserve_shell(&intent, 5))?;
+            assert!(sink.poll_io::<usize>(|| Poll::Pending).is_pending());
+            assert!(matches!(sink.poll_io(|| Poll::Ready(Ok(3))), Poll::Ready(Ok(3))));
+            assert!(matches!(sink.poll_io::<usize>(|| Poll::Ready(Err(std::io::Error::other("controlled disconnect")))), Poll::Ready(Err(_))));
+            let mut retried = false;
+            assert!(matches!(sink.poll_io(|| { retried = true; Poll::Ready(Ok(2)) }), Poll::Ready(Err(_))));
+            assert!(!retried);
+            // A different response/socket cannot erase the same owner's unknown
+            // disposition. App and Shell registries remain independent.
+            assert!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_err());
+            Ok(())
+        })
     }
 
     #[test]

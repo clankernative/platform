@@ -339,14 +339,16 @@ pub(in crate::oauth) fn authorize_managed_exchange(
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
-    authorize_checked(db, input, now, Some(guard))
+    guard.with_current(super::native_management::Phase::DispatchCommit, now, |current| {
+        authorize_checked(db, input, now, Some((guard, current)))
+    })
 }
 
 fn authorize_checked(
     db: &mut Connection,
     input: OutboundQualification<'_>,
     now: i64,
-    guard: Option<&super::management::app::FinishGuard<'_>>,
+    mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>)>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
@@ -357,7 +359,8 @@ fn authorize_checked(
         input.instance,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(guard) = guard {
+    if let Some((guard, current)) = &mut guard {
+        current.check()?;
         guard.check(&tx, now)?;
     }
     let row: Option<(ConnectIntent, String, String, String)> = tx
@@ -415,10 +418,15 @@ fn authorize_checked(
         params![input.intent.attempt, now],
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
-    if let Some(guard) = guard {
+    if let Some((guard, current)) = &mut guard {
+        current.check()?;
         guard.commit_dispatch(&tx)?;
     }
-    tx.commit()?;
+    if let Some((_, current)) = guard {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(Some(ExchangeDispatchPermit {
         intent: stored_intent,
         binding: stored_exchange,
@@ -580,6 +588,7 @@ pub fn settle_mapped(
         &prepared.binding,
         current_mapping_revision,
         now,
+        None,
         |tx| custody::publish_tokens(tx, prepared.material),
     )
 }
@@ -605,16 +614,17 @@ pub(in crate::oauth) fn settle_managed(
     {
         return Ok(false);
     }
-    connect::activate_mapped_bound(
+    guard.with_current(super::native_management::Phase::FinishCommit, now, |current| connect::activate_mapped_bound(
         db,
         &prepared.verified,
         &prepared.binding,
         revision,
         now,
+        Some(current),
         |tx| {
             guard.check(tx, now)?;
             custody::publish_tokens(tx, prepared.material)?;
             guard.complete(tx)
         },
-    )
+    ))
 }

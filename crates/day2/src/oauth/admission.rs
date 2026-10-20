@@ -199,11 +199,11 @@ impl ArtifactShellSigner {
     ) -> Result<super::management::Attestation> {
         proof.require_management_authentication()?;
         let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
-        super::native_management::with_current_original(
+        super::native_management::with_consumer(
             &intent,
             super::native_management::Phase::Signature,
             now,
-            |role, original| {
+            |current| {
                 let state = self
                     .state
                     .read()
@@ -222,7 +222,7 @@ impl ArtifactShellSigner {
                     "OAuth management key changed"
                 );
                 let at = proof.observe_current(now)?;
-                original.check(role)?;
+                current.check()?;
                 super::management::Attestation::sign(
                     view,
                     proof,
@@ -230,7 +230,7 @@ impl ArtifactShellSigner {
                     session,
                     (&key.bytes, key.version),
                     at,
-                    (role, original),
+                    current,
                 )
             },
         )
@@ -1125,6 +1125,11 @@ impl ArtifactApprovalAuthority {
         identity: &crate::iap::Verified,
         now: i64,
     ) -> Result<()> {
+        super::native_management::with_consumer(
+            &super::fresh_auth::FreshIntent::management(view, identity)?,
+            super::native_management::Phase::Verification,
+            now,
+            |current| {
         let state = self
             .state
             .read()
@@ -1144,7 +1149,10 @@ impl ArtifactApprovalAuthority {
         );
         let at = super::effects::wall_time()?;
         ensure!(at >= now, "OAuth management clock moved backwards");
+        current.check()?;
         proof.verify(view, identity, &key.bytes, &key.version, at)
+            },
+        )
     }
 
     pub(super) fn management_client(&self, view: &super::management::View) -> Result<String> {
@@ -4195,11 +4203,11 @@ pub(super) mod tests {
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
             super::super::native_management::reserve_shell(&intent, 104)?;
-            let refused = super::super::native_management::with_current_original(
+            let refused = super::super::native_management::with_consumer(
                 &intent,
                 super::super::native_management::Phase::Signature,
                 104,
-                |role, original| {
+                |current| {
                     Attestation::sign(
                         &view,
                         &actual,
@@ -4207,7 +4215,7 @@ pub(super) mod tests {
                         session.clone(),
                         (&[11; 32], "11".into()),
                         104,
-                        (role, original),
+                        current,
                     )
                 },
             );
@@ -4219,6 +4227,10 @@ pub(super) mod tests {
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
+            assert!(super::super::native_management::reserve_shell(&intent, 104).is_err());
+            let mut isolated_view = view.clone();
+            isolated_view.id.push_str("_isolated");
+            let intent = FreshIntent::management(&isolated_view, &identity)?;
             super::super::native_management::reserve_shell(&intent, 104)?;
             let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 intent,
@@ -4226,8 +4238,8 @@ pub(super) mod tests {
                 identity.subject.clone(),
                 103,
             ));
-            let accepted = signer.attest_management(&view, &isolated, &identity, session, 104)?;
-            accepted.verify(&view, &identity, &[11; 32], "11", 104)?;
+            let accepted = signer.attest_management(&isolated_view, &isolated, &identity, session, 104)?;
+            accepted.verify(&isolated_view, &identity, &[11; 32], "11", 104)?;
             assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 super::super::simulation::snapshot(&crate::store::open(&database)?)?,

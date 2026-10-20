@@ -846,6 +846,11 @@ impl Manager {
                     finished >= checking,
                     "OAuth disconnect clock moved backwards"
                 );
+                crate::oauth::native_management::with_consumer(
+                    &crate::oauth::fresh_auth::FreshIntent::management(view, identity)?,
+                    crate::oauth::native_management::Phase::DisconnectCommit,
+                    finished,
+                    |current| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
                 ensure!(
@@ -873,8 +878,10 @@ impl Manager {
                 )?;
                 tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
-                tx.commit()?;
+                current.commit(tx)?;
                 Ok(true)
+                    },
+                )
             },
         )?;
         ensure!(fenced, "OAuth disconnect not admitted");
@@ -896,6 +903,19 @@ pub(in crate::oauth) struct StartGuard<'a> {
 }
 
 impl StartGuard<'_> {
+    pub(in crate::oauth) fn with_current<T>(
+        &self,
+        now: i64,
+        operation: impl FnOnce(&mut crate::oauth::native_management::Consumer<'_, '_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            crate::oauth::native_management::Phase::StartCommit,
+            now,
+            operation,
+        )
+    }
+
     pub(in crate::oauth) fn check(&self, db: &Connection, now: i64) -> Result<()> {
         let (stored, state, _) = self.manager.load(db, &self.view.id, self.identity, now)?;
         ensure!(
@@ -923,6 +943,30 @@ pub(in crate::oauth) struct FinishGuard<'a> {
 }
 
 impl FinishGuard<'_> {
+    pub(in crate::oauth) fn with_current<T>(
+        &self,
+        phase: crate::oauth::native_management::Phase,
+        now: i64,
+        operation: impl FnOnce(&mut crate::oauth::native_management::Consumer<'_, '_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(matches!(phase,
+            crate::oauth::native_management::Phase::DispatchCommit |
+            crate::oauth::native_management::Phase::ProviderSend |
+            crate::oauth::native_management::Phase::FinishCommit), "OAuth finish consumer phase refused");
+        crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            phase, now, operation,
+        )
+    }
+
+    pub(in crate::oauth) fn send<T>(&self, entry: i64, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.with_current(crate::oauth::native_management::Phase::ProviderSend, entry, |current| {
+            self.require_send(entry)?;
+            current.check()?;
+            operation()
+        })
+    }
+
     pub(in crate::oauth) fn require_send(&self, entry: i64) -> Result<()> {
         let now = effects::wall_time()?;
         ensure!(now >= entry, "OAuth initial dispatch clock moved backwards");

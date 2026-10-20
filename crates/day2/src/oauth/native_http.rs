@@ -351,6 +351,16 @@ async fn run(
                 };
                 let admitted = admission.clone();
                 connections.push(async move {
+                    struct Completion {
+                        sink: super::native_management::Sink,
+                        known: bool,
+                    }
+                    impl Drop for Completion {
+                        fn drop(&mut self) {
+                            if !self.known { self.sink.abort(); }
+                        }
+                    }
+                    let mut completion = Completion { sink: sink.clone(), known: false };
                     let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                         let admitted = admitted.clone();
                         let sink = sink.clone();
@@ -365,7 +375,11 @@ async fn run(
                         .timer(OwnerTimer)
                         .header_read_timeout(std::time::Duration::from_secs(3))
                         .serve_connection(connection_io, service);
-                    let _ = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await;
+                    if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
+                        // Known local transport completion only. This is not
+                        // evidence that a browser/human received the bytes.
+                        completion.known = completion.sink.with_current(|| ()).is_ok();
+                    }
                 });
             }
         }
@@ -432,34 +446,19 @@ impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
         }
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_flush(cx))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_shutdown(cx))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_shutdown(cx))
     }
 }
 

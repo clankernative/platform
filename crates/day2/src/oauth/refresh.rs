@@ -147,7 +147,7 @@ impl ClientCredential {
             );
             let code = request.load_code(db, key)?;
             let verifier = request.load_verifier(db, key)?;
-            guard.require_send(now)?;
+            let raw = guard.send(now, || {
             let response = wire
                 .client
                 .post(google::TOKEN)
@@ -170,7 +170,8 @@ impl ClientCredential {
                 response.status().as_u16() == 200,
                 "OAuth initial exchange refused"
             );
-            let raw = body(response)?;
+            body(response)
+            })?;
             let (normalized, tokens) = google::normalized_tokens(
                 &raw,
                 super::catalog::TokenContext {
@@ -184,7 +185,7 @@ impl ClientCredential {
             let mut authorization =
                 reqwest::header::HeaderValue::from_str(&format!("Bearer {}", tokens.access))?;
             authorization.set_sensitive(true);
-            guard.require_send(now)?;
+            let observed_account = guard.send(now, || {
             let response = wire
                 .client
                 .get(google::USERINFO)
@@ -200,7 +201,9 @@ impl ClientCredential {
                 response.status().as_u16() == 200,
                 "OAuth initial account refused"
             );
-            account = Some(google::observe_account(&body(response)?)?);
+            google::observe_account(&body(response)?)
+            })?;
+            account = Some(observed_account);
             Ok(super::exchange::TokenHttpResponse {
                 status: 200,
                 content_type: "application/json".into(),

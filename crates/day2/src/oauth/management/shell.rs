@@ -111,11 +111,11 @@ impl Shell {
         proof.require_current(now)?;
         proof.require_management_authentication()?;
         let intent = FreshIntent::management(&view, identity)?;
-        crate::oauth::native_management::with_current_original(
+        crate::oauth::native_management::with_consumer(
             &intent,
             crate::oauth::native_management::Phase::Session,
             now,
-            |role, original| {
+            |current| {
                 let token = effects::random()?;
                 let digest = Digest::new(token.as_bytes());
                 let session = Session {
@@ -134,13 +134,21 @@ impl Shell {
                     sessions.len() < 1024,
                     "OAuth management session capacity reached"
                 );
-                original.check(role)?;
+                current.check()?;
+                ensure!(!sessions.contains_key(digest.as_str()), "OAuth management session collision");
                 sessions.insert(digest.as_str().into(), session);
+                // An expired/changed owner after insertion must not leave a
+                // usable session even if the response is never constructed.
+                let response = (|| {
+                current.check()?;
                 with_cookie(
                     redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
                     &token,
                     view.expires_at - now,
                 )
+                })();
+                if response.is_err() { sessions.remove(digest.as_str()); }
+                response
             },
         )
     }
