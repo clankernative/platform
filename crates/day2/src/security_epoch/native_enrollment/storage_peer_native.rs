@@ -1,6 +1,6 @@
 //! Retained actual per-message sender handles, not reconstructed numeric PIDs.
 
-use super::wire::{Message, StageStatement};
+use super::storage_peer_wire::{Message, StageStatement};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::StorageSender};
 use anyhow::{Result, ensure};
@@ -27,7 +27,9 @@ impl Peer {
         };
         match &mut owner.processes[0] {
             StorageSender::App(process) => {
-                stage.check_storage_peer(&owner.statement, process, acquisition)?
+                process.check_identity(acquisition)?;
+                stage.check_storage_app_statement(&owner.statement, process.data(), acquisition)?;
+                process.check_identity(acquisition)?
             }
             StorageSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
