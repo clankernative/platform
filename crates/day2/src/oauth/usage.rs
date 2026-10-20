@@ -547,7 +547,7 @@ fn resolve(
     let tx = crate::write_queue::immediate(&mut db)?;
     let now = super::effects::wall_time()?;
     if !refresh.validate(&tx, now)? {
-        serving.commit(tx)?;
+        serving.commit_write(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     runtime.check_binding(&tx)?;
@@ -600,7 +600,7 @@ fn resolve(
             serde_json::to_string(&claims)?
         ],
     )?;
-    serving.commit(tx)?;
+    serving.commit_write(tx)?;
     Ok(json!({"Available": reference}).to_string())
 }
 
@@ -643,6 +643,7 @@ fn execute_current(
     instruction: &Instruction,
     serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
 ) -> Result<String> {
+    serving.require_runtime(runtime)?;
     ensure!(
         instruction.kind == "observe",
         "connection read requires observation phase"
@@ -695,7 +696,7 @@ fn execute_current(
     if selected_at < started {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        serving.commit(tx)?;
+        serving.commit_write(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     serving.check()?;
@@ -713,7 +714,7 @@ fn execute_current(
     if now < selected_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        serving.commit(tx)?;
+        serving.commit_write(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let snapshot = crate::write_queue::immediate(&mut db)?;
@@ -751,7 +752,7 @@ fn execute_current(
             ],
         )?;
     }
-    serving.commit(snapshot)?;
+    serving.commit_write(snapshot)?;
     let Some(token) = token else {
         return Ok(unavailable("ReauthRequired"));
     };
@@ -760,7 +761,7 @@ fn execute_current(
     if at < now || at >= token.expires_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        serving.commit(tx)?;
+        serving.commit_write(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
@@ -775,7 +776,7 @@ fn execute_current(
     if completed_at < at || completed_at >= token.expires_at {
         let tx = crate::write_queue::immediate(&mut db)?;
         refuse(&tx, &claims)?;
-        serving.commit(tx)?;
+        serving.commit_write(tx)?;
         return Ok(unavailable("ReauthRequired"));
     }
     let snapshot = db.transaction()?;

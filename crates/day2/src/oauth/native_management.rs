@@ -846,6 +846,7 @@ pub(crate) enum RuntimePhase {
 /// participant and SAME stage; ordinary/test Runtime data cannot supply those.
 pub(crate) struct RuntimeConsumer<'a, 'role> {
     source: RuntimeSource<'a, 'role>,
+    runtime: Option<&'a crate::store::Runtime>,
 }
 
 enum RuntimeSource<'a, 'role> {
@@ -857,6 +858,14 @@ enum RuntimeSource<'a, 'role> {
 }
 
 impl RuntimeConsumer<'_, '_> {
+    pub(super) fn require_runtime(&self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(
+            self.runtime
+                .is_some_and(|selected| std::ptr::eq(selected, runtime)),
+            "native runtime consumer selection changed"
+        );
+        Ok(())
+    }
     pub(super) fn check(&mut self) -> Result<()> {
         match &mut self.source {
             RuntimeSource::Native { current, stage } => current.check(stage),
@@ -867,6 +876,21 @@ impl RuntimeConsumer<'_, '_> {
     /// This does not mint a dispatch or publication permit. Existing durable
     /// CAS/selection/slot checks still own each transaction's actual authority.
     pub(super) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            tx.commit()?;
+            self.check()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(super) fn commit_write(
+        &mut self,
+        tx: crate::write_queue::WriteTransaction<'_>,
+    ) -> Result<()> {
         let result = (|| {
             self.check()?;
             tx.commit()?;
@@ -935,6 +959,7 @@ pub(super) fn with_runtime_consumer<T>(
     if !runtime.uses_native_storage() {
         return RuntimeConsumer {
             source: RuntimeSource::Ordinary,
+            runtime: Some(runtime),
         }
         .run(operation);
     }
@@ -960,6 +985,7 @@ pub(super) fn with_runtime_consumer<T>(
                         current,
                         stage: same,
                     },
+                    runtime: Some(runtime),
                 }
                 .run(operation)
             },
@@ -1028,6 +1054,7 @@ fn with_runtime_response<T>(
                         current,
                         stage: same,
                     },
+                    runtime: None,
                 };
                 consumer.run(|_| operation())
             },
@@ -2063,8 +2090,8 @@ mod tests {
         assert!(!ordinary.uses_native_storage());
         let instance = crate::artifact::Instance::load(ordinary.instance_path())?;
         let scope = AuthorityScope {
-            installation: instance.installation,
-            environment: instance.environment,
+            installation: instance.installation.try_into()?,
+            environment: instance.environment.try_into()?,
             app: ordinary.app().to_owned().try_into()?,
         };
         let world = super::super::simulation::World::new(458);
@@ -2086,6 +2113,9 @@ mod tests {
             assert!(sink.runtime.borrow().is_none());
             assert!(sink.bindings.borrow().is_empty());
             with_runtime_consumer(&ordinary, RuntimePhase::Read, |current| {
+                current.require_runtime(&ordinary)?;
+                let other = ordinary.clone();
+                assert!(current.require_runtime(&other).is_err());
                 let mut db = rusqlite::Connection::open_in_memory()?;
                 db.execute_batch("CREATE TABLE runtime_probe(value INTEGER)")?;
                 let tx = db.transaction()?;

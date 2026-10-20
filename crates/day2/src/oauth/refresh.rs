@@ -289,6 +289,7 @@ pub(super) fn ensure_current(
     started_at: i64,
     serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
 ) -> Result<Resolution> {
+    serving.require_runtime(runtime)?;
     let authority = runtime
         .connections
         .as_deref()
@@ -356,7 +357,7 @@ pub(super) fn ensure_current(
         expected.base_version,
         now,
     )?;
-    serving.commit(snapshot)?;
+    serving.commit_write(snapshot)?;
     let Some(source) = source else {
         return Ok(Resolution::unavailable("ReauthRequired"));
     };
