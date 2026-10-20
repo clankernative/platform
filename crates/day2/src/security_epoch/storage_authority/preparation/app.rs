@@ -35,7 +35,7 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
     /// supplied descriptor. The original role borrow cannot be replaced later.
     pub(crate) fn observe_existing(
         stage: &'stage mut EnrolledRoleStage<'role>,
-        runtime: &crate::store::Runtime,
+        runtime: &crate::store::InitialStoreMetadata,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         projection: PreparedFileProjection,

@@ -1299,14 +1299,14 @@
       "methods": [
         "fn check_identity (& mut self) -> Result < () >",
         "pub (crate) fn check_original (& mut self) -> Result < () >",
-        "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >",
+        "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: InitialStoreMetadata , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >",
         "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
         "fn read_current (& mut self) -> Result < Vec < u8 > >"
       ],
       "factories": [
         {
           "owner": "AppPreparedFile < 'stage , 'role >",
-          "signature": "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >"
+          "signature": "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: InitialStoreMetadata , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >"
         }
       ],
       "material_uses": [
