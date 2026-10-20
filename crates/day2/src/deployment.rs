@@ -639,6 +639,12 @@ pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
     crate::security_epoch::native_enrollment::run(issuer)
 }
 
+/// Dedicated Controller on its final owning OS thread. No caller PID, URL,
+/// signing key, database path or callback selects operational authority.
+pub fn run_epoch_controller(instance: &Path, app: &str) -> Result<()> {
+    crate::security_epoch::controller::run(instance, app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
