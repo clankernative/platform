@@ -26,6 +26,8 @@ use std::{
     time::Duration,
 };
 
+mod storage;
+
 struct OwnerIdentity;
 
 pub(crate) struct EnrolledProcessRoleOwner {
@@ -38,6 +40,9 @@ pub(crate) struct EnrolledProcessRoleOwner {
     process: u32,
     thread: ThreadId,
     refused: bool,
+    // One-way refusal gate, never a holder permission or restored DATA flag.
+    // Even a later fresh stage cannot restart an unknown initial exchange.
+    initial_holder_attempted: bool,
     #[cfg(target_os = "linux")]
     issuer: IssuerReceipt,
     #[cfg(target_os = "linux")]
@@ -59,6 +64,8 @@ pub(crate) struct EnrolledRoleStage<'a> {
     grant_peer: IssuerReceipt,
     #[cfg(target_os = "linux")]
     channel: Channel,
+    #[cfg(target_os = "linux")]
+    current_grant: SignedStage,
 }
 
 /// Captured at the actual creator entry, before any entropy or I/O. This owns
@@ -120,6 +127,7 @@ impl EnrolledProcessRoleOwner {
                 process: std::process::id(),
                 thread: std::thread::current().id(),
                 refused: false,
+                initial_holder_attempted: false,
                 issuer,
                 binding: grant.data.runtime,
                 self_data: grant.data.process,
@@ -188,6 +196,7 @@ impl EnrolledProcessRoleOwner {
                     nonce_peer,
                     grant_peer,
                     channel,
+                    current_grant: grant,
                 };
                 stage.check()?;
                 Ok(stage)
