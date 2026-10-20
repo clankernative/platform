@@ -291,11 +291,17 @@ impl ObservedInitialImage {
 /// accepts a caller connection only as DATA validation, never as a file,
 /// provider, first-holder or current-writer constructor.
 pub(super) fn check_current_seed(
-    connection: &Connection,
+    connection: &rusqlite::Transaction<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
     core: &OriginalSeedCore,
 ) -> Result<()> {
+    // The typed SQLite transaction is necessary, but a caller can still close
+    // it with raw COMMIT. Refuse that stale handle before the first read.
+    ensure!(
+        !connection.is_autocommit(),
+        "epoch_current_seed_transaction_required"
+    );
     core.validate(policy, store)?;
     ensure!(
         schema_contract(connection)? == core.schema_contract,
@@ -828,7 +834,13 @@ pub(super) mod tests {
         let decoded = image
             .decode_exact_readback(image.bytes(), &mut acquisition())
             .unwrap();
-        check_current_seed(&decoded, &policy, &store, image.core()).unwrap();
+        let observe = |connection: &Connection, core: &OriginalSeedCore| -> Result<()> {
+            let snapshot = connection.unchecked_transaction()?;
+            let result = check_current_seed(&snapshot, &policy, &store, core);
+            snapshot.rollback()?;
+            result
+        };
+        observe(&decoded, image.core()).unwrap();
         // The native initial decoder is intentionally read-only; copy its real
         // complete SQLite image to a new writable memory DB for this DATA test.
         let mut live = Connection::open_in_memory().unwrap();
@@ -839,7 +851,7 @@ pub(super) mod tests {
             [],
         )
         .unwrap();
-        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        observe(&live, image.core()).unwrap();
         for (sql, argument) in [
             (
                 "UPDATE day2_initial_security_seed SET store=?1",
@@ -858,7 +870,7 @@ pub(super) mod tests {
             tx.execute(sql, [argument]).unwrap();
             assert!(check_current_seed(&tx, &policy, &store, image.core()).is_err());
             tx.rollback().unwrap();
-            check_current_seed(&live, &policy, &store, image.core()).unwrap();
+            observe(&live, image.core()).unwrap();
         }
         for sql in [
             "CREATE TABLE forged(value TEXT)",
@@ -885,8 +897,18 @@ pub(super) mod tests {
         tx.rollback().unwrap();
         let mut replaced = image.core().clone();
         replaced.incarnations.database = Digest::new(b"copied backup incarnation");
-        assert!(check_current_seed(&live, &policy, &store, &replaced).is_err());
-        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        assert!(observe(&live, &replaced).is_err());
+        observe(&live, image.core()).unwrap();
+        let ended = live.transaction().unwrap();
+        ended.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            check_current_seed(&ended, &policy, &store, image.core())
+                .unwrap_err()
+                .to_string(),
+            "epoch_current_seed_transaction_required"
+        );
+        drop(ended);
+        observe(&live, image.core()).unwrap();
         assert_eq!(
             live.query_row("SELECT value FROM items", [], |row| row.get::<_, String>(0))
                 .unwrap(),
