@@ -378,7 +378,7 @@ async fn run(
                     if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
                         // Known local transport completion only. This is not
                         // evidence that a browser/human received the bytes.
-                        completion.known = completion.sink.with_current(|| ()).is_ok();
+                        completion.known = completion.sink.finish().is_ok();
                     }
                 });
             }

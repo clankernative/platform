@@ -275,6 +275,7 @@ pub(crate) enum Phase {
     Signature,
     Verification,
     Response,
+    ResponseComplete,
     ShellFlow,
 }
 
@@ -540,8 +541,10 @@ impl Consumer<'_, '_, '_> {
 
     fn refuse(&mut self) {
         self.original.refuse();
-        if let ConsumerSource::Native { current, .. } = &mut self.source {
-            current.refuse();
+        match &mut self.source {
+            ConsumerSource::Native { current, .. } => current.refuse(),
+            #[cfg(test)]
+            ConsumerSource::Simulated(_) => {},
         }
     }
 
@@ -553,21 +556,33 @@ impl Consumer<'_, '_, '_> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.check()?;
             let output = operation(self);
-            self.check()?;
+            let checked = self.check();
             match output {
                 Ok(output) => {
-                    if let ConsumerSource::Native { current, stage } = &mut self.source {
+                    checked?;
+                    match &mut self.source {
+                        ConsumerSource::Native { current, stage } => {
                         current.finish_known(stage)?;
                         // finish_known has not released the owner scope. A
                         // later original failure still refuses that owner.
                         self.original.check_with_native(stage, self.original.wall)?;
+                        }
+                        #[cfg(test)]
+                        ConsumerSource::Simulated(_) => {},
                     }
                     Ok(output)
                 }
                 Err(error) => {
+                    if checked.is_err() {
+                        // Preserve the original commit/send cause. The failed
+                        // check has already refused both retained owners.
+                        return Err(error.context("consumer current check also refused after the operation"));
+                    }
                     if !self.armed.get() {
-                        if let ConsumerSource::Native { current, .. } = &mut self.source {
-                            current.finish_excluded()?;
+                        match &mut self.source {
+                            ConsumerSource::Native { current, .. } => current.finish_excluded()?,
+                            #[cfg(test)]
+                            ConsumerSource::Simulated(_) => {},
                         }
                         excluded = true;
                     }
@@ -627,7 +642,7 @@ pub(crate) fn with_consumer<T>(
     with_consumer_for_role(intent, phase, wall, role, operation)
 }
 
-fn serving_use(phase: Phase) -> Result<ServingUse> {
+fn serving_use(phase: Phase, role: NativeRole) -> Result<ServingUse> {
     Ok(match phase {
         Phase::StartCommit => ServingUse::StartCommit,
         Phase::DispatchCommit => ServingUse::DispatchCommit,
@@ -639,6 +654,11 @@ fn serving_use(phase: Phase) -> Result<ServingUse> {
         Phase::Verification => ServingUse::Verification,
         Phase::Callback => ServingUse::Callback,
         Phase::Response => ServingUse::Response,
+        Phase::ResponseComplete => match role {
+            NativeRole::AppHost => ServingUse::AppResponseComplete,
+            NativeRole::SecurityShell => ServingUse::ShellResponseComplete,
+            _ => anyhow::bail!("native response completion role refused"),
+        },
         _ => anyhow::bail!("native serving consumer purpose unsupported"),
     })
 }
@@ -650,7 +670,7 @@ fn with_consumer_for_role<T>(
     role: NativeRole,
     operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
 ) -> Result<T> {
-    let purpose = serving_use(phase)?;
+    let purpose = serving_use(phase, role)?;
     let mut guard = ConsumerGuard {
         intent: intent.clone(),
         role,
@@ -753,8 +773,11 @@ fn with_current_for_role<T>(
 #[derive(Clone)]
 pub(super) struct Sink {
     bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
-    refused: Rc<std::cell::Cell<bool>>,
+    state: Rc<std::cell::Cell<SinkState>>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SinkState { Open, Complete, Refused }
 
 pub(super) fn current_sink() -> Result<Sink> {
     ACTIVE_SINK.with(|slot| {
@@ -774,7 +797,7 @@ impl Sink {
     pub(super) fn new() -> Self {
         Self {
             bindings: Rc::new(RefCell::new(BTreeMap::new())),
-            refused: Rc::new(std::cell::Cell::new(false)),
+            state: Rc::new(std::cell::Cell::new(SinkState::Open)),
         }
     }
 
@@ -793,12 +816,20 @@ impl Sink {
     }
 
     pub(super) fn with_current<T>(&self, operation: impl FnOnce() -> T) -> Result<T> {
-        self.with_current_result(|| Ok(operation()))
+        self.with_current_result(Phase::Response, || Ok(operation()))
     }
 
-    fn with_current_result<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    /// Only the actual successful HTTP connection completion calls this. Poll
+    /// completion/partial progress never takes this terminal branch.
+    pub(super) fn finish(&self) -> Result<()> {
+        self.with_current_result(Phase::ResponseComplete, || Ok(()))?;
+        self.state.set(SinkState::Complete);
+        Ok(())
+    }
+
+    fn with_current_result<T>(&self, phase: Phase, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         ensure!(
-            !self.refused.get(),
+            self.state.get() == SinkState::Open,
             "native response outcome unknown or excluded"
         );
         let intents: Vec<_> = self
@@ -812,7 +843,7 @@ impl Sink {
             [(role, binding)] => binding.effects.clone().run(|| {
                 with_consumer_for_role(
                     &binding.intent,
-                    Phase::Response,
+                    phase,
                     super::effects::wall_time()?,
                     *role,
                     |consumer| {
@@ -828,7 +859,8 @@ impl Sink {
     /// Retain uncertainty in each ORIGINAL owner, independently for App and
     /// Shell. Neither a handler/RPC success nor a later socket can erase it.
     pub(super) fn abort(&self) {
-        self.refused.set(true);
+        if self.state.get() == SinkState::Complete { return; }
+        self.state.set(SinkState::Refused);
         let Ok(bindings) = self.bindings.try_borrow() else {
             return;
         };
@@ -838,7 +870,15 @@ impl Sink {
             let _ = binding
                 .effects
                 .clone()
-                .run(|| refuse_original(&binding.intent, *role));
+                .run(|| -> Result<()> {
+                    // Refuse BOTH retained owners without a new stage/clock.
+                    // The simulator never calls a native serving factory.
+                    let original = refuse_original(&binding.intent, *role);
+                    #[cfg(test)]
+                    if fixtures::active() { return original; }
+                    let serving = crate::security_epoch::serving::refuse_current_serving(&binding.intent, ServingUse::Response);
+                    original.and(serving)
+                });
         }
     }
 
@@ -846,7 +886,7 @@ impl Sink {
         &self,
         operation: impl FnOnce() -> Poll<std::io::Result<T>>,
     ) -> Poll<std::io::Result<T>> {
-        match self.with_current_result(|| match operation() {
+        match self.with_current_result(Phase::Response, || match operation() {
             Poll::Ready(Err(error)) => Err(error.into()),
             output => Ok(output),
         }) {
@@ -909,7 +949,7 @@ fn refuse_original(intent: &FreshIntent, kind: NativeRole) -> Result<()> {
 fn enlist(role: NativeRole, intent: &FreshIntent) -> Result<()> {
     ACTIVE_SINK.with(|slot| {
         if let Some(sink) = slot.try_borrow()?.as_ref() {
-            ensure!(!sink.refused.get(), "native response sink refused");
+            ensure!(sink.state.get() == SinkState::Open, "native response sink closed");
             let mut indexes = sink.bindings.try_borrow_mut()?;
             let key = (role, intent.attempt().into());
             ensure!(
@@ -1104,6 +1144,25 @@ mod tests {
             })?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn consumer_completed_socket_cannot_send_or_complete_again() -> Result<()> {
+        let world = super::super::simulation::World::new(431);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("consumer-body-completed", 305)?;
+            let sink = Sink::new();
+            sink.run(|| reserve_shell(&intent, 5))?;
+            assert!(matches!(sink.poll_io(|| Poll::Ready(Ok(3))), Poll::Ready(Ok(3))));
+            sink.finish()?;
+            let mut wrote_again = false;
+            assert!(matches!(sink.poll_io(|| { wrote_again = true; Poll::Ready(Ok(1)) }), Poll::Ready(Err(_))));
+            assert!(!wrote_again);
+            assert!(sink.finish().is_err());
+            sink.abort(); // Late cleanup cannot turn known completion into a regrant.
+            with_consumer(&intent, Phase::Session, 5, |_| Ok(()))?;
+            Ok(())
+        })
     }
 
     #[test]
