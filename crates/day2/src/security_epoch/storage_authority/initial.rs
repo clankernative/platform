@@ -121,6 +121,18 @@ impl InitialStorageContinuity {
         Ok(phase)
     }
 
+    pub(in crate::security_epoch) fn bootstrap_core(
+        &self,
+    ) -> Result<crate::security_epoch::seed_core::OriginalSeedCore> {
+        ensure!(self.ready, "initial_storage_continuation_refused");
+        Ok(self.peer.initial_projection().initial_core().clone())
+    }
+
+    pub(in crate::security_epoch) fn first_holder_data(&self) -> Result<Holder> {
+        ensure!(self.ready, "initial_storage_continuation_refused");
+        Ok(self.peer.first_holder().clone())
+    }
+
     pub(crate) fn refuse(&mut self) {
         self.ready = false;
         self.peer.refuse();
@@ -189,10 +201,35 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
     /// composite postchecks. It grants no epoch/write/serving permission. The
     /// enclosing ready gate stays false if either final owner check fails,
     /// including after the peer has recorded its own known completion.
+    pub(in crate::security_epoch) fn announce_known(&mut self) -> Result<()> {
+        self.check()?;
+        self.peer.announce_known(self.file.controller_stage()?)?;
+        self.check()
+    }
+
     pub(in crate::security_epoch) fn finish_checked(mut self) -> Result<()> {
         self.check()?;
+        self.peer
+            .await_acknowledgement(self.file.controller_stage()?)?;
+        self.check()?;
+        self.peer.release_known(self.file.controller_stage()?)?;
         self.peer.finish_checked(self.file.controller_stage()?)?;
         self.file.finish_checked()?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn finish_activated(mut self) -> Result<()> {
+        self.check()?;
+        self.peer
+            .await_acknowledgement(self.file.controller_stage()?)?;
+        self.check()?;
+        // The App remains blocked on release until this last initial-byte
+        // check. Once released, only physical identity is required here.
+        let mut physical = self.file.into_physical_checked()?;
+        self.peer.release_known(physical.controller_stage()?)?;
+        self.peer.finish_checked(physical.controller_stage()?)?;
+        physical.finish_checked()?;
         *self.continuation = true;
         Ok(())
     }
@@ -205,6 +242,18 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
 }
 
 impl AppInitialStorageContinuity {
+    pub(in crate::security_epoch) fn bootstrap_core(
+        &self,
+    ) -> Result<crate::security_epoch::seed_core::OriginalSeedCore> {
+        ensure!(self.ready, "app_initial_storage_continuation_refused");
+        Ok(self.peer.initial_projection().initial_core().clone())
+    }
+
+    pub(in crate::security_epoch) fn first_holder_data(&self) -> Result<Holder> {
+        ensure!(self.ready, "app_initial_storage_continuation_refused");
+        Ok(self.peer.first_holder().clone())
+    }
+
     pub(crate) fn retain(holder: AuthenticatedAppFirstHolder<'_, '_>) -> Result<Self> {
         let (file, peer) = holder.retain_for_activation()?;
         Ok(Self {
@@ -250,6 +299,15 @@ impl AppInitialStorageContinuity {
 }
 
 impl CurrentAppStorageBootstrapPhase<'_> {
+    pub(in crate::security_epoch) fn await_known(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.peer.await_known(stage)?;
+        self.check(stage)
+    }
+
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
             ensure!(!*self.continuation, "app_initial_storage_phase_released");
@@ -268,8 +326,26 @@ impl CurrentAppStorageBootstrapPhase<'_> {
         stage: &mut EnrolledRoleStage<'_>,
     ) -> Result<()> {
         self.check(stage)?;
+        self.peer.acknowledge_known(stage)?;
+        self.check(stage)?;
+        self.peer.await_release(stage)?;
         self.peer.finish_checked(stage)?;
         self.file.check_initial(stage)?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn finish_activated(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.peer.acknowledge_known(stage)?;
+        self.peer.await_release(stage)?;
+        // The Controller may now finalize activation. Future writes need
+        // their own active serving fence; initial bytes are never re-adopted.
+        self.peer.finish_checked(stage)?;
+        self.file.check_current(stage)?;
         *self.continuation = true;
         Ok(())
     }

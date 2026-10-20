@@ -1,10 +1,12 @@
 //! Private, initial-only external security-epoch protocol.
 //!
 //! Records, receipts and observations below are historical DATA. None is a
-//! current authority, clock, holder or credential-readiness proof. In particular,
-//! the live execution-context producer is deliberately absent: ordinary app
-//! startup cannot initialize a counter or adopt an existing database here.
+//! current authority, clock, holder or credential-readiness proof. The native execution context
+//! retains a joined Controller/file/peer phase through the consuming dispatch.
+//! Ordinary startup cannot initialize a counter or adopt an existing database;
+//! the serving supplier and lifecycle still need composition and qualification.
 mod authenticated_reads;
+mod bootstrap;
 mod control_slot;
 mod control_slot_firestore;
 pub(crate) mod control_slot_io;
@@ -26,7 +28,10 @@ pub(crate) mod serving;
 mod storage_authority;
 mod transport;
 
-pub(crate) use authenticated_reads::AuthenticatedReads;
+pub(crate) use authenticated_reads::{AuthenticatedReads, ControllerPort};
+pub(crate) use bootstrap::{
+    ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
+};
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;
 pub(crate) use native_clock::NativeAcquisition;

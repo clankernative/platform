@@ -22,6 +22,10 @@ use day2_capabilities::{
 use std::{collections::BTreeMap, io::Read, time::Duration};
 use zeroize::Zeroizing;
 
+mod writer;
+pub(in crate::security_epoch) use writer::ControllerBorrow;
+pub(crate) use writer::ControllerPort;
+
 pub(crate) struct AuthenticatedReads<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,
     policy: InitialBootstrapPolicy,
@@ -290,6 +294,32 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         }
         result
     }
+    pub(super) fn read_slot(
+        &mut self,
+        selection: &EpochStore,
+        core: &super::control_slot::LogicalCore,
+    ) -> Result<super::control_slot_io::SlotObservation> {
+        let result = (|| {
+            ensure!(
+                self.selection == Digest::of(selection)?,
+                "epoch_native_read_selection_changed"
+            );
+            self.sample()?;
+            let budget = self.acquisition.budget()?;
+            super::control_slot_io::read_with_budget(
+                selection,
+                core,
+                &mut ReadPort { owner: self },
+                budget,
+            )
+        })();
+        if result.is_err() {
+            self.valid = false;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
     fn sample(&mut self) -> Result<Sample> {
         let result = (|| {
             ensure!(self.valid, "epoch_native_read_refused");
