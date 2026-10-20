@@ -319,6 +319,18 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
         result
     }
 
+    /// The fixed, successfully observed activation performs its LAST initial
+    /// byte check before notifying the App that legitimate writes may begin.
+    /// The SAME descriptors/provider phase remain live for physical postchecks.
+    pub(in crate::security_epoch) fn into_physical_checked(
+        mut self,
+    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        self.check()?;
+        let mut physical = CurrentPhysicalFilePhase { inner: self };
+        physical.check()?;
+        Ok(physical)
+    }
+
     /// A statement only, after current file/provider checks. The closed S1
     /// exchange must authenticate it before the App parses any SQLite bytes.
     pub(crate) fn projection(&mut self) -> Result<PreparedFileProjection> {

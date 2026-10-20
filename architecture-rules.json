@@ -304,6 +304,8 @@
     "crates/day2/src/sdk.rs",
     "crates/day2/src/security_admission.rs",
     "crates/day2/src/security_epoch/authenticated_reads.rs",
+    "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
+    "crates/day2/src/security_epoch/bootstrap.rs",
     "crates/day2/src/security_epoch/control_slot.rs",
     "crates/day2/src/security_epoch/control_slot_firestore.rs",
     "crates/day2/src/security_epoch/control_slot_io.rs",

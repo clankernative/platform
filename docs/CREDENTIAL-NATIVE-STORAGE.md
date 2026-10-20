@@ -231,7 +231,9 @@ known completion after all final checks releases it. Errors, unknown outcomes,
 drop and a failure after the peer's local completion leave the enclosing owner
 closed. The new private owner types reject cloning, serialization and thread
 transfer. These types supply neither effective IAM nor active epoch/writer or
-Shell serving authority; no production bootstrap-dispatch factory is enabled.
+Shell serving authority on their own. The fixed native bootstrap dispatcher now
+retains this phase through the consuming counter claim, send, response and final
+provider/file checks; the Controller lifecycle and live qualification remain owed.
 
 The App counterpart, `AppInitialStorageContinuity`, consumes its genuine
 authenticated first holder and retains the SAME read-only file and peer in one
@@ -287,3 +289,22 @@ Accepted administrative/provider malice, rollback/deletion and permanent zonal
 loss are outside the selected model. No hostile-administrator or global IAM
 exclusivity claim follows. Actual same-stage storage, holder, counter and
 serving checks remain required; this decision alone enables no native factory.
+
+The fixed initial lifecycle has six steps: reserve, dispatch and settle the
+create request, then reserve, dispatch and settle the first activation. Every
+step acquires a fresh real enrolled stage and uses the SAME retained file and
+App peer. The shared permanent slot is the existing control journal. A stored
+MayHaveBeenSent state cannot supply a known local claim, and this lifecycle
+contains no retry, rearm, adoption or alternate-candidate route. Errors stop it.
+
+The Controller's signed current-result packet only unblocks the App's own
+coherent provider read. The App checks the SAME original file and actual stage
+and acknowledges consumption; the Controller completes its final checks and
+releases that exact transcript. Only the final activation switches the
+Controller's remaining file check to physical identity, so a legitimate App
+write cannot race an obsolete initial-byte comparison after release. The App
+cannot construct its active owner before all six checked native steps finish.
+Active observations retain the complete four-document provider-version binding,
+not just receipt values. The new owners remain private and cannot be cloned,
+serialized or transferred to another thread. Native deployment qualification
+and actual serving/Runtime composition remain separate owed work.
