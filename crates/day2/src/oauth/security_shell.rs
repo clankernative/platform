@@ -1922,7 +1922,7 @@ mod tests {
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(capacity.available_permits(), 1);
             assert!(world.requests().is_empty());
             Ok(())
