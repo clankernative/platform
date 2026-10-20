@@ -64,6 +64,8 @@ struct RetainedPeer {
     local: StageStatement,
     initial: Digest,
     projection: PreparedFileProjection,
+    last_local_grant: Digest,
+    last_remote_grant: Digest,
     disposition: Disposition,
     #[cfg(target_os = "linux")]
     peer: Peer,
@@ -91,6 +93,7 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     acquisition: NativeAcquisition,
     local: StageStatement,
     exchange: CurrentExchange,
+    remote_grant: Digest,
     #[cfg(target_os = "linux")]
     peer: Peer,
 }
@@ -104,6 +107,8 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
         let projection = self.file.projection()?;
         self.check()?;
         let initial = self.offer.exchange.digest()?;
+        let last_local_grant = self.offer.local.grant_digest()?;
+        let last_remote_grant = self.offer.remote.grant_digest()?;
         // The storage owner moves the SAME descriptors after its own final
         // original checks. No file/key/channel is reopened or reconstructed.
         let file = self.file.retain_physical()?;
@@ -115,6 +120,8 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
                     local: self.offer.local,
                     initial,
                     projection,
+                    last_local_grant,
+                    last_remote_grant,
                     disposition: Disposition::Ready(0),
                     #[cfg(target_os = "linux")]
                     peer: self.offer.peer,
@@ -133,6 +140,8 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
         let projection = self.phase.projection()?;
         self.check()?;
         let initial = self.exchange.digest()?;
+        let last_local_grant = self.local.grant_digest()?;
+        let last_remote_grant = self.remote.grant_digest()?;
         // Only known initial exchange completion closes this original phase.
         // Its caller still owns the SAME PreparedFileContinuity; it may now
         // move that owner into its storage composite. This peer is not a file.
@@ -143,6 +152,8 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
                 local: self.local,
                 initial,
                 projection,
+                last_local_grant,
+                last_remote_grant,
                 disposition: Disposition::Ready(0),
                 #[cfg(target_os = "linux")]
                 peer: self.peer,
@@ -173,6 +184,7 @@ impl RetainedPeer {
             self.local.same_enrollment(&local),
             "storage_peer_enrollment_changed"
         );
+        local.require_new_grant(&self.last_local_grant)?;
         self.check_resources(stage, &mut acquisition)?;
         Ok((acquisition, local, sequence))
     }
@@ -254,6 +266,7 @@ impl AppHolderPeerContinuity {
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
             );
+            remote.require_new_grant(&self.owner.last_remote_grant)?;
             let mut peer = Peer::authenticate(&offer, remote, process, stage, &mut acquisition)?;
             ensure!(
                 exchange.initial == self.owner.initial
@@ -284,6 +297,7 @@ impl AppHolderPeerContinuity {
                 "storage_peer_current_ready_changed"
             );
             let mut phase = CurrentStoragePeerPhase {
+                remote_grant: peer.statement().grant_digest()?,
                 owner: &mut self.owner,
                 acquisition,
                 local,
@@ -346,6 +360,7 @@ impl ControllerHolderPeerContinuity {
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
             );
+            remote.require_new_grant(&self.owner.last_remote_grant)?;
             let mut peer = Peer::authenticate(&hello, remote, process, stage, &mut acquisition)?;
             let exchange = CurrentExchange {
                 initial: self.owner.initial.clone(),
@@ -383,6 +398,7 @@ impl ControllerHolderPeerContinuity {
                 .channel
                 .send_storage(&ready, stage, &mut acquisition)?;
             let mut phase = CurrentStoragePeerPhase {
+                remote_grant: peer.statement().grant_digest()?,
                 owner: &mut self.owner,
                 acquisition,
                 local,
@@ -424,6 +440,8 @@ impl CurrentStoragePeerPhase<'_> {
     /// a consumer: it releases the peer scope and must follow those postchecks.
     pub(crate) fn finish_checked(mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.check(stage)?;
+        self.owner.last_local_grant = self.local.grant_digest()?;
+        self.owner.last_remote_grant = self.remote_grant.clone();
         self.owner.disposition.complete(self.exchange.sequence)
     }
 

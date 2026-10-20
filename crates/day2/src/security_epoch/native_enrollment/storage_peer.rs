@@ -37,6 +37,7 @@ pub(crate) struct InitialHolderServer<'file, 'role> {
 /// acquisition, without storing a self-referential borrow of the App stage.
 pub(crate) struct AuthenticatedInitialHolderOffer {
     local: StageStatement,
+    remote: StageStatement,
     exchange: Exchange,
     projection: PreparedFileProjection,
     acquisition: NativeAcquisition,
@@ -58,6 +59,7 @@ pub(crate) struct AuthenticatedControllerFirstHolder<'file, 'role> {
     phase: CurrentPreparedFilePhase<'file, 'role>,
     acquisition: NativeAcquisition,
     local: StageStatement,
+    remote: StageStatement,
     exchange: Exchange,
     #[cfg(target_os = "linux")]
     peer: Peer,
@@ -204,6 +206,7 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
             peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
             channel.check_storage_open(self.phase.controller_stage()?, &mut self.acquisition)?;
             Ok(AuthenticatedControllerFirstHolder {
+                remote: peer.statement().clone(),
                 phase: self.phase,
                 acquisition: self.acquisition,
                 local: self.local,
@@ -258,6 +261,7 @@ impl AuthenticatedInitialHolderOffer {
                 "storage_peer_offer_changed"
             );
             let mut owner = Self {
+                remote: peer.statement().clone(),
                 local,
                 exchange,
                 projection,

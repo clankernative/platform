@@ -45,6 +45,20 @@ pub(in crate::security_epoch::native_enrollment) struct StageStatement {
 }
 
 impl StageStatement {
+    pub(super) fn grant_digest(&self) -> Result<Digest> {
+        Digest::of(&("day2-storage-peer-role-grant-v1", &self.stage))
+    }
+
+    /// DATA replay check only. Issuer/time/sender validation and actual native
+    /// ownership are separate requirements of the current peer factory.
+    pub(super) fn require_new_grant(&self, previous: &Digest) -> Result<()> {
+        ensure!(
+            self.grant_digest()? != *previous,
+            "storage_peer_new_role_grant_required"
+        );
+        Ok(())
+    }
+
     /// Stable original enrollment identity, not a current grant. Later phases
     /// must additionally validate a NEW issuer-signed stage and fresh message.
     pub(super) fn same_enrollment(&self, other: &Self) -> bool {
