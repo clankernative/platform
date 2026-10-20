@@ -326,11 +326,6 @@ impl<'role> NativeVolumeObservation<'role> {
             .check_directory(&mut self.reader, directory, identity)
     }
 
-    pub(super) fn original_controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
-        self.check_current()?;
-        Ok(&mut self.reader.stage)
-    }
-
     /// Capture only while the original preparation remains valid. The caller
     /// performs its final original-file check before the infallible move below.
     pub(super) fn capture_same_owner(&mut self) -> Result<SameEnrolledOwner> {
@@ -562,6 +557,14 @@ impl CurrentVolumePhase<'_, '_> {
     // descriptor or reusable permission is exposed to the application.
     pub(super) fn acquisition(&mut self) -> &mut NativeAcquisition {
         &mut self.reader.acquisition
+    }
+}
+
+impl<'role> CurrentVolumePhase<'_, 'role> {
+    pub(super) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.reader.check()?;
+        self.reader.acquisition.remaining()?;
+        Ok(&mut self.reader.stage)
     }
 }
 
