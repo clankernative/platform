@@ -667,6 +667,9 @@ impl SecurityShell {
             };
             return protected(status.into_response());
         }
+        if !admission.load(Ordering::Acquire) {
+            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        }
         let captured = self
             .credentials
             .as_ref()
@@ -702,10 +705,9 @@ impl SecurityShell {
             // A disconnected browser cannot release capacity while its native
             // provider operation is still running and cannot be cancelled.
             let _permit = permit;
-            ensure!(
-                admission.load(Ordering::Acquire),
-                "security shell is draining"
-            );
+            if !admission.load(Ordering::Acquire) {
+                return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+            }
             match self.dispatch(&method, &path, query.as_deref(), &headers, &body, at) {
                 Ok(response) => Ok(response),
                 Err(error) => match shell_oidc::take_provider_observation(error) {

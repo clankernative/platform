@@ -330,12 +330,14 @@ async fn run(
             result = &mut pump, if !pump_finished => {
                 result?;
                 pump_finished = true;
-                draining = true;
-                admission.store(false, Ordering::Release);
+                ensure!(!admission.load(Ordering::Acquire), "native App pump completed with admission open");
+                // Admission stop drains background work; explicit shutdown
+                // drains the listener. Keep idle health/refusal responses
+                // available between those distinct lifecycle events.
                 live_receiver.close();
                 while live_receiver.try_recv().is_ok() {}
             }
-            work = live_receiver.recv(), if !draining => {
+            work = live_receiver.recv(), if !draining && !live_receiver.is_closed() => {
                 if let Some(work) = work { live.push(work.run()); }
             }
             _ = live.next(), if !live.is_empty() => {}
