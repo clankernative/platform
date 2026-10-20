@@ -75,7 +75,7 @@ resource "terraform_data" "native_admission" {
         local.native_policy.scope == { installation = var.installation, environment = var.environment, app = var.app_id } &&
         jsonencode(local.native_enrollment.bootstrap) == jsonencode(local.native_policy) &&
         jsonencode(local.native_enrollment.store) == jsonencode(local.instance.control.security_epochs[local.native_policy.epoch_store.id]) &&
-        local.native_enrollment.runtime.architecture == "x86_64" &&
+        local.native_enrollment.runtime.architecture == "amd64" &&
         length(local.native_enrollment.runtime.node_name) > 0 && length(local.native_enrollment.runtime.node_uid) > 0 &&
         local.native_role.namespace.name == var.namespace &&
         local.native_role.namespace.uid == data.kubernetes_resource.native_namespace[0].object.metadata.uid &&
