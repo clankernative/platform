@@ -150,6 +150,16 @@ const CONSUMER_EVIDENCE_LIMIT: u8 = 128;
 const CONSUMER_EVIDENCE_BYTES: usize = 2048;
 static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+fn next_consumer_evidence_sequence(records: &std::sync::atomic::AtomicU8) -> Option<u8> {
+    use std::sync::atomic::Ordering;
+    records
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+            (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1)
+        })
+        .ok()
+        .map(|previous| previous + 1)
+}
+
 impl ConsumerScopeEvidence {
     pub(in crate::security_epoch) fn app(
         selection: Digest,
@@ -200,15 +210,11 @@ impl ConsumerScopeEvidence {
     }
 
     pub(in crate::security_epoch) fn record(&self, observation: ConsumerScopeResult) {
-        use std::{io::Write, sync::atomic::Ordering};
-        let Ok(previous) = CONSUMER_EVIDENCE_RECORDS.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |previous| (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1),
-        ) else {
+        use std::io::Write;
+        let Some(sequence) = next_consumer_evidence_sequence(&CONSUMER_EVIDENCE_RECORDS) else {
             return;
         };
-        let Some(line) = self.line(previous + 1, observation) else {
+        let Some(line) = self.line(sequence, observation) else {
             return;
         };
         // Export failure cannot change a completed native result. Missing or
@@ -659,6 +665,18 @@ impl CurrentServingPhase for ServingBorrow<'_, '_> {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    #[test]
+    fn consumer_diagnostic_budget_cannot_wrap_or_reopen_after_exhaustion() {
+        let records = std::sync::atomic::AtomicU8::new(0);
+        for expected in 1..=128 {
+            assert_eq!(next_consumer_evidence_sequence(&records), Some(expected));
+        }
+        for _ in 0..1024 {
+            assert_eq!(next_consumer_evidence_sequence(&records), None);
+        }
+        assert_eq!(records.load(std::sync::atomic::Ordering::Relaxed), 128);
+    }
 
     #[test]
     fn historical_consumer_records_are_bounded_redacted_and_keep_shell_snapshot_absent() {
