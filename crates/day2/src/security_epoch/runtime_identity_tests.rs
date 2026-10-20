@@ -222,25 +222,21 @@ fn container_response_cannot_replace_the_workload_selected_container() {
 }
 
 #[test]
-fn selected_app_and_shell_code_do_not_enable_native_epoch_readers() {
+fn native_reader_selection_keeps_shell_refused_and_app_code_distinct() {
     use day2_capabilities::security_epoch::bootstrap::NativeRole;
     let store = super::tests::selection();
     let policy = super::control_slot_tests::policy(&store);
-    for (role, expected) in [
-        (
-            NativeRole::AppHost,
-            "epoch_native_app_executable_profile_producer_unavailable",
-        ),
-        (
-            NativeRole::SecurityShell,
-            "epoch_native_shell_executable_profile_producer_unavailable",
-        ),
-    ] {
-        let error = super::AuthenticatedReads::acquire(&policy, &store, role)
-            .err()
-            .unwrap();
-        assert_eq!(error.to_string(), expected);
-    }
+    // This selection is DATA. AuthenticatedReads now additionally REQUIRES a
+    // borrowing real EnrolledRoleStage; code/image selections cannot call its
+    // constructor alone or become an enrolled-stage fallback.
+    let selected =
+        super::authenticated_reads::reader_selection(&policy, NativeRole::AppHost).unwrap();
+    assert_eq!(selected.code, &policy.runtime_profile.app_host_code);
+    assert_ne!(selected.code, &policy.runtime_profile.app_artifact);
+    assert_eq!(selected.workload, &policy.app);
+    assert!(
+        super::authenticated_reads::reader_selection(&policy, NativeRole::SecurityShell).is_err()
+    );
 }
 
 #[test]

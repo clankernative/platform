@@ -34,8 +34,9 @@ pub(crate) use native_identity::NativeProcessObservation;
 pub(crate) use native_namespace::NativeNamespaceObservation;
 pub(crate) use storage_authority::NativeStorageCreationAuthority;
 pub(crate) use storage_authority::{
-    BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
-    PreparationCoordinator, RefusedOriginalPreparation,
+    AppPreparedFile, BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    PreparationCoordinator, PreparedFileContinuity, PreparedFileProjection, PreparedInitialFile,
+    PreparedRetentionOutcome, RefusedOriginalPreparation,
 };
 
 #[cfg(test)]

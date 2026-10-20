@@ -118,48 +118,106 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Send);
     assert_not_impl!(crate::security_epoch::NativeConnectionPeerObservation, Sync);
-    assert_consuming!(crate::security_epoch::PreparationCoordinator);
+    assert_consuming!(crate::security_epoch::PreparationCoordinator<'static>);
     assert_not_impl!(
-        crate::security_epoch::PreparationCoordinator,
+        crate::security_epoch::PreparationCoordinator<'static>,
         std::fmt::Debug
     );
-    assert_not_impl!(crate::security_epoch::PreparationCoordinator, Send);
-    assert_not_impl!(crate::security_epoch::PreparationCoordinator, Sync);
-    assert_consuming!(crate::security_epoch::NativeOriginalPreparationOutcome);
+    assert_not_impl!(crate::security_epoch::PreparationCoordinator<'static>, Send);
+    assert_not_impl!(crate::security_epoch::PreparationCoordinator<'static>, Sync);
+    assert_consuming!(crate::security_epoch::NativeOriginalPreparationOutcome<'static>);
     assert_not_impl!(
-        crate::security_epoch::NativeOriginalPreparationOutcome,
+        crate::security_epoch::NativeOriginalPreparationOutcome<'static>,
         std::fmt::Debug
     );
     assert_not_impl!(
-        crate::security_epoch::NativeOriginalPreparationOutcome,
+        crate::security_epoch::NativeOriginalPreparationOutcome<'static>,
         Send
     );
     assert_not_impl!(
-        crate::security_epoch::NativeOriginalPreparationOutcome,
+        crate::security_epoch::NativeOriginalPreparationOutcome<'static>,
         Sync
     );
-    assert_consuming!(crate::security_epoch::OriginalCreatorFd);
-    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, std::fmt::Debug);
-    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Send);
-    assert_not_impl!(crate::security_epoch::OriginalCreatorFd, Sync);
-    assert_consuming!(crate::security_epoch::BeforeAttemptRefusal);
-    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, std::fmt::Debug);
-    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, Send);
-    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal, Sync);
-    assert_consuming!(crate::security_epoch::RefusedOriginalPreparation);
+    assert_consuming!(crate::security_epoch::OriginalCreatorFd<'static>);
     assert_not_impl!(
-        crate::security_epoch::RefusedOriginalPreparation,
+        crate::security_epoch::OriginalCreatorFd<'static>,
         std::fmt::Debug
     );
-    assert_not_impl!(crate::security_epoch::RefusedOriginalPreparation, Send);
-    assert_not_impl!(crate::security_epoch::RefusedOriginalPreparation, Sync);
-    assert_consuming!(crate::security_epoch::NativeStorageCreationAuthority);
+    assert_not_impl!(crate::security_epoch::OriginalCreatorFd<'static>, Send);
+    assert_not_impl!(crate::security_epoch::OriginalCreatorFd<'static>, Sync);
+    assert_consuming!(crate::security_epoch::PreparedInitialFile<'static>);
     assert_not_impl!(
-        crate::security_epoch::NativeStorageCreationAuthority,
+        crate::security_epoch::PreparedInitialFile<'static>,
         std::fmt::Debug
     );
-    assert_not_impl!(crate::security_epoch::NativeStorageCreationAuthority, Send);
-    assert_not_impl!(crate::security_epoch::NativeStorageCreationAuthority, Sync);
+    assert_not_impl!(crate::security_epoch::PreparedInitialFile<'static>, Send);
+    assert_not_impl!(crate::security_epoch::PreparedInitialFile<'static>, Sync);
+    assert_consuming!(crate::security_epoch::PreparedFileContinuity);
+    assert_not_impl!(
+        crate::security_epoch::PreparedFileContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Send);
+    assert_not_impl!(crate::security_epoch::PreparedFileContinuity, Sync);
+    assert_consuming!(crate::security_epoch::PreparedRetentionOutcome<'static>);
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::PreparedRetentionOutcome<'static>,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::AppPreparedFile<'static, 'static>);
+    assert_not_impl!(
+        crate::security_epoch::AppPreparedFile<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::AppPreparedFile<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::AppPreparedFile<'static, 'static>,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::BeforeAttemptRefusal<'static>);
+    assert_not_impl!(
+        crate::security_epoch::BeforeAttemptRefusal<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal<'static>, Send);
+    assert_not_impl!(crate::security_epoch::BeforeAttemptRefusal<'static>, Sync);
+    assert_consuming!(crate::security_epoch::RefusedOriginalPreparation<'static>);
+    assert_not_impl!(
+        crate::security_epoch::RefusedOriginalPreparation<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::RefusedOriginalPreparation<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::RefusedOriginalPreparation<'static>,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::NativeStorageCreationAuthority<'static>);
+    assert_not_impl!(
+        crate::security_epoch::NativeStorageCreationAuthority<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::NativeStorageCreationAuthority<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::NativeStorageCreationAuthority<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::NativeNamespaceObservation);
     assert_not_impl!(
         crate::security_epoch::NativeNamespaceObservation,
@@ -204,10 +262,19 @@ const _: () = {
     );
     assert_not_impl!(crate::security_epoch::control_slot_io::KnownClaim, Send);
     assert_not_impl!(crate::security_epoch::control_slot_io::KnownClaim, Sync);
-    assert_consuming!(crate::security_epoch::AuthenticatedReads);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, std::fmt::Debug);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Send);
-    assert_not_impl!(crate::security_epoch::AuthenticatedReads, Sync);
+    assert_consuming!(crate::security_epoch::AuthenticatedReads<'static, 'static>);
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::AuthenticatedReads<'static, 'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::NativeAcquisition);
     assert_not_impl!(crate::security_epoch::NativeAcquisition, std::fmt::Debug);
     assert_not_impl!(crate::security_epoch::NativeAcquisition, Send);
@@ -229,6 +296,20 @@ const _: () = {
     assert_not_impl!(crate::security_epoch::EpochObservation, Send);
     assert_not_impl!(crate::security_epoch::EpochObservation, Sync);
     assert_consuming!(crate::security_epoch::journal::CurrentBootstrapExecution);
+    assert_consuming!(crate::security_epoch::journal::PreparedDispatch);
+    assert_not_impl!(
+        crate::security_epoch::journal::PreparedDispatch,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::journal::PreparedDispatch, Send);
+    assert_not_impl!(crate::security_epoch::journal::PreparedDispatch, Sync);
+    assert_consuming!(crate::security_epoch::journal::CounterResponse);
+    assert_not_impl!(
+        crate::security_epoch::journal::CounterResponse,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::journal::CounterResponse, Send);
+    assert_not_impl!(crate::security_epoch::journal::CounterResponse, Sync);
     assert_not_impl!(
         crate::security_epoch::journal::CurrentBootstrapExecution,
         std::fmt::Debug

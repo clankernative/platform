@@ -1,6 +1,7 @@
-//! Storage creation's owning boundary. No production issuer or factory exists.
-//! The empty production issuer enum makes that absence explicit in the type.
-//! Namespace, image, Kubernetes and volume DATA cannot construct this owner.
+//! Controller-only native storage creation. The native factory consumes an
+//! enrolled controller and performs real provider/device/mount acquisition.
+//! Namespace, Kubernetes and volume DATA cannot construct the native owner.
+//! Live profile qualification and current counter/writer admission are separate.
 
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
@@ -11,10 +12,14 @@ use day2_capabilities::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
+mod native_volume;
+use native_volume::NativeVolumeObservation;
+mod persistent_disk;
 mod preparation;
 pub(crate) use preparation::{
-    BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
-    PreparationCoordinator, RefusedOriginalPreparation,
+    AppPreparedFile, BeforeAttemptRefusal, NativeOriginalPreparationOutcome, OriginalCreatorFd,
+    PreparationCoordinator, PreparedFileContinuity, PreparedFileProjection, PreparedInitialFile,
+    PreparedRetentionOutcome, RefusedOriginalPreparation,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,11 +85,10 @@ struct DirectoryIdentity {
     mount: u64,
 }
 
-/// There are deliberately NO production variants or constructors. An actual
-/// runtime/role/provider issuer must be implemented and reviewed before this
-/// can contain an actual owning witness. Do not replace it with a boolean,
-/// receipt, scalar identity or a blanket successful check.
-enum StorageIssuerOwner {
+/// Retains the actual enrolled stage and provider/mount owners. The controlled
+/// filesystem fixture remains a distinct test-only variant, never a fallback.
+enum StorageIssuerOwner<'role> {
+    Native(Box<NativeVolumeObservation<'role>>),
     #[cfg(test)]
     UnqualifiedFilesystemFixture {
         domain: Digest,
@@ -93,11 +97,17 @@ enum StorageIssuerOwner {
     },
 }
 
-impl StorageIssuerOwner {
-    fn check_current(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
+impl StorageIssuerOwner<'_> {
+    fn check_current(
+        &mut self,
+        directory: &File,
+        identity: &DirectoryIdentity,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
         let sample = acquisition.sample()?;
         let _ = &sample;
         match *self {
+            Self::Native(ref mut volume) => volume.check_directory(directory, identity),
             #[cfg(test)]
             Self::UnqualifiedFilesystemFixture {
                 ref domain,
@@ -121,14 +131,14 @@ enum StorageRefusal {
     PreparationFailed,
 }
 
-/// Not constructible in production. Root's closed preparation child will own
-/// fixed file operations with private access to these anchors. No descriptor
+/// The native factory owns fixed file operations and the actual enrolled
+/// controller/provider anchors. No descriptor
 /// getter, AsFd/AsRawFd, clone/dup/export or callback API is supplied.
-pub(crate) struct NativeStorageCreationAuthority {
+pub(crate) struct NativeStorageCreationAuthority<'role> {
     selection: ReviewedStorageSelection,
     directory: File,
     identity: DirectoryIdentity,
-    issuer: StorageIssuerOwner,
+    issuer: StorageIssuerOwner<'role>,
     preparation: Budget,
     process: u32,
     thread: ThreadId,
@@ -136,7 +146,38 @@ pub(crate) struct NativeStorageCreationAuthority {
     local: PhantomData<Rc<()>>,
 }
 
-impl NativeStorageCreationAuthority {
+impl<'role> NativeStorageCreationAuthority<'role> {
+    /// The only native creation factory consumes an actual enrolled controller
+    /// stage and performs the fixed provider/device/mount acquisition itself.
+    /// Nothing accepts an issuer flag, parsed provider proof or caller FD.
+    pub(super) fn acquire_initial(
+        stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<(Self, NativeAcquisition)> {
+        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)?;
+        let seed = volume.original_seed()?;
+        let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&SelectionData {
+            policy: policy.clone(),
+            store: store.clone(),
+            seed,
+        })?)?;
+        let (directory, identity, mut acquisition) = volume.create_initial_directory()?;
+        let preparation = acquisition.budget()?;
+        let mut authority = Self {
+            selection,
+            directory,
+            identity,
+            issuer: StorageIssuerOwner::Native(Box::new(volume)),
+            preparation,
+            process: std::process::id(),
+            thread: std::thread::current().id(),
+            refusal: None,
+            local: PhantomData,
+        };
+        authority.check_current(&mut acquisition)?;
+        Ok((authority, acquisition))
+    }
     pub(super) fn check_current(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
         let result = (|| {
             ensure!(self.refusal.is_none(), "storage_creation_authority_refused");
@@ -148,10 +189,10 @@ impl NativeStorageCreationAuthority {
             let identity = directory_identity(&self.directory)?;
             ensure!(identity == self.identity, "storage_creation_anchor_changed");
             self.preparation.remaining_native(acquisition)?;
-            // An actual issuer must also perform its actual current runtime,
-            // role, provider and fresh anchor-path join. No production variant
-            // exists, so these filesystem checks cannot authorize creation.
-            self.issuer.check_current(acquisition)?;
+            // The native issuer performs current role, original provider lease,
+            // actual device/mount and fresh private-anchor path joins.
+            self.issuer
+                .check_current(&self.directory, &self.identity, acquisition)?;
             self.preparation.remaining_native(acquisition)?;
             Ok(())
         })();

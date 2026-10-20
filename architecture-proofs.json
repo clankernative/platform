@@ -1,15 +1,316 @@
 {
   "version": 1,
   "trait_checks": [
-    {"source":"crates/day2/src/structural_proofs.rs","scope":"module","fingerprint":"sha256:bb4a431776bf086f6eafefc9370490fd12a18b5bcb62f7a01ae3150b915f1f41","registration":{"source":"crates/day2/src/lib.rs","module":"structural_proofs"}},
-    {"source":"crates/day2-control/src/release.rs","scope":"const","fingerprint":"sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3","registration":null}
+    {
+      "source": "crates/day2/src/structural_proofs.rs",
+      "scope": "module",
+      "fingerprint": "sha256:6a06871ceef2c98fcf19abf8e2d963ddc57134fd6c0d940cf5f331bdd72a4f46",
+      "registration": {
+        "source": "crates/day2/src/lib.rs",
+        "module": "structural_proofs"
+      }
+    },
+    {
+      "source": "crates/day2-control/src/release.rs",
+      "scope": "const",
+      "fingerprint": "sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3",
+      "registration": null
+    }
   ],
   "proofs": [
-    {"source":"crates/day2/src/oauth/management/app.rs","type_name":"CaptureStart","owning_children":[],"methods":[],"factories":[{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn start (& self) -> & CaptureStart"},{"owner":"Manager","signature":"pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"}],"material_uses":[],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/management/app.rs","type_name":"CommittedCapture","owning_children":[],"methods":["pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent","pub (in crate :: oauth) fn start (& self) -> & CaptureStart"],"factories":[{"owner":"Manager","signature":"pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"}],"material_uses":[{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent"},{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn start (& self) -> & CaptureStart"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"AppCreator","owning_children":[],"methods":["pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"],"factories":[{"owner":null,"signature":"pub (super) fn capture_app < 'a > (start : & 'a super :: management :: app :: CaptureStart , app : & str) -> Result < AppCreator < 'a > >"}],"material_uses":[{"owner":"AppCreator < '_ >","signature":"pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"}],"proof_uses":[],"kind":"private_material","consuming_methods":["bind"]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"OriginalPhase","owning_children":[],"methods":["pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >","pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"],"factories":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"}],"material_uses":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"RoleStage","owning_children":[],"methods":["pub (crate) fn check (& mut self) -> Result < () >","pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >","pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"],"factories":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"}],"material_uses":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn check (& mut self) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
+    {
+      "source": "crates/day2/src/oauth/management/app.rs",
+      "type_name": "CaptureStart",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+        },
+        {
+          "owner": "Manager",
+          "signature": "pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/management/app.rs",
+      "type_name": "CommittedCapture",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent",
+        "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+      ],
+      "factories": [
+        {
+          "owner": "Manager",
+          "signature": "pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent"
+        },
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "AppCreator",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn capture_app < 'a > (start : & 'a super :: management :: app :: CaptureStart , app : & str) -> Result < AppCreator < 'a > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "bind"
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "OriginalPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RoleStage",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
+        "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < '_ >",
+          "signature": "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < '_ >",
+          "signature": "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/exchange.rs",
+      "type_name": "ExchangeDispatchPermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": [
+        "pub fn send(self, transport: impl FnOnce(&ExchangeRequest<'_>) -> Result<TokenHttpResponse>) -> ExchangeObservation"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"
+        },
+        {
+          "owner": null,
+          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>) -> Result<Option<ExchangeDispatchPermit>>"
+        },
+        {
+          "owner": null,
+          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: Option<&super::management::app::FinishGuard<'_>>) -> Result<Option<ExchangeDispatchPermit>>"
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/store.rs",
+      "type_name": "RefreshDispatchPermit",
+      "kind": "consuming",
+      "consuming_methods": [
+        "send"
+      ],
+      "methods": [
+        "pub fn attempt(&self) -> &str",
+        "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "ClientCredential",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>",
+        "pub(in crate::oauth) fn initial_exchange(self, permit: super::exchange::ExchangeDispatchPermit, input: InitialExchange<'_>) -> Result<(super::exchange::ExchangeObservation, Option<super::account::ProviderAccount>,)>"
+      ],
+      "factories": [
+        {
+          "owner": "ClientCredential",
+          "signature": "pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ClientCredential",
+          "signature": "pub(in crate::oauth) fn initial_exchange(self, permit: super::exchange::ExchangeDispatchPermit, input: InitialExchange<'_>) -> Result<(super::exchange::ExchangeObservation, Option<super::account::ProviderAccount>,)>"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "PreparedReplacement",
+      "kind": "private_material",
+      "consuming_methods": [
+        "into_parts"
+      ],
+      "methods": [
+        "pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedReplacement",
+          "signature": "pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/refresh.rs",
+      "type_name": "Resolution",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub(super) fn problem(&self) -> Option<&'static str>",
+        "fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>",
+        "fn unavailable(problem: &'static str) -> Self",
+        "pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "fn unavailable(problem: &'static str) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Resolution",
+          "signature": "pub(super) fn problem(&self) -> Option<&'static str>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"
+        }
+      ],
+      "owning_children": []
+    },
     {
       "source": "crates/day2/src/security_epoch/native_connection_peer.rs",
       "type_name": "NativeConnectionPeerObservation",
@@ -45,13 +346,23 @@
       "source": "crates/day2/src/execution.rs",
       "type_name": "DispatchPermit",
       "kind": "consuming",
-      "consuming_methods": ["perform"],
-      "methods": ["fn perform(self, runtime: &Runtime) -> Result<Performed>"],
+      "consuming_methods": [
+        "perform"
+      ],
+      "methods": [
+        "fn perform(self, runtime: &Runtime) -> Result<Performed>"
+      ],
       "factories": [
-        {"owner": null, "signature": "pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit>"}
+        {
+          "owner": null,
+          "signature": "pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit>"
+        }
       ],
       "proof_uses": [
-        {"owner": null, "signature": "pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Performed>"}
+        {
+          "owner": null,
+          "signature": "pub(crate) fn perform(runtime: &Runtime, permit: DispatchPermit) -> Result<Performed>"
+        }
       ]
     },
     {
@@ -59,18 +370,44 @@
       "type_name": "ApprovedRelease",
       "kind": "readiness",
       "consuming_methods": [],
-      "methods": ["pub fn id(&self) -> &Digest"],
+      "methods": [
+        "pub fn id(&self) -> &Digest"
+      ],
       "factories": [
-        {"owner": "Journal", "signature": "pub fn approve_release(&mut self, approval: &ReleaseApproval) -> Result<ApprovedRelease>"},
-        {"owner": "Journal", "signature": "pub fn load_approved_release(&self, id: &Digest) -> Result<ApprovedRelease>"},
-        {"owner": "Journal", "signature": "pub(crate) fn recover_approved_release_in(tx: &Transaction<'_>, id: &Digest) -> Result<ApprovedRelease>"}
+        {
+          "owner": "Journal",
+          "signature": "pub fn approve_release(&mut self, approval: &ReleaseApproval) -> Result<ApprovedRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub fn load_approved_release(&self, id: &Digest) -> Result<ApprovedRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub(crate) fn recover_approved_release_in(tx: &Transaction<'_>, id: &Digest) -> Result<ApprovedRelease>"
+        }
       ],
       "proof_uses": [
-        {"owner": "Journal", "signature": "fn stop_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor, status: &str) -> Result<()>"},
-        {"owner": "Journal", "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
-        {"owner": "Journal", "signature": "pub fn cancel_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"},
-        {"owner": "Journal", "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
-        {"owner": "Journal", "signature": "pub fn revoke_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"}
+        {
+          "owner": "Journal",
+          "signature": "fn stop_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor, status: &str) -> Result<()>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub fn cancel_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub fn revoke_release(&mut self, release: &ApprovedRelease, actor: &OperatorActor) -> Result<()>"
+        }
       ]
     },
     {
@@ -78,15 +415,32 @@
       "type_name": "ReadyRelease",
       "kind": "readiness",
       "consuming_methods": [],
-      "methods": ["pub fn id(&self) -> &Digest"],
+      "methods": [
+        "pub fn id(&self) -> &Digest"
+      ],
       "factories": [
-        {"owner": "Journal", "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
-        {"owner": "Journal", "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"},
-        {"owner": "Journal", "signature": "pub(crate) fn recover_ready_release_in(tx: &Transaction<'_>, id: &Digest, release: &Digest) -> Result<ReadyRelease>"}
+        {
+          "owner": "Journal",
+          "signature": "pub fn prepare_release(&mut self, approved: &ApprovedRelease) -> Result<ReadyRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub(crate) fn prepare_release_in(tx: &Transaction<'_>, approved: &ApprovedRelease) -> Result<ReadyRelease>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub(crate) fn recover_ready_release_in(tx: &Transaction<'_>, id: &Digest, release: &Digest) -> Result<ReadyRelease>"
+        }
       ],
       "proof_uses": [
-        {"owner": "Journal", "signature": "pub(crate) fn activate_release_in_checked(tx: &Transaction<'_>, ready: &ReadyRelease, catalog: Option<&crate::release_catalog::ReleaseCatalogCandidate>) -> Result<ActivationReceipt>"},
-        {"owner": "Journal", "signature": "pub fn activate_release(&mut self, ready: &ReadyRelease) -> Result<ActivationReceipt>"}
+        {
+          "owner": "Journal",
+          "signature": "pub(crate) fn activate_release_in_checked(tx: &Transaction<'_>, ready: &ReadyRelease, catalog: Option<&crate::release_catalog::ReleaseCatalogCandidate>) -> Result<ActivationReceipt>"
+        },
+        {
+          "owner": "Journal",
+          "signature": "pub fn activate_release(&mut self, ready: &ReadyRelease) -> Result<ActivationReceipt>"
+        }
       ]
     },
     {
@@ -102,9 +456,18 @@
         "pub fn into_response_body(self, lease: &KeyLease) -> Result<String>"
       ],
       "factories": [
-        {"owner": null, "signature": "pub(crate) fn authorize_reveal(db: &mut Connection, post: VerifiedHumanPost) -> Result<Option<HumanRevealPermit>>"},
-        {"owner": null, "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"},
-        {"owner": "PendingReveal", "signature": "pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"}
+        {
+          "owner": null,
+          "signature": "pub(crate) fn authorize_reveal(db: &mut Connection, post: VerifiedHumanPost) -> Result<Option<HumanRevealPermit>>"
+        },
+        {
+          "owner": null,
+          "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"
+        },
+        {
+          "owner": "PendingReveal",
+          "signature": "pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"
+        }
       ]
     },
     {
@@ -114,9 +477,14 @@
       "consuming_methods": [
         "commit"
       ],
-      "methods": ["pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"],
+      "methods": [
+        "pub(crate) fn commit(self, tx: crate::write_queue::WriteTransaction<'_>) -> Result<HumanRevealPermit>"
+      ],
       "factories": [
-        {"owner": null, "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"}
+        {
+          "owner": null,
+          "signature": "pub(crate) fn authorize_reveal_in(tx: &Transaction<'_>, post: VerifiedHumanPost) -> Result<Option<PendingReveal>>"
+        }
       ]
     },
     {
@@ -126,11 +494,22 @@
       "consuming_methods": [
         "send"
       ],
-      "methods": ["pub fn send(self, transport: impl FnOnce(&ExchangeRequest<'_>) -> Result<TokenHttpResponse>) -> ExchangeObservation"],
+      "methods": [
+        "pub fn send(self, transport: impl FnOnce(&ExchangeRequest<'_>) -> Result<TokenHttpResponse>) -> ExchangeObservation"
+      ],
       "factories": [
-        {"owner": null, "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"},
-        {"owner": null, "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>) -> Result<Option<ExchangeDispatchPermit>>"},
-        {"owner": null, "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: Option<&super::management::app::FinishGuard<'_>>) -> Result<Option<ExchangeDispatchPermit>>"}
+        {
+          "owner": null,
+          "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"
+        },
+        {
+          "owner": null,
+          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>) -> Result<Option<ExchangeDispatchPermit>>"
+        },
+        {
+          "owner": null,
+          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: Option<&super::management::app::FinishGuard<'_>>) -> Result<Option<ExchangeDispatchPermit>>"
+        }
       ]
     },
     {
@@ -140,9 +519,15 @@
       "consuming_methods": [
         "send"
       ],
-      "methods": ["pub fn attempt(&self) -> &str", "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"],
+      "methods": [
+        "pub fn attempt(&self) -> &str",
+        "pub fn send<T>(self, transport: impl FnOnce(&RefreshEligibility) -> T) -> T"
+      ],
       "factories": [
-        {"owner": null, "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"}
+        {
+          "owner": null,
+          "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
+        }
       ]
     },
     {
@@ -155,10 +540,16 @@
         "pub(in crate::oauth) fn initial_exchange(self, permit: super::exchange::ExchangeDispatchPermit, input: InitialExchange<'_>) -> Result<(super::exchange::ExchangeObservation, Option<super::account::ProviderAccount>,)>"
       ],
       "factories": [
-        {"owner":"ClientCredential","signature":"pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>"}
+        {
+          "owner": "ClientCredential",
+          "signature": "pub(super) fn new(client: String, secret: String, reference: BindingRef, checked_at: i64) -> Result<Self>"
+        }
       ],
       "material_uses": [
-        {"owner":"ClientCredential","signature":"pub(in crate::oauth) fn initial_exchange(self, permit: super::exchange::ExchangeDispatchPermit, input: InitialExchange<'_>) -> Result<(super::exchange::ExchangeObservation, Option<super::account::ProviderAccount>,)>"}
+        {
+          "owner": "ClientCredential",
+          "signature": "pub(in crate::oauth) fn initial_exchange(self, permit: super::exchange::ExchangeDispatchPermit, input: InitialExchange<'_>) -> Result<(super::exchange::ExchangeObservation, Option<super::account::ProviderAccount>,)>"
+        }
       ],
       "owning_children": []
     },
@@ -166,13 +557,23 @@
       "source": "crates/day2/src/oauth/refresh.rs",
       "type_name": "PreparedReplacement",
       "kind": "private_material",
-      "consuming_methods": ["into_parts"],
-      "methods": ["pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"],
+      "consuming_methods": [
+        "into_parts"
+      ],
+      "methods": [
+        "pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"
+      ],
       "factories": [
-        {"owner":null,"signature":"pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"}
+        {
+          "owner": null,
+          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+        }
       ],
       "material_uses": [
-        {"owner":"PreparedReplacement","signature":"pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"}
+        {
+          "owner": "PreparedReplacement",
+          "signature": "pub(super) fn into_parts(self) -> (String, i64, String, String, custody::PreparedTokenMaterial)"
+        }
       ],
       "owning_children": []
     },
@@ -188,13 +589,28 @@
         "pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"
       ],
       "factories": [
-        {"owner":null,"signature":"pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"},
-        {"owner":"Resolution","signature":"fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>"},
-        {"owner":"Resolution","signature":"fn unavailable(problem: &'static str) -> Self"}
+        {
+          "owner": null,
+          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "fn ready(context: &usage::RefreshContext, version: i64, clock: i64) -> Result<Self>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "fn unavailable(problem: &'static str) -> Self"
+        }
       ],
       "material_uses": [
-        {"owner":"Resolution","signature":"pub(super) fn problem(&self) -> Option<&'static str>"},
-        {"owner":"Resolution","signature":"pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"}
+        {
+          "owner": "Resolution",
+          "signature": "pub(super) fn problem(&self) -> Option<&'static str>"
+        },
+        {
+          "owner": "Resolution",
+          "signature": "pub(super) fn validate(&self, db: &Connection, now: i64) -> Result<bool>"
+        }
       ],
       "owning_children": []
     },
@@ -208,6 +624,7 @@
         "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
         "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
         "pub (super) fn lose_original_creator_fixture (& mut self)",
+        "pub (super) fn observe_fixture_lifetime (& mut self) -> std :: rc :: Weak < () >",
         "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
       ],
       "factories": [],
@@ -272,28 +689,28 @@
       "type_name": "AuthenticatedReads",
       "owning_children": [],
       "methods": [
-        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >",
+        "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole , stage : & 'stage mut EnrolledRoleStage < 'role >) -> Result < Self >",
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "fn sample (& mut self) -> Result < Sample >"
       ],
       "factories": [
         {
-          "owner": "AuthenticatedReads",
-          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole) -> Result < Self >"
+          "owner": "AuthenticatedReads < 'stage , 'role >",
+          "signature": "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole , stage : & 'stage mut EnrolledRoleStage < 'role >) -> Result < Self >"
         }
       ],
       "material_uses": [
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
         },
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "fn sample (& mut self) -> Result < Sample >"
         },
         {
-          "owner": "AuthenticatedReads",
+          "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >"
         }
       ],
@@ -611,10 +1028,15 @@
       "type_name": "KnownClaim",
       "owning_children": [],
       "methods": [
-        "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Request , Budget) >",
+        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >",
         "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
       ],
       "factories": [
+        {
+          "owner": "KnownClaim",
+          "signature": "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >"
+        },
         {
           "owner": "SlotClaimMutation",
           "signature": "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
@@ -674,38 +1096,72 @@
       "type_name": "NativeStorageCreationAuthority",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "native_volume"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "persistent_disk"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
             "module": "preparation"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
         }
       ],
       "methods": [
+        "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >",
         "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn filesystem_fixture (selection : ReviewedStorageSelection , directory : File , acquisition : & mut NativeAcquisition) -> Result < Self >",
         "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
       ],
-      "factories": [],
+      "factories": [
+        {
+          "owner": "NativeStorageCreationAuthority < 'role >",
+          "signature": "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >"
+        }
+      ],
       "material_uses": [
         {
           "owner": null,
-          "signature": "fn check_file_identity (authority : & mut NativeStorageCreationAuthority , file : & File , identity : & FileIdentity , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
+          "signature": "fn check_file_identity (authority : & mut NativeStorageCreationAuthority < '_ > , file : & File , identity : & FileIdentity , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
           "owner": null,
-          "signature": "fn observe_file (authority : & NativeStorageCreationAuthority , file : & File , expected_length : usize) -> Result < FileIdentity >"
+          "signature": "fn observe_file (authority : & NativeStorageCreationAuthority < '_ > , file : & File , expected_length : usize) -> Result < FileIdentity >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         },
         {
-          "owner": "NativeStorageCreationAuthority",
+          "owner": "NativeStorageCreationAuthority < 'role >",
           "signature": "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
         },
         {
-          "owner": "NativeStorageCreationAuthority",
+          "owner": "NativeStorageCreationAuthority < 'role >",
           "signature": "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
         }
       ],
@@ -716,12 +1172,27 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "BeforeAttemptRefusal",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [],
@@ -732,20 +1203,39 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "OriginalCreatorFd",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn check_unchanged_initial_file (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
       ],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [
         {
-          "owner": "OriginalCreatorFd",
+          "owner": "OriginalCreatorFd < '_ >",
           "signature": "pub (super) fn check_unchanged_initial_file (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
         }
       ],
       "proof_uses": [],
@@ -755,7 +1245,22 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "PreparationCoordinator",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [
         "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn file_ref (& self) -> Result < & File >",
@@ -765,24 +1270,24 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn check_file (& mut self , expected_length : usize , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn file_ref (& self) -> Result < & File >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn prepare (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
         },
         {
-          "owner": "PreparationCoordinator",
+          "owner": "PreparationCoordinator < '_ >",
           "signature": "fn validate_plan (& mut self , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> Result < () >"
         }
       ],
@@ -793,18 +1298,153 @@
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
       "type_name": "RefusedOriginalPreparation",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
       "methods": [],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn prepare_original_file (authority : NativeStorageCreationAuthority , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome"
+          "signature": "pub (super) fn prepare_original_file < 'role > (authority : NativeStorageCreationAuthority < 'role > , plan : & ReviewedFileLayout , acquisition : & mut NativeAcquisition) -> NativeOriginalPreparationOutcome < 'role >"
         }
       ],
       "material_uses": [],
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "CounterResponse",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn bytes (& self) -> & [u8]",
+        "pub (super) fn finish (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CounterResponse",
+          "signature": "pub (super) fn bytes (& self) -> & [u8]"
+        },
+        {
+          "owner": "CounterResponse",
+          "signature": "pub (super) fn finish (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/journal.rs",
+      "type_name": "PreparedDispatch",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+      ],
+      "factories": [
+        {
+          "owner": "AuthorizedDispatch",
+          "signature": "pub (super) fn prepare (self , selection : & EpochStore , port : & mut impl Port) -> Result < PreparedDispatch >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+        },
+        {
+          "owner": "PreparedDispatch",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "send"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+      "type_name": "PreparedInitialFile",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "app"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
+            "module": "continuity"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn check_original (& mut self) -> Result < () >",
+        "pub (crate) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >",
+        "pub (crate) fn retain_for_current_phases (mut self) -> PreparedRetentionOutcome < 'role >",
+        "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (super) fn retain_original (creator : OriginalCreatorFd < 'role > , layout : ReviewedFileLayout , acquisition : NativeAcquisition) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn projection (& mut self) -> Result < crate :: security_epoch :: PreparedFileProjection >"
+        },
+        {
+          "owner": "PreparedInitialFile < 'role >",
+          "signature": "pub (crate) fn retain_for_current_phases (mut self) -> PreparedRetentionOutcome < 'role >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "retain_for_current_phases"
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
@@ -944,6 +1584,176 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/app.rs",
+      "type_name": "AppPreparedFile",
+      "owning_children": [],
+      "methods": [
+        "fn check_identity (& mut self) -> Result < () >",
+        "pub (crate) fn check_original (& mut self) -> Result < () >",
+        "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >",
+        "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
+        "fn read_current (& mut self) -> Result < Vec < u8 > >"
+      ],
+      "factories": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn observe_existing (stage : & 'stage mut EnrolledRoleStage < 'role > , runtime : & crate :: store :: Runtime , policy : & InitialBootstrapPolicy , store : & EpochStore , projection : PreparedFileProjection) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "fn check_identity (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "fn read_current (& mut self) -> Result < Vec < u8 > >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn check_original (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppPreparedFile < 'stage , 'role >",
+          "signature": "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "PreparedFileContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "NativeVolumeObservation",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >",
+        "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
+        "pub (super) fn check_current (& mut self) -> Result < () >",
+        "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
+        "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >",
+        "pub (super) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
+        "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn check_current (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn original_controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "retain_resources"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "NativeVolumeContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+      "type_name": "CurrentVolumePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
         }
       ],
       "proof_uses": [],

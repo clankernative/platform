@@ -411,14 +411,19 @@ impl SlotClaimMutation {
 }
 
 impl KnownClaim {
+    pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        self.mutation.check(selection, port)
+    }
+
     pub(super) fn prepare(
         mut self,
         selection: &EpochStore,
         port: &mut impl Port,
-    ) -> Result<(Request, Budget)> {
+    ) -> Result<(Self, Request, Budget)> {
         self.mutation.check(selection, port)?;
         let budget = self.mutation.context.budget(port)?;
-        Ok((self.mutation.core.counter, budget))
+        let request = self.mutation.core.counter.clone();
+        Ok((self, request, budget))
     }
 
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
