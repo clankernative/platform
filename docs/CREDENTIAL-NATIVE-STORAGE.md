@@ -68,6 +68,24 @@ identity. Failure remains latched even after restoration. A replacement interval
 cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
 there is no inverse projection-to-owner constructor.
 
+Only a successfully checked preparation may consume the original creator into
+`PreparedFileContinuity`. That transition captures the real `SameEnrolledOwner`
+while the original preparation still passes, then moves the same file, directory
+and block-device descriptors without reopening them. Failure retains the
+original owner in a refused outcome. Filesystem fixtures cannot take this
+transition. The original preparation stage and its spent clock are dropped;
+a later current operation must supply a fresh bounded stage from the same
+still-live enrolled owner and reobserve the actual selected provider attachment.
+This is physical continuity, not a renewed preparation, first-holder or writer
+grant. All initial-image changes still refuse; serving after legitimate SQLite
+writes requires its own qualified activation transition.
+
+The initial controller qualification budget is a 250m CPU / 256Mi memory request
+and a 1 CPU / 512Mi memory limit, in one process that also owns the fixed storage
+peer. There is no additional storage sidecar. These are unmeasured starting
+limits; peak admitted-runtime initialization and headroom must be measured before
+qualifying the deployment.
+
 An authorized counter dispatch retains the known claim through the fixed
 request, response parser and final current check. The prepared dispatch is
 consumed at send, and the response still owns its execution context. It cannot
