@@ -65,6 +65,9 @@ fn selected_file(
 struct IssuerBirthOwner {
     child: Child,
     peer: Option<MessageProcess>,
+    // Retain the actual startup endpoint through grant admission. A queued
+    // packet plus HUP is still a refusal, even while its sender lives.
+    startup: Channel,
     _listener: Listener,
     socket_identity: (u64, u64),
     storage: StorageSocketDirectory,
@@ -115,7 +118,7 @@ pub(super) fn run() -> Result<()> {
     acquisition.remaining()?;
     let (listener, listener_child) = Listener::create(&mut acquisition)?;
     let metadata = std::fs::symlink_metadata("/run/day2-native-enrollment/issuer.sock")?;
-    let (mut channel, child_channel) = Channel::pair(&mut acquisition)?;
+    let (channel, child_channel) = Channel::pair(&mut acquisition)?;
     let child = Command::new(ISSUER)
         .arg("issuer")
         .env_clear()
@@ -126,13 +129,14 @@ pub(super) fn run() -> Result<()> {
     let mut birth = IssuerBirthOwner {
         child,
         peer: None,
+        startup: channel,
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
         storage,
     };
     birth.peer = Some(grant_child(
         &mut birth.child,
-        &mut channel,
+        &mut birth.startup,
         &root,
         &mut current,
         &policy,
