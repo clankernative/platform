@@ -271,6 +271,13 @@ its logs and require both sandbox qualification and cgroup preflight to pass.
 Landlock ABI 3, seccomp, cgroup v2 and private cgroup namespaces are mandatory.
 The reference cannot promise every current GKE kernel supplies them.
 
+Pass the operator-reviewed native Linux `Requirements` object as
+`security_requirements` when selecting evidence-bound security admission. The
+root checks its artifact and Linux profile, then preserves the object unchanged;
+native admission checks its complete evidence, platform inventory and executing
+supervisor/sandbox. A mocked Terraform plan is not qualification. Null keeps
+existing installations unchanged and does not claim security approval.
+
 Fill workload tfvars with the image digest, artifact ID, hosted domain, initial
 principals and the **complete authority policy for that artifact**. The template
 intentionally has an empty policy and is refused until filled. Match the node
