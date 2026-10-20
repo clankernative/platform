@@ -14,7 +14,8 @@ below are still missing from those PRs, as confirmed by their owners.
   Credential owns the fixed issuer entrypoint, operational composition and
   live enrollment qualification; G1 is implementing the exchange against S1.
 - G1 owns provider P3 and exclusive-mutator qualification, counter activation,
-  current serving/writer authority, and final consumer settlement. The current
+  and current serving/writer authority. Product owns final consumer settlement
+  on this branch. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
   `PreparedFileContinuity` retain real resources, but cannot authorize serving
   mutations. `CurrentBootstrapExecution` has no production constructor.
@@ -51,6 +52,28 @@ socket writes as applicable. Each later phase needs its own current authority
 check. A dropped response, unknown commit or unknown send must retain the
 appropriate unresolved ownership; it must not restart either original or
 create a second permit journal.
+
+`with_consumer` now retains the same original and role through the real consumer
+operation and its result, with pessimistic drop on error or unwinding. The
+original remains in its owning registry, permanently refused after ambiguity;
+there is no timer-based regrant or restoration from SQL. App start, dispatch,
+activation and disconnect hold that borrow through the actual SQLite COMMIT
+and a subsequent current check. A commit error cannot be swallowed to rearm
+the original. Shell session insertion, selected key loading/signing and App
+signature verification use the same boundary. Provider token and account
+requests retain it through their actual response-body reads.
+
+The native HTTP socket checks before and after each write/flush/shutdown poll.
+Pending and partial writes are not delivery completion. A failed, timed out or
+cancelled connection refuses its original; a handler/RPC success cannot erase
+that outcome. The App and Shell own their independent response lifetimes.
+Successful transport completion means local completion only, not human receipt.
+
+This consumer boundary currently checks the original and enrolled role. It must
+also consume G1's genuine current serving/storage owner before the production
+producer can be enabled. The published preparation-only file phase cannot
+supply that authority. No native serving factory or substitute epoch boolean
+is introduced by this branch.
 
 When a storage consumer already holds the native stage,
 `OriginalPhase::check_with_native` checks the same retained original through
