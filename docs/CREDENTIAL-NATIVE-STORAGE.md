@@ -26,9 +26,13 @@ dedicated enrollment pool, with host PID visibility and a read-only host
 `/dev/disk/by-id` directory. Its fixed adapter opens only the selected block
 device read-only and compares its actual device number with the retained mount;
 the provider attachment and immutable disk ID must also match. This explicitly
-adds the controller and node runtime to the TCB. It grants no device, containerd
-or ptrace access to AppHost or SecurityShell and makes no hostile-code
-containment claim. Deployment of this profile requires the instance's normal
+adds the controller and node runtime to the TCB. The current S1 profile also
+requires AppHost and SecurityShell to run with hostPID=true for initial PID
+namespace identity. Both remain UID/GID10001, unprivileged, drop all additional
+capabilities and use RuntimeDefault, with immutable subPath policy and read-only
+enrollment sockets. They receive no device, containerd, KMS or ptrace grant.
+Host process visibility is part of this trusted native profile; no hostile-code
+containment claim follows. Deployment of this profile requires the instance's normal
 review/apply; it has not been applied by this change.
 
 The Controller entrypoint is
@@ -73,8 +77,8 @@ belongs in this interface.
 The Controller authenticates the unprivileged App through each actual received
 SCM_PIDFD and its executable/process/namespace checks. The App retains the
 Controller's actual received kernel handle and verifies the same live issuer's
-signed Controller grant plus fresh key possession. This does not give the App
-ptrace or containerd access or claim independent privileged-process inspection.
+signed Controller grant plus fresh key possession. This grants the App no additional ptrace capability or containerd access and
+claims no independent privileged-process inspection.
 The original CLOEXEC seqpacket socket must remain connected around each message
 and final admission. HUP, including a buffered final reply after peer closure,
 refuses. The kernel handle alone would not detect an exec of a still-live peer.
@@ -363,3 +367,16 @@ NOFOLLOW semantics and never chmod/initialize the original.
 No local filesystem test, mock deployment plan, static proof inventory or
 earlier CI receipt establishes actual native P3, serving or end-to-end OAuth
 success. Live provider/kernel/deployment qualification remains separate.
+
+
+Initial listener binding is a separate known atomic operation. It finishes its
+actual current initial-file phase before returning a private listener containing
+only the same enrolled-owner identity, exact unchanged file projection and
+original socket. No role stage, signed grant or acquisition is retained as
+current while waiting for Kubernetes startup. Zero-timeout readiness consumes no
+packet and supplies no App, P3 or serving permission. Once actual work is
+pending, the Controller consumes that listener exactly once into a fresh
+SAME-owner CurrentPreparedFilePhase, checks the exact projection before accept,
+and produces the fresh statement from that stage. The exchange's original
+five-second budget, per-message handles and strict HUP/CLOEXEC checks remain.
+Unknown or abandoned exchange state cannot reopen, rebind or adopt the listener.

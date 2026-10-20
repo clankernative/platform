@@ -32,6 +32,19 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::native_enrollment::InitialHolderListener);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderListener,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderListener,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::InitialHolderListener,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::ShellServingPeer);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::ShellServingPeer,

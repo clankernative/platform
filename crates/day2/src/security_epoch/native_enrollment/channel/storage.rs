@@ -192,6 +192,12 @@ pub(in crate::security_epoch::native_enrollment) struct StorageListener {
 }
 
 impl StorageListener {
+    /// Zero-timeout readiness on this retained descriptor. No role, clock,
+    /// packet, peer authentication, file or P3 permission is obtained here.
+    pub(in crate::security_epoch::native_enrollment) fn pending(&self) -> Result<bool> {
+        storage_listener_pending(&self.socket)
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn bind(
         stage: &mut EnrolledRoleStage<'_>,
         acquisition: &mut NativeAcquisition,
@@ -242,6 +248,7 @@ impl StorageListener {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Channel> {
         let result = (|| {
+            require_listener_cloexec(&self.socket)?;
             self.directory.check(&self.root)?;
             stage.check_storage_acquisition(acquisition)?;
             wait(&self.socket, PollFlags::IN, acquisition)?;
@@ -249,6 +256,7 @@ impl StorageListener {
             let socket =
                 net::accept_with(&self.socket, SocketFlags::CLOEXEC | SocketFlags::NONBLOCK)?;
             configure(&socket)?;
+            require_listener_cloexec(&self.socket)?;
             self.directory.check(&self.root)?;
             stage.check_storage_acquisition(acquisition)?;
             Ok(Channel {
@@ -261,6 +269,65 @@ impl StorageListener {
             acquisition.refuse();
         }
         result
+    }
+}
+
+fn require_listener_cloexec(socket: &File) -> Result<()> {
+    ensure!(
+        rustix::io::fcntl_getfd(socket)?.contains(rustix::io::FdFlags::CLOEXEC),
+        "storage_peer_listener_cloexec_lost"
+    );
+    Ok(())
+}
+
+fn storage_listener_pending(socket: &File) -> Result<bool> {
+    require_listener_cloexec(socket)?;
+    let mut fds = [PollFd::new(socket, PollFlags::IN | PollFlags::RDHUP)];
+    rustix::event::poll(
+        &mut fds,
+        Some(&rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }),
+    )?;
+    let flags = fds[0].revents();
+    ensure!(
+        !flags.intersects(PollFlags::HUP | PollFlags::RDHUP | PollFlags::ERR | PollFlags::NVAL),
+        "storage_peer_listener_closed"
+    );
+    Ok(flags.contains(PollFlags::IN))
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn idle_listener_probe_is_data_only_and_refuses_buffered_hup_and_lost_cloexec() -> Result<()> {
+        // Lower socket DATA controls, not construction of a native listener,
+        // role, prepared file, holder or P3 owner.
+        let (left, right) = net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        let left = File::from(left);
+        assert!(!storage_listener_pending(&left)?);
+        net::send(&right, b"queued-data", SendFlags::NOSIGNAL)?;
+        assert!(storage_listener_pending(&left)?);
+        drop(right);
+        assert!(storage_listener_pending(&left).is_err());
+        let (open, _peer) = net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        let open = File::from(open);
+        rustix::io::fcntl_setfd(&open, rustix::io::FdFlags::empty())?;
+        assert!(storage_listener_pending(&open).is_err());
+        Ok(())
     }
 }
 

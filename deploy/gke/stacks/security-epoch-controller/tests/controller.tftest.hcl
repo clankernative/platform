@@ -24,6 +24,7 @@ run "registration_does_not_start_a_placeholder_executor" {
   }
   assert {
     condition = (
+      !kubernetes_deployment_v1.controller.wait_for_rollout &&
       tonumber(kubernetes_deployment_v1.controller.spec[0].replicas) == 0 &&
       length(kubernetes_config_map_v1.inputs) == 0 &&
       kubernetes_deployment_v1.controller.spec[0].strategy[0].type == "Recreate" &&

@@ -19,10 +19,22 @@ use crate::security_epoch::native_enrollment::storage_peer_wire::Body;
 use crate::security_epoch::native_enrollment::storage_peer_wire::{Exchange, StageStatement};
 use crate::security_epoch::{
     AppPreparedFile, CurrentPreparedFilePhase, PreparedFileProjection,
-    native_clock::NativeAcquisition, native_enrollment::EnrolledRoleStage,
+    native_clock::NativeAcquisition,
+    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy};
+
+/// A bound endpoint and original ownership identity, never a retained role or
+/// first-holder/P3 permit. Idle readiness DATA may outlive its completed bind
+/// phase; actual exchange needs a new SAME-owner current file/role phase.
+pub(crate) struct InitialHolderListener {
+    owner: SameEnrolledOwner,
+    projection: PreparedFileProjection,
+    valid: bool,
+    #[cfg(target_os = "linux")]
+    listener: StorageListener,
+}
 
 pub(crate) struct InitialHolderServer<'file, 'role> {
     phase: CurrentPreparedFilePhase<'file, 'role>,
@@ -68,8 +80,8 @@ pub(crate) struct AuthenticatedControllerFirstHolder<'file, 'role> {
     valid: bool,
 }
 
-impl<'file, 'role> InitialHolderServer<'file, 'role> {
-    pub(crate) fn bind(mut phase: CurrentPreparedFilePhase<'file, 'role>) -> Result<Self> {
+impl InitialHolderListener {
+    pub(crate) fn bind(mut phase: CurrentPreparedFilePhase<'_, '_>) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = &mut phase;
@@ -78,19 +90,70 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
         #[cfg(target_os = "linux")]
         {
             phase.check()?;
+            let owner = phase.controller_stage()?.capture_same_owner()?;
+            let projection = phase.projection()?;
             let mut acquisition = phase.controller_stage()?.narrow_io_acquisition(5)?;
-            let local = phase.controller_stage()?.storage_statement()?;
             let listener = StorageListener::bind(phase.controller_stage()?, &mut acquisition)?;
             phase.check()?;
+            // Binding is a completed atomic operation, NOT a first-holder
+            // exchange. No signed offer or durable activation has occurred.
+            phase.finish_checked()?;
             Ok(Self {
-                phase,
-                acquisition,
-                local,
+                owner,
+                projection,
+                valid: true,
                 listener,
             })
         }
     }
 
+    pub(crate) fn idle_ready(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(self.valid, "storage_peer_listener_refused");
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            self.listener.pending()
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    /// Consume this one original listener BEFORE any fallible exchange work.
+    /// Its completed old bind stage cannot authorize a packet or renew time.
+    pub(crate) fn start<'file, 'role>(
+        mut self,
+        mut phase: CurrentPreparedFilePhase<'file, 'role>,
+    ) -> Result<InitialHolderServer<'file, 'role>> {
+        ensure!(self.valid, "storage_peer_listener_refused");
+        self.valid = false;
+        self.owner.check(phase.controller_stage()?)?;
+        phase.check()?;
+        ensure!(
+            phase.projection()? == self.projection,
+            "storage_peer_listener_original_changed"
+        );
+        let acquisition = phase.controller_stage()?.narrow_io_acquisition(5)?;
+        let local = phase.controller_stage()?.storage_statement()?;
+        self.owner.check(phase.controller_stage()?)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (acquisition, local);
+            anyhow::bail!("storage_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        Ok(InitialHolderServer {
+            phase,
+            acquisition,
+            local,
+            listener: self.listener,
+        })
+    }
+}
+
+impl<'file, 'role> InitialHolderServer<'file, 'role> {
     fn check(&mut self) -> Result<()> {
         self.phase.check()?;
         #[cfg(not(target_os = "linux"))]
