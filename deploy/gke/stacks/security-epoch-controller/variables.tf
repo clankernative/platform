@@ -14,7 +14,13 @@ variable "app" {
   }
 }
 variable "bootstrap_alias" {
-  type = string
+  description = "Required only for activation; registration supplies no native policy selection."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.bootstrap_alias == null ? !var.activate : var.bootstrap_alias != ""
+    error_message = "Activation requires the exact native bootstrap alias."
+  }
 }
 variable "namespace" {
   type = string
@@ -32,36 +38,44 @@ variable "image" {
   }
 }
 variable "instance_json" {
-  type = string
+  type    = string
+  default = null
   validation {
-    condition     = length(var.instance_json) <= 524288 && can(jsondecode(var.instance_json).apps)
+    condition     = var.instance_json == null ? !var.activate : (length(var.instance_json) <= 524288 && can(jsondecode(var.instance_json).apps))
     error_message = "Supply bounded complete native instance metadata."
   }
 }
+
 variable "enrollment_json" {
   description = "Public operator enrollment selections, no private keys. Native admission validates their complete closed schema."
   type        = string
+  default     = null
   validation {
-    condition     = length(var.enrollment_json) <= 65536 && can(jsondecode(var.enrollment_json))
+    condition     = var.enrollment_json == null ? !var.activate : (length(var.enrollment_json) <= 65536 && can(jsondecode(var.enrollment_json)))
     error_message = "Supply bounded JSON. Activation requires the exact complete selected enrollment profile."
   }
 }
+
 variable "storage_json" {
   description = "Actual immutable PVC/PV/disk/node selection, not a mount or P3 witness."
   type        = string
+  default     = null
   validation {
-    condition     = length(var.storage_json) <= 16384 && can(jsondecode(var.storage_json).disk_id)
+    condition     = var.storage_json == null ? !var.activate : (length(var.storage_json) <= 16384 && can(jsondecode(var.storage_json).disk_id))
     error_message = "Supply bounded complete immutable storage selections."
   }
 }
+
 variable "host_state_path" {
   description = "Operator-observed existing CSI global mount of the SAME App disk on the selected node. Never guess this from a PVC name."
   type        = string
+  default     = null
   validation {
-    condition     = can(regex("^/var/lib/kubelet/plugins/kubernetes.io/csi/.+/globalmount$", var.host_state_path)) && !strcontains(var.host_state_path, "..")
+    condition     = var.host_state_path == null ? !var.activate : (can(regex("^/var/lib/kubelet/plugins/kubernetes.io/csi/.+/globalmount$", var.host_state_path)) && !strcontains(var.host_state_path, ".."))
     error_message = "Select the observed existing CSI global mount, with no traversal."
   }
 }
+
 variable "activate" {
   description = "False registers no running executor. True only after exact workload UID, profiles, App mount and code have been qualified; no original-file adoption on restart."
   type        = bool
@@ -71,8 +85,9 @@ variable "activate" {
 variable "node_profile" {
   description = "Existing protected native-enrollment placement label and taint value. This root creates no pool or node."
   type        = string
+  default     = null
   validation {
-    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.node_profile))
+    condition     = var.node_profile == null ? !var.activate : (can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.node_profile)))
     error_message = "Select the existing protected native placement profile."
   }
 }

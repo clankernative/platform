@@ -2,9 +2,9 @@
 # This optional root creates no IAM, database, identity, disk, node or secret.
 locals {
   name       = "${replace(var.app, "_", "-")}-epoch-controller"
-  instance   = jsondecode(var.instance_json)
-  enrollment = jsondecode(var.enrollment_json)
-  storage    = jsondecode(var.storage_json)
+  instance   = var.activate ? try(jsondecode(var.instance_json), null) : null
+  enrollment = var.activate ? try(jsondecode(var.enrollment_json), null) : null
+  storage    = var.activate ? try(jsondecode(var.storage_json), null) : null
   policy     = try(local.instance.control.security_bootstraps[var.bootstrap_alias], null)
   labels = {
     "app.kubernetes.io/name" = local.name
@@ -69,9 +69,9 @@ resource "kubernetes_deployment_v1" "controller" {
     template {
       metadata {
         labels = local.labels
-        annotations = {
+        annotations = var.activate ? {
           "day2.dev/native-inputs" = sha256(jsonencode([var.instance_json, var.enrollment_json, var.storage_json]))
-        }
+        } : {}
       }
       spec {
         service_account_name            = local.name
@@ -80,17 +80,20 @@ resource "kubernetes_deployment_v1" "controller" {
         host_pid                        = true
         host_network                    = false
         host_ipc                        = false
-        node_selector = {
+        node_selector = var.activate ? {
           "day2.dev.node-restriction.kubernetes.io/enrollment" = var.node_profile
           "kubernetes.io/arch"                                 = "amd64"
           "kubernetes.io/hostname"                             = local.storage.node.name
           "iam.gke.io/gke-metadata-server-enabled"             = "true"
-        }
-        toleration {
-          key      = "day2.dev/native-enrollment"
-          operator = "Equal"
-          value    = var.node_profile
-          effect   = "NoSchedule"
+        } : {}
+        dynamic "toleration" {
+          for_each = var.activate ? [1] : []
+          content {
+            key      = "day2.dev/native-enrollment"
+            operator = "Equal"
+            value    = var.node_profile
+            effect   = "NoSchedule"
+          }
         }
         termination_grace_period_seconds = 10
         security_context {
@@ -116,51 +119,78 @@ resource "kubernetes_deployment_v1" "controller" {
             name           = "health"
             container_port = 8080
           }
-          volume_mount {
-            name       = "inputs"
-            mount_path = "/srv/day2/instance.json"
-            sub_path   = "instance.json"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "inputs"
+              mount_path = "/srv/day2/instance.json"
+              sub_path   = "instance.json"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "inputs"
-            mount_path = "/etc/day2/native-enrollment.json"
-            sub_path   = "native-enrollment.json"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "inputs"
+              mount_path = "/etc/day2/native-enrollment.json"
+              sub_path   = "native-enrollment.json"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "inputs"
-            mount_path = "/etc/day2-native/storage.json"
-            sub_path   = "storage.json"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "inputs"
+              mount_path = "/etc/day2-native/storage.json"
+              sub_path   = "storage.json"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "state"
-            mount_path = "/state"
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "state"
+              mount_path = "/state"
+            }
           }
-          volume_mount {
-            name       = "enrollment"
-            mount_path = "/run/day2-native-enrollment"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "enrollment"
+              mount_path = "/run/day2-native-enrollment"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "storage-peer"
-            mount_path = "/run/day2-native-enrollment/storage"
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "storage-peer"
+              mount_path = "/run/day2-native-enrollment/storage"
+            }
           }
-          volume_mount {
-            name       = "disk-names"
-            mount_path = "/dev/disk/by-id"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "disk-names"
+              mount_path = "/dev/disk/by-id"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "api-token"
-            mount_path = "/var/run/secrets/kubernetes.io/serviceaccount"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "api-token"
+              mount_path = "/var/run/secrets/kubernetes.io/serviceaccount"
+              read_only  = true
+            }
           }
-          volume_mount {
-            name       = "subject-token"
-            mount_path = "/var/run/secrets/day2-native"
-            read_only  = true
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              name       = "subject-token"
+              mount_path = "/var/run/secrets/day2-native"
+              read_only  = true
+            }
           }
           readiness_probe {
             http_get {
@@ -173,71 +203,92 @@ resource "kubernetes_deployment_v1" "controller" {
           }
           # No liveness restart loop: an uncertain original is never adopted.
         }
-        volume {
-          name = "inputs"
-          config_map {
-            name         = local.config_name
-            default_mode = "0444"
-          }
-        }
-        volume {
-          name = "state"
-          host_path {
-            path = var.host_state_path
-            type = "Directory"
-          }
-        }
-        volume {
-          name = "enrollment"
-          host_path {
-            path = "/run/day2-native-enrollment"
-            type = "Directory"
-          }
-        }
-        volume {
-          name = "storage-peer"
-          host_path {
-            path = "/run/day2-native-enrollment/storage"
-            type = "Directory"
-          }
-        }
-        volume {
-          name = "disk-names"
-          host_path {
-            path = "/dev/disk/by-id"
-            type = "Directory"
-          }
-        }
-        volume {
-          name = "api-token"
-          projected {
-            default_mode = "0444"
-            sources {
-              service_account_token {
-                path               = "token"
-                expiration_seconds = 3600
-              }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "inputs"
+            config_map {
+              name         = local.config_name
+              default_mode = "0444"
             }
-            sources {
-              config_map {
-                name = "kube-root-ca.crt"
-                items {
-                  key  = "ca.crt"
-                  path = "ca.crt"
+          }
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "state"
+            host_path {
+              path = var.host_state_path
+              type = "Directory"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "enrollment"
+            host_path {
+              path = "/run/day2-native-enrollment"
+              type = "Directory"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "storage-peer"
+            host_path {
+              path = "/run/day2-native-enrollment/storage"
+              type = "Directory"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "disk-names"
+            host_path {
+              path = "/dev/disk/by-id"
+              type = "Directory"
+            }
+          }
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "api-token"
+            projected {
+              default_mode = "0444"
+              sources {
+                service_account_token {
+                  path               = "token"
+                  expiration_seconds = 3600
+                }
+              }
+              sources {
+                config_map {
+                  name = "kube-root-ca.crt"
+                  items {
+                    key  = "ca.crt"
+                    path = "ca.crt"
+                  }
                 }
               }
             }
           }
         }
-        volume {
-          name = "subject-token"
-          projected {
-            default_mode = "0444"
-            sources {
-              service_account_token {
-                path               = "subject-token"
-                audience           = try(local.policy.controller.token_review_audience, "invalid")
-                expiration_seconds = 600
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "subject-token"
+            projected {
+              default_mode = "0444"
+              sources {
+                service_account_token {
+                  path               = "subject-token"
+                  audience           = try(local.policy.controller.token_review_audience, "invalid")
+                  expiration_seconds = 600
+                }
               }
             }
           }
