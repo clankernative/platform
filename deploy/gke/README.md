@@ -298,6 +298,36 @@ matching public JSON cannot supply any of those owners. These roots create no
 node, disk, GSA, issuer or IAM grants; native activation is a separate reviewed
 deployment, not an automatic consequence of adding these variables.
 
+### Historical native consumer observations
+
+The actual App and Shell serving owners export capped JSON lines to their own
+private container stderr with prefix `day2-native-consumer-evidence ` and format
+`day2_native_consumer_evidence_v1`. Collect the exact selected Pod and container,
+including its UID, image digest and restart count, rather than combining replicas:
+
+```sh
+umask 077
+kubectl -n APP_NAMESPACE logs APP_POD -c day2 --timestamps > app-native-private.log
+kubectl -n SHELL_NAMESPACE logs SHELL_POD -c security-shell --timestamps > shell-native-private.log
+```
+
+Each process exports at most 128 consumer lines of at most 2048 bytes. Records
+contain fixed outcomes, checked incarnation and request commitments; they contain
+no tokens, subjects, URLs, paths or raw errors. `completed` follows the actual
+known consumer, final peer acknowledgement and same-stage postchecks. App also
+records the final coherent provider snapshot through the existing journal digest.
+Its binding is the actual wrapped storage request binding, matching the Controller
+record. Shell records its actual serving request binding and has no provider
+snapshot or App selection; correlate that binding with the Controller's release.
+Other outcomes are terminal failure observations, never completion. Known input
+exclusions do not produce `completed` records.
+
+These are historical diagnostic DATA, not a permission, readiness receipt, or an
+independent proof of the entire OAuth lifecycle. A matching health response,
+stored row, missing/truncated log, or a record from another process cannot replace
+the actual joined native qualification. In particular, these security consumer
+fences do not claim every generic business SQL read and commit is epoch-fenced.
+
 ## Build, qualify and deploy
 
 For a selected managed-credential verifier, `app-edge.credential_api = true`
