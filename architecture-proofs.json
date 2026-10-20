@@ -1257,7 +1257,8 @@
         "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >",
         "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >",
         "fn check_local (& mut self) -> Result < () >",
-        "pub (crate) fn enroll_current_thread (scope : & AuthorityScope , role : NativeRole) -> Result < Self >"
+        "pub (crate) fn enroll_current_thread (scope : & AuthorityScope , role : NativeRole) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn historical_incarnation_data (& self) -> Digest"
       ],
       "factories": [
         {
@@ -1277,6 +1278,10 @@
         {
           "owner": "EnrolledProcessRoleOwner",
           "signature": "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (in crate :: security_epoch) fn historical_incarnation_data (& self) -> Digest"
         }
       ],
       "proof_uses": [],
@@ -2511,13 +2516,13 @@
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (crate) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
-        "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < () >"
+        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < ServingObservation >",
+        "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
       ],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn activate_controller (mut storage : InitialStorageContinuity , owner : & mut super :: native_enrollment :: EnrolledProcessRoleOwner , policy : & InitialBootstrapPolicy , selection : & EpochStore) -> ControllerActivationOutcome"
+          "signature": "pub (super) fn activate_controller (mut storage : InitialStorageContinuity , owner : & mut super :: native_enrollment :: EnrolledProcessRoleOwner , policy : & InitialBootstrapPolicy , selection : & EpochStore , evidence : & mut super :: controller :: evidence :: Evidence) -> ControllerActivationOutcome"
         }
       ],
       "material_uses": [
@@ -2531,11 +2536,11 @@
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < ServingObservation >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
         }
       ],
       "proof_uses": [],
