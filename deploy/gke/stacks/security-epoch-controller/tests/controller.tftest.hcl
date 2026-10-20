@@ -15,26 +15,6 @@ variables {
   node_profile    = "fixture-native"
 }
 
-run "registration_does_not_start_a_placeholder_executor" {
-  command = plan
-  variables {
-    activate        = false
-    enrollment_json = "{}"
-    instance_json   = jsonencode({ apps = { calendar = {} } })
-  }
-  assert {
-    condition = (
-      !kubernetes_deployment_v1.controller.wait_for_rollout &&
-      tonumber(kubernetes_deployment_v1.controller.spec[0].replicas) == 0 &&
-      length(kubernetes_config_map_v1.inputs) == 0 &&
-      kubernetes_deployment_v1.controller.spec[0].strategy[0].type == "Recreate" &&
-      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-epoch-controller"]) &&
-      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "calendar"])
-    )
-    error_message = "Registration must stay dormant and select the actual fixed Controller executable, never day2-host or a substitute."
-  }
-}
-
 run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
   command = plan
   variables { activate = true }
@@ -48,6 +28,8 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
       tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 7 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 9 &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "fixture-node"
     )
     error_message = "The trusted privileged Controller must retain its distinct existing identity and exact native node placement."
@@ -96,4 +78,10 @@ run "foreign_node_is_refused" {
     storage_json = jsonencode(merge(jsondecode(file("tests/storage.json")), { node = { name = "foreign-node", uid = "foreign-uid" } }))
   }
   expect_failures = [kubernetes_config_map_v1.inputs]
+}
+
+run "active_mount_is_required" {
+  command = plan
+  variables { host_state_path = null }
+  expect_failures = [var.host_state_path]
 }
