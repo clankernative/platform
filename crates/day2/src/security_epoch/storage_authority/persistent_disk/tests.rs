@@ -154,3 +154,42 @@ fn profile_is_bound_to_policy_and_cannot_substitute_a_recreated_disk() {
     changed.fresh_storage.mount_binding = Digest::new(b"other profile");
     assert!(check(&selected, &changed, &replies).is_err());
 }
+
+#[test]
+fn minimal_instance_reply_requires_every_join_and_the_whole_attachment_list() {
+    let (selected, policy, replies) = fixture();
+    let minimal = replies[4].clone();
+    assert_eq!(
+        selected.instance(&policy, &minimal).unwrap(),
+        "attached-device"
+    );
+    for field in ["id", "name", "selfLink", "status", "disks"] {
+        let mut missing = minimal.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            selected.instance(&policy, &missing).is_err(),
+            "missing {field}"
+        );
+    }
+    for field in ["source", "deviceName", "type", "mode", "boot"] {
+        let mut missing = minimal.clone();
+        missing["disks"][0].as_object_mut().unwrap().remove(field);
+        assert!(
+            selected.instance(&policy, &missing).is_err(),
+            "missing disk {field}"
+        );
+    }
+    let selected_disk = minimal["disks"][0].clone();
+    let mut foreign = selected_disk.clone();
+    foreign["source"] =
+        json!("https://www.googleapis.com/compute/v1/projects/foreign/zones/zone-one/disks/other");
+    let mut whole = minimal.clone();
+    whole["disks"] = json!(vec![foreign; 32]);
+    whole["disks"][0] = selected_disk.clone();
+    assert!(selected.instance(&policy, &whole).is_ok());
+    // A duplicate at the LAST slot cannot be hidden by choosing the first disk.
+    whole["disks"][31] = selected_disk.clone();
+    assert!(selected.instance(&policy, &whole).is_err());
+    whole["disks"] = json!(vec![selected_disk; 33]);
+    assert!(selected.instance(&policy, &whole).is_err());
+}

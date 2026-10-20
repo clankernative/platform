@@ -14,13 +14,13 @@ use std::{path::Path, time::Duration};
 
 pub(in crate::security_epoch) mod evidence;
 mod health;
-use evidence::{Evidence, FailurePhase, ServingRole};
+use evidence::{Evidence, FailurePhase, PreparationFailure, PreparationStep, ServingRole};
 
 pub(crate) fn run(instance_path: &Path, app: &str) -> Result<()> {
     let mut evidence = Evidence::new();
     let result = run_inner(instance_path, app, &mut evidence);
-    if result.is_err() {
-        evidence.refuse()?;
+    if let Err(error) = &result {
+        evidence.refuse(Some(error))?;
     }
     result
 }
@@ -53,7 +53,8 @@ fn run_inner(instance_path: &Path, app: &str, evidence: &mut Evidence) -> Result
     evidence.enter(FailurePhase::Preparation);
     let mut file = storage_authority::prepare_controller_initial(
         instance_path,
-        role.begin_current_stage()?,
+        role.begin_current_stage()
+            .map_err(|error| PreparationFailure::at(PreparationStep::RoleStage, error))?,
         &policy,
         &store,
     )?;

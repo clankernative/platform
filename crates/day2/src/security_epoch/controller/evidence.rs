@@ -47,7 +47,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     export_failed: bool,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum FailurePhase {
     Selection,
@@ -69,6 +69,168 @@ pub(in crate::security_epoch) enum FailurePhase {
     ShellAccept,
     ShellServing,
     Health,
+}
+
+/// Fixed diagnostic DATA only. No field carries a path, URL, response body,
+/// credential, arbitrary message, elapsed-time assertion or permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum PreparationStep {
+    Unknown,
+    RoleStage,
+    StorageAcquisition,
+    StorageProfile,
+    ClusterCa,
+    TransportSetup,
+    MetadataCredential,
+    ProjectIdentity,
+    ClusterIdentity,
+    ControllerIdentity,
+    ControllerCredential,
+    EpochDatabase,
+    KubernetesCredential,
+    ClaimBinding,
+    VolumeBinding,
+    NodeBoot,
+    NodeBinding,
+    DiskBinding,
+    InstanceBinding,
+    VolumeDirectory,
+    VolumeIdentity,
+    BlockDevice,
+    VolumeCurrent,
+    Seed,
+    PrivateDirectory,
+    ImageAdmission,
+    OriginalPreparation,
+    OriginalRetention,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PreparationErrorCategory {
+    ClockExpiredOrRewound,
+    AcquisitionRefused,
+    TransportUnavailable,
+    ResponseStatusOrBound,
+    AdmissionRejected,
+    PermissionDenied,
+    NotFound,
+    AlreadyExists,
+    TimedOut,
+    PathResolution,
+    Unsupported,
+    Io,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(in crate::security_epoch) struct PreparationFailure {
+    step: PreparationStep,
+    category: PreparationErrorCategory,
+}
+
+impl std::fmt::Display for PreparationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native preparation boundary refused")
+    }
+}
+
+impl PreparationFailure {
+    /// Preserve the innermost annotated actual boundary. This only adds error
+    /// context; the original error and every existing refusal remain intact.
+    pub(in crate::security_epoch) fn at(
+        step: PreparationStep,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if error.downcast_ref::<Self>().is_some() {
+            return error;
+        }
+        let context = Self {
+            step,
+            category: preparation_error_category(&error),
+        };
+        error.context(context)
+    }
+
+    fn observe(error: &anyhow::Error) -> Self {
+        error.downcast_ref::<Self>().copied().unwrap_or(Self {
+            step: PreparationStep::Unknown,
+            category: preparation_error_category(error),
+        })
+    }
+}
+
+fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory {
+    use PreparationErrorCategory as Category;
+    // Inspect only stored message DATA against a closed list. Never format the
+    // error, walk Display causes, or emit an unrecognized string.
+    let code = error
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| error.downcast_ref::<String>().map(String::as_str));
+    match code {
+        Some(
+            "epoch_native_clock_rewind_or_expired"
+            | "epoch_native_acquisition_expired"
+            | "epoch_native_narrowed_acquisition_expired"
+            | "native_enrollment_stage_expired",
+        ) => return Category::ClockExpiredOrRewound,
+        Some("epoch_native_acquisition_refused" | "native_enrollment_owner_refused") => {
+            return Category::AcquisitionRefused;
+        }
+        Some(
+            "epoch_native_transport_unavailable"
+            | "epoch_native_response_unavailable"
+            | "epoch_native_metadata_unavailable",
+        ) => return Category::TransportUnavailable,
+        Some("epoch_native_response_status_or_bound" | "epoch_native_metadata_status_or_bound") => {
+            return Category::ResponseStatusOrBound;
+        }
+        Some(
+            "storage_provider_selection_mismatch"
+            | "storage_provider_kubernetes_identity"
+            | "storage_provider_claim_binding"
+            | "storage_provider_volume_binding"
+            | "storage_provider_node_binding"
+            | "storage_provider_disk_binding"
+            | "storage_provider_instance_binding"
+            | "storage_provider_attachment_binding"
+            | "storage_provider_attachment_missing"
+            | "storage_provider_attachment_ambiguous"
+            | "storage_native_mount_binding"
+            | "storage_native_block_device_mismatch"
+            | "storage_native_private_anchor_profile"
+            | "epoch_preparation_admitted_schema_mismatch"
+            | "epoch_preparation_runtime_selection_mismatch"
+            | "native_enrollment_full_selection_changed",
+        ) => return Category::AdmissionRejected,
+        _ => {}
+    }
+    let kind = error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+        .or_else(|| {
+            error
+                .downcast_ref::<rustix::io::Errno>()
+                .map(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()).kind())
+        });
+    match kind {
+        Some(std::io::ErrorKind::PermissionDenied) => Category::PermissionDenied,
+        Some(std::io::ErrorKind::NotFound) => Category::NotFound,
+        Some(std::io::ErrorKind::AlreadyExists) => Category::AlreadyExists,
+        Some(std::io::ErrorKind::TimedOut) => Category::TimedOut,
+        Some(std::io::ErrorKind::Unsupported) => Category::Unsupported,
+        Some(_)
+            if error.downcast_ref::<rustix::io::Errno>().is_some_and(|e| {
+                *e == rustix::io::Errno::LOOP || *e == rustix::io::Errno::XDEV
+            }) =>
+        {
+            Category::PathResolution
+        }
+        Some(_) => Category::Io,
+        None => Category::Other,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,6 +294,8 @@ enum Observation {
     },
     Refused {
         at: FailurePhase,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preparation: Option<PreparationFailure>,
     },
 }
 
@@ -272,9 +436,17 @@ impl<W: RecordOutput> Recorder<W> {
         Ok(())
     }
 
-    pub(super) fn refuse(&mut self) -> Result<()> {
+    pub(super) fn refuse(&mut self, error: Option<&anyhow::Error>) -> Result<()> {
         if !self.refused {
-            self.emit(Observation::Refused { at: self.at })?;
+            let preparation = if self.at == FailurePhase::Preparation {
+                error.map(PreparationFailure::observe)
+            } else {
+                None
+            };
+            self.emit(Observation::Refused {
+                at: self.at,
+                preparation,
+            })?;
             self.refused = true;
         }
         Ok(())
@@ -437,8 +609,8 @@ mod tests {
             }
         }
         recorder.enter(FailurePhase::ShellServing);
-        recorder.refuse().unwrap();
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
+        recorder.refuse(None).unwrap();
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), usize::from(MAX_RECORDS));
         assert!(recorder.output.len() <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES);
@@ -537,7 +709,7 @@ mod tests {
                 .activated(&complete, &Digest::new(b"snapshot"))
                 .is_err()
         );
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
         assert!(
             recorder
                 .bootstrap(&create, Action::Dispatch, &snapshot)
@@ -549,8 +721,8 @@ mod tests {
     #[test]
     fn refusal_before_selection_is_fixed_metadata_without_positive_milestones() {
         let mut recorder = Recorder::with_writer(Vec::new());
-        recorder.refuse().unwrap();
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
+        recorder.refuse(None).unwrap();
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), 1);
         assert!(rows[0]["selection"].is_null());
@@ -608,11 +780,143 @@ mod tests {
     #[test]
     fn failed_partial_export_is_terminal_and_cannot_claim_a_complete_record() {
         let mut recorder = Recorder::with_writer(InterruptedWriter { bytes: Vec::new() });
-        assert!(recorder.refuse().is_err());
+        assert!(recorder.refuse(None).is_err());
         assert_eq!(recorder.records, 0);
         assert_eq!(recorder.output.bytes.len(), 10);
-        assert!(recorder.refuse().is_err());
+        assert!(recorder.refuse(None).is_err());
         assert_eq!(recorder.output.bytes.len(), 10);
         assert!(!recorder.output.bytes.contains(&b'\n'));
+    }
+    #[test]
+    fn preparation_categories_accept_only_closed_messages_and_os_kinds() {
+        use PreparationErrorCategory as Category;
+        for (code, expected) in [
+            (
+                "epoch_native_clock_rewind_or_expired",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
+                "native_enrollment_stage_expired",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
+                "epoch_native_acquisition_refused",
+                Category::AcquisitionRefused,
+            ),
+            (
+                "epoch_native_transport_unavailable",
+                Category::TransportUnavailable,
+            ),
+            (
+                "epoch_native_response_status_or_bound",
+                Category::ResponseStatusOrBound,
+            ),
+            ("storage_provider_disk_binding", Category::AdmissionRejected),
+            (
+                "epoch_native_clock_rewind_or_expired /SECRET",
+                Category::Other,
+            ),
+        ] {
+            assert_eq!(
+                preparation_error_category(&anyhow::Error::msg(code)),
+                expected
+            );
+            assert_eq!(
+                preparation_error_category(&anyhow::Error::msg(code.to_owned())),
+                expected
+            );
+        }
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::PermissionDenied,
+                Category::PermissionDenied,
+            ),
+            (std::io::ErrorKind::NotFound, Category::NotFound),
+            (std::io::ErrorKind::AlreadyExists, Category::AlreadyExists),
+            (std::io::ErrorKind::TimedOut, Category::TimedOut),
+        ] {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "/SECRET Bearer TOKEN"));
+            assert_eq!(preparation_error_category(&error), expected);
+        }
+        assert_eq!(
+            preparation_error_category(&anyhow::Error::new(rustix::io::Errno::LOOP)),
+            Category::PathResolution
+        );
+    }
+
+    #[test]
+    fn preparation_context_preserves_original_error_and_innermost_boundary() {
+        let error = PreparationFailure::at(
+            PreparationStep::ClaimBinding,
+            anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SECRET",
+            )),
+        );
+        let error = PreparationFailure::at(PreparationStep::StorageAcquisition, error);
+        assert_eq!(
+            PreparationFailure::observe(&error),
+            PreparationFailure {
+                step: PreparationStep::ClaimBinding,
+                category: PreparationErrorCategory::PermissionDenied,
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[derive(Debug)]
+    struct MustNotDisplay;
+    impl std::fmt::Display for MustNotDisplay {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("diagnostics must never format an unknown error")
+        }
+    }
+    impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn preparation_refusal_is_bounded_fixed_data_and_never_formats_unknown_causes() {
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        let error = PreparationFailure::at(
+            PreparationStep::MetadataCredential,
+            anyhow::Error::new(MustNotDisplay),
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1]["observation"],
+            serde_json::json!({
+                "event":"refused", "at":"preparation",
+                "preparation":{"step":"metadata_credential", "category":"other"}
+            })
+        );
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("MustNotDisplay")
+        );
+    }
+
+    #[test]
+    fn preparation_details_are_not_exported_for_another_phase_or_as_success() {
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enter(FailurePhase::Enrollment);
+        let error = PreparationFailure::at(
+            PreparationStep::RoleStage,
+            anyhow::anyhow!("native_enrollment_stage_expired"),
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        assert_eq!(
+            records(&recorder.output)[0]["observation"],
+            serde_json::json!({"event":"refused", "at":"enrollment"})
+        );
+        assert_eq!(recorder.records, 1);
+        assert!(!recorder.first_holder && !recorder.activated);
     }
 }
