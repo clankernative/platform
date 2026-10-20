@@ -220,6 +220,10 @@ impl RetainedPeer {
 }
 
 impl AppHolderPeerContinuity {
+    pub(in crate::security_epoch) fn first_holder(&self) -> &crate::security_epoch::kernel::Holder {
+        &self.owner.first_holder
+    }
+
     /// This is the original selection DATA, not a refreshed image or permission.
     pub(crate) fn initial_projection(&self) -> &PreparedFileProjection {
         &self.owner.projection

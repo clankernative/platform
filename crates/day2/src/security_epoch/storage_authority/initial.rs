@@ -1,12 +1,13 @@
 //! Own the SAME joined durable initial file and authenticated App peer. This
 //! is conditional PD/ext4 durability, not effective IAM or active writer proof.
 
-use super::{CurrentPreparedFilePhase, PreparedFileContinuity};
+use super::{AppFileContinuity, CurrentPreparedFilePhase, PreparedFileContinuity};
 use crate::security_epoch::{
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
-        ControllerHolderPeerContinuity, CurrentStoragePeerPhase, EnrolledRoleStage,
-        InitialHolderServer, StoragePeerPurpose, StoragePeerRequest,
+        AppHolderPeerContinuity, AuthenticatedAppFirstHolder, ControllerHolderPeerContinuity,
+        CurrentStoragePeerPhase, EnrolledRoleStage, InitialHolderServer, StoragePeerPurpose,
+        StoragePeerRequest,
     },
 };
 use anyhow::{Result, ensure};
@@ -26,6 +27,20 @@ pub(crate) struct InitialStorageContinuity {
     file: PreparedFileContinuity,
     peer: ControllerHolderPeerContinuity,
     ready: bool,
+}
+
+/// The actual initial App file and same connected peer stay together. This is
+/// the unprivileged participant, not a Controller, provider or counter writer.
+pub(crate) struct AppInitialStorageContinuity {
+    file: AppFileContinuity,
+    peer: AppHolderPeerContinuity,
+    ready: bool,
+}
+
+pub(crate) struct CurrentAppStorageBootstrapPhase<'storage> {
+    file: &'storage mut AppFileContinuity,
+    peer: CurrentStoragePeerPhase<'storage>,
+    continuation: &'storage mut bool,
 }
 
 /// The actual fresh role is owned by the physical phase. The peer retains its
@@ -89,6 +104,10 @@ impl InitialStorageContinuity {
             file.projection()? == *expected,
             "initial_storage_file_projection_changed"
         );
+        // The historical establishment is not a current configuration lease.
+        // Rejoin/check and synchronize under THIS already-spent fresh stage,
+        // before the new peer transcript can advertise a bootstrap phase.
+        file.check_initial_durability()?;
         let peer = self
             .peer
             .accept_current(file.controller_stage()?, &binding)?;
@@ -174,6 +193,83 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
         self.check()?;
         self.peer.finish_checked(self.file.controller_stage()?)?;
         self.file.finish_checked()?;
+        *self.continuation = true;
+        Ok(())
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        *self.continuation = false;
+        self.file.refuse();
+        self.peer.refuse();
+    }
+}
+
+impl AppInitialStorageContinuity {
+    pub(crate) fn retain(holder: AuthenticatedAppFirstHolder<'_, '_>) -> Result<Self> {
+        let (file, peer) = holder.retain_for_activation()?;
+        Ok(Self {
+            file,
+            peer,
+            ready: true,
+        })
+    }
+
+    /// This side validates its own SAME retained read-only image before/after
+    /// the fresh handshake. It neither borrows the Controller's stage nor uses
+    /// a caller projection in place of the original file or participant.
+    pub(in crate::security_epoch) fn begin_bootstrap<'storage>(
+        &'storage mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selection: &EpochStore,
+        request: &Request,
+    ) -> Result<CurrentAppStorageBootstrapPhase<'storage>> {
+        ensure!(self.ready, "app_initial_storage_continuation_refused");
+        self.ready = false;
+        let binding = request_binding(
+            &self.peer.initial_projection().initial_core().bootstrap()?,
+            self.peer.first_holder(),
+            selection,
+            request,
+        )?;
+        self.file.check_initial(stage)?;
+        let peer = self.peer.begin_current(stage, binding)?;
+        let mut phase = CurrentAppStorageBootstrapPhase {
+            file: &mut self.file,
+            peer,
+            continuation: &mut self.ready,
+        };
+        phase.check(stage)?;
+        Ok(phase)
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        self.ready = false;
+        self.file.refuse();
+        self.peer.refuse();
+    }
+}
+
+impl CurrentAppStorageBootstrapPhase<'_> {
+    pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        let result = (|| {
+            ensure!(!*self.continuation, "app_initial_storage_phase_released");
+            self.file.check_initial(stage)?;
+            self.peer.check(stage)?;
+            self.file.check_initial(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn finish_checked(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check(stage)?;
+        self.peer.finish_checked(stage)?;
+        self.file.check_initial(stage)?;
         *self.continuation = true;
         Ok(())
     }

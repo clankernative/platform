@@ -2127,6 +2127,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder",
         "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -2148,6 +2149,10 @@
         {
           "owner": "AppHolderPeerContinuity",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder"
         }
       ],
       "proof_uses": [],
@@ -2310,6 +2315,71 @@
       "proof_uses": [],
       "kind": "private_material",
       "consuming_methods": []
+    }
+  ,
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "AppInitialStorageContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn retain (holder : AuthenticatedAppFirstHolder < '_ , '_ >) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (crate) fn retain (holder : AuthenticatedAppFirstHolder < '_ , '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "CurrentAppStorageBootstrapPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentAppStorageBootstrapPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStorageBootstrapPhase < '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentAppStorageBootstrapPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ]
     }
   ],
   "buffer_destructors": [
