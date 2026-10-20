@@ -543,3 +543,93 @@ fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
     changed["body"]["sequence"] = serde_json::json!("1");
     assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
 }
+
+#[test]
+fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
+    let (_, controller, controller_key) = fixture(NativeRole::EpochController);
+    let (_, app, app_key) = fixture(NativeRole::AppHost);
+    let exchange = Digest::new(b"this-exact-current-native-exchange");
+    let foreign = Digest::new(b"other-executor-or-exchange");
+    let cases = [
+        (
+            Body::CurrentResult {
+                exchange: exchange.clone(),
+            },
+            CompletionKind::Result,
+            &controller,
+            &controller_key,
+        ),
+        (
+            Body::CurrentConsumed {
+                exchange: exchange.clone(),
+            },
+            CompletionKind::Consumed,
+            &app,
+            &app_key,
+        ),
+        (
+            Body::CurrentReleased {
+                exchange: exchange.clone(),
+            },
+            CompletionKind::Released,
+            &controller,
+            &controller_key,
+        ),
+    ];
+    for (body, kind, sender, key) in cases {
+        let mut message = signed(sender, key, body);
+        message.verify(sender).unwrap();
+        assert!(message.body.matches_completion(&exchange, kind));
+        assert!(!message.body.matches_completion(&foreign, kind));
+        for other in [
+            CompletionKind::Result,
+            CompletionKind::Consumed,
+            CompletionKind::Released,
+        ] {
+            let expected = matches!(
+                (&message.body, other),
+                (Body::CurrentResult { .. }, CompletionKind::Result)
+                    | (Body::CurrentConsumed { .. }, CompletionKind::Consumed)
+                    | (Body::CurrentReleased { .. }, CompletionKind::Released)
+            );
+            assert_eq!(message.body.matches_completion(&exchange, other), expected);
+        }
+        match &mut message.body {
+            Body::CurrentResult { exchange }
+            | Body::CurrentConsumed { exchange }
+            | Body::CurrentReleased { exchange } => *exchange = foreign.clone(),
+            _ => unreachable!(),
+        }
+        assert!(message.verify(sender).is_err());
+    }
+    let handshake = Body::CurrentReady {
+        exchange: exchange.clone(),
+    };
+    for kind in [
+        CompletionKind::Result,
+        CompletionKind::Consumed,
+        CompletionKind::Released,
+    ] {
+        assert!(!handshake.matches_completion(&exchange, kind));
+    }
+    assert!(
+        signed(
+            &app,
+            &app_key,
+            Body::CurrentResult {
+                exchange: exchange.clone()
+            }
+        )
+        .verify(&app)
+        .is_err()
+    );
+    assert!(
+        signed(
+            &controller,
+            &controller_key,
+            Body::CurrentConsumed { exchange }
+        )
+        .verify(&controller)
+        .is_err()
+    );
+}

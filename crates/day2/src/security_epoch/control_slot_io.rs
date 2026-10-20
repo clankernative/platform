@@ -1,6 +1,7 @@
 //! Bounded shared-slot operations under opaque current execution authority.
-//! The authority's production factory remains absent until the actual original
-//! CreatorFD/P3, role, app key/channel and runtime producers qualify. DATA-only
+//! Native execution retains the actual original file/P3, enrolled Controller
+//! and App peer through the consuming dispatch; live profile qualification is
+//! a separate gate. DATA-only
 //! codec proposals and stored MayHaveBeenSent never enter the counter writer.
 
 use super::{
@@ -59,6 +60,10 @@ impl SlotObservation {
             self.valid = false;
         }
         result
+    }
+
+    pub(super) fn data(&self) -> Option<&VersionedSlot> {
+        self.value.as_ref()
     }
 
     pub(super) fn into_data(self) -> Option<VersionedSlot> {
@@ -142,17 +147,17 @@ pub(super) fn read_with_budget(
     })
 }
 
-pub(crate) struct Mutation {
+pub(crate) struct Mutation<'storage, 'role> {
     core: LogicalCore,
     after: Slot,
     write: Value,
     counter: EpochObservation,
     slot: SlotObservation,
-    context: CurrentBootstrapExecution,
+    context: CurrentBootstrapExecution<'storage, 'role>,
     purpose: Purpose,
 }
 
-impl Mutation {
+impl<'storage, 'role> Mutation<'storage, 'role> {
     fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         self.core.validate(selection)?;
         self.counter.remaining(selection, port)?;
@@ -208,27 +213,27 @@ fn commit_version(bytes: &[u8]) -> Result<UpdateTime> {
     Ok(version)
 }
 
-pub(crate) struct SlotMaintenanceMutation {
-    mutation: Mutation,
+pub(crate) struct SlotMaintenanceMutation<'storage, 'role> {
+    mutation: Mutation<'storage, 'role>,
 }
 
-pub(crate) struct SlotClaimMutation {
-    mutation: Mutation,
+pub(crate) struct SlotClaimMutation<'storage, 'role> {
+    mutation: Mutation<'storage, 'role>,
 }
 
 /// Only a known claim commit while all original authority remains valid can
 /// construct this. Readback of a matching stored May never does. Consumption
 /// permits one local send attempt, not a once-only remote application claim.
-pub(crate) struct KnownClaim {
-    mutation: Mutation,
+pub(crate) struct KnownClaim<'storage, 'role> {
+    mutation: Mutation<'storage, 'role>,
 }
 
-fn checked(
-    mut mutation: Mutation,
+fn checked<'storage, 'role>(
+    mut mutation: Mutation<'storage, 'role>,
     selection: &EpochStore,
     port: &mut impl Port,
     expected: Outcome,
-) -> Result<Mutation> {
+) -> Result<Mutation<'storage, 'role>> {
     mutation.check(selection, port)?;
     ensure!(
         kernel::reconcile(
@@ -241,14 +246,14 @@ fn checked(
     Ok(mutation)
 }
 
-pub(super) fn accept(
+pub(super) fn accept<'storage, 'role>(
     selection: &EpochStore,
     core: LogicalCore,
     counter: EpochObservation,
     slot: SlotObservation,
-    context: CurrentBootstrapExecution,
+    context: CurrentBootstrapExecution<'storage, 'role>,
     port: &mut impl Port,
-) -> Result<SlotMaintenanceMutation> {
+) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
     ensure!(slot.value.is_none(), "control_slot_already_reserved");
     let after = Slot::prepared(core.clone());
     let write = codec::create_data(selection, &after)?;
@@ -270,15 +275,15 @@ pub(super) fn accept(
     })
 }
 
-pub(super) fn claim(
+pub(super) fn claim<'storage, 'role>(
     selection: &EpochStore,
     core: LogicalCore,
     counter: EpochObservation,
     slot: SlotObservation,
-    context: CurrentBootstrapExecution,
+    context: CurrentBootstrapExecution<'storage, 'role>,
     attempt: AttemptCore,
     port: &mut impl Port,
-) -> Result<SlotClaimMutation> {
+) -> Result<SlotClaimMutation<'storage, 'role>> {
     let before = slot
         .value
         .as_ref()
@@ -309,15 +314,15 @@ pub(super) fn claim(
     })
 }
 
-pub(super) fn rearm(
+pub(super) fn rearm<'storage, 'role>(
     selection: &EpochStore,
     core: LogicalCore,
     counter: EpochObservation,
     slot: SlotObservation,
-    context: CurrentBootstrapExecution,
+    context: CurrentBootstrapExecution<'storage, 'role>,
     rearm: RearmCore,
     port: &mut impl Port,
-) -> Result<SlotMaintenanceMutation> {
+) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
     ensure!(
         rearm.not_applied_observation == snapshot_digest(counter.snapshot())?,
         "control_slot_rearm_observation_mismatch"
@@ -350,15 +355,15 @@ pub(super) fn rearm(
     })
 }
 
-pub(super) fn settle(
+pub(super) fn settle<'storage, 'role>(
     selection: &EpochStore,
     core: LogicalCore,
     counter: EpochObservation,
     slot: SlotObservation,
-    context: CurrentBootstrapExecution,
+    context: CurrentBootstrapExecution<'storage, 'role>,
     settlement: SettlementCore,
     port: &mut impl Port,
-) -> Result<SlotMaintenanceMutation> {
+) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
     let before = slot
         .value
         .as_ref()
@@ -391,7 +396,7 @@ pub(super) fn settle(
     })
 }
 
-impl SlotMaintenanceMutation {
+impl<'storage, 'role> SlotMaintenanceMutation<'storage, 'role> {
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<UpdateTime> {
         let (_, version) = self.mutation.send(selection, port)?;
         // Historical acknowledgement only; never a counter-send permit.
@@ -399,8 +404,12 @@ impl SlotMaintenanceMutation {
     }
 }
 
-impl SlotClaimMutation {
-    pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<KnownClaim> {
+impl<'storage, 'role> SlotClaimMutation<'storage, 'role> {
+    pub(super) fn send(
+        self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<KnownClaim<'storage, 'role>> {
         let (mutation, _) = self.mutation.send(selection, port)?;
         ensure!(
             matches!(mutation.after.state, SlotState::MayHaveBeenSent { .. }),
@@ -410,7 +419,7 @@ impl SlotClaimMutation {
     }
 }
 
-impl KnownClaim {
+impl<'storage, 'role> KnownClaim<'storage, 'role> {
     pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         self.mutation.check(selection, port)
     }

@@ -269,20 +269,50 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
     CurrentReady {
         exchange: Digest,
     },
+    CurrentResult {
+        exchange: Digest,
+    },
+    CurrentConsumed {
+        exchange: Digest,
+    },
+    CurrentReleased {
+        exchange: Digest,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CompletionKind {
+    Result,
+    Consumed,
+    Released,
 }
 
 impl Body {
+    pub(super) fn matches_completion(&self, expected: &Digest, kind: CompletionKind) -> bool {
+        match (self, kind) {
+            (Self::CurrentResult { exchange }, CompletionKind::Result)
+            | (Self::CurrentConsumed { exchange }, CompletionKind::Consumed)
+            | (Self::CurrentReleased { exchange }, CompletionKind::Released) => {
+                exchange == expected
+            }
+            _ => false,
+        }
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn sender_role(&self) -> NativeRole {
         match self {
             Self::Hello { .. }
             | Self::Confirm { .. }
             | Self::Accepted { .. }
             | Self::CurrentHello { .. }
-            | Self::CurrentAck { .. } => NativeRole::AppHost,
+            | Self::CurrentAck { .. }
+            | Self::CurrentConsumed { .. } => NativeRole::AppHost,
             Self::Offer { .. }
             | Self::Complete { .. }
             | Self::CurrentOffer { .. }
-            | Self::CurrentReady { .. } => NativeRole::EpochController,
+            | Self::CurrentReady { .. }
+            | Self::CurrentResult { .. }
+            | Self::CurrentReleased { .. } => NativeRole::EpochController,
         }
     }
 }

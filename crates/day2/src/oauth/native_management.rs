@@ -48,12 +48,32 @@ struct Owners {
     storage: AppStorage,
 }
 
-// Neither absence nor the refusal marker is a storage witness. The only live
-// variant consumes the actual authenticated App first holder on THIS executor.
+// Neither absence nor a refusal is a storage witness. Live variants consume
+// the actual App first holder on THIS executor. Refused variants retain that
+// same owner but cannot enter another bootstrap or consumer callback.
 enum AppStorage {
     Unstarted,
     Refused,
-    Initial(Box<crate::security_epoch::AppInitialStorageContinuity>),
+    Bootstrapping(Box<crate::security_epoch::AppStorageBootstrap>),
+    Active(Box<crate::security_epoch::ActiveAppStorageContinuity>),
+    RefusedBootstrap(Box<crate::security_epoch::AppStorageBootstrap>),
+    RefusedActive(Box<crate::security_epoch::ActiveAppStorageContinuity>),
+}
+
+impl AppStorage {
+    fn refuse(&mut self) {
+        *self = match std::mem::replace(self, Self::Refused) {
+            Self::Bootstrapping(mut storage) | Self::RefusedBootstrap(mut storage) => {
+                storage.refuse();
+                Self::RefusedBootstrap(storage)
+            }
+            Self::Active(mut storage) | Self::RefusedActive(mut storage) => {
+                storage.refuse();
+                Self::RefusedActive(storage)
+            }
+            Self::Unstarted | Self::Refused => Self::Refused,
+        };
+    }
 }
 
 thread_local! {
@@ -106,7 +126,7 @@ pub(crate) fn prepare_initial_app_storage(
     instance: &crate::artifact::Instance,
 ) -> Result<()> {
     use crate::security_epoch::{
-        AppInitialStorageContinuity, AppPreparedFile,
+        AppInitialStorageContinuity, AppPreparedFile, AppStorageBootstrap,
         native_enrollment::AuthenticatedInitialHolderOffer,
     };
     let control = instance
@@ -139,27 +159,73 @@ pub(crate) fn prepare_initial_app_storage(
         // Close before stage acquisition or the first channel operation. A
         // failed/unknown exchange can never be retried from metadata or SQL.
         owners.storage = AppStorage::Refused;
-        let mut role = owners.role.try_borrow_mut()?;
-        let mut stage = role.begin_current_stage()?;
-        stage.check_selection(policy, store, NativeRole::AppHost)?;
-        let mut offer = AuthenticatedInitialHolderOffer::receive(&mut stage)?;
-        let file =
-            AppPreparedFile::observe_existing(&mut stage, metadata, policy, store, &mut offer)?;
-        let holder = offer.finish(file)?;
-        let storage = AppInitialStorageContinuity::retain(holder)?;
-        stage.check_selection(policy, store, NativeRole::AppHost)?;
-        owners.storage = AppStorage::Initial(Box::new(storage));
-        Ok(())
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            {
+                let mut role = owners.role.try_borrow_mut()?;
+                let mut stage = role.begin_current_stage()?;
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+                let mut offer = AuthenticatedInitialHolderOffer::receive(&mut stage)?;
+                let file = AppPreparedFile::observe_existing(
+                    &mut stage, metadata, policy, store, &mut offer,
+                )?;
+                let holder = offer.finish(file)?;
+                let storage = AppInitialStorageContinuity::retain(holder)?;
+                owners.storage = AppStorage::Bootstrapping(Box::new(AppStorageBootstrap::retain(
+                    storage, policy, store,
+                )?));
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+            }
+            // S3 owns the fixed Reserve/Dispatch/Settle pair. Each of its six
+            // steps receives a fresh stage from this SAME enrollment. A failed
+            // or incomplete step cannot restart this once-only startup attempt.
+            for _ in 0..6 {
+                let mut role = owners.role.try_borrow_mut()?;
+                let mut stage = role.begin_current_stage()?;
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+                let AppStorage::Bootstrapping(storage) = &mut owners.storage else {
+                    anyhow::bail!("native App bootstrap owner unavailable")
+                };
+                storage.advance(&mut stage)?;
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
+            }
+            let storage = std::mem::replace(&mut owners.storage, AppStorage::Refused);
+            let AppStorage::Bootstrapping(storage) = storage else {
+                owners.storage = storage;
+                anyhow::bail!("native App bootstrap owner unavailable")
+            };
+            match storage.into_active() {
+                Ok(storage) => {
+                    owners.storage = AppStorage::Active(Box::new(storage));
+                    Ok(())
+                }
+                Err(storage) => {
+                    owners.storage = AppStorage::Bootstrapping(storage);
+                    anyhow::bail!("native App activation incomplete")
+                }
+            }
+        }));
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                owners.storage.refuse();
+                Err(error)
+            }
+            Err(panic) => {
+                owners.storage.refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
     })
 }
 
-/// A scoped lend of the retained App file/peer and a fresh stage from the SAME
-/// enrolled executor. No lookup can construct a holder or return its ownership.
-/// S3 must enter its real bootstrap/activation phase inside this callback.
-pub(crate) fn with_initial_app_storage<T>(
+/// Lend the original activated App file/peer and a fresh stage from the SAME
+/// executor. This is still not current serving authority: S3's consuming
+/// Runtime/serving constructor must check the actual owner inside the callback.
+/// No lookup can construct a holder or return its ownership.
+pub(crate) fn with_active_app_storage<T>(
     scope: &AuthorityScope,
     operation: impl FnOnce(
-        &mut crate::security_epoch::AppInitialStorageContinuity,
+        &mut crate::security_epoch::ActiveAppStorageContinuity,
         &mut EnrolledRoleStage<'_>,
     ) -> Result<T>,
 ) -> Result<T> {
@@ -172,8 +238,8 @@ pub(crate) fn with_initial_app_storage<T>(
             owners.kind == NativeRole::AppHost,
             "native storage requires App owner"
         );
-        let AppStorage::Initial(storage) = &mut owners.storage else {
-            anyhow::bail!("native initial App holder unavailable")
+        let AppStorage::Active(storage) = &mut owners.storage else {
+            anyhow::bail!("native active App holder unavailable")
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut role = owners.role.try_borrow_mut()?;
@@ -186,11 +252,11 @@ pub(crate) fn with_initial_app_storage<T>(
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => {
-                storage.refuse();
+                owners.storage.refuse();
                 Err(error)
             }
             Err(panic) => {
-                storage.refuse();
+                owners.storage.refuse();
                 std::panic::resume_unwind(panic)
             }
         }
@@ -1140,7 +1206,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_app_storage_cannot_resolve_a_native_holder_from_simulated_roles() -> Result<()> {
+    fn active_app_storage_cannot_resolve_a_native_holder_from_simulated_roles() -> Result<()> {
         let world = super::super::simulation::World::new(451);
         super::super::effects::scope(world, || -> Result<()> {
             let scope = AuthorityScope {
@@ -1149,7 +1215,7 @@ mod tests {
                 app: "reports".to_owned().try_into()?,
             };
             let entered = std::cell::Cell::new(false);
-            let result = with_initial_app_storage(&scope, |_, _| {
+            let result = with_active_app_storage(&scope, |_, _| {
                 entered.set(true);
                 Ok(())
             });

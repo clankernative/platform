@@ -34,6 +34,7 @@ pub(super) enum Route<'a> {
     Database,
     EpochRead,
     EpochRollback,
+    EpochCommit,
 }
 
 pub(super) struct NativeHttp {
@@ -276,10 +277,11 @@ impl NativeHttp {
                 Method::GET,
                 false,
             ),
-            Route::EpochRead | Route::EpochRollback => {
+            Route::EpochRead | Route::EpochRollback | Route::EpochCommit => {
                 let operation = match route {
                     Route::EpochRead => "batchGet",
-                    _ => "rollback",
+                    Route::EpochRollback => "rollback",
+                    _ => "commit",
                 };
                 (
                     Url::parse(&format!(

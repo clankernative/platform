@@ -19,7 +19,9 @@ exchange is included, but genuine P3/current serving authority is still absent.
   Product owns final consumer settlement and this integration branch. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
   `PreparedFileContinuity` retain real resources, but cannot authorize serving
-  mutations. `CurrentBootstrapExecution` has no production constructor.
+  mutations. The native `CurrentBootstrapExecution` constructor now requires
+  the same retained Controller/file/peer phase and its fixed authenticated
+  counter transport; it supplies only the initial bootstrap operations.
 
 `AuthenticatedReads` and `EpochObservation` are read-only observations. A file
 projection, successful bootstrap receipt, selected role, or decoded epoch row
@@ -33,7 +35,7 @@ The stack also includes `InitialStoreMetadata`, which admits instance and
 artifact/schema inputs without opening or creating the serving database.
 Initial image preparation and App file observation use it instead of a
 previously opened `Runtime`. This closes a preparation-ordering gap, but does
-not construct the missing authenticated holder or writer owner.
+not independently construct an authenticated holder or writer owner.
 
 ## Producer and continuation boundary
 
@@ -160,12 +162,15 @@ metadata and S3's fixed `/state` mount. It never reads an ordinary SQLite
 authority row or creates the ordinary replica lock. On the final enrolled App
 thread, the real Controller offer is authenticated before opening or parsing
 the original file. The completed exchange is consumed into the same executor's
-`AppInitialStorageContinuity`; an attempt closes before stage acquisition or
-channel I/O, and cannot be retried from SQL or metadata after failure. Scoped
-bootstrap participation lends that actual owner and a fresh stage from the
-same enrollment, retaining refusal on error or panic. Runtime activation stays
-closed pending G1's active-owner constructor. Shell receives no App file or
-storage authority through this path.
+`AppInitialStorageContinuity`, then into `AppStorageBootstrap`. The App drives
+S3's six fixed reserve/dispatch/settle steps with a separate fresh stage from
+that same enrollment for each step. Only the consuming successful conversion
+can install `ActiveAppStorageContinuity` in the executor's registry. An attempt
+closes before stage acquisition or channel I/O; failure or panic retains the
+same refused owner and cannot restart from SQL, metadata or a second lookup.
+A scoped lend of the active owner still needs S3's actual current-serving and
+Runtime admission checks. Runtime startup remains closed pending that
+constructor. Shell receives no App file or storage authority through this path.
 
 Current App/Controller peer phases require distinct issuer-signed role grants
 from the initial exchange and the last completed phase. A new wrapper, nonce

@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:20e4c3c0ff30e833d16d2b4ad4fe8b04ea494635a6140dae57c2d39c5eed8bad",
+      "fingerprint": "sha256:2b79afc8c7cac1029696c41d10369ffde410b367be8c5cc34c8e6dc95a893b19",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -578,21 +578,27 @@
         "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
         "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
         "pub (super) fn lose_original_creator_fixture (& mut self)",
+        "pub (super) fn native (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut super :: authenticated_reads :: ControllerBorrow < '_ , 'storage , 'role >) -> Result < Self >",
         "pub (super) fn observe_fixture_lifetime (& mut self) -> std :: rc :: Weak < () >",
         "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
       ],
-      "factories": [],
+      "factories": [
+        {
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
+          "signature": "pub (super) fn native (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut super :: authenticated_reads :: ControllerBorrow < '_ , 'storage , 'role >) -> Result < Self >"
+        }
+      ],
       "material_uses": [
         {
-          "owner": "CurrentBootstrapExecution",
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
           "signature": "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
         },
         {
-          "owner": "CurrentBootstrapExecution",
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
           "signature": "pub (super) fn budget (& mut self , port : & mut impl Port) -> Result < Budget >"
         },
         {
-          "owner": "CurrentBootstrapExecution",
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
           "signature": "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >"
         }
       ],
@@ -641,11 +647,20 @@
     {
       "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
       "type_name": "AuthenticatedReads",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
+            "module": "writer"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn acquire (policy : & InitialBootstrapPolicy , selection : & EpochStore , purpose : NativeRole , stage : & 'stage mut EnrolledRoleStage < 'role >) -> Result < Self >",
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
+        "pub (super) fn read_slot (& mut self , selection : & EpochStore , core : & super :: control_slot :: LogicalCore) -> Result < super :: control_slot_io :: SlotObservation >",
         "fn sample (& mut self) -> Result < Sample >"
       ],
       "factories": [
@@ -666,6 +681,10 @@
         {
           "owner": "AuthenticatedReads < 'stage , 'role >",
           "signature": "pub (super) fn read (& mut self , selection : & EpochStore , names : & Names) -> Result < EpochObservation >"
+        },
+        {
+          "owner": "AuthenticatedReads < 'stage , 'role >",
+          "signature": "pub (super) fn read_slot (& mut self , selection : & EpochStore , core : & super :: control_slot :: LogicalCore) -> Result < super :: control_slot_io :: SlotObservation >"
         }
       ],
       "proof_uses": [],
@@ -834,6 +853,7 @@
       "type_name": "SlotObservation",
       "owning_children": [],
       "methods": [
+        "pub (super) fn data (& self) -> Option < & VersionedSlot >",
         "pub (super) fn into_data (self) -> Option < VersionedSlot >",
         "pub (super) fn remaining (& mut self , selection : & EpochStore , core : & LogicalCore , port : & mut impl Port) -> Result < Duration >"
       ],
@@ -846,19 +866,23 @@
       "material_uses": [
         {
           "owner": null,
-          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn accept < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+          "signature": "pub (super) fn claim < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn rearm < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn settle < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
+        },
+        {
+          "owner": "SlotObservation",
+          "signature": "pub (super) fn data (& self) -> Option < & VersionedSlot >"
         },
         {
           "owner": "SlotObservation",
@@ -886,40 +910,40 @@
       "factories": [
         {
           "owner": null,
-          "signature": "fn checked (mut mutation : Mutation , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation >"
+          "signature": "fn checked < 'storage , 'role > (mut mutation : Mutation < 'storage , 'role > , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn accept < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+          "signature": "pub (super) fn claim < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn rearm < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn settle < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
-          "owner": "Mutation",
+          "owner": "Mutation < 'storage , 'role >",
           "signature": "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
         }
       ],
       "material_uses": [
         {
           "owner": null,
-          "signature": "fn checked (mut mutation : Mutation , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation >"
+          "signature": "fn checked < 'storage , 'role > (mut mutation : Mutation < 'storage , 'role > , selection : & EpochStore , port : & mut impl Port , expected : Outcome) -> Result < Mutation < 'storage , 'role > >"
         },
         {
-          "owner": "Mutation",
+          "owner": "Mutation < 'storage , 'role >",
           "signature": "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
         },
         {
-          "owner": "Mutation",
+          "owner": "Mutation < 'storage , 'role >",
           "signature": "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
         }
       ],
@@ -939,15 +963,15 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn accept (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn accept < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn rearm (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn rearm < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , rearm : RearmCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         },
         {
           "owner": null,
-          "signature": "pub (super) fn settle (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation >"
+          "signature": "pub (super) fn settle < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , settlement : SettlementCore , port : & mut impl Port) -> Result < SlotMaintenanceMutation < 'storage , 'role > >"
         }
       ],
       "material_uses": [],
@@ -962,12 +986,12 @@
       "type_name": "SlotClaimMutation",
       "owning_children": [],
       "methods": [
-        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
+        "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim < 'storage , 'role > >"
       ],
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn claim (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation >"
+          "signature": "pub (super) fn claim < 'storage , 'role > (selection : & EpochStore , core : LogicalCore , counter : EpochObservation , slot : SlotObservation , context : CurrentBootstrapExecution < 'storage , 'role > , attempt : AttemptCore , port : & mut impl Port) -> Result < SlotClaimMutation < 'storage , 'role > >"
         }
       ],
       "material_uses": [],
@@ -988,12 +1012,12 @@
       ],
       "factories": [
         {
-          "owner": "KnownClaim",
+          "owner": "KnownClaim < 'storage , 'role >",
           "signature": "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >"
         },
         {
-          "owner": "SlotClaimMutation",
-          "signature": "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim >"
+          "owner": "SlotClaimMutation < 'storage , 'role >",
+          "signature": "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < KnownClaim < 'storage , 'role > >"
         }
       ],
       "material_uses": [],
@@ -1297,17 +1321,17 @@
       ],
       "factories": [
         {
-          "owner": "PreparedDispatch",
-          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+          "owner": "PreparedDispatch < 'storage , 'role >",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse < 'storage , 'role > >"
         }
       ],
       "material_uses": [
         {
-          "owner": "CounterResponse",
+          "owner": "CounterResponse < 'storage , 'role >",
           "signature": "pub (super) fn bytes (& self) -> & [u8]"
         },
         {
-          "owner": "CounterResponse",
+          "owner": "CounterResponse < 'storage , 'role >",
           "signature": "pub (super) fn finish (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
         }
       ],
@@ -1323,22 +1347,22 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
-        "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+        "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse < 'storage , 'role > >"
       ],
       "factories": [
         {
-          "owner": "AuthorizedDispatch",
-          "signature": "pub (super) fn prepare (self , selection : & EpochStore , port : & mut impl Port) -> Result < PreparedDispatch >"
+          "owner": "AuthorizedDispatch < 'storage , 'role >",
+          "signature": "pub (super) fn prepare (self , selection : & EpochStore , port : & mut impl Port) -> Result < PreparedDispatch < 'storage , 'role > >"
         }
       ],
       "material_uses": [
         {
-          "owner": "PreparedDispatch",
+          "owner": "PreparedDispatch < 'storage , 'role >",
           "signature": "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
         },
         {
-          "owner": "PreparedDispatch",
-          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse >"
+          "owner": "PreparedDispatch < 'storage , 'role >",
+          "signature": "pub (super) fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < CounterResponse < 'storage , 'role > >"
         }
       ],
       "proof_uses": [],
@@ -1502,6 +1526,7 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_app_statement (& mut self , statement : & StageStatement , observed : & ProcessData , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_controller_statement (& mut self , statement : & StageStatement , kernel_process : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn check_storage_runtime_selection (& mut self , statement : & StageStatement , role : NativeRole) -> Result < () >",
+        "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (in crate :: security_epoch :: native_enrollment) fn sign_storage_message (& mut self , body : Body) -> Result < Message >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_code (& mut self) -> Result < Digest >",
@@ -1582,6 +1607,10 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn storage_statement (& mut self) -> Result < StageStatement >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >"
         },
         {
           "owner": "SameEnrolledOwner",
@@ -1834,6 +1863,7 @@
         "pub (crate) fn check_initial_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn into_physical_checked (mut self) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >",
         "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -1871,6 +1901,10 @@
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentPreparedFilePhase < 'file , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn into_physical_checked (mut self) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "proof_uses": [],
@@ -2097,6 +2131,10 @@
       ],
       "factories": [
         {
+          "owner": "CurrentPreparedFilePhase < 'file , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn into_physical_checked (mut self) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        },
+        {
           "owner": "PreparedFileContinuity",
           "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
@@ -2202,9 +2240,16 @@
       "type_name": "CurrentStoragePeerPhase",
       "owning_children": [],
       "methods": [
+        "pub (crate) fn acknowledge_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn announce_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn await_acknowledgement (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn await_release (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "fn completion_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Completion , next : Completion , role : NativeRole , send : bool) -> Result < () >",
         "pub (crate) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn release_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn request (& self) -> & StoragePeerRequest"
       ],
       "factories": [
@@ -2220,6 +2265,30 @@
       "material_uses": [
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "fn completion_packet (& mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Completion , next : Completion , role : NativeRole , send : bool) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn acknowledge_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn announce_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn await_acknowledgement (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn await_release (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         },
         {
@@ -2229,6 +2298,10 @@
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentStoragePeerPhase < '_ >",
+          "signature": "pub (crate) fn release_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         },
         {
           "owner": "CurrentStoragePeerPhase < '_ >",
@@ -2247,8 +2320,10 @@
       "type_name": "CurrentStorageBootstrapPhase",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn announce_known (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (in crate :: security_epoch) fn finish_activated (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn request_digest (& self) -> Result < Digest >"
@@ -2270,7 +2345,15 @@
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn announce_known (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn finish_activated (mut self) -> Result < () >"
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
@@ -2293,7 +2376,9 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
+        "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
@@ -2310,6 +2395,14 @@
         {
           "owner": "InitialStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >"
         }
       ],
       "proof_uses": [],
@@ -2323,6 +2416,8 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >",
+        "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
+        "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn retain (holder : AuthenticatedAppFirstHolder < '_ , '_ >) -> Result < Self >"
       ],
@@ -2340,6 +2435,14 @@
         {
           "owner": "AppInitialStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , request : & Request) -> Result < CurrentAppStorageBootstrapPhase < 'storage > >"
+        },
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >"
+        },
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >"
         }
       ],
       "proof_uses": [],
@@ -2351,7 +2454,9 @@
       "type_name": "CurrentAppStorageBootstrapPhase",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_activated (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -2372,6 +2477,14 @@
         },
         {
           "owner": "CurrentAppStorageBootstrapPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn await_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStorageBootstrapPhase < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn finish_activated (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppStorageBootstrapPhase < '_ >",
           "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
         }
       ],
@@ -2379,6 +2492,141 @@
       "kind": "private_material",
       "consuming_methods": [
         "finish_checked"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
+      "type_name": "ControllerPort",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >",
+        "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < super :: super :: firestore :: Budget >",
+        "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >",
+        "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "fn sample (& mut self) -> Result < Sample >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerPort < '_ , '_ >",
+          "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
+        },
+        {
+          "owner": "ControllerPort < '_ , '_ >",
+          "signature": "fn sample (& mut self) -> Result < Sample >"
+        },
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >"
+        },
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < super :: super :: firestore :: Budget >"
+        },
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >"
+        },
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap.rs",
+      "type_name": "ActiveAppStorageContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap.rs",
+      "type_name": "ActiveControllerStorageContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn activate_controller (mut storage : InitialStorageContinuity , owner : & mut super :: native_enrollment :: EnrolledProcessRoleOwner , policy : & InitialBootstrapPolicy , selection : & EpochStore) -> ControllerActivationOutcome"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap.rs",
+      "type_name": "AppStorageBootstrap",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn advance (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn retain (storage : super :: AppInitialStorageContinuity , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >"
+        },
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn retain (storage : super :: AppInitialStorageContinuity , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn advance (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >"
+        },
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "into_active"
       ]
     }
   ],

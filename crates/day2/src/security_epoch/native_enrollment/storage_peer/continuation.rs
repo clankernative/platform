@@ -95,6 +95,7 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     local: StageStatement,
     exchange: CurrentExchange,
     remote_grant: Digest,
+    completion: Completion,
     #[cfg(target_os = "linux")]
     peer: Peer,
 }
@@ -306,6 +307,7 @@ impl AppHolderPeerContinuity {
                 "storage_peer_current_ready_changed"
             );
             let mut phase = CurrentStoragePeerPhase {
+                completion: Completion::Waiting,
                 remote_grant: peer.statement().grant_digest()?,
                 owner: &mut self.owner,
                 acquisition,
@@ -412,6 +414,7 @@ impl ControllerHolderPeerContinuity {
                 .channel
                 .send_storage(&ready, stage, &mut acquisition)?;
             let mut phase = CurrentStoragePeerPhase {
+                completion: Completion::Waiting,
                 remote_grant: peer.statement().grant_digest()?,
                 owner: &mut self.owner,
                 acquisition,
@@ -425,7 +428,154 @@ impl ControllerHolderPeerContinuity {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    Waiting,
+    ControllerAnnounced,
+    AppObserved,
+    AppAcknowledged,
+    ControllerAcknowledged,
+    AppReleased,
+    ControllerReleased,
+    Refused,
+}
+
 impl CurrentStoragePeerPhase<'_> {
+    /// Close before the actual packet operation. An uncertain send/receive
+    /// cannot be repeated or converted into a completion by time or DATA.
+    fn completion_packet(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        expected: Completion,
+        next: Completion,
+        role: NativeRole,
+        send: bool,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.completion == expected && self.local.stage.data.role == role,
+                "storage_peer_completion_order_or_role"
+            );
+            self.completion = Completion::Refused;
+            self.check(stage)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (next, send);
+                anyhow::bail!("storage_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let digest = self.exchange.digest()?;
+                if send {
+                    let body = if next == Completion::ControllerReleased {
+                        Body::CurrentReleased { exchange: digest }
+                    } else if role == NativeRole::EpochController {
+                        Body::CurrentResult { exchange: digest }
+                    } else {
+                        Body::CurrentConsumed { exchange: digest }
+                    };
+                    let message = stage.sign_storage_message(body)?;
+                    self.owner
+                        .channel
+                        .send_storage(&message, stage, &mut self.acquisition)?;
+                } else {
+                    let (message, process) = self
+                        .owner
+                        .channel
+                        .receive_storage(stage, &mut self.acquisition)?;
+                    self.peer
+                        .accept_message(&message, process, stage, &mut self.acquisition)?;
+                    let kind = match next {
+                        Completion::AppObserved => {
+                            super::super::storage_peer_wire::CompletionKind::Result
+                        }
+                        Completion::ControllerAcknowledged => {
+                            super::super::storage_peer_wire::CompletionKind::Consumed
+                        }
+                        Completion::AppReleased => {
+                            super::super::storage_peer_wire::CompletionKind::Released
+                        }
+                        _ => anyhow::bail!("storage_peer_completion_receive_state"),
+                    };
+                    ensure!(
+                        message.body.matches_completion(&digest, kind),
+                        "storage_peer_completion_transcript_changed"
+                    );
+                }
+                self.check(stage)?;
+                self.completion = next;
+                Ok(())
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(crate) fn announce_known(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::Waiting,
+            Completion::ControllerAnnounced,
+            NativeRole::EpochController,
+            true,
+        )
+    }
+
+    pub(crate) fn await_known(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::Waiting,
+            Completion::AppObserved,
+            NativeRole::AppHost,
+            false,
+        )
+    }
+
+    pub(crate) fn acknowledge_known(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::AppObserved,
+            Completion::AppAcknowledged,
+            NativeRole::AppHost,
+            true,
+        )
+    }
+
+    pub(crate) fn await_acknowledgement(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::ControllerAnnounced,
+            Completion::ControllerAcknowledged,
+            NativeRole::EpochController,
+            false,
+        )
+    }
+
+    pub(crate) fn release_known(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::ControllerAcknowledged,
+            Completion::ControllerReleased,
+            NativeRole::EpochController,
+            true,
+        )
+    }
+
+    pub(crate) fn await_release(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.completion_packet(
+            stage,
+            Completion::AppAcknowledged,
+            Completion::AppReleased,
+            NativeRole::AppHost,
+            false,
+        )
+    }
+
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
             self.owner.disposition.check(self.exchange.sequence)?;
@@ -454,6 +604,14 @@ impl CurrentStoragePeerPhase<'_> {
     /// a consumer: it releases the peer scope and must follow those postchecks.
     pub(crate) fn finish_checked(mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.check(stage)?;
+        ensure!(
+            matches!(
+                (self.local.stage.data.role, self.completion),
+                (NativeRole::AppHost, Completion::AppReleased)
+                    | (NativeRole::EpochController, Completion::ControllerReleased)
+            ),
+            "storage_peer_completion_not_consumed"
+        );
         self.owner.last_local_grant = self.local.grant_digest()?;
         self.owner.last_remote_grant = self.remote_grant.clone();
         self.owner.disposition.complete(self.exchange.sequence)
@@ -461,6 +619,7 @@ impl CurrentStoragePeerPhase<'_> {
 
     /// Terminal refusal has no live clock, stage check, network or replacement.
     pub(crate) fn refuse(&mut self) {
+        self.completion = Completion::Refused;
         self.owner.disposition.refuse();
         self.acquisition.refuse();
     }
