@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:76c92c592cb29807cf47528a1bd0a14da98d59744f2081c9ba4f0aae15ea914c",
+      "fingerprint": "sha256:ad0b547b2aca599ae9a3911da42445b88e1e6a1924fdb70f89863eebd503b6e8",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -803,6 +803,13 @@
       "type_name": "NativeStorageCreationAuthority",
       "owning_children": [
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority.rs",
+            "module": "initial"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
@@ -1540,6 +1547,7 @@
       "methods": [
         "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
+        "pub (super) fn check_durability_profile (& mut self) -> Result < () >",
         "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
       ],
       "factories": [
@@ -1558,6 +1566,10 @@
           "signature": "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >"
         },
         {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (super) fn check_durability_profile (& mut self) -> Result < () >"
+        },
+        {
           "owner": "CurrentVolumePhase < '_ , 'role >",
           "signature": "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         }
@@ -1572,6 +1584,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn check_initial_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn projection (& mut self) -> Result < PreparedFileProjection >",
@@ -1591,6 +1604,10 @@
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPreparedFilePhase < 'file , 'role >",
+          "signature": "pub (crate) fn check_initial_durability (& mut self) -> Result < () >"
         },
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
@@ -1667,6 +1684,7 @@
       ],
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn check_initial_durability (& mut self) -> Result < () >",
         "pub (crate) fn retain_for_activation (mut self) -> Result < ControllerHolderPeerContinuity >"
       ],
       "factories": [
@@ -1679,6 +1697,10 @@
         {
           "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
           "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
+          "signature": "pub (crate) fn check_initial_durability (& mut self) -> Result < () >"
         },
         {
           "owner": "AuthenticatedControllerFirstHolder < '_ , '_ >",
@@ -1891,6 +1913,7 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder",
         "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -1912,6 +1935,10 @@
         {
           "owner": "ControllerHolderPeerContinuity",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder"
         }
       ],
       "proof_uses": [],
@@ -1961,6 +1988,81 @@
       "consuming_methods": [
         "finish_checked"
       ]
+    }
+  ,
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "CurrentStorageBootstrapPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn request_digest (& self) -> Result < Digest >"
+      ],
+      "factories": [
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn request_digest (& self) -> Result < Digest >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish_checked"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "InitialStorageContinuity",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >",
+        "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
+        "pub (crate) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (crate) fn establish (mut file : PreparedFileContinuity , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     }
   ],
   "buffer_destructors": [
