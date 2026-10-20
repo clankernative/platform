@@ -207,6 +207,10 @@ impl NativeNamespaceObservation {
         self.facts
     }
 
+    pub(super) fn data(&self) -> &NamespaceFacts {
+        &self.facts
+    }
+
     /// Actual complete mapping DATA from this retained self task. File-backed
     /// mappings and permissions do not qualify image or immutable execution.
     pub(super) fn mappings(
@@ -235,7 +239,7 @@ impl NativeNamespaceObservation {
 }
 
 #[cfg(target_os = "linux")]
-fn require_proc(file: &std::fs::File) -> Result<()> {
+pub(super) fn require_proc(file: &std::fs::File) -> Result<()> {
     ensure!(
         rustix::fs::fstatfs(file)?.f_type == rustix::fs::PROC_SUPER_MAGIC,
         "epoch_native_procfs_required"
@@ -244,7 +248,7 @@ fn require_proc(file: &std::fs::File) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_root(acquisition: &mut NativeAcquisition) -> Result<std::fs::File> {
+pub(super) fn open_root(acquisition: &mut NativeAcquisition) -> Result<std::fs::File> {
     use rustix::fs::{Mode, OFlags};
     acquisition.remaining()?;
     let file = std::fs::File::from(rustix::fs::open(
@@ -258,7 +262,10 @@ fn open_root(acquisition: &mut NativeAcquisition) -> Result<std::fs::File> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_task(root: &std::fs::File, acquisition: &mut NativeAcquisition) -> Result<std::fs::File> {
+pub(super) fn open_task(
+    root: &std::fs::File,
+    acquisition: &mut NativeAcquisition,
+) -> Result<std::fs::File> {
     use rustix::fs::{Mode, OFlags};
     acquisition.remaining()?;
     // Only this fixed kernel-owned link is followed; no caller path.
@@ -322,7 +329,7 @@ fn require_process_time_join(
 }
 
 #[cfg(target_os = "linux")]
-fn proc_identity(file: &std::fs::File) -> Result<(u32, u32, u64, u64)> {
+pub(super) fn proc_identity(file: &std::fs::File) -> Result<(u32, u32, u64, u64)> {
     use rustix::fs::{AtFlags, StatxFlags};
     require_proc(file)?;
     let mask = StatxFlags::INO | StatxFlags::MNT_ID;
@@ -340,7 +347,7 @@ fn proc_identity(file: &std::fs::File) -> Result<(u32, u32, u64, u64)> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_proc(
+pub(super) fn open_proc(
     task: &std::fs::File,
     name: &str,
     acquisition: &mut NativeAcquisition,
@@ -371,7 +378,7 @@ fn open_proc(
 }
 
 #[cfg(target_os = "linux")]
-fn open_namespace(
+pub(super) fn open_namespace(
     task: &std::fs::File,
     name: &str,
     acquisition: &mut NativeAcquisition,
@@ -392,7 +399,7 @@ fn open_namespace(
 }
 
 #[cfg(target_os = "linux")]
-fn namespace_identity(file: &std::fs::File) -> Result<NamespaceIdentity> {
+pub(super) fn namespace_identity(file: &std::fs::File) -> Result<NamespaceIdentity> {
     use std::os::unix::fs::MetadataExt;
     // Linux UAPI NSFS_MAGIC. This checks object filesystem type, not authority
     // or node initial namespace membership. Kernel/proc trust still qualified.
@@ -409,7 +416,7 @@ fn namespace_identity(file: &std::fs::File) -> Result<NamespaceIdentity> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_proc(
+pub(super) fn read_proc(
     file: &mut std::fs::File,
     max: usize,
     acquisition: &mut NativeAcquisition,

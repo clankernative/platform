@@ -50250,10 +50250,9 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-===== rustix 1.1.4 =====
+===== rustix 1.1.5 =====
 License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
-Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/rustix/1.1.4/download
+Source: git+https://github.com/clankernative/rustix?rev=6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0#6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0
 
 --- LICENSE-APACHE ---
                               Apache License

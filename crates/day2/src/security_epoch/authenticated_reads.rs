@@ -15,16 +15,11 @@ use day2_capabilities::{
     Digest,
     security_epoch::{
         EpochStore,
-        bootstrap::{InitialBootstrapPolicy, WorkloadKind},
+        bootstrap::{InitialBootstrapPolicy, NativeRole, WorkloadKind},
     },
 };
 use std::{collections::BTreeMap, io::Read, time::Duration};
 use zeroize::Zeroizing;
-
-pub(super) enum RolePurpose {
-    Controller,
-    App,
-}
 
 pub(crate) struct AuthenticatedReads {
     http: NativeHttp,
@@ -39,25 +34,27 @@ impl AuthenticatedReads {
     pub(super) fn acquire(
         policy: &InitialBootstrapPolicy,
         selection: &EpochStore,
-        purpose: RolePurpose,
+        purpose: NativeRole,
     ) -> Result<Self> {
         policy.validate(&BTreeMap::from([(
             policy.epoch_store.id.clone(),
             selection.clone(),
         )]))?;
-        let role = match purpose {
-            RolePurpose::Controller => &policy.controller,
-            RolePurpose::App => {
+        match purpose {
+            NativeRole::EpochController => {}
+            NativeRole::AppHost => {
                 anyhow::bail!("epoch_native_app_executable_profile_producer_unavailable")
             }
-        };
+            NativeRole::SecurityShell => {
+                anyhow::bail!("epoch_native_shell_executable_profile_producer_unavailable")
+            }
+        }
+        let selected = policy.native_role(purpose);
+        let role = selected.workload;
         // The native executable pin must come from the selected admitted profile;
         // matching it alone does not qualify the full deployment/profile/image.
         let mut acquisition = NativeAcquisition::begin(selection.max_lease_seconds)?;
-        let process = NativeProcessObservation::acquire(
-            &policy.runtime_profile.controller_code,
-            &mut acquisition,
-        )?;
+        let process = NativeProcessObservation::acquire(selected.code, &mut acquisition)?;
         let mut ca = Vec::new();
         acquisition.remaining()?;
         let ca_file = std::fs::File::from(rustix::fs::open(

@@ -34,7 +34,12 @@ may resolve Kubernetes' atomic writer; their path alone does not authenticate
 the caller or prove that its process belongs to the token's Pod. An actual
 deployment must supply and qualify these projections, executable/profile
 admission and process-to-Pod binding before a serving bootstrap factory exists.
-The app producer refuses until its own native executable selection exists.
+The shared `NativeRole::EpochController` selection supplies the staged read
+adapter's exact executable pin. AppHost and SecurityShell have independent
+required executable/workload/container selections, but their read producers
+still refuse until native enrollment and current role owners are installed.
+Adding the selections does not enable either producer. See
+[runtime identity selections](CREDENTIAL-RUNTIME-IDENTITY.md#selected-container-data).
 
 ## Authenticated response checks
 
