@@ -95,6 +95,12 @@ pub(crate) struct SameEnrolledOwner {
 }
 
 impl EnrolledProcessRoleOwner {
+    /// Historical DATA from the successful enrollment, not a current check or
+    /// grant. The private Controller evidence exporter cannot restore an owner.
+    pub(in crate::security_epoch) fn historical_incarnation_data(&self) -> Digest {
+        self.incarnation.clone()
+    }
+
     /// Only operator-selected fixed configuration and the real native exchange
     /// can install a role. Call inside the executor's final owning OS thread.
     pub(crate) fn enroll_current_thread(scope: &AuthorityScope, role: NativeRole) -> Result<Self> {
