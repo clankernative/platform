@@ -98,6 +98,8 @@ pub(crate) enum RuntimeServingUse {
     PendingCapture,
     Read,
     Refresh,
+    Response,
+    ResponseComplete,
 }
 
 #[derive(Clone, Copy)]
@@ -106,9 +108,15 @@ pub(super) enum ScopePurpose {
     Runtime(RuntimeServingUse),
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum HoldContext {
+    Human(Digest),
+    Runtime(Digest),
+}
+
 struct ResponseHold {
     identity: ResponseIdentity,
-    intent: Digest,
+    context: HoldContext,
     refused: bool,
 }
 
@@ -121,7 +129,7 @@ struct ResponseHolds {
 impl ResponseHolds {
     fn prepare(
         &mut self,
-        intent: &Digest,
+        context: &HoldContext,
         purpose: ServingUse,
         identity: Option<&ResponseIdentity>,
     ) -> Result<bool> {
@@ -141,7 +149,7 @@ impl ResponseHolds {
             identity.ok_or_else(|| anyhow::anyhow!("native_serving_response_identity_required"))?;
         if let Some(hold) = &self.current {
             ensure!(
-                !hold.refused && hold.identity.same(identity) && hold.intent == *intent,
+                !hold.refused && hold.identity.same(identity) && hold.context == *context,
                 "native_serving_different_or_refused_response_hold"
             );
             return Ok(false);
@@ -152,7 +160,7 @@ impl ResponseHolds {
         );
         self.current = Some(ResponseHold {
             identity: identity.clone(),
-            intent: intent.clone(),
+            context: context.clone(),
             refused: false,
         });
         Ok(true)
@@ -160,7 +168,7 @@ impl ResponseHolds {
 
     fn require_bound(
         &mut self,
-        intent: &Digest,
+        context: &HoldContext,
         purpose: ServingUse,
         identity: Option<&ResponseIdentity>,
     ) -> Result<()> {
@@ -175,17 +183,17 @@ impl ResponseHolds {
                 "native_serving_response_not_bound_at_creator"
             );
         }
-        self.prepare(intent, purpose, identity)?;
+        self.prepare(context, purpose, identity)?;
         Ok(())
     }
 
-    fn refuse_exact(&mut self, intent: &Digest, identity: &ResponseIdentity) -> Result<()> {
+    fn refuse_exact(&mut self, context: &HoldContext, identity: &ResponseIdentity) -> Result<()> {
         let hold = self
             .current
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("native_serving_response_hold_missing"))?;
         ensure!(
-            hold.intent == *intent && hold.identity.same(identity),
+            hold.context == *context && hold.identity.same(identity),
             "native_serving_different_response_hold"
         );
         hold.refused = true;
@@ -244,9 +252,11 @@ pub(crate) fn bind_response(
     identity: &ResponseIdentity,
 ) -> Result<()> {
     intent.require_oauth_management()?;
-    participant
-        .response
-        .prepare(&intent.commitment()?, ServingUse::Response, Some(identity))?;
+    participant.response.prepare(
+        &HoldContext::Human(intent.commitment()?),
+        ServingUse::Response,
+        Some(identity),
+    )?;
     Ok(())
 }
 
@@ -286,9 +296,11 @@ pub(crate) fn with_current_serving<'role, T>(
     }
     let commitment = intent.commitment()?;
     // A duplicate loser fails BEFORE taking the paused winner's native scope.
-    participant
-        .response
-        .require_bound(&commitment, purpose, response)?;
+    participant.response.require_bound(
+        &HoldContext::Human(commitment.clone()),
+        purpose,
+        response,
+    )?;
     let binding = Digest::of(&("day2-native-human-serving-v1", &commitment, purpose))?;
     let outcome = match &mut participant.native {
         ParticipantOwner::App(app) => {
@@ -320,6 +332,7 @@ pub(crate) fn with_current_runtime_serving<'role, T>(
     purpose: RuntimeServingUse,
     operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> Result<T> {
+    require_runtime_operation(purpose)?;
     let binding = Digest::of(&("day2-native-runtime-serving-v1", purpose))?;
     let ParticipantOwner::App(app) = &mut participant.native else {
         anyhow::bail!("native_runtime_app_participant_required");
@@ -332,6 +345,118 @@ pub(crate) fn with_current_runtime_serving<'role, T>(
             Err(error)
         }
     }
+}
+
+fn require_runtime_operation(purpose: RuntimeServingUse) -> Result<()> {
+    ensure!(
+        !matches!(
+            purpose,
+            RuntimeServingUse::Response | RuntimeServingUse::ResponseComplete
+        ),
+        "native_runtime_response_requires_exact_hold"
+    );
+    Ok(())
+}
+
+fn runtime_response_context(
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+) -> Result<HoldContext> {
+    Ok(HoldContext::Runtime(Digest::of(&(
+        "day2-native-runtime-response-v1",
+        scope,
+    ))?))
+}
+
+/// Connection ownership DATA, never an autonomous operation permission. Bind
+/// only the actual socket identity before its first poll; a human hold cannot
+/// be reclassified as runtime even with equal digest/identity bytes.
+pub(crate) fn bind_runtime_response(
+    participant: &mut ServingParticipant,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    ensure!(
+        matches!(participant.native, ParticipantOwner::App(_)),
+        "native_runtime_app_participant_required"
+    );
+    participant.response.prepare(
+        &runtime_response_context(scope)?,
+        ServingUse::Response,
+        Some(identity),
+    )?;
+    Ok(())
+}
+
+/// Pure exclusion before the caller acquires a new role stage. It cannot make
+/// a hold, consume native permission or repair a missing/foreign connection.
+pub(crate) fn require_runtime_response(
+    participant: &mut ServingParticipant,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    ensure!(
+        matches!(participant.native, ParticipantOwner::App(_)),
+        "native_runtime_app_participant_required"
+    );
+    participant.response.require_bound(
+        &runtime_response_context(scope)?,
+        ServingUse::Response,
+        Some(identity),
+    )
+}
+
+pub(crate) fn with_current_runtime_response<'role, T>(
+    participant: &mut ServingParticipant,
+    stage: &mut EnrolledRoleStage<'role>,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    purpose: RuntimeServingUse,
+    identity: &ResponseIdentity,
+    operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
+) -> Result<T> {
+    ensure!(
+        matches!(
+            purpose,
+            RuntimeServingUse::Response | RuntimeServingUse::ResponseComplete
+        ),
+        "native_runtime_response_purpose_required"
+    );
+    require_runtime_response(participant, scope, identity)?;
+    stage.check_for(scope, super::native_enrollment::NativeRole::AppHost)?;
+    let binding = Digest::of(&("day2-native-runtime-response-scope-v1", scope, purpose))?;
+    let ParticipantOwner::App(app) = &mut participant.native else {
+        anyhow::bail!("native_runtime_app_participant_required")
+    };
+    match app.with_serving(stage, binding, ScopePurpose::Runtime(purpose), operation) {
+        ScopeOutcome::Known(value) => {
+            if purpose == RuntimeServingUse::ResponseComplete {
+                participant.response.current = None;
+            }
+            Ok(value)
+        }
+        ScopeOutcome::Excluded(error) => Err(error),
+        ScopeOutcome::Refused(error) => {
+            participant.refuse();
+            Err(error)
+        }
+    }
+}
+
+/// Stage-free terminal disposition of only the existing exact runtime hold.
+/// A human/retired/losing context never changes the rightful native owner.
+pub(crate) fn refuse_runtime_response(
+    participant: &mut ServingParticipant,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    ensure!(
+        matches!(participant.native, ParticipantOwner::App(_)),
+        "native_runtime_app_participant_required"
+    );
+    participant
+        .response
+        .refuse_exact(&runtime_response_context(scope)?, identity)?;
+    participant.refuse();
+    Ok(())
 }
 
 /// The real active App participant and SAME already acquired stage remain
@@ -363,7 +488,9 @@ pub(crate) fn refuse_current_serving(
         "native_serving_terminal_purpose"
     );
     let commitment = intent.commitment()?;
-    participant.response.refuse_exact(&commitment, identity)?;
+    participant
+        .response
+        .refuse_exact(&HoldContext::Human(commitment), identity)?;
     participant.refuse();
     Ok(())
 }
@@ -424,9 +551,59 @@ mod response_tests {
     use super::*;
 
     #[test]
+    fn equal_digest_and_identity_cannot_cross_human_and_runtime_holds() {
+        let digest = Digest::new(b"deliberately equal context bytes");
+        let human = HoldContext::Human(digest.clone());
+        let runtime = HoldContext::Runtime(digest);
+        for (owner, foreign) in [(human.clone(), runtime.clone()), (runtime, human)] {
+            let mut holds = ResponseHolds::default();
+            let identity = ResponseIdentity::new();
+            holds
+                .prepare(&owner, ServingUse::Response, Some(&identity))
+                .unwrap();
+            assert!(
+                holds
+                    .require_bound(&foreign, ServingUse::AppResponseComplete, Some(&identity))
+                    .is_err()
+            );
+            assert!(holds.refuse_exact(&foreign, &identity).is_err());
+            assert!(!holds.current.as_ref().unwrap().refused);
+            holds
+                .require_bound(&owner, ServingUse::AppResponseComplete, Some(&identity))
+                .unwrap();
+            // Model only the known actual completion branch; no native factory
+            // or completed operation is manufactured by this DATA control.
+            holds.current = None;
+            holds
+                .prepare(&foreign, ServingUse::Response, Some(&identity))
+                .unwrap();
+            assert!(holds.refuse_exact(&owner, &identity).is_err());
+            assert!(!holds.current.as_ref().unwrap().refused);
+        }
+    }
+
+    #[test]
+    fn runtime_response_cannot_use_the_generic_operation_purpose() {
+        for purpose in [
+            RuntimeServingUse::Response,
+            RuntimeServingUse::ResponseComplete,
+        ] {
+            assert!(require_runtime_operation(purpose).is_err());
+        }
+        for purpose in [
+            RuntimeServingUse::InitialStorage,
+            RuntimeServingUse::PendingCapture,
+            RuntimeServingUse::Read,
+            RuntimeServingUse::Refresh,
+        ] {
+            require_runtime_operation(purpose).unwrap();
+        }
+    }
+
+    #[test]
     fn pre_poll_abort_and_loser_completion_cannot_burn_a_paused_winner() {
         let mut holds = ResponseHolds::default();
-        let intent = Digest::new(b"same-real-intent-data");
+        let intent = HoldContext::Human(Digest::new(b"same-real-intent-data"));
         let a = ResponseIdentity::new();
         let a_clone = a.clone();
         let b = ResponseIdentity::new();
@@ -470,7 +647,7 @@ mod response_tests {
     #[test]
     fn late_old_abort_never_refuses_a_replacement_or_creates_a_missing_hold() {
         let mut holds = ResponseHolds::default();
-        let intent = Digest::new(b"intent");
+        let intent = HoldContext::Human(Digest::new(b"intent"));
         let a = ResponseIdentity::new();
         let b = ResponseIdentity::new();
         assert!(holds.refuse_exact(&intent, &a).is_err());
@@ -501,7 +678,7 @@ mod response_tests {
         assert!(
             holds
                 .prepare(
-                    &Digest::new(b"foreign-intent"),
+                    &HoldContext::Human(Digest::new(b"foreign-intent")),
                     ServingUse::Response,
                     Some(&b)
                 )
