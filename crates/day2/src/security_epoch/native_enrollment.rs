@@ -23,8 +23,14 @@ mod runtime;
 mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
+mod storage_peer;
 #[cfg(target_os = "linux")]
 mod storage_socket_directory;
+
+pub(crate) use storage_peer::{
+    AuthenticatedAppFirstHolder, AuthenticatedControllerFirstHolder,
+    AuthenticatedInitialHolderOffer, InitialHolderServer,
+};
 
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{

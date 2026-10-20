@@ -16,6 +16,9 @@ use rustix::{
 };
 use std::{fs::File, io::IoSliceMut, marker::PhantomData, rc::Rc};
 
+mod storage;
+pub(super) use storage::{StorageListener, StorageSender};
+
 pub(super) struct Channel {
     socket: File,
     refused: bool,
