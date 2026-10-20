@@ -42,6 +42,16 @@ permissions before using a production role. Privileged node agents, init
 containers, launchers, debug/ptrace users and node administrators belong to the
 trusted computing base; this is not protection from a hostile node root.
 
+## Provisioner/issuer AppArmor
+
+Load the narrow [`day2-native-enrollment` profile](apparmor/day2-native-enrollment.tftpl)
+with the separate [native enrollment profile root](../native-enrollment-profile/README.md).
+Its loader selects only this pool and its exact protected enrollment label.
+Provisioner/issuer use the Localhost profile; ordinary App/Shell participants
+keep RuntimeDefault. The loader's readiness and real allowed/denied observation
+checks are prerequisites to deployment. Desired profile names do not grant a
+native role.
+
 ## Smallest supported capacity and indicative monthly cost
 
 For the single Calendar canary, the proposed requests are:
@@ -52,7 +62,8 @@ For the single Calendar canary, the proposed requests are:
 | Shell (current profile) | 500m | 512 MiB |
 | Provisioner and issuer (proposed combined allowance) | 1,000m | 512 MiB |
 | Epoch controller (proposed allowance) | 250m | 256 MiB |
-| **Native total** | **2,750m** | **1,792 MiB** |
+| AppArmor loader (effective init/steady request) | 10m | 32 MiB |
+| **Native total** | **2,760m** | **1,824 MiB** |
 
 `e2-highcpu-4` supplies four vCPUs and 4 GiB. Using GKE's published reservations
 leaves approximately 3,920m CPU and 2,972 MiB memory for Pods before system
@@ -63,8 +74,9 @@ Reconcile actual supplier requests and system Pods before moving workloads; sele
 `e2-standard-4` if memory needs more headroom. [GKE node reservations](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes).
 
 The approved Calendar node's actual allocatable memory was 2,793 MiB, with
-approximately 930 MiB of system Pod requests. The proposed native requests leave
-only about 71 MiB of scheduling headroom. This is tighter than the initial
+approximately 930 MiB of system Pod requests before the profile loader. The
+proposed native requests, including that loader, leave only about 39 MiB of
+scheduling headroom. This is tighter than the initial
 allowance above; reconcile actual native requests and measured usage before
 workload deployment. A larger machine needs its own cost approval.
 

@@ -1,0 +1,72 @@
+# Trusted provisioner/issuer only. The instance still selects exact retained
+# pidfds, code, workloads, images, node and boot through the native issuer.
+# Static AppArmor rules bound observation kinds and peer labels, not dynamic
+# native role identity. No general file or ptrace-trace permission is granted.
+@{PIDS} = [0-9]*
+@{CLIENT_EXECUTABLES} = ${client_executables}
+profile day2-native-enrollment flags=(attach_disconnected,mediate_deleted) {
+  capability sys_ptrace,
+  capability chown,
+
+  # Same binary is the provisioner and its private issuer child.
+  /usr/local/bin/day2-native-enrollment rix,
+  @{CLIENT_EXECUTABLES} r,
+  /usr/bin/containerd r,
+  /usr/lib/systemd/systemd r,
+  /{usr/,}lib{,64}/**.so* mr,
+
+  # Actual proc task paths used by retained native observations.
+  /proc/ r,
+  /proc/@{PIDS}/ r,
+  /proc/@{PIDS}/task/ r,
+  /proc/@{PIDS}/task/@{PIDS}/ r,
+  /proc/@{PIDS}/{stat,status,maps,timens_offsets} r,
+  /proc/@{PIDS}/task/@{PIDS}/{stat,status,maps} r,
+  /proc/@{PIDS}/ns/ r,
+  /proc/@{PIDS}/task/@{PIDS}/ns/ r,
+  /proc/@{PIDS}/ns/{pid,user,time,time_for_children,mnt,cgroup} r,
+  /proc/@{PIDS}/task/@{PIDS}/ns/{pid,user,time,time_for_children,mnt,cgroup} r,
+  # This qualified GKE kernel mediates nsfs object opens as "/". Exact root
+  # read admits that object/root-directory metadata, never descendant files.
+  / r,
+  /proc/sys/kernel/osrelease r,
+  /proc/sys/kernel/random/boot_id r,
+  /proc/@{PIDS}/attr/current r,
+
+  # Trusted host init/runtime, selected default-profile clients and same-role
+  # child. This is PTRACE_MODE_READ; ptrace trace/control is not admitted.
+  ptrace (read) peer=unconfined,
+  ptrace (read) peer=cri-containerd.apparmor.d,
+  ptrace (read,readby) peer=day2-native-enrollment,
+  signal (send,receive) peer=day2-native-enrollment,
+  signal (receive) peer=unconfined,
+
+  /etc/day2/native-enrollment.json r,
+  /run/day2-native-enrollment/ rw,
+  /run/day2-native-enrollment/issuer.sock rw,
+  /run/day2-native-enrollment/storage/ rw,
+  /run/containerd/containerd.sock rw,
+  /{var/run,run}/secrets/kubernetes.io/serviceaccount/{token,ca.crt,namespace} r,
+  /{var/run,run}/secrets/kubernetes.io/serviceaccount/..*/{token,ca.crt,namespace} r,
+  /etc/{hosts,resolv.conf,nsswitch.conf,gai.conf} r,
+  /etc/ssl/certs/{,**} r,
+  /dev/null rw,
+  /dev/{urandom,random} r,
+  network unix stream,
+  network unix seqpacket,
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+
+  # Explicit denials remain even if a future allow rule is accidentally wider.
+  deny ptrace (trace,tracedby),
+  deny /proc/@{PIDS}/{mem,environ,cmdline,stack,syscall,io} rw,
+  deny /proc/@{PIDS}/task/@{PIDS}/{mem,environ,stack,syscall,io} rw,
+  deny /proc/kcore rw,
+  deny /etc/{shadow,gshadow} rw,
+  deny /dev/mem rw,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+}

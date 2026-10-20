@@ -865,7 +865,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        stack: [cluster, app-edge, security-shell-edge, security-shell, security-epoch-controller, day2-app, qualification-runner, native-enrollment, native-enrollment-observer-access, native-enrollment-pool]
+        stack: [cluster, app-edge, security-shell-edge, security-shell, security-epoch-controller, day2-app, qualification-runner, native-enrollment, native-enrollment-observer-access, native-enrollment-pool, native-enrollment-profile]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
