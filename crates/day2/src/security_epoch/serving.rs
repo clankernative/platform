@@ -774,10 +774,7 @@ mod runtime_admission_tests {
             let error = crate::store::Runtime::load(&path, "workspace")
                 .err()
                 .context("native Runtime unexpectedly admitted")?;
-            assert_eq!(
-                error.to_string(),
-                "native runtime storage authority unavailable"
-            );
+            assert_eq!(error.to_string(), "native_runtime_current_serving_required");
             Ok(())
         };
         refused()?;

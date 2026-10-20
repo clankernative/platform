@@ -371,6 +371,12 @@ impl VerifiedAuthTime {
         self.google.require_management_authentication(current)
     }
 
+    /// Observation DATA validation only; this cannot replace the consuming
+    /// native producer or authenticate a session/signature by itself.
+    pub(in crate::oauth) fn validate_management_observation(&self) -> Result<()> {
+        self.google.validate_management_observation()
+    }
+
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {
         self.google.intent().purpose()
     }

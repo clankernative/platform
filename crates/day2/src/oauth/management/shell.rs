@@ -109,6 +109,7 @@ impl Shell {
         let view = self.pending(proof.attempt(), headers, identity, now)?;
         proof.require_intent(&FreshIntent::management(&view, identity)?, identity)?;
         proof.require_current(now)?;
+        proof.validate_management_observation()?;
         let intent = FreshIntent::management(&view, identity)?;
         crate::oauth::native_management::with_consumer(
             &intent,

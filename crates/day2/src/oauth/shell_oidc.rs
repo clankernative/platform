@@ -531,6 +531,33 @@ impl Reauthenticated {
         &self,
         current: &mut super::native_management::Consumer<'_, '_, '_>,
     ) -> Result<()> {
+        self.validate_management_observation()?;
+        #[cfg(test)]
+        if self.isolated_fixture {
+            return Ok(());
+        }
+        let order = self.ordering.as_ref().context(PRODUCER_UNAVAILABLE)?;
+        if let Err(error) = current.require_google_producer(&self.intent) {
+            return Err(anyhow::Error::new(ProviderObservationUnavailable(
+                ProviderObservationData {
+                    version: 1,
+                    kind: "google_provider_prerequisite",
+                    outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+                    baseline_iat: order.baseline.claims.iat,
+                    fresh_auth_time: order.fresh.claims.auth_time,
+                    profile: observation_profile(&order.fresh.profile)?,
+                    correlation: order.observation_correlation.clone(),
+                },
+            ))
+            .context(error));
+        }
+        self.require_current(effects::wall_time()?)?;
+        current.check()
+    }
+
+    /// Pure negative preflight before any key or native acquisition. A valid
+    /// observation is DATA; only the consuming method above can authenticate.
+    pub(in crate::oauth) fn validate_management_observation(&self) -> Result<()> {
         self.intent.require_oauth_management()?;
         #[cfg(test)]
         if self.isolated_fixture {
@@ -548,24 +575,7 @@ impl Reauthenticated {
                 && order.fresh.claims.auth_time <= order.fresh.claims.iat,
             "Google original ordering context changed"
         );
-        if let Err(error) = current.require_google_producer(&self.intent) {
-            // Keep the closed prerequisite diagnostic for signed replay without
-            // actual native suppliers. It does not grant a session or retry.
-            return Err(anyhow::Error::new(ProviderObservationUnavailable(
-                ProviderObservationData {
-                    version: 1,
-                    kind: "google_provider_prerequisite",
-                    outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
-                    baseline_iat: order.baseline.claims.iat,
-                    fresh_auth_time: order.fresh.claims.auth_time,
-                    profile: observation_profile(&order.fresh.profile)?,
-                    correlation: order.observation_correlation.clone(),
-                },
-            ))
-            .context(error));
-        }
-        self.require_current(effects::wall_time()?)?;
-        current.check()
+        Ok(())
     }
 
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {

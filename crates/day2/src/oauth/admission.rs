@@ -197,6 +197,7 @@ impl ArtifactShellSigner {
         session: Digest,
         now: i64,
     ) -> Result<super::management::Attestation> {
+        proof.validate_management_observation()?;
         let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
         super::native_management::with_consumer(
             &intent,
