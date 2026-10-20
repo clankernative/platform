@@ -474,7 +474,6 @@ impl OriginalPhase<'_> {
 pub(crate) struct Consumer<'a, 'role, 'original> {
     role: &'a mut RoleStage<'role>,
     original: &'a mut OriginalPhase<'original>,
-    settled: bool,
 }
 
 impl Consumer<'_, '_, '_> {
@@ -502,10 +501,19 @@ impl Consumer<'_, '_, '_> {
     }
 }
 
-impl Drop for Consumer<'_, '_, '_> {
+// Terminal DATA lookup only: this can refuse an existing owner, never construct
+// one or authorize an action. Kept OUTSIDE its registry borrow so unwinding can
+// release the borrow before this guard records the unknown outcome.
+struct ConsumerGuard {
+    intent: FreshIntent,
+    role: NativeRole,
+    settled: bool,
+}
+
+impl Drop for ConsumerGuard {
     fn drop(&mut self) {
         if !self.settled {
-            self.original.refuse();
+            let _ = refuse_original(&self.intent, self.role);
         }
     }
 }
@@ -516,18 +524,25 @@ pub(crate) fn with_consumer<T>(
     wall: i64,
     operation: impl FnOnce(&mut Consumer<'_, '_, '_>) -> Result<T>,
 ) -> Result<T> {
-    with_current_original(intent, phase, wall, |role, original| {
+    let role = match phase {
+        Phase::Session | Phase::Signature => NativeRole::SecurityShell,
+        Phase::StartCommit | Phase::DispatchCommit | Phase::ProviderSend | Phase::FinishCommit |
+        Phase::DisconnectCommit | Phase::Verification | Phase::Callback => NativeRole::AppHost,
+        _ => anyhow::bail!("native consumer purpose unsupported"),
+    };
+    let mut guard = ConsumerGuard { intent: intent.clone(), role, settled: false };
+    let result = with_current_original(intent, phase, wall, |role, original| {
         let mut consumer = Consumer {
             role,
             original,
-            settled: false,
         };
         consumer.check()?;
         let output = operation(&mut consumer)?;
         consumer.check()?;
-        consumer.settled = true;
         Ok(output)
-    })
+    });
+    guard.settled = result.is_ok();
+    result
 }
 
 /// This callback cannot escape the local borrow or return a transferable
@@ -658,7 +673,8 @@ impl Sink {
         match intents.as_slice() {
             [] => Ok(operation()),
             [(role, binding)] => binding.effects.clone().run(|| {
-                with_current_for_role(
+                let mut guard = ConsumerGuard { intent: binding.intent.clone(), role: *role, settled: false };
+                let result = with_current_for_role(
                     &binding.intent,
                     Phase::Response,
                     super::effects::wall_time()?,
@@ -667,15 +683,15 @@ impl Sink {
                         let mut consumer = Consumer {
                             role: stage,
                             original,
-                            settled: false,
                         };
                         consumer.check()?;
                         let output = operation();
                         consumer.check()?;
-                        consumer.settled = true;
                         Ok(output)
                     },
-                )
+                );
+                guard.settled = result.is_ok();
+                result
             }),
             _ => anyhow::bail!("native response must have exactly one original"),
         }

@@ -737,6 +737,10 @@ impl Manager {
         let response = match outcome {
             crate::oauth::exchange::ExchangeObservation::Uncertain(uncertain) => {
                 uncertain.record(&db)?;
+                // Always preserve the unknown outcome, including after expiry,
+                // but do not return a successful continuation for an expired
+                // human intent. This grants no retry or publication authority.
+                view.validate(identity, effects::wall_time()?)?;
                 return Ok(Reply::Completed { status: "Connection outcome unknown. No connection was published; operator cleanup is required before another attempt.".into() });
             }
             crate::oauth::exchange::ExchangeObservation::Response(response) => response,
