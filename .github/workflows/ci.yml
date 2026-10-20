@@ -326,14 +326,10 @@ jobs:
             !target/debug/deps/*.rmeta
             !target/debug/deps/*.d
 
-  verify-mac-prepare:
+  verify-mac-compatibility:
     # Reject known security failures before allocating compilation runners.
     needs: [secrets, dependencies, verify-queue-receipt]
     if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [inputs, tests]
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -384,9 +380,8 @@ jobs:
         id: cargo_intermediates
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-cargo-intermediates-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ matrix.part }}-${{ github.sha }}
+          key: day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            day2-cargo-intermediates-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ matrix.part }}-
             day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-
           path: |
             target/debug/.fingerprint
@@ -400,7 +395,6 @@ jobs:
       # Reuse the pre-build key when saving instead of rehashing generated trees.
       - name: Restore completed fixture builds
         id: fixture_cache
-        if: ${{ matrix.part == 'inputs' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
@@ -411,7 +405,6 @@ jobs:
             artifacts/????????????????????????????????????????????????????????????????
       - name: Restore completed test executables
         id: test_cache
-        if: ${{ matrix.part == 'tests' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
@@ -432,27 +425,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: cargo run --locked -p xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
       - run: cargo run --locked -p xtask -- configure-tofu
-      - run: target/debug/xtask verify-mac-prepare ${{ matrix.part }}
+      - run: target/debug/xtask verify-mac
         id: native_preparation
       - name: Retain current Mac compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: day2-compiler-failure-mac-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-compiler-failure-*/manifest.json
           if-no-files-found: warn
           retention-days: 3
-      - name: Retain current Mac preparation facts
+      - name: Retain real Mac native preparation, exact cases and both build campaigns
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: day2-mac-preparation-facts-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            artifacts/ci-preparation-${{ matrix.part }}.json
-            target/debug/xtask.d
+          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-mac-compatibility.json
           if-no-files-found: error
           retention-days: 14
       - name: Retain the separate native Mac compiler inventory
-        if: ${{ matrix.part == 'tests' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-mac-compiler-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -478,7 +468,7 @@ jobs:
             target/debug/deps/*.dylib
       - name: Save completed fixture builds
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ matrix.part == 'inputs' && steps.fixture_cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
           path: |
@@ -486,7 +476,7 @@ jobs:
             artifacts/????????????????????????????????????????????????????????????????
       - name: Save completed test executables
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ matrix.part == 'tests' && steps.test_cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.test_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.test_cache.outputs.cache-primary-key }}
           path: |
@@ -496,108 +486,6 @@ jobs:
             !target/debug/deps/*.rlib
             !target/debug/deps/*.rmeta
             !target/debug/deps/*.d
-
-      # Transport only this run's preparation. The test part cannot replace
-      # fixture artifacts, the CLI distribution or generated worker sources.
-      - name: Archive native Mac fixture and CLI preparation
-        if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-mac-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' platform/target platform/artifacts/ci-preparation-inputs.json platform/artifacts/???????????????????????????????????????????????????????????????? platform/cli platform/crates/worker/generated .toolchains
-        working-directory: ${{ github.workspace }}/..
-      - name: Archive native Mac test compilation
-        if: ${{ matrix.part == 'tests' }}
-        run: tar -czf /tmp/day2-mac-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target/debug platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-test-programs platform/artifacts/ci-preparation-tests.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: day2-mac-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-mac-preparation.tgz
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-
-  verify-mac-compatibility:
-    # Reject known security failures before allocating compilation runners.
-    needs: [secrets, dependencies, verify-queue-receipt, verify-mac-prepare]
-    if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && needs.verify-mac-prepare.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
-    runs-on: macos-15
-    timeout-minutes: 360
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      # Keep compilation parallelism within the standard Mac runner's CPU budget.
-      CARGO_BUILD_JOBS: '3'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
-      # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
-      DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
-        with:
-          tofu_version: 1.11.5
-          tofu_wrapper: false
-      - run: gh release download v1.6.1 --repo temporalio/cli --pattern temporal_cli_1.6.1_darwin_arm64.tar.gz --dir /tmp/day2-tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
-        working-directory: /tmp/day2-tools
-      - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-v2
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: 'false'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: day2-mac-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-mac-inputs
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: day2-mac-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-mac-tests
-      - name: Restore current Mac fixture and CLI preparation
-        run: tar -xzf /tmp/day2-mac-inputs/day2-mac-preparation.tgz -C "$GITHUB_WORKSPACE/.."
-      - name: Restore current Mac test compilation
-        run: tar -xzf /tmp/day2-mac-tests/day2-mac-preparation.tgz -C "$GITHUB_WORKSPACE/.."
-      - run: target/debug/xtask source-check
-      - run: cargo fetch --locked
-      - run: target/debug/xtask notices
-      - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: target/debug/xtask bootstrap
-      - run: target/debug/xtask configure-tofu
-      # The Roc recipe joins both exact-run parts, re-admits every transported
-      # executable/fixture, then executes every native case and campaign fresh.
-      - run: target/debug/xtask verify-mac-runtime
-        id: native_preparation
-      - name: Retain current Mac compiler failure metadata without private stdout
-        if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/ci-compiler-failure-*/manifest.json
-          if-no-files-found: warn
-          retention-days: 3
-      - name: Retain real Mac native preparation, exact cases and both build campaigns
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/ci-mac-compatibility.json
-          if-no-files-found: error
-          retention-days: 14
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
