@@ -448,6 +448,7 @@ pub(crate) fn handle_qualified_callback(
     input: OutboundQualification<'_>,
     ingress: super::outbound::CallbackIngress<'_>,
     key: &crate::managed_credentials::crypto::KeyLease,
+    current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
 ) -> Result<super::outbound::CallbackOutcome> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
@@ -472,7 +473,7 @@ pub(crate) fn handle_qualified_callback(
             allowed_extras: Default::default(),
         }
     };
-    super::outbound::handle_callback_profile(db, ingress, &parameters, |tx, code| {
+    super::outbound::handle_callback_profile(db, ingress, &parameters, current, |tx, code| {
         let binding = load_binding(tx, &qualified.intent().attempt)?
             .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
         ensure!(

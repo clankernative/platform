@@ -2141,6 +2141,7 @@ pub(super) mod tests {
                 now: 998,
             },
             &terms.custody_key,
+            None,
         )?;
         ensure!(
             matches!(

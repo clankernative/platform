@@ -455,7 +455,11 @@ impl Manager {
             selection.identity()? == view.selection,
             "OAuth management selection changed"
         );
-        let key = self
+        let key = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::StartCommit, now, |current| {
+        current.arm()?;
+        self
             .authority
             .custody(
                 self.runtime.app(),
@@ -464,7 +468,8 @@ impl Manager {
                 &view.selection,
                 now,
             )?
-            .context("OAuth custody unavailable")?;
+            .context("OAuth custody unavailable")
+        })?;
         let verifier = effects::random()?;
         let state = format!("product.{}.{}", view.id, effects::random()?);
         let at = effects::wall_time()?;
@@ -630,7 +635,11 @@ impl Manager {
             selection.identity()? == view.selection,
             "OAuth callback selection changed"
         );
-        let key = self
+        let key = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback, now, |current| {
+        current.arm()?;
+        self
             .authority
             .custody(
                 self.runtime.app(),
@@ -639,8 +648,13 @@ impl Manager {
                 &view.selection,
                 now,
             )?
-            .context("OAuth custody unavailable")?;
-        let client = self
+            .context("OAuth custody unavailable")
+        })?;
+        let client = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback, now, |current| {
+        current.arm()?;
+        self
             .authority
             .refresh_client(
                 self.runtime.app(),
@@ -649,7 +663,8 @@ impl Manager {
                 &view.selection,
                 now,
             )?
-            .context("OAuth client unavailable")?;
+            .context("OAuth client unavailable")
+        })?;
         let (intent, binding) = self.context(&db, id)?;
         let input = || crate::oauth::profiles::OutboundQualification {
             intent: &intent,
@@ -664,7 +679,11 @@ impl Manager {
         let at = effects::wall_time()?;
         ensure!(at >= now, "OAuth callback clock moved backwards");
         view.validate(identity, at)?;
-        let outcome = crate::oauth::exchange::handle_qualified_callback(
+        let outcome = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback,
+            at,
+            |current| crate::oauth::exchange::handle_qualified_callback(
             &mut db,
             input(),
             crate::oauth::outbound::CallbackIngress {
@@ -677,10 +696,21 @@ impl Manager {
                 now: at,
             },
             &key,
-        )?;
+            Some(current),
+        ))?;
         match outcome {
             crate::oauth::outbound::CallbackOutcome::Denied { .. } => {
-                db.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])?;
+                crate::oauth::native_management::with_consumer(
+                    &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+                    crate::oauth::native_management::Phase::Callback, at, |current| {
+                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let (stored, state, stored_session) = self.load(&tx, id, identity, effects::wall_time()?)?;
+                        ensure!(stored == view && state == "authorized" && stored_session.as_deref() == Some(session.as_str()), "OAuth denied callback confirmation changed");
+                        self.check_in(&tx, &view, identity)?;
+                        ensure!(tx.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])? == 1, "OAuth denied callback consumed");
+                        current.commit(tx)
+                    },
+                )?;
                 return Ok(Reply::Completed {
                     status: "Provider authorization declined.".into(),
                 });

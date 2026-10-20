@@ -521,7 +521,10 @@ impl Consumer<'_, '_, '_> {
     /// valid original. Once armed, error/unwind is permanently unresolved.
     pub(crate) fn arm(&mut self) -> Result<()> {
         self.check()?;
-        self.armed.set(true);
+        if self.armed.replace(true) {
+            self.refuse();
+            anyhow::bail!("native consumer attempt already armed");
+        }
         let result = match &mut self.source {
             ConsumerSource::Native { stage, current } => current.arm(stage),
             #[cfg(test)]
@@ -1038,6 +1041,30 @@ mod tests {
             5,
             deadline,
         )
+    }
+
+    #[test]
+    fn consumer_cannot_commit_a_second_mutation_with_the_same_phase() -> Result<()> {
+        let world = super::super::simulation::World::new(398);
+        super::super::effects::scope(world, || -> Result<()> {
+            let intent = original_intent("consumer-single-commit", 305)?;
+            reserve_shell(&intent, 5)?;
+            let mut db = rusqlite::Connection::open_in_memory()?;
+            db.execute_batch("CREATE TABLE receipt(value INTEGER)")?;
+            let result = with_consumer(&intent, Phase::Session, 5, |current| {
+                let first = db.transaction()?;
+                first.execute("INSERT INTO receipt VALUES(1)", [])?;
+                current.commit(first)?;
+                let second = db.transaction()?;
+                second.execute("INSERT INTO receipt VALUES(2)", [])?;
+                assert!(current.commit(second).is_err());
+                Ok(()) // Swallowing the refusal still cannot report success.
+            });
+            assert!(result.is_err());
+            assert_eq!(db.query_row("SELECT sum(value) FROM receipt", [], |row| row.get::<_, i64>(0))?, 1);
+            assert!(with_consumer(&intent, Phase::Session, 5, |_| Ok(())).is_err());
+            Ok(())
+        })
     }
 
     #[test]

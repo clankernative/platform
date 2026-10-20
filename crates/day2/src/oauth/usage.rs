@@ -1587,7 +1587,7 @@ mod tests {
                             code_ref: &code_ref,
                             now: 2
                         },
-                        &key
+                        &key, None,
                     )?,
                     CallbackOutcome::CodeAccepted { .. }
                 ));
