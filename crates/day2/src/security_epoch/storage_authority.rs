@@ -15,7 +15,8 @@ use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::
 mod initial;
 mod native_volume;
 pub(crate) use initial::{
-    CurrentStorageBootstrapPhase, InitialStorageContinuity, InitialStorageOutcome,
+    AppInitialStorageContinuity, CurrentAppStorageBootstrapPhase, CurrentStorageBootstrapPhase,
+    InitialStorageContinuity, InitialStorageOutcome,
 };
 use native_volume::NativeVolumeObservation;
 mod persistent_disk;
