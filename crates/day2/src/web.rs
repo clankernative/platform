@@ -71,6 +71,56 @@ struct Notice<'a> {
     invocation: &'a str,
     operation: &'a str,
 }
+fn accepted_page_acknowledgement(
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    rejection: &PageOutcomeFailure,
+    reload: &str,
+) -> Markup {
+    let message = match status {
+        StatusCode::OK => "Saved. The page could not be refreshed.",
+        StatusCode::ACCEPTED => {
+            "Accepted. This is still finishing; the page could not be refreshed."
+        }
+        _ => unreachable!("only accepted commands receive a fallback acknowledgement"),
+    };
+    html! { main id="day2-main"
+        data-day2-invocation=(invocation)
+        data-day2-operation=(operation)
+        data-day2-status=(if status == StatusCode::ACCEPTED { "pending" } else { "success" }) {
+        div id="day2-command-status" {
+            div class="notice" role="status" {
+                p { (message) }
+                p { (&rejection.message) }
+                p { a href=(reload) { "Reload page" } " before making another change." }
+                p { "Receipt: " code { @for character in invocation.chars() { (character) wbr; } } }
+            }
+        }
+    } }
+}
+
+fn page_content_or_acknowledgement(
+    rendered: Result<Markup>,
+    status: StatusCode,
+    invocation: &str,
+    operation: &str,
+    reload: &str,
+) -> Result<Markup> {
+    match rendered {
+        Ok(content) => Ok(content),
+        Err(error) if matches!(status, StatusCode::OK | StatusCode::ACCEPTED) => {
+            match error.downcast::<PageOutcomeFailure>() {
+                Ok(rejection) => Ok(accepted_page_acknowledgement(
+                    status, invocation, operation, &rejection, reload,
+                )),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 struct Host {
     entropy: Arc<dyn Entropy>,
     clock: Arc<dyn Clock>,
@@ -1759,17 +1809,8 @@ impl Host {
             })?,
         };
         if outcome.status != "success" {
-            let declared_app_error = self
-                .runtime
-                .artifact()
-                .contract()
-                .app_contract
-                .as_ref()
-                .and_then(|contract| contract.errors.get(&outcome.error));
-            if declared_app_error.is_some() {
-                let (status, _, message) =
-                    crate::web_api::outcome_failure(&self.runtime, &outcome.error);
-                return Err(anyhow::Error::new(PageOutcomeFailure { status, message }));
+            if let Some(rejection) = declared_page_rejection(&self.runtime, name, &outcome.error) {
+                return Err(anyhow::Error::new(rejection));
             }
             let failure = match outcome.error.as_str() {
                 "invalid_page_bounds" => crate::error::Failure::InvalidPageInput,
@@ -2082,7 +2123,7 @@ impl Host {
         } else {
             // A rendering failure after commit is ambiguous only to the browser.
             // The unchanged signed ticket always identifies the durable receipt.
-            let content = self.page(
+            let rendered = self.page(
                 &ticket.page,
                 &ticket.page_input,
                 session,
@@ -2098,6 +2139,13 @@ impl Host {
                     bound: &ticket.bound,
                     fields: &fields,
                 }),
+            );
+            let content = page_content_or_acknowledgement(
+                rendered,
+                status,
+                &id,
+                &ticket.operation,
+                &view::page_url(&self.runtime, &ticket.page, &ticket.page_input)?,
             )?;
             if datastar {
                 if self.runtime.artifact().page(&ticket.page)?.live {
@@ -2403,6 +2451,40 @@ impl std::fmt::Display for PageOutcomeFailure {
 
 impl std::error::Error for PageOutcomeFailure {}
 
+fn declared_page_rejection(
+    runtime: &Runtime,
+    page_name: &str,
+    code: &str,
+) -> Option<PageOutcomeFailure> {
+    let artifact = runtime.artifact();
+    let page = artifact.page(page_name).ok()?;
+    let contract = artifact.contract().app_contract.as_ref()?;
+    let operation = contract.operations.get(&page.operation)?;
+    declared_page_rejection_for(&page.operation, &operation.errors, &contract.errors, code)?;
+    let (status, _, message) = crate::web_api::outcome_failure(runtime, code);
+    Some(PageOutcomeFailure { status, message })
+}
+
+fn declared_page_rejection_for<'a>(
+    operation_name: &str,
+    declared_errors: &[String],
+    failures: &'a std::collections::BTreeMap<String, crate::app_contract::Failure>,
+    code: &str,
+) -> Option<&'a crate::app_contract::Failure> {
+    if !declared_errors.iter().any(|declared| declared == code) {
+        return None;
+    }
+    let failure = failures.get(code)?;
+    if failure.code != code
+        || !failure
+            .targets()
+            .any(|target| target.operation == operation_name)
+    {
+        return None;
+    }
+    Some(failure)
+}
+
 fn validate_presentation_delivery(
     expected: &crate::authority_state::AuthorityStamp,
     current: &crate::authority_state::AuthorityStamp,
@@ -2501,6 +2583,108 @@ mod page_failure_tests {
         let markup = String::from_utf8(markup.to_vec()).expect("HTML is UTF-8");
         assert!(markup.contains("Use &lt;a safe filter&gt; &amp; retry."));
         assert!(!markup.contains("Use <a safe filter> & retry."));
+
+        let response = failure(&anyhow::anyhow!("database connection details"));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("error body");
+        let body = String::from_utf8(body.to_vec()).expect("HTML is UTF-8");
+        assert!(!body.contains("database connection details"));
+        assert!(body.contains("Retry commands with the same idempotency key."));
+    }
+
+    #[test]
+    fn accepted_command_page_rejection_returns_receipt_acknowledgement() -> Result<()> {
+        for (status, state, phrase) in [
+            (StatusCode::OK, "success", "Saved."),
+            (StatusCode::ACCEPTED, "pending", "Accepted."),
+        ] {
+            let content = page_content_or_acknowledgement(
+                Err(anyhow::Error::new(PageOutcomeFailure {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    message: "<Access & membership denied> Choose \"another\" space & retry."
+                        .into(),
+                })),
+                status,
+                "web-original-ticket-nonce",
+                "freetool.space_update",
+                "/spaces/example/settings?tab=details&view=current",
+            )?;
+            let markup = content.into_string();
+            assert!(markup.contains("data-day2-invocation=\"web-original-ticket-nonce\""));
+            assert!(markup.contains("data-day2-operation=\"freetool.space_update\""));
+            assert!(markup.contains(&format!("data-day2-status=\"{state}\"")));
+            assert!(markup.contains(phrase));
+            assert!(markup.contains("&lt;Access &amp; membership denied&gt;"));
+            assert!(markup.contains("Choose &quot;another&quot; space &amp; retry."));
+            let document = scraper::Html::parse_fragment(&markup);
+            let text = document.root_element().text().collect::<String>();
+            assert!(text.contains("Reload page before making another change."));
+            assert!(text.contains("Receipt: web-original-ticket-nonce"));
+            assert!(markup.contains("<wbr>"));
+            assert!(
+                markup.contains("href=\"/spaces/example/settings?tab=details&amp;view=current\"")
+            );
+            assert!(!markup.contains("<form") && !markup.contains("_ticket"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn acknowledgement_fallback_does_not_convert_rejected_or_operational_errors() {
+        let rejected = page_content_or_acknowledgement(
+            Err(anyhow::Error::new(PageOutcomeFailure {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                message: "Denied. Reload.".into(),
+            })),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert!(rejected.downcast_ref::<PageOutcomeFailure>().is_some());
+        let operational = page_content_or_acknowledgement(
+            Err(anyhow::anyhow!("rendering database failure")),
+            StatusCode::OK,
+            "receipt",
+            "operation",
+            "/",
+        )
+        .unwrap_err();
+        assert_eq!(operational.to_string(), "rendering database failure");
+    }
+
+    #[test]
+    fn app_failure_requires_exact_operation_declaration_and_matching_target() {
+        let code = "app:freetool.space_page_denied";
+        let declarations = vec![code.into()];
+        let matching = std::collections::BTreeMap::from([(
+            code.into(),
+            crate::app_contract::Failure {
+                code: code.into(),
+                description: "Denied".into(),
+                recovery: "Reload".into(),
+                operation: crate::operation_metadata::Target {
+                    operation: "freetool.space_page".into(),
+                    input_type: "input".into(),
+                    output_type: "output".into(),
+                },
+                additional_operations: Vec::new(),
+                verification_actors: Vec::new(),
+                verification_delegations: Vec::new(),
+            },
+        )]);
+        assert!(
+            declared_page_rejection_for("freetool.space_page", &declarations, &matching, code)
+                .is_some()
+        );
+        assert!(
+            declared_page_rejection_for("freetool.other_page", &declarations, &matching, code)
+                .is_none()
+        );
+        assert!(declared_page_rejection_for("freetool.space_page", &[], &matching, code).is_none());
     }
 }
 

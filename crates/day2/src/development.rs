@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const ACTOR: &str = "developer";
@@ -21,6 +21,10 @@ pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 256;
 const VERIFICATION_TIME: i64 = 1_700_000_000;
+
+#[cfg(test)]
+#[path = "development/verification_failure_tests.rs"]
+mod verification_failure_tests;
 
 /// Non-interactive invocation and provider-fixture time. Verification uses a
 /// repeatable epoch; local serving uses the runtime clock for fresh providers.
@@ -99,11 +103,37 @@ pub fn imported_query_fixtures(
     Ok(fixtures)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    Command,
+    Generated,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
+    pub kind: StepKind,
     pub operation: String,
-    pub input: String,
+    pub payload: String,
+}
+
+impl Step {
+    fn operation(&self) -> &str {
+        &self.operation
+    }
+
+    fn command(operation: impl Into<String>, input: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::Command,
+            operation: operation.into(),
+            payload: input.into(),
+        }
+    }
+
+    fn input(&self) -> Option<&str> {
+        (self.kind == StepKind::Command).then_some(self.payload.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +165,63 @@ struct VerificationInvocation<'a> {
     seed: u64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum VerificationAction {
+    Input,
+    Check,
+    ErrorInput,
+}
+
+impl VerificationAction {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "input" => Ok(Self::Input),
+            "check" => Ok(Self::Check),
+            "error-input" => Ok(Self::ErrorInput),
+            _ => bail!("unknown verification action"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Check => "check",
+            Self::ErrorInput => "error-input",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VerificationStage {
+    Callback,
+    GeneratedInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationRequest {
+    action: VerificationAction,
+    operation: String,
+    snapshot: String,
+    before: String,
+    output: String,
+    seed: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationFailure {
+    format: u32,
+    artifact: String,
+    request: VerificationRequest,
+    stage: VerificationStage,
+    responses: Vec<String>,
+    error: String,
+    generated_input: Option<String>,
+}
+
 fn verification_snapshot_context(
     snapshot: &Value,
     invocation: &VerificationInvocation<'_>,
@@ -156,6 +243,24 @@ fn verification_snapshot_context(
     Ok(encoded)
 }
 
+fn verification_request(
+    action: &str,
+    operation: &str,
+    snapshot: &Value,
+    before: &Value,
+    output: &Value,
+    invocation: &VerificationInvocation<'_>,
+) -> Result<VerificationRequest> {
+    Ok(VerificationRequest {
+        action: VerificationAction::parse(action)?,
+        operation: operation.into(),
+        snapshot: verification_snapshot_context(snapshot, invocation)?,
+        before: verification_snapshot_context(before, invocation)?,
+        output: output.to_string(),
+        seed: invocation.seed,
+    })
+}
+
 fn verification(
     artifact: &LoadedArtifact,
     action: &str,
@@ -165,19 +270,265 @@ fn verification(
     output: &Value,
     invocation: VerificationInvocation<'_>,
 ) -> Result<String> {
+    let request = verification_request(action, operation, snapshot, before, output, &invocation)?;
+    verification_captured(artifact, request, None, VerificationStage::Callback)
+}
+
+fn verification_captured(
+    artifact: &LoadedArtifact,
+    request: VerificationRequest,
+    evidence_dir: Option<&Path>,
+    stage: VerificationStage,
+) -> Result<String> {
+    let frame = format!("verify:{}", serde_json::to_string(&request)?);
+    let (result, responses, generated_input) =
+        observe_verification(artifact, &request, stage, || {
+            properties::exchange_verification(artifact, frame.as_bytes())
+        });
+    if let (Err(error), Some(directory)) = (&result, evidence_dir) {
+        let path = save_verification_failure(
+            directory,
+            &VerificationFailure {
+                format: 1,
+                artifact: artifact.id().to_owned(),
+                request,
+                stage,
+                responses,
+                error: format!("{error:#}"),
+                generated_input,
+            },
+        )
+        .with_context(|| format!("{error:#}; could not retain verification evidence"))?;
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let command = format!(
+            "cargo run --locked -p day2 -- replay-verification {} {}",
+            quote(&artifact.directory().to_string_lossy()),
+            quote(&path.to_string_lossy()),
+        );
+        bail!(
+            "{error:#}; verification evidence: {}; replay: {command}",
+            path.display()
+        );
+    }
+    result
+}
+
+fn observe_verification(
+    artifact: &LoadedArtifact,
+    request: &VerificationRequest,
+    stage: VerificationStage,
+    mut call: impl FnMut() -> Result<Vec<u8>>,
+) -> (Result<String>, Vec<String>, Option<String>) {
+    let mut responses = Vec::new();
+    let result = verification_reply(&request.operation, request.action.name(), || {
+        let bytes = call()?;
+        // The complete request reproduces output; fingerprints retain both
+        // observations without copying two potentially large worker replies.
+        responses.push(crate::digest(&bytes));
+        Ok(bytes)
+    });
+    let generated_input = if stage == VerificationStage::GeneratedInput {
+        result.as_ref().ok().cloned()
+    } else {
+        None
+    };
+    let result = result.and_then(|value| {
+        if stage == VerificationStage::GeneratedInput {
+            ensure!(
+                request.action == VerificationAction::Input,
+                "invalid generation stage"
+            );
+            validate_step(artifact, &request.operation, &value)?;
+        }
+        Ok(value)
+    });
+    (result, responses, generated_input)
+}
+
+fn validate_verification_request(
+    artifact: &LoadedArtifact,
+    request: &VerificationRequest,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            request.action,
+            VerificationAction::Input | VerificationAction::Check
+        ),
+        "unsupported saved verification action"
+    );
+    let operation = artifact.route(&request.operation)?;
+    ensure!(
+        operation.name == request.operation
+            && matches!(operation.kind.as_str(), "command" | "query"),
+        "unregistered verification operation"
+    );
+    let mut context = None;
+    for snapshot in [&request.snapshot, &request.before] {
+        ensure!(
+            snapshot.len() <= artifact.contract().verification_limits.snapshot_bytes,
+            "verification snapshot byte budget"
+        );
+        let value: Value = serde_json::from_str(snapshot)?;
+        let verification = value
+            .get("verification")
+            .context("verification context missing")?;
+        ensure!(
+            verification["actor"]
+                .as_str()
+                .is_some_and(|actor| !actor.is_empty())
+                && verification["input"].is_string(),
+            "invalid verification context"
+        );
+        if let Some(previous) = &context {
+            ensure!(previous == verification, "verification contexts differ");
+        }
+        context = Some(verification.clone());
+    }
+    ensure!(
+        request.output.len() <= artifact.contract().verification_limits.snapshot_bytes,
+        "verification output byte budget"
+    );
+    let _: Value = serde_json::from_str(&request.output)?;
+    ensure!(
+        format!("verify:{}", serde_json::to_string(request)?).len()
+            < properties::MAX_PROPERTY_FRAME,
+        "verification request frame budget"
+    );
+    Ok(())
+}
+
+// A full admitted request and a returned invalid input, plus bounded diagnostics.
+// Worker, snapshot, heap and deadline limits are unchanged.
+const VERIFICATION_EVIDENCE_BYTES: usize = 2 * properties::MAX_PROPERTY_FRAME + 65_536;
+
+fn validate_verification_observation(failure: &VerificationFailure) -> Result<()> {
+    let metadata = serde_json::to_vec(&(
+        &failure.artifact,
+        failure.stage,
+        &failure.responses,
+        &failure.error,
+    ))?;
+    ensure!(
+        !failure.error.is_empty()
+            && metadata.len() <= 65_536
+            && failure.responses.len() <= 2
+            && failure.responses.iter().all(|hash| hash.len() == 71
+                && hash
+                    .strip_prefix("sha256:")
+                    .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))),
+        "invalid verification observation"
+    );
+    ensure!(
+        failure.stage != VerificationStage::GeneratedInput
+            || failure.request.action == VerificationAction::Input,
+        "invalid generation stage"
+    );
+    if let Some(input) = &failure.generated_input {
+        ensure!(
+            failure.stage == VerificationStage::GeneratedInput
+                && failure.responses.len() == 2
+                && failure.responses[0] == failure.responses[1]
+                && serde_json::to_vec(input)?.len() < properties::MAX_PROPERTY_FRAME,
+            "invalid generated input observation"
+        );
+    }
+    Ok(())
+}
+
+fn save_verification_failure(directory: &Path, failure: &VerificationFailure) -> Result<PathBuf> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    validate_verification_observation(failure)?;
+    let path = directory.join("verification-failure.json");
+    fs::create_dir_all(directory)?;
+    let bytes = serde_json::to_vec(failure)?;
+    ensure!(
+        bytes.len() <= VERIFICATION_EVIDENCE_BYTES,
+        "verification evidence byte budget"
+    );
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .context("verification evidence already exists or unavailable")?;
+    file.write_all(&bytes)?;
+    Ok(path)
+}
+
+fn replay_verification_with(
+    artifact: &LoadedArtifact,
+    path: &Path,
+    mut call: impl FnMut(&[u8]) -> Result<Vec<u8>>,
+) -> Result<()> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    artifact.require_current_api()?;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.file_type().is_file() && metadata.len() <= VERIFICATION_EVIDENCE_BYTES as u64,
+        "verification evidence file type or byte budget"
+    );
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= VERIFICATION_EVIDENCE_BYTES as u64,
+        "verification evidence file type or byte budget"
+    );
+    let mut bytes = Vec::new();
+    file.take(VERIFICATION_EVIDENCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= VERIFICATION_EVIDENCE_BYTES,
+        "verification evidence byte budget"
+    );
+    let evidence: VerificationFailure =
+        serde_json::from_slice(&bytes).context("decode verification evidence")?;
+    ensure!(
+        evidence.format == 1 && evidence.artifact == artifact.id(),
+        "verification evidence identity mismatch"
+    );
+    validate_verification_observation(&evidence)?;
+    validate_verification_request(artifact, &evidence.request)?;
+    let frame = format!("verify:{}", serde_json::to_string(&evidence.request)?);
+    let (result, responses, generated_input) =
+        observe_verification(artifact, &evidence.request, evidence.stage, || {
+            call(frame.as_bytes())
+        });
+    let error = result
+        .err()
+        .context("verification failure did not reproduce")?;
+    ensure!(
+        format!("{error:#}") == evidence.error
+            && responses == evidence.responses
+            && generated_input == evidence.generated_input,
+        "verification replay diverged"
+    );
+    Ok(())
+}
+
+/// Re-evaluate saved pure callbacks and input validation, never commands or provider effects.
+pub fn replay_verification_file(artifact: &LoadedArtifact, path: &Path) -> Result<()> {
+    replay_verification_with(artifact, path, |frame| {
+        properties::exchange_verification(artifact, frame)
+    })
+}
+
+fn verification_reply(
+    operation: &str,
+    action: &str,
+    mut call: impl FnMut() -> Result<Vec<u8>>,
+) -> Result<String> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Reply {
         value: String,
         error: String,
     }
-    let request = format!(
-        "verify:{}",
-        json!({ "action": action, "operation": operation, "snapshot": verification_snapshot_context(snapshot, &invocation)?, "before": verification_snapshot_context(before, &invocation)?, "output": output.to_string(), "seed": invocation.seed })
-    );
-    let bytes = properties::exchange_verification(artifact, request.as_bytes())?;
+    let bytes = call()?;
     ensure!(
-        bytes == properties::exchange_verification(artifact, request.as_bytes())?,
+        bytes == call()?,
         "verification callback is not deterministic"
     );
     let reply: Reply = serde_json::from_slice(&bytes)?;
@@ -187,6 +538,27 @@ fn verification(
         reply.error
     );
     Ok(reply.value)
+}
+
+fn prepare_generated_step(
+    operation: &str,
+    seed: u64,
+    snapshot: &Value,
+    input: impl FnOnce(&str, &Value, u64) -> Result<String>,
+) -> Result<Step> {
+    Ok(Step::command(operation, input(operation, snapshot, seed)?))
+}
+
+fn take_sample_obligation(
+    prepared_sample: bool,
+    generated_example: bool,
+    obligations: &mut std::collections::VecDeque<Sample>,
+) -> Result<bool> {
+    ensure!(
+        !(prepared_sample && generated_example),
+        "example became a sample obligation"
+    );
+    Ok(prepared_sample && obligations.pop_front().is_some())
 }
 
 pub fn examples(artifact: &LoadedArtifact) -> Result<Vec<Example>> {
@@ -212,7 +584,7 @@ pub fn examples(artifact: &LoadedArtifact) -> Result<Vec<Example>> {
         total += example.steps.len();
         ensure!(total <= MAX_STEPS, "example step budget");
         for step in &example.steps {
-            validate_step(artifact, step)?;
+            validate_example_step(artifact, step)?;
         }
     }
     Ok(values)
@@ -272,13 +644,7 @@ pub fn samples(artifact: &LoadedArtifact, seed: u64, count: u64) -> Result<Vec<S
             sample.generator,
             sample.error
         );
-        validate_step(
-            artifact,
-            &Step {
-                operation: sample.operation.clone(),
-                input: sample.input.clone(),
-            },
-        )?;
+        validate_step(artifact, &sample.operation, &sample.input)?;
         let case_seed: u64 = sample.seed.parse().context("invalid generated seed")?;
         ensure!(
             sample.seed == case_seed.to_string(),
@@ -300,15 +666,15 @@ pub fn samples(artifact: &LoadedArtifact, seed: u64, count: u64) -> Result<Vec<S
     Ok(values)
 }
 
-fn validate_step(artifact: &LoadedArtifact, step: &Step) -> Result<()> {
-    ensure!(step.input.len() <= 65_536, "example input budget");
-    let operation = artifact.route(&step.operation)?;
+fn validate_step(artifact: &LoadedArtifact, operation_name: &str, input: &str) -> Result<()> {
+    ensure!(input.len() <= 65_536, "example input budget");
+    let operation = artifact.route(operation_name)?;
     ensure!(
-        operation.name == step.operation
+        operation.name == operation_name
             && (operation.kind == "command" || operation.kind == "query"),
         "verification requires a declared command or query"
     );
-    let input: Value = serde_json::from_str(&step.input)?;
+    let input: Value = serde_json::from_str(input)?;
     artifact
         .contract()
         .schema
@@ -316,6 +682,183 @@ fn validate_step(artifact: &LoadedArtifact, step: &Step) -> Result<()> {
         .get(&operation.input_type)
         .context("example input schema")?
         .validate_input(&input)
+}
+
+fn validate_example_step(artifact: &LoadedArtifact, step: &Step) -> Result<()> {
+    let (operation_name, input) = match step.kind {
+        StepKind::Command => (&step.operation, Some(step.payload.as_str())),
+        StepKind::Generated => {
+            generated_seed(&step.payload)?;
+            (&step.operation, None)
+        }
+    };
+    let operation = artifact.route(operation_name)?;
+    validate_example_target(operation_name, Some(operation))?;
+    if let Some(input) = input {
+        validate_step(artifact, operation_name, input)?;
+    }
+    Ok(())
+}
+
+fn generated_seed(payload: &str) -> Result<u64> {
+    let seed: u64 = payload.parse().context("invalid generated example seed")?;
+    ensure!(
+        payload == seed.to_string(),
+        "noncanonical generated example seed"
+    );
+    Ok(seed)
+}
+
+fn validate_example_target(
+    operation_name: &str,
+    operation: Option<&crate::artifact::Operation>,
+) -> Result<()> {
+    let operation = operation.context("unknown example command")?;
+    ensure!(
+        operation.name == operation_name && operation.kind == "command",
+        "examples require a declared command"
+    );
+    Ok(())
+}
+
+fn validate_example_privacy(internal: bool, simulated: bool) -> Result<()> {
+    ensure!(
+        !internal || simulated,
+        "internal_examples_require_simulated_providers"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod example_step_tests {
+    use super::*;
+
+    fn operation(name: &str, kind: &str) -> crate::artifact::Operation {
+        crate::artifact::Operation {
+            name: name.into(),
+            kind: kind.into(),
+            input_type: "Input".into(),
+            output_type: "Output".into(),
+        }
+    }
+
+    #[test]
+    fn generated_step_has_an_explicit_tag_and_carries_no_static_input() -> Result<()> {
+        let generated = Step {
+            kind: StepKind::Generated,
+            operation: "app.create".into(),
+            payload: "0".into(),
+        };
+        let value = serde_json::to_value(&generated)?;
+        assert_eq!(value["kind"], "generated");
+        assert_eq!(value["operation"], "app.create");
+        assert_eq!(value["payload"], "0");
+        assert!(value.get("input").is_none());
+        assert_eq!(serde_json::from_value::<Step>(value)?, generated);
+        let malformed: Step =
+            serde_json::from_str(r#"{"kind":"generated","operation":"app.create","payload":""}"#)?;
+        assert!(generated_seed(&malformed.payload).is_err());
+        assert!(
+            serde_json::from_str::<Step>(
+                r#"{"kind":"generated","operation":"app.create","payload":"0","extra":true}"#
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generated_inputs_use_the_snapshot_and_seed_at_preparation_time() -> Result<()> {
+        let current_snapshot = json!({"spaces":["created-in-prior-stage"]});
+        let mut observed = None;
+        let prepared = prepare_generated_step(
+            "app.add_member",
+            0,
+            &current_snapshot,
+            |operation, snapshot, seed| {
+                observed = Some((operation.to_owned(), snapshot.clone(), seed));
+                Ok(serde_json::to_string(snapshot)?)
+            },
+        )?;
+        assert_eq!(
+            observed,
+            Some(("app.add_member".into(), current_snapshot.clone(), 0))
+        );
+        assert_eq!(
+            prepared,
+            Step::command("app.add_member", r#"{"spaces":["created-in-prior-stage"]}"#,)
+        );
+        assert!(
+            prepare_generated_step("app.add_member", 0, &current_snapshot, |_, _, _| bail!(
+                "verification input failed"
+            ),)
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generated_stages_reject_unknown_query_and_private_unsafe_targets() {
+        let create = operation("app.create", "command");
+        assert!(validate_example_target("app.create", Some(&create)).is_ok());
+        assert!(validate_example_target("app.missing", None).is_err());
+        let query = operation("app.list", "query");
+        assert!(validate_example_target("app.list", Some(&query)).is_err());
+        assert!(validate_example_target("app.other", Some(&create)).is_err());
+        assert!(validate_example_privacy(true, false).is_err());
+        assert!(validate_example_privacy(true, true).is_ok());
+    }
+
+    #[test]
+    fn verification_callback_errors_and_nondeterminism_fail_closed() {
+        let mut calls = 0;
+        let error = verification_reply("app.create", "input", || {
+            calls += 1;
+            Ok(serde_json::to_vec(
+                &json!({"value":"{}","error":"rejected"}),
+            )?)
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("verification failed: rejected"));
+        assert_eq!(calls, 2);
+
+        let mut calls = 0;
+        let error = verification_reply("app.create", "input", || {
+            calls += 1;
+            Ok(serde_json::to_vec(
+                &json!({"value":calls.to_string(),"error":""}),
+            )?)
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("not deterministic"));
+    }
+
+    #[test]
+    fn generated_examples_do_not_consume_mandatory_sample_obligations() -> Result<()> {
+        let mut obligations = std::collections::VecDeque::from([
+            Sample {
+                generator: "app_create".into(),
+                operation: "app.create".into(),
+                seed: "0".into(),
+                input: String::new(),
+                error: String::new(),
+            },
+            Sample {
+                generator: "app_create".into(),
+                operation: "app.create".into(),
+                seed: "1".into(),
+                input: String::new(),
+                error: String::new(),
+            },
+        ]);
+        assert!(!take_sample_obligation(false, true, &mut obligations)?);
+        assert_eq!(obligations.len(), 2);
+        assert!(take_sample_obligation(true, false, &mut obligations)?);
+        assert_eq!(obligations.len(), 1);
+        assert!(take_sample_obligation(true, true, &mut obligations).is_err());
+        assert_eq!(obligations.len(), 1);
+        Ok(())
+    }
 }
 
 /// A disposable local profile. It is never installed into an existing instance
@@ -2946,6 +3489,7 @@ pub struct Campaign {
     catalog: Option<Vec<Example>>,
     selected: BTreeSet<String>,
     queue: std::collections::VecDeque<Step>,
+    prepared_example: Option<(String, u64)>,
     sampled: bool,
     empty_checked: bool,
     active: Option<Active>,
@@ -2999,7 +3543,7 @@ impl SetupState {
         };
         let expected = steps.front().context("missing verification setup step")?;
         ensure!(
-            expected.operation == step.operation && expected.input == step.input,
+            expected == step,
             "command differs from declared verification setup"
         );
         steps.pop_front();
@@ -3030,10 +3574,7 @@ mod setup_state_tests {
     use super::*;
 
     fn step(operation: &str) -> Step {
-        Step {
-            operation: operation.into(),
-            input: "{}".into(),
-        }
+        Step::command(operation, "{}")
     }
 
     #[test]
@@ -3043,13 +3584,10 @@ mod setup_state_tests {
         state.plan(vec![step("first"), step("second")])?;
         assert!(state.plan(Vec::new()).is_err());
         assert!(state.consume(&step("second")).is_err());
-        assert_eq!(state.next().unwrap().operation, "first");
-        let malformed = Step {
-            operation: "first".into(),
-            input: "{\"actor\":\"other\"}".into(),
-        };
+        assert_eq!(state.next().unwrap().operation(), "first");
+        let malformed = Step::command("first", "{\"actor\":\"other\"}");
         assert!(state.consume(&malformed).is_err());
-        assert_eq!(state.next().unwrap().operation, "first");
+        assert_eq!(state.next().unwrap().operation(), "first");
         state.consume(&step("first"))?;
         assert!(matches!(state, SetupState::InFlight(_)));
         assert!(state.consume(&step("second")).is_err());
@@ -3087,6 +3625,8 @@ struct Active {
     application_initial: Value,
     application_after: Value,
     kind: CaseKind,
+    verification_seed: Option<u64>,
+    obligation: bool,
 }
 
 impl Campaign {
@@ -3141,6 +3681,7 @@ impl Campaign {
             catalog: None,
             selected: BTreeSet::new(),
             queue: std::collections::VecDeque::new(),
+            prepared_example: None,
             sampled: false,
             empty_checked: false,
             active: None,
@@ -3199,20 +3740,15 @@ impl Campaign {
                 // An artifact-owned example can exercise scheduled/private work
                 // only with the offline provider host. This never changes the
                 // public operation lookup used by HTTP, CLI or MCP.
-                ensure!(
-                    self.runtime.integrations().is_simulated()
-                        || catalog
-                            .iter()
-                            .flat_map(|example| &example.steps)
-                            .all(|step| {
-                                !self
-                                    .runtime
-                                    .artifact()
-                                    .contract()
-                                    .internal_command(&step.operation)
-                            }),
-                    "internal_examples_require_simulated_providers"
-                );
+                for step in catalog.iter().flat_map(|example| &example.steps) {
+                    validate_example_privacy(
+                        self.runtime
+                            .artifact()
+                            .contract()
+                            .internal_command(step.operation()),
+                        self.runtime.integrations().is_simulated(),
+                    )?;
+                }
                 let result = serde_json::to_value(&catalog)?;
                 self.catalog = Some(catalog);
                 return Ok(result);
@@ -3225,7 +3761,9 @@ impl Campaign {
                 }
                 let selected: Selection = request.decode()?;
                 ensure!(
-                    self.queue.is_empty() && self.active.is_none(),
+                    self.queue.is_empty()
+                        && self.active.is_none()
+                        && self.prepared_example.is_none(),
                     "previous example incomplete"
                 );
                 ensure!(
@@ -3245,12 +3783,20 @@ impl Campaign {
                     self.selected.insert(selected.name),
                     "duplicate selected example"
                 );
+                ensure!(
+                    self.evidence.traces.len() + self.queue.len() + example.steps.len()
+                        <= MAX_STEPS,
+                    "development campaign step budget"
+                );
                 self.queue.extend(example.steps.iter().cloned());
                 self.evidence.examples += 1;
             }
             "dev-samples" => {
                 ensure!(
-                    !self.sampled && self.queue.is_empty() && self.active.is_none(),
+                    !self.sampled
+                        && self.queue.is_empty()
+                        && self.active.is_none()
+                        && self.prepared_example.is_none(),
                     "generated campaign already started or example incomplete"
                 );
                 let values = samples(
@@ -3260,6 +3806,7 @@ impl Campaign {
                 )?;
                 ensure!(
                     self.evidence.traces.len()
+                        + self.queue.len()
                         + values
                             .iter()
                             .map(|sample| {
@@ -3278,10 +3825,11 @@ impl Campaign {
                         <= MAX_STEPS,
                     "development campaign step budget"
                 );
-                self.queue.extend(values.iter().map(|sample| Step {
-                    operation: sample.operation.clone(),
-                    input: sample.input.clone(),
-                }));
+                self.queue.extend(
+                    values
+                        .iter()
+                        .map(|sample| Step::command(&sample.operation, &sample.input)),
+                );
                 self.sampled = true;
                 if self.runtime.artifact().contract().app_contract.is_some() {
                     self.obligations.extend(values.iter().cloned());
@@ -3291,10 +3839,20 @@ impl Campaign {
             }
             "dev-setups" => {
                 ensure!(
-                    self.sampled && self.active.is_none() && !self.prepared,
+                    self.sampled
+                        && self.active.is_none()
+                        && !self.prepared
+                        && self.prepared_example.is_none()
+                        && matches!(self.setup, SetupState::Unplanned),
                     "verification setup phase order"
                 );
                 let sample = self.queue.front().context("missing verification sample")?;
+                ensure!(
+                    self.obligations
+                        .front()
+                        .is_some_and(|obligation| obligation.operation == sample.operation),
+                    "verification setup requires the selected positive sample"
+                );
                 let steps: Vec<Step> = self
                     .runtime
                     .artifact()
@@ -3306,10 +3864,7 @@ impl Campaign {
                         operation
                             .verification_setup
                             .iter()
-                            .map(|operation| Step {
-                                operation: operation.clone(),
-                                input: "{}".into(),
-                            })
+                            .map(|operation| Step::command(operation, "{}"))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -3319,6 +3874,60 @@ impl Campaign {
                 );
                 self.setup.plan(steps.clone())?;
                 return Ok(serde_json::to_value(steps)?);
+            }
+            "dev-prepare-example" => {
+                ensure!(
+                    self.active.is_none() && !self.prepared && self.prepared_example.is_none(),
+                    "example step already prepared"
+                );
+                let (operation, seed) = match self.queue.front().context("missing example step")? {
+                    step if step.kind == StepKind::Generated => {
+                        (step.operation.clone(), generated_seed(&step.payload)?)
+                    }
+                    _ => bail!("example step is not generated"),
+                };
+                let parsed_operation = self.runtime.artifact().route(&operation)?;
+                validate_example_target(&operation, Some(parsed_operation))?;
+                validate_example_privacy(
+                    self.runtime
+                        .artifact()
+                        .contract()
+                        .internal_command(&operation),
+                    self.runtime.integrations().is_simulated(),
+                )?;
+                let snapshot = self.runtime.verification_snapshot()?;
+                let resolved = prepare_generated_step(
+                    &operation,
+                    seed,
+                    &snapshot,
+                    |operation, snapshot, seed| {
+                        let request = verification_request(
+                            "input",
+                            operation,
+                            snapshot,
+                            &json!({}),
+                            &Value::Null,
+                            &VerificationInvocation {
+                                actor: &self.actor,
+                                input: "",
+                                seed,
+                            },
+                        )?;
+                        verification_captured(
+                            self.runtime.artifact(),
+                            request,
+                            Some(&evidence_dir),
+                            VerificationStage::GeneratedInput,
+                        )
+                    },
+                )?;
+                ensure!(
+                    resolved.kind == StepKind::Command,
+                    "generated preparation is not a command"
+                );
+                *self.queue.front_mut().context("missing example step")? = resolved.clone();
+                self.prepared_example = Some((operation, seed));
+                return Ok(serde_json::to_value(resolved)?);
             }
             "dev-prepare-sample" => {
                 ensure!(
@@ -3331,12 +3940,16 @@ impl Campaign {
                     .queue
                     .front_mut()
                     .context("missing verification sample")?;
+                ensure!(
+                    step.kind == StepKind::Command,
+                    "generated example step must be prepared before invocation"
+                );
                 if let Some(sample) = self.obligations.front() {
                     ensure!(
-                        step.operation == sample.operation && step.input.is_empty(),
+                        step.operation() == sample.operation && step.payload.is_empty(),
                         "verification schedule mismatch"
                     );
-                    step.input = verification(
+                    step.payload = verification(
                         self.runtime.artifact(),
                         "input",
                         &sample.operation,
@@ -3367,7 +3980,9 @@ impl Campaign {
                     "development campaign step budget"
                 );
                 let step: Step = request.decode()?;
-                let kind = if self.setup.next().is_some() {
+                let setup_step = self.setup.next().is_some();
+                let mut generated_seed = None;
+                let kind = if setup_step {
                     self.setup.consume(&step)?;
                     CaseKind::Setup
                 } else {
@@ -3379,12 +3994,9 @@ impl Campaign {
                         .queue
                         .front()
                         .context("command outside selected examples/generators")?;
-                    ensure!(
-                        step.operation == expected.operation && step.input == expected.input,
-                        "command differs from selected case"
-                    );
+                    ensure!(step == *expected, "command differs from selected case");
                     self.queue.pop_front();
-                    let kind = if self.prepared && self.obligations.pop_front().is_some() {
+                    let kind = if self.prepared && self.obligations.front().is_some() {
                         CaseKind::Positive
                     } else {
                         CaseKind::Example
@@ -3392,9 +4004,42 @@ impl Campaign {
                     self.setup = SetupState::Unplanned;
                     kind
                 };
-                if kind != CaseKind::Positive {
-                    validate_step(self.runtime.artifact(), &step)?;
+                if !setup_step {
+                    ensure!(
+                        step.kind == StepKind::Command,
+                        "generated example step must be prepared before invocation"
+                    );
+                    generated_seed = self.prepared_example.take();
+                    if let Some((operation, _)) = &generated_seed {
+                        ensure!(
+                            operation == step.operation(),
+                            "prepared example command changed"
+                        );
+                    }
                 }
+                let generated_example = generated_seed.is_some();
+                let verification_seed = if setup_step || self.prepared {
+                    self.obligations
+                        .front()
+                        .map(|sample| sample.seed.parse())
+                        .transpose()?
+                } else {
+                    generated_seed.as_ref().map(|(_, seed)| *seed)
+                };
+                let obligation = if setup_step {
+                    false
+                } else {
+                    take_sample_obligation(self.prepared, generated_example, &mut self.obligations)?
+                };
+                if kind != CaseKind::Positive {
+                    validate_step(
+                        self.runtime.artifact(),
+                        step.operation(),
+                        step.input().context("command input required")?,
+                    )?;
+                }
+                let operation_name = step.operation().to_owned();
+                let input_text = step.input().context("command input required")?.to_owned();
                 let index = self.evidence.traces.len();
                 let prefix = if kind == CaseKind::Setup {
                     "setup"
@@ -3403,16 +4048,16 @@ impl Campaign {
                 };
                 let id = format!("{prefix}-{index}");
                 let interactive =
-                    crate::managed_credentials::issuance::access(&self.runtime, &step.operation)?
+                    crate::managed_credentials::issuance::access(&self.runtime, &operation_name)?
                         .interactive;
                 let now = if interactive {
                     self.runtime.host().now_ms()?.div_euclid(1000)
                 } else {
                     self.provider_clock + index as i64
                 };
-                let input: Value = serde_json::from_str(&step.input)?;
+                let input: Value = serde_json::from_str(&input_text)?;
                 let delegated = if kind == CaseKind::Positive {
-                    operation_verification_delegation(self.runtime.artifact(), &step.operation)
+                    operation_verification_delegation(self.runtime.artifact(), &operation_name)
                         .cloned()
                 } else {
                     None
@@ -3448,7 +4093,7 @@ impl Campaign {
                 if interactive {
                     crate::managed_credentials::verification::confirm(
                         &self.runtime,
-                        &step.operation,
+                        &operation_name,
                         campaign_actor,
                         &id,
                         &input,
@@ -3464,7 +4109,7 @@ impl Campaign {
                         .runtime
                         .artifact()
                         .contract()
-                        .internal_command(&step.operation);
+                        .internal_command(&operation_name);
                 ensure!(
                     !internal_example || self.runtime.integrations().is_simulated(),
                     "internal_examples_require_simulated_providers"
@@ -3472,7 +4117,7 @@ impl Campaign {
                 if let Some(principal) = &delegated {
                     let authenticated = format!("app:{}", principal.application);
                     self.runtime.accept_delegated(
-                        &step.operation,
+                        &operation_name,
                         &id,
                         &input,
                         now,
@@ -3482,9 +4127,9 @@ impl Campaign {
                             &authenticated,
                         ),
                     )?;
-                } else if kind == CaseKind::Positive || internal_example {
+                } else if obligation || internal_example || generated_example {
                     self.runtime.accept_route(
-                        &step.operation,
+                        &operation_name,
                         campaign_actor,
                         &id,
                         &input,
@@ -3493,7 +4138,7 @@ impl Campaign {
                     )?;
                 } else {
                     self.runtime
-                        .accept(&step.operation, &self.actor, &id, &input, now)?;
+                        .accept(&operation_name, campaign_actor, &id, &input, now)?;
                 }
                 let mut outcome = self.runtime.execute(&id, Fault::None)?;
                 for _ in 0..32 {
@@ -3506,7 +4151,7 @@ impl Campaign {
                 ensure!(
                     outcome.status == "success",
                     "example command {} rejected: {}",
-                    step.operation,
+                    operation_name,
                     outcome.error
                 );
                 self.active = Some(Active {
@@ -3521,6 +4166,8 @@ impl Campaign {
                     application_initial,
                     application_after: self.runtime.verification_snapshot()?,
                     kind,
+                    verification_seed,
+                    obligation,
                 });
             }
             "dev-assert" => {
@@ -3529,26 +4176,38 @@ impl Campaign {
                     !active.checks.contains("assert"),
                     "duplicate operation assertion"
                 );
-                if active.kind != CaseKind::Example {
-                    verification(
-                        self.runtime.artifact(),
+                if let Some(seed) = active.verification_seed {
+                    let request = verification_request(
                         "check",
-                        &active.step.operation,
+                        active.step.operation(),
                         &active.application_after,
                         &active.application_initial,
                         &active.outcome.result,
-                        VerificationInvocation {
+                        &VerificationInvocation {
                             actor: &active.actor,
-                            input: &active.step.input,
-                            seed: 0,
+                            input: active.step.input().context("command input required")?,
+                            seed,
                         },
                     )?;
-                    let counts = if active.kind == CaseKind::Setup {
-                        &mut self.evidence.setup_counts
-                    } else {
-                        &mut self.evidence.obligations
-                    };
-                    *counts.entry(active.step.operation.clone()).or_default() += 1;
+                    verification_captured(
+                        self.runtime.artifact(),
+                        request,
+                        Some(&evidence_dir),
+                        VerificationStage::Callback,
+                    )?;
+                    if active.kind == CaseKind::Setup {
+                        *self
+                            .evidence
+                            .setup_counts
+                            .entry(active.step.operation().to_owned())
+                            .or_default() += 1;
+                    } else if active.obligation {
+                        *self
+                            .evidence
+                            .obligations
+                            .entry(active.step.operation().to_owned())
+                            .or_default() += 1;
+                    }
                 }
                 ensure!(
                     active.checks.insert("assert".into()),
@@ -3557,7 +4216,10 @@ impl Campaign {
             }
             "dev-errors" => {
                 ensure!(
-                    self.active.is_none() && self.queue.is_empty() && !self.errors_checked,
+                    self.active.is_none()
+                        && self.queue.is_empty()
+                        && self.prepared_example.is_none()
+                        && !self.errors_checked,
                     "error verification phase order"
                 );
                 if let Some(definition) = &self.runtime.artifact().contract().app_contract {
@@ -3695,12 +4357,19 @@ impl Campaign {
             }
             "dev-duplicate" => {
                 let active = self.active.as_mut().context("active command required")?;
+                let operation = active.step.operation();
+                let input: Value = serde_json::from_str(
+                    active
+                        .step
+                        .input()
+                        .context("active command input required")?,
+                )?;
                 let duplicate = if let Some(delegation) = &active.delegation {
                     let authenticated = format!("app:{}", delegation.application);
                     self.runtime.accept_delegated(
-                        &active.step.operation,
+                        operation,
                         &active.id,
-                        &serde_json::from_str(&active.step.input)?,
+                        &input,
                         active.now,
                         crate::store::Cause::delegated(
                             &delegation.actor,
@@ -3713,23 +4382,23 @@ impl Campaign {
                     .runtime
                     .artifact()
                     .contract()
-                    .internal_command(&active.step.operation)
+                    .internal_command(operation)
                 {
                     self.runtime.accept_route(
-                        &active.step.operation,
-                        &self.actor,
+                        operation,
+                        &active.actor,
                         &active.id,
-                        &serde_json::from_str(&active.step.input)?,
+                        &input,
                         active.now,
                         crate::audit::Trigger::Request,
                     )?;
                     self.runtime.execute(&active.id, Fault::None)?
                 } else {
                     self.runtime.invoke(
-                        &active.step.operation,
-                        &self.actor,
+                        operation,
+                        &active.actor,
                         &active.id,
-                        &serde_json::from_str(&active.step.input)?,
+                        &input,
                         active.now,
                         Fault::None,
                     )?
@@ -3745,14 +4414,19 @@ impl Campaign {
             }
             "dev-invalid" => {
                 let active = self.active.as_mut().context("active command required")?;
-                let mut malformed: Value = serde_json::from_str(&active.step.input)?;
+                let mut malformed: Value = serde_json::from_str(
+                    active
+                        .step
+                        .input()
+                        .context("active command input required")?,
+                )?;
                 malformed
                     .as_object_mut()
                     .context("command input record")?
                     .insert("$unexpected".into(), Value::Bool(true));
                 let rejected = self.runtime.accept_route(
-                    &active.step.operation,
-                    &self.actor,
+                    active.step.operation(),
+                    &active.actor,
                     &format!("invalid-{}", self.evidence.traces.len() - 1),
                     &malformed,
                     active.now,
@@ -3822,6 +4496,7 @@ impl Campaign {
                         && self.active.is_none()
                         && self.queue.is_empty()
                         && !self.prepared
+                        && self.prepared_example.is_none()
                         && matches!(self.setup, SetupState::Unplanned),
                     "incomplete development campaign"
                 );

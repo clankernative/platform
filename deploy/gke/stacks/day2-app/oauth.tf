@@ -12,9 +12,9 @@ variable "oauth_instance_json" {
       length(jsondecode(var.oauth_instance_json).oauth_runtime.apps) == 1 &&
       length(jsondecode(var.oauth_instance_json).control.security_epochs) == 1 &&
       jsondecode(var.oauth_instance_json).oauth_runtime.version == 1 &&
-      contains([1, 2], jsondecode(var.oauth_instance_json).oauth_clients.version),
+      jsondecode(var.oauth_instance_json).oauth_clients.version == 2,
     false)
-    error_message = "oauth_instance_json must be bounded single-app canonical JSON with one scoped current authority selector, version 1 OAuth runtime and version 1 or 2 client selections."
+    error_message = "oauth_instance_json must be bounded single-app canonical JSON with one scoped current authority selector, version 1 OAuth runtime and version 2 client selections."
   }
 }
 

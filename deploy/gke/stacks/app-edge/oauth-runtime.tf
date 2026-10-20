@@ -32,7 +32,7 @@ variable "oauth_instance_json" {
       length(jsondecode(var.oauth_instance_json).apps) == 1 &&
       length(jsondecode(var.oauth_instance_json).oauth_runtime.apps) == 1 &&
       jsondecode(var.oauth_instance_json).oauth_runtime.version == 1 &&
-      contains([1, 2], jsondecode(var.oauth_instance_json).oauth_clients.version),
+      jsondecode(var.oauth_instance_json).oauth_clients.version == 2,
     false)
     error_message = "OAuth IAM requires bounded, complete single-app native instance metadata."
   }

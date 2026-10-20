@@ -240,7 +240,7 @@ fn run(limits: Limits) -> io::Result<()> {
 /// each selected argument must point to a valid NUL-terminated string.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(argc: i32, argv: *const *const i8) -> i32 {
+pub unsafe extern "C" fn main(argc: i32, argv: *const *const std::ffi::c_char) -> i32 {
     if !(1..=2).contains(&argc) || argv.is_null() {
         return 64;
     }

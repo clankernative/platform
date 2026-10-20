@@ -158,6 +158,13 @@ fn main() -> Result<()> {
             replay(&LoadedArtifact::load(Path::new(artifact))?, &trace)?;
             serde_json::json!({"replayed": trace.request.context.invocation_id})
         }
+        ["replay-verification", artifact, evidence] => {
+            day2::development::replay_verification_file(
+                &LoadedArtifact::load(Path::new(artifact))?,
+                Path::new(evidence),
+            )?;
+            serde_json::json!({"replayed": evidence})
+        }
         ["lab-crash", instance, app, id, write] => {
             let write = write.parse().context("write index")?;
             serde_json::to_value(
@@ -166,7 +173,7 @@ fn main() -> Result<()> {
             )?
         }
         _ => bail!(
-            "usage: day2 init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
+            "usage: day2 init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | replay-verification ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
         ),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

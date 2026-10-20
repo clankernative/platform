@@ -5,7 +5,12 @@ use syn::visit::Visit;
 
 pub(super) const SOURCES: &[(&str, &str)] = &[
     ("account.rs", include_str!("account.rs")),
+    ("admission", ""),
     ("admission.rs", include_str!("admission.rs")),
+    (
+        "admission/desired_epochs.rs",
+        include_str!("admission/desired_epochs.rs"),
+    ),
     ("approval_keys.rs", include_str!("approval_keys.rs")),
     ("approval_registry.rs", include_str!("approval_registry.rs")),
     ("calendar.rs", include_str!("calendar.rs")),
@@ -18,11 +23,17 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("exchange.rs", include_str!("exchange.rs")),
     ("external.rs", include_str!("external.rs")),
     ("fresh_auth.rs", include_str!("fresh_auth.rs")),
+    ("fresh_owner.rs", include_str!("fresh_owner.rs")),
     ("gitlab.rs", include_str!("gitlab.rs")),
     ("google.rs", include_str!("google.rs")),
+    ("google_begin.rs", include_str!("google_begin.rs")),
     ("host.rs", include_str!("host.rs")),
     ("inbound.rs", include_str!("inbound.rs")),
     ("live_readiness.rs", include_str!("live_readiness.rs")),
+    ("management", ""),
+    ("management.rs", include_str!("management.rs")),
+    ("management/app.rs", include_str!("management/app.rs")),
+    ("management/shell.rs", include_str!("management/shell.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
@@ -282,7 +293,7 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
 #[test]
 fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/oauth");
-    let mut files = std::fs::read_dir(directory)?
+    let mut files = std::fs::read_dir(&directory)?
         .map(|entry| {
             entry?
                 .file_name()
@@ -300,6 +311,27 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         files == expected,
         "OAuth source catalog changed; add effect guard and replay identity coverage"
     );
+    for (name, expected) in [
+        ("admission", &["desired_epochs.rs"][..]),
+        ("management", &["app.rs", "shell.rs"][..]),
+    ] {
+        let mut children = std::fs::read_dir(directory.join(name))?
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("non-UTF8 {name} source"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        children.sort();
+        ensure!(
+            children
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied()),
+            "OAuth {name} source catalog changed"
+        );
+    }
     for &(name, source) in SOURCES {
         if matches!(
             name,

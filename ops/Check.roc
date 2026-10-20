@@ -2,7 +2,7 @@ import Capability
 import Build
 
 Check :: [].{
-	Step : { operation : Str, input : Str }
+	Step : { kind : Str, operation : Str, payload : Str }
 
 	Example : { name : Str, steps : List(Step), error : Str }
 
@@ -34,7 +34,15 @@ Check :: [].{
 		}
 		for example in selected {
 			_ = Capability.call!("dev-example", Json.to_str({ name: example.name }), host!)?
-			for step in example.steps {
+			for example_step in example.steps {
+				step = if example_step.kind == "generated" {
+					prepared = Capability.call!("dev-prepare-example", "{}", host!)?
+					Json.parse(prepared).map_err(|_| "invalid prepared example input")?
+				} else if example_step.kind == "command" {
+					example_step
+				} else {
+					return Err("unknown example step kind: ${example_step.kind}")
+				}
 				step!(step, host!)?
 			}
 		}

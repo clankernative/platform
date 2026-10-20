@@ -336,25 +336,27 @@ fn gitlab_actual_wire_campaign_checks_rotation_scopes_client_and_account() -> Re
 fn provider_codes_pin_both_canary_roles_before_any_native_io() -> Result<()> {
     let world = crate::oauth::simulation::World::new(81);
     crate::oauth::effects::scope(world.clone(), || -> Result<()> {
-        for field in [
-            "provider_subject",
-            "provider_tenant",
-            "qualification_subject",
-        ] {
-            let original = gitlab_target()?;
-            let codes = crate::oauth::simulation::registration_codes(&original)?;
-            let mut changed = original.clone();
-            match field {
-                "provider_subject" => changed.canary_subject = "43".into(),
-                "provider_tenant" => changed.canary_tenant = "other.example".into(),
-                "qualification_subject" => {
-                    changed.qualification_subject = "accounts.google.com:other-human".into()
+        for original in [fixture()?.target, gitlab_target()?] {
+            for field in [
+                "provider_subject",
+                "provider_tenant",
+                "qualification_subject",
+            ] {
+                let codes = crate::oauth::simulation::registration_codes(&original)?;
+                let mut changed = original.clone();
+                match field {
+                    "provider_subject" => changed.canary_subject = "43".into(),
+                    "provider_tenant" => changed.canary_tenant = "other.example".into(),
+                    "qualification_subject" => {
+                        changed.qualification_subject = "accounts.google.com:other-human".into()
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
+                assert!(
+                    Session::new(changed, codes, Arc::new(TokensSource(AtomicUsize::new(0))))
+                        .is_err()
+                );
             }
-            assert!(
-                Session::new(changed, codes, Arc::new(TokensSource(AtomicUsize::new(0)))).is_err()
-            );
         }
         assert!(world.requests().is_empty());
         Ok(())
@@ -1056,23 +1058,77 @@ fn authorization_derives_s256_and_accepts_only_its_fresh_session_and_state() -> 
         assert_eq!(code.code, CODE_CANARY);
         assert!(code.purpose == purpose);
     }
-    for attack in 0..5 {
+    for attack in 0..8 {
         let (mut authorization, _) =
             Authorization::begin(&target, Purpose::Positive, human.clone())?;
-        let mut query = format!("state={}&code={CODE_CANARY}", authorization.state);
+        let base = format!("state={}&code={CODE_CANARY}", authorization.state);
+        let mut query = format!("{base}&iss={}", google::ISSUER);
         let session = if attack == 0 {
             Digest::of(&"different-shell-session")?
         } else {
             human.clone()
         };
         match attack {
-            1 => query = format!("state=wrong&code={CODE_CANARY}"),
-            2 => query.push_str("&iss=https%3A%2F%2Fattacker.example"),
+            1 => query = format!("state=wrong&code={CODE_CANARY}&iss={}", google::ISSUER),
+            2 => query = format!("{base}&iss=https%3A%2F%2Fattacker.example"),
             3 => query.push_str("&state=duplicate"),
             4 => authorization.started = Instant::now() - Duration::from_secs(VALID_SECONDS as u64),
+            5 => query = base,
+            6 => query = format!("{base}&iss="),
+            7 => query.push_str(&format!("&iss={}", google::ISSUER)),
             _ => {}
         }
         assert!(authorization.complete(query.as_bytes(), &session).is_err());
     }
+    Ok(())
+}
+
+pub(in crate::oauth) fn authorization_snapshot(
+    authorization: &Authorization,
+) -> Result<(Digest, Instant)> {
+    let purpose = match authorization.purpose {
+        Purpose::Positive => "positive",
+        Purpose::RejectPkce => "pkce",
+        Purpose::RejectCredential => "credential",
+    };
+    let adapter = match authorization.adapter {
+        catalog::Adapter::GoogleCalendar => "google",
+        catalog::Adapter::GitlabProjects => "gitlab",
+    };
+    Ok((
+        Digest::of(&json!({
+            "state":Digest::new(authorization.state.as_bytes()),
+            "verifier":Digest::new(authorization.verifier.as_bytes()),
+            "target":authorization.target,"purpose":purpose,"session":authorization.session,
+            "issuer":authorization.issuer,"adapter":adapter
+        }))?,
+        authorization.started,
+    ))
+}
+
+#[test]
+fn gitlab_qualification_keeps_optional_issuer_but_rejects_a_supplied_wrong_issuer() -> Result<()> {
+    let target = gitlab_target()?;
+    let session = Digest::new(b"gitlab-shell-session");
+    for issuer in [None, Some(target.reviewed.issuer_url.as_str())] {
+        let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("state", &authorization.state)
+            .append_pair("code", CODE_CANARY);
+        if let Some(issuer) = issuer {
+            query.append_pair("iss", issuer);
+        }
+        let query = query.finish();
+        authorization.validate_required_issuer(query.as_bytes())?;
+        authorization.complete(query.as_bytes(), &session)?;
+    }
+    let (authorization, _) = Authorization::begin(&target, Purpose::Positive, session.clone())?;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("state", &authorization.state)
+        .append_pair("code", CODE_CANARY)
+        .append_pair("iss", "https://attacker.example")
+        .finish();
+    assert!(authorization.complete(query.as_bytes(), &session).is_err());
     Ok(())
 }

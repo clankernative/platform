@@ -900,7 +900,7 @@ pub(super) mod tests {
         shell: &ShellApprovalKeyLease,
     ) -> FreshExternalApproval {
         shell
-            .attest(
+            .attest_fixture(
                 pending,
                 Digest::of(&"fresh-security-session").unwrap(),
                 5,
@@ -1304,6 +1304,7 @@ pub(super) mod tests {
             &self,
             identity: &crate::iap::Verified,
             _: crate::oauth::fresh_auth::FreshIntent,
+            _: &HeaderMap,
             _: i64,
         ) -> Result<ReauthStart> {
             Ok(ReauthStart::Authenticated(FreshHuman {
@@ -1328,6 +1329,7 @@ pub(super) mod tests {
             &self,
             _: &crate::iap::Verified,
             intent: crate::oauth::fresh_auth::FreshIntent,
+            _: &HeaderMap,
             _: i64,
         ) -> Result<ReauthStart> {
             *self.0.lock().unwrap() = Some(intent);
@@ -1340,17 +1342,20 @@ pub(super) mod tests {
             &self,
             _: &str,
             _: &crate::iap::Verified,
+            _: &HeaderMap,
             _: i64,
-        ) -> Result<crate::oauth::shell_oidc::Reauthenticated> {
-            Ok(crate::oauth::shell_oidc::Reauthenticated::fixture(
-                self.0
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .context("test callback intent unavailable")?,
-                "human_1".into(),
-                "accounts.google.com:test-human".into(),
-                5,
+        ) -> Result<crate::oauth::security_shell::ReauthCallback> {
+            Ok(crate::oauth::security_shell::ReauthCallback::Observed(
+                Box::new(crate::oauth::shell_oidc::Reauthenticated::fixture(
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .context("test callback intent unavailable")?,
+                    "human_1".into(),
+                    "accounts.google.com:test-human".into(),
+                    5,
+                )),
             ))
         }
     }
@@ -1712,7 +1717,7 @@ pub(super) mod tests {
                 .is_err()
         );
         let stale = shell
-            .attest(
+            .attest_fixture(
                 &pending,
                 Digest::of(&"fresh-security-session").unwrap(),
                 3,
@@ -1723,7 +1728,7 @@ pub(super) mod tests {
             external::approve_external(&mut db, fixture.input(), &key, &shell, stale, 5).is_err()
         );
         let reused_session = shell
-            .attest(&pending, fixture.binding.session().clone(), 5, 5)
+            .attest_fixture(&pending, fixture.binding.session().clone(), 5, 5)
             .unwrap();
         assert!(
             external::approve_external(&mut db, fixture.input(), &key, &shell, reused_session, 5)
@@ -2216,6 +2221,13 @@ pub(super) mod tests {
             late: AtomicBool,
         }
         impl effects::Hooks for Port {
+            fn provider_observation(
+                &self,
+                _: crate::oauth::shell_oidc::ProviderObservationData,
+            ) -> Result<()> {
+                anyhow::bail!("unscripted provider observation")
+            }
+
             fn domain(&self) -> u64 {
                 6301
             }

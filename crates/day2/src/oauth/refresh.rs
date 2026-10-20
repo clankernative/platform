@@ -102,7 +102,114 @@ pub(crate) struct ClientCredential {
     checked_at: i64,
 }
 
+pub(in crate::oauth) struct InitialExchange<'a> {
+    pub db: &'a Connection,
+    pub key: &'a crate::managed_credentials::crypto::KeyLease,
+    pub selection: &'a usage::Selection,
+    pub subject: &'a str,
+    pub now: i64,
+    pub guard: &'a super::management::app::FinishGuard<'a>,
+}
+
 impl ClientCredential {
+    /// Consumes the durable code-exchange permit. Credentials, provider code,
+    /// PKCE verifier and tokens never leave the fixed native adapter.
+    pub(in crate::oauth) fn initial_exchange(
+        self,
+        permit: super::exchange::ExchangeDispatchPermit,
+        input: InitialExchange<'_>,
+    ) -> Result<(
+        super::exchange::ExchangeObservation,
+        Option<super::account::ProviderAccount>,
+    )> {
+        let InitialExchange {
+            db,
+            key,
+            selection,
+            subject,
+            now,
+            guard,
+        } = input;
+        ensure!(
+            now >= self.checked_at && selection.reviewed.token_endpoint == google::TOKEN,
+            "OAuth initial credential expired or changed"
+        );
+        let wire = Wire::new()?;
+        let started = effects::Instant::now();
+        let mut account = None;
+        let outcome = permit.send(|request| {
+            ensure!(
+                request.token_endpoint() == google::TOKEN
+                    && request.client_credential() == &self.reference
+                    && request.profile() == &selection.permission.profile
+                    && request.registration() == &selection.instance.registration.registration,
+                "OAuth initial credential binding changed"
+            );
+            let code = request.load_code(db, key)?;
+            let verifier = request.load_verifier(db, key)?;
+            guard.require_send(now)?;
+            let response = wire
+                .client
+                .post(google::TOKEN)
+                .timeout(
+                    BUDGET
+                        .checked_sub(started.elapsed())
+                        .context("OAuth initial deadline reached")?,
+                )
+                .form(&[
+                    ("grant_type", "authorization_code"),
+                    ("client_id", self.client.as_str()),
+                    ("client_secret", self.secret.as_str()),
+                    ("code", code.as_str()),
+                    ("code_verifier", verifier.as_str()),
+                    ("redirect_uri", request.callback_url()),
+                ])
+                .send()
+                .map_err(|_| anyhow::anyhow!("OAuth initial exchange outcome unknown"))?;
+            ensure!(
+                response.status().as_u16() == 200,
+                "OAuth initial exchange refused"
+            );
+            let raw = body(response)?;
+            let (normalized, tokens) = google::normalized_tokens(
+                &raw,
+                super::catalog::TokenContext {
+                    reviewed: &selection.reviewed,
+                    permission: &selection.permission,
+                    client_id: &self.client,
+                    subject,
+                },
+                false,
+            )?;
+            let mut authorization =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", tokens.access))?;
+            authorization.set_sensitive(true);
+            guard.require_send(now)?;
+            let response = wire
+                .client
+                .get(google::USERINFO)
+                .header(reqwest::header::AUTHORIZATION, authorization)
+                .timeout(
+                    BUDGET
+                        .checked_sub(started.elapsed())
+                        .context("OAuth initial deadline reached")?,
+                )
+                .send()
+                .map_err(|_| anyhow::anyhow!("OAuth initial account outcome unknown"))?;
+            ensure!(
+                response.status().as_u16() == 200,
+                "OAuth initial account refused"
+            );
+            account = Some(google::observe_account(&body(response)?)?);
+            Ok(super::exchange::TokenHttpResponse {
+                status: 200,
+                content_type: "application/json".into(),
+                body: normalized,
+            })
+        });
+        Ok((outcome, account))
+    }
+
     pub(super) fn new(
         client: String,
         secret: String,

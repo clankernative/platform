@@ -330,6 +330,24 @@ pub fn authorize_and_commit_qualified_exchange(
     input: OutboundQualification<'_>,
     now: i64,
 ) -> Result<Option<ExchangeDispatchPermit>> {
+    authorize_checked(db, input, now, None)
+}
+
+pub(in crate::oauth) fn authorize_managed_exchange(
+    db: &mut Connection,
+    input: OutboundQualification<'_>,
+    now: i64,
+    guard: &super::management::app::FinishGuard<'_>,
+) -> Result<Option<ExchangeDispatchPermit>> {
+    authorize_checked(db, input, now, Some(guard))
+}
+
+fn authorize_checked(
+    db: &mut Connection,
+    input: OutboundQualification<'_>,
+    now: i64,
+    guard: Option<&super::management::app::FinishGuard<'_>>,
+) -> Result<Option<ExchangeDispatchPermit>> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
         input.binding,
@@ -339,6 +357,9 @@ pub fn authorize_and_commit_qualified_exchange(
         input.instance,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(guard) = guard {
+        guard.check(&tx, now)?;
+    }
     let row: Option<(ConnectIntent, String, String, String)> = tx
         .query_row(
             "SELECT a.slot, a.expected_generation, a.expected_epoch,
@@ -394,6 +415,9 @@ pub fn authorize_and_commit_qualified_exchange(
         params![input.intent.attempt, now],
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
+    if let Some(guard) = guard {
+        guard.commit_dispatch(&tx)?;
+    }
     tx.commit()?;
     Ok(Some(ExchangeDispatchPermit {
         intent: stored_intent,
@@ -424,7 +448,17 @@ pub(crate) fn handle_qualified_callback(
         "callback attempt mismatch"
     );
     let callback_code_ref = ingress.code_ref;
-    super::outbound::handle_callback(db, ingress, |tx, code| {
+    let parameters = if input.reviewed.issuer_url == super::google::ISSUER
+        && input.reviewed.token_endpoint == super::google::TOKEN
+    {
+        super::catalog::Adapter::GoogleCalendar.callback_parameters()
+    } else {
+        super::protocol::CallbackParameters {
+            require_issuer: true,
+            allowed_extras: Default::default(),
+        }
+    };
+    super::outbound::handle_callback_profile(db, ingress, &parameters, |tx, code| {
         let binding = load_binding(tx, &qualified.intent().attempt)?
             .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
         ensure!(
@@ -547,5 +581,40 @@ pub fn settle_mapped(
         current_mapping_revision,
         now,
         |tx| custody::publish_tokens(tx, prepared.material),
+    )
+}
+
+pub(in crate::oauth) fn settle_managed(
+    db: &mut Connection,
+    prepared: PreparedMappedSettlement,
+    current: OutboundQualification<'_>,
+    revision: &Digest,
+    now: i64,
+    guard: &super::management::app::FinishGuard<'_>,
+) -> Result<bool> {
+    let qualified = super::profiles::qualify_outbound_connect(
+        current.intent,
+        current.binding,
+        current.requirement,
+        current.permission,
+        current.reviewed,
+        current.instance,
+    )?;
+    if prepared.verified.intent() != qualified.intent()
+        || !prepared.binding.matches_current(&current)?
+    {
+        return Ok(false);
+    }
+    connect::activate_mapped_bound(
+        db,
+        &prepared.verified,
+        &prepared.binding,
+        revision,
+        now,
+        |tx| {
+            guard.check(tx, now)?;
+            custody::publish_tokens(tx, prepared.material)?;
+            guard.complete(tx)
+        },
     )
 }
