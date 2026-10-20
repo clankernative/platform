@@ -16,6 +16,8 @@ mod shell;
 /// phase needs its own genuine same-stage serving fence.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ServingUse {
+    Claim,
+    Publication,
     StartCommit,
     DispatchCommit,
     ProviderSend,
@@ -92,6 +94,7 @@ impl ResponseIdentity {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum RuntimeServingUse {
     InitialStorage,
+    PendingCapture,
     Read,
     Refresh,
 }
