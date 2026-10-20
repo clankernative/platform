@@ -283,6 +283,17 @@ providers! {
             OpenAiGenerate => "openai.generate.v1" (write),
         },
     },
+    FreetoolExecutor {
+        kind: FreetoolExecutorResource,
+        world: "freetool_executor.simulated.sqlite",
+        actions: {
+            FreetoolFingerprint => "freetool.fingerprint.v1" (read),
+            FreetoolStatus => "freetool.status.v1" (read),
+            FreetoolResultPage => "freetool.result_page.v1" (read),
+            FreetoolRegister => "freetool.register.v1" (write),
+            FreetoolExecute => "freetool.execute.v1" (write),
+        },
+    },
 }
 
 /// A provider serves exactly one resource kind.

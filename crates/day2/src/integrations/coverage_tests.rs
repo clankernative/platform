@@ -92,6 +92,8 @@ enum Demonstration {
     /// establish — a correct signature over the wrong object is still wrong, and
     /// a presigned URL cannot be recalled once handed to a client.
     LocalAuthorization,
+    /// Exercises the executor service's own deterministic manifest/receipt world.
+    FreetoolExecutorWorld,
 }
 
 fn demonstration(action: Action) -> Demonstration {
@@ -146,6 +148,11 @@ fn demonstration(action: Action) -> Demonstration {
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the published capture.
         Action::CartaSnapshot | Action::CartaRecord => Demonstration::NativeAdapterRead,
+        Action::FreetoolFingerprint
+        | Action::FreetoolStatus
+        | Action::FreetoolResultPage
+        | Action::FreetoolRegister
+        | Action::FreetoolExecute => Demonstration::FreetoolExecutorWorld,
     }
 }
 
@@ -1060,6 +1067,118 @@ fn observe_native_carta(action: Action, variant: Variant) -> Result<Observed> {
     })
 }
 
+fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
+    use crate::freetool_executor::{
+        ExecutionIdentity, ExecutionPlan, ServiceRequest, response_json, sha256, simulated_call,
+    };
+    let run = |variant: Variant| -> Result<(String, bool)> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("freetool_executor.simulated.sqlite");
+        let suffix = match variant {
+            Variant::A => "alpha",
+            Variant::B => "beta",
+        };
+        let identity = ExecutionIdentity {
+            installation: "coverage/test".into(),
+            application: "freetool".into(),
+            actor: "coverage-actor".into(),
+            artifact: "coverage-artifact".into(),
+            operation: "freetool.run".into(),
+            resource_id: "resource-coverage".into(),
+            configuration_id: "config-coverage".into(),
+            immutable_version: 1,
+            configuration_digest: sha256(suffix.as_bytes()),
+            run_id: format!("run-{suffix}"),
+            arguments_digest: sha256(format!("args-{suffix}").as_bytes()),
+        };
+        let plan = ExecutionPlan::Http {
+            method: "GET".into(),
+            url: format!("https://api.example.test/{suffix}"),
+            headers: vec![("accept".into(), "application/json".into())],
+            body: vec![],
+        };
+        let mut writes = false;
+        let response = match action {
+            Action::FreetoolFingerprint => serde_json::json!({
+                "configuration_digest": sha256(format!("configuration-{suffix}").as_bytes()),
+                "arguments_digest": sha256(format!("arguments-{suffix}").as_bytes()),
+            })
+            .to_string(),
+            Action::FreetoolRegister => {
+                writes = true;
+                response_json(simulated_call(
+                    &database,
+                    ServiceRequest::Register { identity, plan },
+                )?)?
+            }
+            Action::FreetoolExecute => {
+                writes = true;
+                simulated_call(
+                    &database,
+                    ServiceRequest::Register {
+                        identity: identity.clone(),
+                        plan,
+                    },
+                )?;
+                response_json(simulated_call(
+                    &database,
+                    ServiceRequest::Execute { identity },
+                )?)?
+            }
+            Action::FreetoolStatus | Action::FreetoolResultPage => {
+                simulated_call(
+                    &database,
+                    ServiceRequest::Register {
+                        identity: identity.clone(),
+                        plan,
+                    },
+                )?;
+                simulated_call(
+                    &database,
+                    ServiceRequest::Execute {
+                        identity: identity.clone(),
+                    },
+                )?;
+                let before = std::fs::read(&database)?;
+                let request = if action == Action::FreetoolStatus {
+                    ServiceRequest::Status { identity }
+                } else {
+                    ServiceRequest::ResultPage {
+                        identity,
+                        offset: 0,
+                        limit: 1024,
+                    }
+                };
+                let output = response_json(simulated_call(&database, request)?)?;
+                ensure!(
+                    std::fs::read(&database)? == before,
+                    "Freetool read changed its world"
+                );
+                output
+            }
+            _ => anyhow::bail!("not a Freetool executor capability"),
+        };
+        let changed = database.exists() && writes;
+        Ok((response, changed))
+    };
+    let first = run(Variant::A).map_err(|error| format!("{action:?}: {error:#}"))?;
+    let second = run(Variant::B).map_err(|error| format!("{action:?}: {error:#}"))?;
+    if first.0 == second.0 {
+        return Err(format!(
+            "{action:?} did not reflect its execution world/identity"
+        ));
+    }
+    if matches!(action, Action::FreetoolRegister | Action::FreetoolExecute)
+        && !(first.1 && second.1)
+    {
+        return Err(format!(
+            "{action:?} did not commit to its declared provider world"
+        ));
+    }
+    Ok(())
+
+}
+
 fn check(
     action: Action,
     observe: impl Fn(Variant) -> Result<Observed>,
@@ -1071,6 +1190,7 @@ fn check(
     let run = |variant| observe(variant).map_err(|error| format!("{action:?}: {error:#}"));
     match demonstration(action) {
         Demonstration::PendingAdapterSeam => Ok(()),
+        Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
         Demonstration::NativeAdapterRead => {
             let native = if action.provider() == Provider::Carta {
                 observe_native_carta

@@ -650,6 +650,16 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
         scope,
         crate::simulations::simulation(Provider::WorkspaceDirectory),
         &fixture.workspace_directory,
+    )?;
+    // The executor simulation is deterministic from its sealed request and needs
+    // no scenario payload. Provision its declared database through the same
+    // explicit fixture path as the other simulated providers; this also ensures
+    // its world file exists before the runtime opens it for the first call.
+    seed_world(
+        database,
+        scope,
+        crate::simulations::simulation(Provider::FreetoolExecutor),
+        &json!({"service": "freetool_executor", "version": 1}),
     )
 }
 
