@@ -32,6 +32,33 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::InitialStorageOutcome);
+    assert_not_impl!(
+        crate::security_epoch::InitialStorageOutcome,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::InitialStorageOutcome, Send);
+    assert_not_impl!(crate::security_epoch::InitialStorageOutcome, Sync);
+    assert_consuming!(crate::security_epoch::InitialStorageContinuity);
+    assert_not_impl!(
+        crate::security_epoch::InitialStorageContinuity,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::security_epoch::InitialStorageContinuity, Send);
+    assert_not_impl!(crate::security_epoch::InitialStorageContinuity, Sync);
+    assert_consuming!(crate::security_epoch::CurrentStorageBootstrapPhase<'static, 'static>);
+    assert_not_impl!(
+        crate::security_epoch::CurrentStorageBootstrapPhase<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentStorageBootstrapPhase<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::CurrentStorageBootstrapPhase<'static, 'static>,
+        Sync
+    );
     assert_consuming!(crate::oauth::native_management::AppCreator<'static>);
     assert_not_impl!(crate::oauth::native_management::AppCreator<'static>, Send);
     assert_not_impl!(crate::oauth::native_management::AppCreator<'static>, Sync);

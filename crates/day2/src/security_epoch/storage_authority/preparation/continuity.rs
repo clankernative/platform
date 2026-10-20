@@ -293,6 +293,32 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
         result
     }
 
+    /// Only the authenticated initial-holder composition may interpret this
+    /// fixed operation as P3. All real resources remain owned by THIS phase;
+    /// a local filesystem fixture cannot construct its native volume owner.
+    pub(crate) fn check_initial_durability(&mut self) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            self.phase.check_durability_profile()?;
+            self.check()?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("original_file_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                rustix::fs::fsync(self.file)?;
+                self.check()?;
+                rustix::fs::fsync(self.directory)?;
+                self.check()?;
+                self.phase.check_durability_profile()?;
+                self.check()
+            }
+        })();
+        if result.is_err() {
+            self.disposition.refuse();
+        }
+        result
+    }
+
     /// A statement only, after current file/provider checks. The closed S1
     /// exchange must authenticate it before the App parses any SQLite bytes.
     pub(crate) fn projection(&mut self) -> Result<PreparedFileProjection> {

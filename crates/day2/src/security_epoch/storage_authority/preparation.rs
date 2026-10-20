@@ -211,6 +211,10 @@ impl<'role> PreparedInitialFile<'role> {
 }
 
 impl PreparedFileProjection {
+    pub(in crate::security_epoch) fn initial_core(&self) -> &OriginalSeedCore {
+        &self.core
+    }
+
     pub(crate) fn scope(&self) -> &day2_capabilities::security_epoch::AuthorityScope {
         &self.core.scope
     }
