@@ -244,9 +244,8 @@ grant or treats the historical durability completion as a configuration lease.
 
 The native creation factory consumes the actual enrolled controller stage and
 performs authenticated provider reads and native block-device/mount checks. It
-has not been qualified on the live GKE profile. Complete exclusive
-mutator/impersonation governance qualification, then bind the first-holder peer,
-current serving transition and production bootstrap-execution factory. Recheck these
+has not been qualified on the live GKE profile. Bind the first-holder peer, current serving transition and production
+bootstrap-execution factory under the accepted governance contract below. Recheck these
 owners through known local admission commits, provider/body sends and final
 settlement. Keep unknown outcomes retained. Do not treat a completed response
 object as a completed human or provider exposure.
@@ -261,3 +260,30 @@ not current serving authority.
 Until that composition and its native qualification exist, the production
 fresh-human refusal remains in place. No fixture, desired configuration, IAM
 audit report, local readback or prior verification receipt may replace it.
+
+## Accepted governance contract
+
+The user selected trust option B on 2026-10-20. The Google-managed Firebase
+Rules service agent `service-79211883381@firebase-rules.iam.gserviceaccount.com`
+and its existing writer/actAs paths are accepted provider TCB for Firebase Rules
+system operation. No IAM changes are made; the earlier exclusion/custom-role
+proposal is superseded and unapplied. The Controller is the sole application
+protocol mutator, subject to those trusted provider and governance paths, not
+the only principal able to change documents under effective IAM.
+
+The confirmed governance roots are `chander@wonderly.com`,
+`sebastian@wonderly.com` and the infrastructure deployment account
+`internal-tools-infra@wonderly-internal-tools.iam.gserviceaccount.com`.
+Their administration/delegation and the selected GKE/Compute identity mechanisms
+are trusted. Include `csm-ops-deploy@wonderly-idp-sso.iam.gserviceaccount.com` as
+an ancillary, tag-conditional organization-policy administrator: it can affect
+the enforcement environment. Its exported organization-policy role does not
+grant IAM mutation, Firestore writes or actAs, and the export does not establish
+a current tag match. It is not a direct counter writer.
+
+This is a conditional native trust model. A saved allow-policy export neither
+exhausts all deny/key/delegation/pool paths nor constructs current permission.
+Accepted administrative/provider malice, rollback/deletion and permanent zonal
+loss are outside the selected model. No hostile-administrator or global IAM
+exclusivity claim follows. Actual same-stage storage, holder, counter and
+serving checks remain required; this decision alone enables no native factory.
