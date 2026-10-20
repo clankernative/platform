@@ -586,6 +586,13 @@
           "kind": [
             "bin"
           ],
+          "name": "day2-native-enrollment-qualify",
+          "source": "crates/day2/src/bin/day2-native-enrollment-qualify.rs"
+        },
+        {
+          "kind": [
+            "bin"
+          ],
           "name": "day2-package",
           "source": "crates/day2/src/bin/day2-package.rs"
         },
