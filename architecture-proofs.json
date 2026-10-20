@@ -146,7 +146,10 @@
         "pub (crate) fn arm (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn prepare_finalization (& mut self) -> Result < () >",
         "fn refuse (& mut self)",
+        "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >",
         "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >",
         "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >",
         "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
@@ -165,6 +168,10 @@
         {
           "owner": null,
           "signature": "pub (crate) fn with_consumer < T > (intent : & FreshIntent , phase : Phase , wall : i64 , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "fn prepare_finalization (& mut self) -> Result < () >"
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
@@ -188,7 +195,15 @@
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
           "signature": "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >"
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
@@ -510,7 +525,7 @@
         },
         {
           "owner": null,
-          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>, current: &mut super::native_management::Consumer<'_, '_, '_>) -> Result<Option<ExchangeDispatchPermit>>"
         },
         {
           "owner": null,
