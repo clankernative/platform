@@ -9,6 +9,8 @@ neither capability, the runtime socket nor the KMS root grant.
 Inputs are one immutable runtime image, the bounded public `EnrollmentPolicy`,
 pool/profile and exact operator Kubernetes context. The policy ConfigMap is
 immutable and mounted read-only at `/etc/day2/native-enrollment.json`. The native
+file uses an immutable ConfigMap subPath bind mount: the native loader refuses
+the symlink used by a whole-directory ConfigMap projection. The
 entrypoint validates its complete typed policy and actual retained process/code
 observations; Terraform's input checks do not grant enrollment. Select all
 actual workload, namespace and KSA UIDs before starting clients.

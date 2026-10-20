@@ -17,6 +17,7 @@ COPY --from=build /workspace/platform/target/release/day2-native-enrollment /usr
 COPY --from=build /workspace/platform/target/release/day2-native-enrollment-qualify /usr/local/bin/day2-native-enrollment-qualify
 COPY --from=build /workspace/platform/target/debug/day2-workflows /usr/local/lib/day2/day2-workflows
 COPY --from=build /workspace/platform/target/debug/day2-workflows.json /usr/local/lib/day2/day2-workflows.json
+WORKDIR /etc/day2
 USER 10001:10001
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/day2-native-enrollment"]

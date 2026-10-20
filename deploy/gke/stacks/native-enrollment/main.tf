@@ -142,7 +142,7 @@ resource "kubernetes_manifest" "issuer" {
               limits   = { cpu = "2000m", memory = "512Mi" }
             }
             volumeMounts = [
-              { name = "policy", mountPath = "/etc/day2", readOnly = true },
+              { name = "policy", mountPath = "/etc/day2/native-enrollment.json", subPath = "native-enrollment.json", readOnly = true },
               { name = "enrollment", mountPath = "/run/day2-native-enrollment" },
               { name = "containerd", mountPath = "/run/containerd", readOnly = true }
             ]

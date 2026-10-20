@@ -32,6 +32,7 @@ run "fixed_issuer_has_only_selected_observation_privileges" {
       kubernetes_manifest.issuer.manifest.spec.template.spec.containers[0].securityContext.appArmorProfile.localhostProfile == "day2-native-enrollment" &&
       kubernetes_manifest.issuer.manifest.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem &&
       !kubernetes_manifest.issuer.manifest.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation &&
+      kubernetes_manifest.issuer.manifest.spec.template.spec.containers[0].volumeMounts[0].subPath == "native-enrollment.json" &&
       kubernetes_manifest.issuer.manifest.spec.template.spec.containers[0].volumeMounts[2].readOnly &&
       kubernetes_config_map_v1.policy.immutable
     )
