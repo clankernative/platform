@@ -32,6 +32,58 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::native_enrollment::ShellServingPeer);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ShellServingPeer,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ShellServingPeer,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ShellServingPeer,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::ControllerServingPeer);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingPeer,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingPeer,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingPeer,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::ControllerServingListener);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingListener,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingListener,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingListener,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::CurrentServingPeerPhase<'static>);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentServingPeerPhase<'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentServingPeerPhase<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::CurrentServingPeerPhase<'static>,
+        Sync
+    );
     assert_consuming!(crate::security_epoch::AppInitialStorageContinuity);
     assert_not_impl!(
         crate::security_epoch::AppInitialStorageContinuity,

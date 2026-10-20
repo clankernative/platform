@@ -26,6 +26,7 @@ use std::{
     time::Duration,
 };
 
+mod serving;
 mod storage;
 
 struct OwnerIdentity;
@@ -43,6 +44,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     // One-way refusal gate, never a holder permission or restored DATA flag.
     // Even a later fresh stage cannot restart an unknown initial exchange.
     initial_holder_attempted: bool,
+    serving_attempted: bool,
     #[cfg(target_os = "linux")]
     issuer: IssuerReceipt,
     #[cfg(target_os = "linux")]
@@ -128,6 +130,7 @@ impl EnrolledProcessRoleOwner {
                 thread: std::thread::current().id(),
                 refused: false,
                 initial_holder_attempted: false,
+                serving_attempted: false,
                 issuer,
                 binding: grant.data.runtime,
                 self_data: grant.data.process,
