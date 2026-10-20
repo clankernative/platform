@@ -1775,29 +1775,29 @@ impl Sink {
                 .clone()
                 .run(|| -> Result<()> { refuse_response(&binding.intent, *role, &self.identity) });
         }
-        if let Ok(binding) = self.runtime.try_borrow() {
-            if let Some(binding) = binding.as_ref() {
-                let _ = binding.effects.clone().run(|| {
-                    OWNERS.with(|owners| {
-                        let mut owners = owners.try_borrow_mut()?;
-                        let owner = owners
-                            .get_mut(binding.scope.app.as_str())
-                            .context("native runtime terminal executor missing")?;
-                        ensure!(
-                            owner.kind == NativeRole::AppHost,
-                            "native runtime terminal role changed"
-                        );
-                        let AppStorage::Participant(participant) = &mut owner.storage else {
-                            anyhow::bail!("native runtime terminal participant unavailable")
-                        };
-                        crate::security_epoch::serving::refuse_runtime_response(
-                            participant,
-                            &binding.scope,
-                            &self.identity,
-                        )
-                    })
-                });
-            }
+        if let Ok(binding) = self.runtime.try_borrow()
+            && let Some(binding) = binding.as_ref()
+        {
+            let _ = binding.effects.clone().run(|| {
+                OWNERS.with(|owners| {
+                    let mut owners = owners.try_borrow_mut()?;
+                    let owner = owners
+                        .get_mut(binding.scope.app.as_str())
+                        .context("native runtime terminal executor missing")?;
+                    ensure!(
+                        owner.kind == NativeRole::AppHost,
+                        "native runtime terminal role changed"
+                    );
+                    let AppStorage::Participant(participant) = &mut owner.storage else {
+                        anyhow::bail!("native runtime terminal participant unavailable")
+                    };
+                    crate::security_epoch::serving::refuse_runtime_response(
+                        participant,
+                        &binding.scope,
+                        &self.identity,
+                    )
+                })
+            });
         }
     }
 
