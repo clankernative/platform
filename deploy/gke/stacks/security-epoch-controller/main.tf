@@ -100,6 +100,10 @@ resource "kubernetes_deployment_v1" "controller" {
           run_as_non_root = true
           run_as_user     = 10001
           run_as_group    = 10001
+          # Instance-owned observation of the selected native block device.
+          # This trusted Controller alone needs DAC access; fsGroup would
+          # instead mutate volume ownership and is deliberately absent.
+          supplemental_groups = var.activate ? [var.disk_device_group_id] : []
         }
         container {
           name              = "epoch-controller"

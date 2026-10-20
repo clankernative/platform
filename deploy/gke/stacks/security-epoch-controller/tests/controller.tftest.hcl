@@ -3,16 +3,17 @@
 mock_provider "kubernetes" {}
 
 variables {
-  activate        = true
-  app             = "calendar"
-  bootstrap_alias = "native"
-  namespace       = "day2-native-enrollment"
-  image           = "registry.example.com/day2/calendar@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  instance_json   = file("tests/oauth-instance.fixture.json")
-  enrollment_json = file("tests/enrollment.json")
-  storage_json    = file("tests/storage.json")
-  host_state_path = "/var/lib/kubelet/plugins/kubernetes.io/csi/fixture-volume/globalmount"
-  node_profile    = "fixture-native"
+  activate             = true
+  app                  = "calendar"
+  bootstrap_alias      = "native"
+  namespace            = "day2-native-enrollment"
+  image                = "registry.example.com/day2/calendar@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  instance_json        = file("tests/oauth-instance.fixture.json")
+  enrollment_json      = file("tests/enrollment.json")
+  storage_json         = file("tests/storage.json")
+  host_state_path      = "/var/lib/kubelet/plugins/kubernetes.io/csi/fixture-volume/globalmount"
+  node_profile         = "fixture-native"
+  disk_device_group_id = 6
 }
 
 run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
@@ -84,4 +85,66 @@ run "active_mount_is_required" {
   command = plan
   variables { host_state_path = null }
   expect_failures = [var.host_state_path]
+}
+
+run "activated_controller_adds_only_disk_dac_group_without_volume_ownership_mutation" {
+  command = plan
+  assert {
+    condition = (
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].supplemental_groups) == 1 &&
+      contains([
+        for group in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].supplemental_groups : tonumber(group)
+      ], 6) &&
+      tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001 &&
+      tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_group) == 10001 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].fs_group == null &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].init_container) == 0 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-epoch-controller"])
+    )
+    error_message = "Only the activated trusted Controller may add disk GID6; preserve primary UID/GID10001, no fsGroup/init-container ownership repair, and the exact native executable."
+  }
+}
+
+run "missing_disk_group_is_refused" {
+  command = plan
+  variables { disk_device_group_id = null }
+  expect_failures = [var.disk_device_group_id]
+}
+
+run "zero_disk_group_is_refused" {
+  command = plan
+  variables { disk_device_group_id = 0 }
+  expect_failures = [var.disk_device_group_id]
+}
+
+run "fractional_disk_group_is_refused" {
+  command = plan
+  variables { disk_device_group_id = 6.5 }
+  expect_failures = [var.disk_device_group_id]
+}
+
+run "negative_disk_group_is_refused" {
+  command = plan
+  variables { disk_device_group_id = -1 }
+  expect_failures = [var.disk_device_group_id]
+}
+
+run "too_large_disk_group_is_refused" {
+  command = plan
+  variables { disk_device_group_id = 2147483648 }
+  expect_failures = [var.disk_device_group_id]
+}
+
+run "instance_selected_group_is_used_without_a_node_global_default" {
+  command = plan
+  variables { disk_device_group_id = 42 }
+  assert {
+    condition = (
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].supplemental_groups) == 1 &&
+      contains([
+        for group in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].supplemental_groups : tonumber(group)
+      ], 42)
+    )
+    error_message = "Use exactly the operator's explicit observed group; never substitute a global node/image assumption."
+  }
 }

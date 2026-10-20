@@ -61,3 +61,33 @@ Controller holds no live role stage while waiting for App startup; it consumes
 the original listener into a fresh same-owner initial-file phase only after a
 pending connection. No offer, P3 or activation is inferred from that readiness.
 The original five-second exchange budget is unchanged.
+
+Activation requires `disk_device_group_id`, the operator-observed owning group
+of the selected block device on the actual native node (integer 1..2147483647).
+Record this selection and the default `Merge` group policy in the retained
+operator static runtime/TCB profile. The current Calendar node was observed with
+root:disk, mode0660, GID6; this is an instance selection, not a GKE-wide default.
+The activated Controller declares only this supplemental group; registration
+must omit the input and declares no supplemental group. Primary UID/GID10001
+remain. No `fsGroup`, init-container, device chmod/chown or volume
+ownership repair is introduced; App and Shell roots receive no change.
+[Supplemental groups](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)
+apply to processes, unlike volume ownership handling through `fsGroup`.
+
+The pinned Kubernetes provider's typed Deployment cannot express
+`supplementalGroupsPolicy`. This stack retains the same Deployment resource and
+uses Kubernetes' default `Merge` policy, which can add group memberships from the
+image. Before activation, inspect `/etc/passwd` and `/etc/group` in the exact
+pinned image, and retain the running Pod's actual process groups. The current
+Calendar selection expects GID6 and primary GID10001; any additional image group
+must be explicitly accepted in the operator's trusted Controller profile.
+Registration's empty declaration is not proof of an empty process group set.
+
+Disk-group DAC is not a read-only device permission: mode0660 allows group writes
+as well, potentially to other exposed devices with that group. The accepted
+privileged Controller remains trusted; its fixed storage adapter opens the
+selected block device read-only. No hostile-Controller containment is claimed.
+S1's process/code/birth/namespace/workload checks do not compare supplemental
+groups, and this deployment change weakens no native check. Qualify actual
+process groups and device access on the selected node; mock plans verify only
+the declaration. Final apply and native/P3 qualification remain operator-owned.
