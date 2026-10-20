@@ -171,38 +171,6 @@ impl<'role> PreparedInitialFile<'role> {
             .check_unchanged_initial_file(&self.layout, &mut self.acquisition)
     }
 
-    /// Consume only a SUCCESSFULLY checked preparation. On any failure the
-    /// original file/anchor/stage remain owned by the refused outcome. A later
-    /// acquisition cannot restart an expired or failed preparation.
-    pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
-        let binding = (|| {
-            self.check_original()?;
-            let binding = match &mut self.creator.authority.issuer {
-                super::StorageIssuerOwner::Native(volume) => volume.capture_same_owner()?,
-                #[cfg(test)]
-                super::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
-                    anyhow::bail!("storage_native_retention_requires_enrolled_controller")
-                }
-            };
-            self.check_original()?;
-            Ok(binding)
-        })();
-        match binding {
-            Ok(binding) => {
-                PreparedRetentionOutcome::Retained(PreparedFileContinuity::retain(self, binding))
-            }
-            Err(error) => {
-                self.creator
-                    .authority
-                    .refuse_preparation(&mut self.acquisition);
-                PreparedRetentionOutcome::Refused {
-                    original: self,
-                    error,
-                }
-            }
-        }
-    }
-
     pub(crate) fn projection(&mut self) -> Result<crate::security_epoch::PreparedFileProjection> {
         self.check_original()?;
         let value = PreparedFileProjection {
