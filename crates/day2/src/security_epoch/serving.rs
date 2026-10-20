@@ -104,10 +104,116 @@ pub(crate) enum RuntimeServingUse {
     ResponseComplete,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub(super) enum ScopePurpose {
     Human(ServingUse),
     Runtime(RuntimeServingUse),
+}
+
+// Historical DATA only. These capped private log records are never parsed as
+// readiness, native material or permission. Shell has no App provider snapshot
+// and cannot manufacture one from a matching binding.
+#[derive(Clone)]
+pub(in crate::security_epoch) struct ConsumerScopeEvidence {
+    selection: Option<Digest>,
+    incarnation: Digest,
+    binding: Digest,
+    purpose: Option<ScopePurpose>,
+    snapshot: Option<Digest>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum ConsumerScopeResult {
+    Completed,
+    OperationRefused,
+    FinalScopeRefused,
+    Unsettled,
+    Panicked,
+}
+
+#[derive(Serialize)]
+struct ConsumerEvidenceRecord<'a> {
+    format: &'static str,
+    sequence: u8,
+    observation: ConsumerScopeResult,
+    selection: &'a Option<Digest>,
+    consumer_incarnation: &'a Digest,
+    binding: &'a Digest,
+    purpose: &'a Option<ScopePurpose>,
+    snapshot: &'a Option<Digest>,
+}
+
+const CONSUMER_EVIDENCE_PREFIX: &str = "day2-native-consumer-evidence ";
+const CONSUMER_EVIDENCE_LIMIT: u8 = 128;
+const CONSUMER_EVIDENCE_BYTES: usize = 2048;
+static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+impl ConsumerScopeEvidence {
+    pub(in crate::security_epoch) fn app(
+        selection: Digest,
+        incarnation: Digest,
+        binding: Digest,
+        purpose: ScopePurpose,
+    ) -> Self {
+        Self {
+            selection: Some(selection),
+            incarnation,
+            binding,
+            purpose: Some(purpose),
+            snapshot: None,
+        }
+    }
+
+    pub(in crate::security_epoch) fn shell(incarnation: Digest, binding: Digest) -> Self {
+        Self {
+            selection: None,
+            incarnation,
+            binding,
+            purpose: None,
+            snapshot: None,
+        }
+    }
+
+    pub(in crate::security_epoch) fn snapshot(&mut self, snapshot: Digest) {
+        self.snapshot = Some(snapshot);
+    }
+
+    fn line(&self, sequence: u8, observation: ConsumerScopeResult) -> Option<Vec<u8>> {
+        if !(1..=CONSUMER_EVIDENCE_LIMIT).contains(&sequence) {
+            return None;
+        }
+        let record = ConsumerEvidenceRecord {
+            format: "day2_native_consumer_evidence_v1",
+            sequence,
+            observation,
+            selection: &self.selection,
+            consumer_incarnation: &self.incarnation,
+            binding: &self.binding,
+            purpose: &self.purpose,
+            snapshot: &self.snapshot,
+        };
+        let json = serde_json::to_string(&record).ok()?;
+        let line = format!("{CONSUMER_EVIDENCE_PREFIX}{json}\n");
+        (line.len() <= CONSUMER_EVIDENCE_BYTES).then(|| line.into_bytes())
+    }
+
+    pub(in crate::security_epoch) fn record(&self, observation: ConsumerScopeResult) {
+        use std::{io::Write, sync::atomic::Ordering};
+        let Ok(previous) = CONSUMER_EVIDENCE_RECORDS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |previous| (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1),
+        ) else {
+            return;
+        };
+        let Some(line) = self.line(previous + 1, observation) else {
+            return;
+        };
+        // Export failure cannot change a completed native result. Missing or
+        // truncated diagnostics remain missing evidence, never a positive claim.
+        let _ = std::io::stderr().lock().write_all(&line);
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -217,6 +323,7 @@ enum ParticipantOwner {
 pub(crate) struct CurrentShellServingPhase<'peer> {
     peer: super::native_enrollment::CurrentServingPeerPhase<'peer>,
     disposition: super::bootstrap::ServingDisposition,
+    evidence: ConsumerScopeEvidence,
 }
 
 impl ServingParticipant {
@@ -551,6 +658,47 @@ impl CurrentServingPhase for ServingBorrow<'_, '_> {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    #[test]
+    fn historical_consumer_records_are_bounded_redacted_and_keep_shell_snapshot_absent() {
+        let private = "PRIVATE_token_subject_callback_url";
+        let digest = Digest::new(private.as_bytes());
+        let mut app = ConsumerScopeEvidence::app(
+            digest.clone(),
+            digest.clone(),
+            digest.clone(),
+            ScopePurpose::Runtime(RuntimeServingUse::Registration),
+        );
+        app.snapshot(digest.clone());
+        let shell = ConsumerScopeEvidence::shell(digest.clone(), digest.clone());
+        for (record, has_snapshot) in [(&app, true), (&shell, false)] {
+            assert!(record.line(0, ConsumerScopeResult::Completed).is_none());
+            assert!(record.line(129, ConsumerScopeResult::Completed).is_none());
+            for (result, expected) in [
+                (ConsumerScopeResult::Completed, "completed"),
+                (ConsumerScopeResult::OperationRefused, "operation_refused"),
+                (
+                    ConsumerScopeResult::FinalScopeRefused,
+                    "final_scope_refused",
+                ),
+                (ConsumerScopeResult::Unsettled, "unsettled"),
+                (ConsumerScopeResult::Panicked, "panicked"),
+            ] {
+                let bytes = record.line(128, result).unwrap();
+                assert!(bytes.len() <= CONSUMER_EVIDENCE_BYTES);
+                let line = String::from_utf8(bytes).unwrap();
+                assert_eq!(line.lines().count(), 1);
+                assert!(!line.contains(private));
+                let json: serde_json::Value =
+                    serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap())
+                        .unwrap();
+                assert_eq!(json["observation"], expected);
+                assert_eq!(json["binding"], digest.as_str());
+                assert_eq!(json["snapshot"].is_string(), has_snapshot);
+                assert_eq!(json["selection"].is_string(), has_snapshot);
+            }
+        }
+    }
 
     #[test]
     fn equal_digest_and_identity_cannot_cross_human_and_runtime_holds() {

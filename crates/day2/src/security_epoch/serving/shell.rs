@@ -15,6 +15,8 @@ pub(super) fn with_current<'role, T>(
     operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> ScopeOutcome<T> {
     let result = (|| {
+        let evidence =
+            super::ConsumerScopeEvidence::shell(stage.incarnation_data()?, binding.clone());
         let mut phase = peer.begin_current(stage, binding)?;
         // The Controller retains current file/P3 and epoch observations until
         // the actual consumer's original postchecks and final acknowledgement.
@@ -22,6 +24,7 @@ pub(super) fn with_current<'role, T>(
         Ok(CurrentShellServingPhase {
             peer: phase,
             disposition: ServingDisposition::Unarmed,
+            evidence,
         })
     })();
     match result {
@@ -59,7 +62,13 @@ impl CurrentShellServingPhase<'_> {
             ),
             "native_shell_serving_unknown_result"
         );
-        self.peer.finish_checked(stage)
+        let known = self.disposition == ServingDisposition::Known;
+        self.peer.finish_checked(stage)?;
+        stage.check()?;
+        if known {
+            self.evidence.record(super::ConsumerScopeResult::Completed);
+        }
+        Ok(())
     }
 
     fn run<'role, T>(
@@ -73,27 +82,39 @@ impl CurrentShellServingPhase<'_> {
         }));
         match result {
             Ok(Ok(value)) if self.disposition == ServingDisposition::Known => {
+                let evidence = self.evidence.clone();
                 match self.finish_scope(stage) {
                     Ok(()) => ScopeOutcome::Known(value),
-                    Err(error) => ScopeOutcome::Refused(error),
+                    Err(error) => {
+                        evidence.record(super::ConsumerScopeResult::FinalScopeRefused);
+                        ScopeOutcome::Refused(error)
+                    }
                 }
             }
             Ok(Err(error)) if self.disposition == ServingDisposition::Excluded => {
+                let evidence = self.evidence.clone();
                 match self.finish_scope(stage) {
                     Ok(()) => ScopeOutcome::Excluded(error),
-                    Err(cause) => ScopeOutcome::Refused(error.context(cause)),
+                    Err(cause) => {
+                        evidence.record(super::ConsumerScopeResult::FinalScopeRefused);
+                        ScopeOutcome::Refused(error.context(cause))
+                    }
                 }
             }
             Ok(Err(error)) => {
                 self.refuse();
+                self.evidence
+                    .record(super::ConsumerScopeResult::OperationRefused);
                 ScopeOutcome::Refused(error)
             }
             Ok(Ok(_)) => {
                 self.refuse();
+                self.evidence.record(super::ConsumerScopeResult::Unsettled);
                 ScopeOutcome::Refused(anyhow::anyhow!("native_shell_serving_result_not_settled"))
             }
             Err(payload) => {
                 self.refuse();
+                self.evidence.record(super::ConsumerScopeResult::Panicked);
                 std::panic::resume_unwind(payload)
             }
         }

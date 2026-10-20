@@ -43,6 +43,7 @@ pub(crate) struct CurrentAppServingPhase<'storage> {
     continuation: &'storage mut bool,
     disposition: ServingDisposition,
     purpose: super::serving::ScopePurpose,
+    evidence: super::serving::ConsumerScopeEvidence,
 }
 
 /// Fixed lifecycle step selection DATA. None is a write permit. An uncertain
