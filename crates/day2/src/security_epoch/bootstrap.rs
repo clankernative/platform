@@ -22,6 +22,13 @@ use std::{cell::RefCell, rc::Rc};
 mod app_serving;
 mod controller_serving;
 
+/// Historical result DATA, returned only after the actual consumer ACK,
+/// provider reobservation and physical/peer release have all succeeded.
+pub(super) struct ServingObservation {
+    pub(super) binding: Digest,
+    pub(super) snapshot: Digest,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::security_epoch) enum ServingDisposition {
     Unarmed,
@@ -530,7 +537,9 @@ pub(super) fn activate_controller(
     owner: &mut super::native_enrollment::EnrolledProcessRoleOwner,
     policy: &InitialBootstrapPolicy,
     selection: &EpochStore,
+    evidence: &mut super::controller::evidence::Evidence,
 ) -> ControllerActivationOutcome {
+    evidence.enter(super::controller::evidence::FailurePhase::Activation);
     let result = (|| {
         let core = storage.bootstrap_core()?;
         core.validate(policy, selection)?;
@@ -540,15 +549,19 @@ pub(super) fn activate_controller(
         let holder = storage.first_holder_data()?;
         let mut pending = None;
         for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
-            pending = Some(run_phase(
+            evidence.enter_bootstrap(&create, action);
+            let observed = run_phase(
                 &mut storage,
                 owner.begin_current_stage()?,
                 policy,
                 selection,
                 &create,
                 action,
-            )?);
+            )?;
+            evidence.bootstrap(&create, action, &observed)?;
+            pending = Some(observed);
         }
+        evidence.enter(super::controller::evidence::FailurePhase::Activation);
         let complete = completion_request(
             selection,
             &create,
@@ -558,17 +571,22 @@ pub(super) fn activate_controller(
         )?;
         let mut activated = None;
         for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
-            activated = Some(run_phase(
+            evidence.enter_bootstrap(&complete, action);
+            let observed = run_phase(
                 &mut storage,
                 owner.begin_current_stage()?,
                 policy,
                 selection,
                 &complete,
                 action,
-            )?);
+            )?;
+            evidence.bootstrap(&complete, action, &observed)?;
+            activated = Some(observed);
         }
+        evidence.enter(super::controller::evidence::FailurePhase::Activation);
         let snapshot = activated.context("native_activation_observation_missing")?;
         let activation = super::journal::snapshot_digest(&snapshot)?;
+        evidence.activated(&complete, &activation)?;
         Ok((complete, activation))
     })();
     match result {

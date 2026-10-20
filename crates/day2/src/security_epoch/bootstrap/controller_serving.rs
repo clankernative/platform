@@ -1,7 +1,9 @@
 //! Fixed Controller-side active App serving operation. No callback can execute
 //! inside the Controller. The signed peer result is released only while the
 //! SAME current physical/first-holder and provider observations remain owned.
-use super::{ActiveControllerStorageContinuity, check_active_snapshot, request_names};
+use super::{
+    ActiveControllerStorageContinuity, ServingObservation, check_active_snapshot, request_names,
+};
 use crate::security_epoch::{AuthenticatedReads, native_enrollment::EnrolledRoleStage};
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::bootstrap::NativeRole;
@@ -15,14 +17,14 @@ impl ActiveControllerStorageContinuity {
     pub(in crate::security_epoch) fn serve_app_current(
         &mut self,
         stage: EnrolledRoleStage<'_>,
-    ) -> Result<()> {
+    ) -> Result<ServingObservation> {
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
             let mut physical = self.storage.begin_current_app(stage)?;
             // Authenticated request selection is DATA. This can only be the
             // original App enrollment and a fresh current-serving transcript.
-            let _binding = physical.app_request()?.binding.clone();
+            let binding = physical.app_request()?.binding.clone();
             let mut reads = AuthenticatedReads::acquire(
                 &self.policy,
                 &self.store,
@@ -53,7 +55,9 @@ impl ActiveControllerStorageContinuity {
             )?;
             reads.check_observation(physical.controller_stage()?, &mut observed)?;
             physical.check()?;
-            physical.finish_app_known()
+            let snapshot = super::super::journal::snapshot_digest(observed.snapshot())?;
+            physical.finish_app_known()?;
+            Ok(ServingObservation { binding, snapshot })
         })();
         if result.is_ok() {
             self.valid = true;
@@ -72,13 +76,13 @@ impl ActiveControllerStorageContinuity {
         &mut self,
         stage: EnrolledRoleStage<'_>,
         peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
-    ) -> Result<()> {
+    ) -> Result<ServingObservation> {
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
             let mut physical = self.storage.begin_current_controller(stage)?;
             let mut shell = peer.accept_current(physical.controller_stage()?)?;
-            let _binding = shell.request_binding();
+            let binding = shell.request_binding().clone();
             let mut reads = AuthenticatedReads::acquire(
                 &self.policy,
                 &self.store,
@@ -111,7 +115,9 @@ impl ActiveControllerStorageContinuity {
             shell.check(physical.controller_stage()?)?;
             shell.release(physical.controller_stage()?)?;
             shell.finish_checked(physical.controller_stage()?)?;
-            physical.finish_controller_known()
+            let snapshot = super::super::journal::snapshot_digest(observed.snapshot())?;
+            physical.finish_controller_known()?;
+            Ok(ServingObservation { binding, snapshot })
         })();
         if result.is_ok() {
             self.valid = true;
