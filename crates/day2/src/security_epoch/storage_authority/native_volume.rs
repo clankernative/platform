@@ -624,6 +624,7 @@ fn ext4_durability_options(bytes: &[u8]) -> Result<()> {
             && fields
                 .get("barrier")
                 .is_some_and(|v| matches!(*v, "" | "1"))
+            && fields.get("dax").is_none_or(|v| *v == "never")
             && ![
                 "nobarrier",
                 "noload",
@@ -632,8 +633,7 @@ fn ext4_durability_options(bytes: &[u8]) -> Result<()> {
                 "journal_path",
                 "journal_async_commit",
                 "abort",
-                "sb",
-                "dax"
+                "sb"
             ]
             .iter()
             .any(|v| fields.contains_key(*v)),
@@ -809,6 +809,99 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durability_options_require_explicit_live_ordering_and_barriers() {
+        let good = "rw\nbarrier\ndata=ordered\nerrors=remount-ro\n";
+        ext4_durability_options(good.as_bytes()).unwrap();
+        ext4_durability_options(b"rw\nbarrier=1\ndata=ordered\ndax=never\n").unwrap();
+        for bad in [
+            good.replace("barrier\n", ""),
+            good.replace("barrier\n", "barrier=0\n"),
+            good.replace("data=ordered", "data=writeback"),
+            good.replace("data=ordered", "data=journal"),
+            good.replace("data=ordered\n", ""),
+            good.replace("rw\n", "ro\n"),
+            format!("{good}ro\n"),
+            format!("{good}nobarrier\n"),
+            format!("{good}noload\n"),
+            format!("{good}norecovery\n"),
+            format!("{good}journal_dev=8:17\n"),
+            format!("{good}journal_path=/another-device\n"),
+            format!("{good}journal_async_commit\n"),
+            format!("{good}abort\n"),
+            format!("{good}sb=2\n"),
+            format!("{good}dax\n"),
+            format!("{good}dax=always\n"),
+            format!("{good}dax=inode\n"),
+            format!("{good}data=ordered\n"),
+            good.replace('\n', ","),
+            good.trim_end().to_owned(),
+        ] {
+            assert!(ext4_durability_options(bad.as_bytes()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn kernel_device_component_is_bound_to_the_actual_whole_block_device() {
+        let good = "MAJOR=8\nMINOR=16\nDEVNAME=sdb\nDEVTYPE=disk\n";
+        assert_eq!(kernel_block_name(good.as_bytes(), 8, 16).unwrap(), "sdb");
+        for bad in [
+            good.replace("MAJOR=8", "MAJOR=9"),
+            good.replace("MINOR=16", "MINOR=17"),
+            good.replace("DEVTYPE=disk", "DEVTYPE=partition"),
+            good.replace("DEVNAME=sdb", "DEVNAME=../../sdb"),
+            good.replace("DEVNAME=sdb", "DEVNAME="),
+            format!("{good}DEVNAME=sdb\n"),
+            good.replace("MAJOR=8", "MAJOR=08"),
+            good.trim_end().to_owned(),
+            "x".repeat(4097),
+        ] {
+            assert!(kernel_block_name(bad.as_bytes(), 8, 16).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn durability_superblock_requires_a_healthy_internal_journal() {
+        let mut good = [0_u8; 1024];
+        good[0x38..0x3a].copy_from_slice(&0xef53_u16.to_le_bytes());
+        good[0x5c..0x60].copy_from_slice(&4_u32.to_le_bytes());
+        good[0xe0..0xe4].copy_from_slice(&8_u32.to_le_bytes());
+        ext4_internal_journal(&good).unwrap();
+        for (offset, value) in [
+            (0x38, 0),
+            (0x3a, 2),
+            (0x5c, 0),
+            (0x60, 8),
+            (0xe0, 0),
+            (0xe4, 1),
+        ] {
+            let mut bad = good;
+            bad[offset] = value;
+            assert!(ext4_internal_journal(&bad).is_err(), "offset {offset}");
+        }
+        assert!(ext4_internal_journal(&good[..1023]).is_err());
+        assert!(ext4_internal_journal(&[0_u8; 1025]).is_err());
+    }
+
+    #[test]
+    fn kernel_options_refuse_duplicate_truncated_and_unbounded_metadata() {
+        for bytes in [
+            b"".as_slice(),
+            b"rw\n\n",
+            b"rw\nbarrier\nbarrier\n",
+            b"rw\nnon graphic=value\n",
+            b"rw\nbarrier\x00\n",
+            b"rw\nbarrier",
+        ] {
+            assert!(kernel_lines(bytes, 8192).is_err());
+        }
+        let too_many = (0..129)
+            .map(|v| format!("key{v}=value\n"))
+            .collect::<String>();
+        assert!(kernel_lines(too_many.as_bytes(), 8192).is_err());
+    }
+
     #[test]
     fn exact_private_ext4_mount_refuses_aliases_propagation_and_partial_snapshots() {
         let good = b"91 1 8:16 / /state rw,nosuid - ext4 /dev/sdb rw\n";

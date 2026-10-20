@@ -45,6 +45,32 @@ pub(in crate::security_epoch::native_enrollment) struct StageStatement {
 }
 
 impl StageStatement {
+    /// Historical candidate DATA only. Native callers retain the actual
+    /// authenticated sender/channel; these hashes cannot recreate that owner.
+    pub(super) fn app_holder(&self) -> Result<crate::security_epoch::kernel::Holder> {
+        ensure!(
+            self.stage.data.role == NativeRole::AppHost,
+            "storage_peer_app_holder_role"
+        );
+        let data = &self.stage.data;
+        let holder = crate::security_epoch::kernel::Holder {
+            principal: Digest::of(&(
+                "day2-enrolled-app-principal-v1",
+                &data.policy,
+                &data.runtime.container.pod_uid,
+            ))?,
+            pod_uid: data.runtime.container.pod_uid.clone(),
+            process_incarnation: Digest::of(&(
+                "day2-enrolled-app-process-v1",
+                &data.process,
+                &data.runtime,
+            ))?,
+            ephemeral_key: Digest::new(&decode_key(&data.public_key)?),
+        };
+        holder.validate()?;
+        Ok(holder)
+    }
+
     pub(super) fn grant_digest(&self) -> Result<Digest> {
         Digest::of(&("day2-storage-peer-role-grant-v1", &self.stage))
     }

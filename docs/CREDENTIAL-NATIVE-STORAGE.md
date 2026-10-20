@@ -203,6 +203,36 @@ reply cannot reconstruct send authority or clear the permanent slot.
 
 ## Remaining production composition
 
+`InitialStorageContinuity::establish` now consumes the actual prepared-file
+continuation and a new enrolled Controller stage. Its fixed operation performs
+the authenticated initial App exchange, checks the joined disk/attachment and
+live ext4 profile, synchronizes the same file and private directory, and reads
+back the unchanged admitted image. Failure returns the refused original file
+owner; no success flag or projection can reconstruct the owning result.
+
+The selected durability fault model trusts Persistent Disk and the admitted
+Linux/ext4/CSI/node/Controller stack. Google documents stable-media completion
+for a successful Persistent Disk write command. The native checks join that
+provider to the actual retained descriptors; a local sync in an unrelated
+filesystem is insufficient. The live ext4 options must report ordered data and
+enabled barriers, and the selected block device must have a healthy internal
+journal. Unsupported/ambiguous kernel metadata refuses. Provider/kernel bugs,
+administrative deletion or rollback and permanent zonal loss are outside this
+conditional model; this is not a regional availability guarantee.
+[Compute Engine Persistent Disk FAQ](https://docs.cloud.google.com/compute/docs/faq#persistent_disk),
+[Linux ext4 documentation](https://cdn.kernel.org/doc/html/latest/admin-guide/ext4.html).
+
+Known establishment retains the SAME file, volume, channel and authenticated
+first holder. Each `CurrentStorageBootstrapPhase` owns a fresh physical phase
+and new peer handshake, bound to the exact original seed and request. Completion
+must select the same actual first App participant's Pod, process incarnation and
+ephemeral key. The enclosing continuation closes before fallible work, and only
+known completion after all final checks releases it. Errors, unknown outcomes,
+drop and a failure after the peer's local completion leave the enclosing owner
+closed. The new private owner types reject cloning, serialization and thread
+transfer. These types supply neither effective IAM nor active epoch/writer or
+Shell serving authority; no production bootstrap-dispatch factory is enabled.
+
 The native creation factory consumes the actual enrolled controller stage and
 performs authenticated provider reads and native block-device/mount checks. It
 has not been qualified on the live GKE profile. Complete exclusive

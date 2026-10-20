@@ -12,7 +12,11 @@ use day2_capabilities::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
+mod initial;
 mod native_volume;
+pub(crate) use initial::{
+    CurrentStorageBootstrapPhase, InitialStorageContinuity, InitialStorageOutcome,
+};
 use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 mod preparation;

@@ -398,6 +398,14 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
 }
 
 impl AuthenticatedControllerFirstHolder<'_, '_> {
+    /// Spend this SAME authenticated holder and physical phase on the joined
+    /// initial durability operation. This returns no transferable P3 witness.
+    pub(crate) fn check_initial_durability(&mut self) -> Result<()> {
+        self.check()?;
+        self.phase.check_initial_durability()?;
+        self.check()
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             ensure!(self.valid, "storage_peer_controller_holder_refused");

@@ -21,6 +21,34 @@ fn process(code: Digest, process: u32) -> ProcessData {
     }
 }
 
+#[test]
+fn app_holder_candidate_keeps_pod_process_and_key_identities_separate() {
+    let (_, mut statement, _) = fixture(NativeRole::AppHost);
+    assert!(statement.app_holder().is_err()); // fixture's non-UUID Pod is not admitted
+    statement.stage.data.runtime.container.pod_uid = "a6b27e63-16d8-4b99-92f6-2437e5b20f43".into();
+    let original = statement.app_holder().unwrap();
+    let mut changed = statement.clone();
+    changed.stage.data.challenge = Digest::new(b"another-grant-challenge");
+    assert_eq!(changed.app_holder().unwrap(), original);
+    changed.stage.data.process.start_ticks += 1;
+    let process = changed.app_holder().unwrap();
+    assert_ne!(process.process_incarnation, original.process_incarnation);
+    assert_eq!(process.principal, original.principal);
+    assert_eq!(process.ephemeral_key, original.ephemeral_key);
+    let mut changed = statement.clone();
+    changed.stage.data.public_key = KeyOwner::generate().unwrap().public();
+    let key = changed.app_holder().unwrap();
+    assert_ne!(key.ephemeral_key, original.ephemeral_key);
+    assert_eq!(key.principal, original.principal);
+    let mut changed = statement.clone();
+    changed.stage.data.runtime.container.pod_uid = "b6b27e63-16d8-4b99-92f6-2437e5b20f43".into();
+    let pod = changed.app_holder().unwrap();
+    assert_ne!(pod.principal, original.principal);
+    assert_ne!(pod.process_incarnation, original.process_incarnation);
+    statement.stage.data.role = NativeRole::EpochController;
+    assert!(statement.app_holder().is_err());
+}
+
 fn fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
     let (policy, statement, key, _issuer) = fixture_with_issuer(role);
     (policy, statement, key)
