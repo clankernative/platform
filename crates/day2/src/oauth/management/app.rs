@@ -1896,6 +1896,18 @@ mod tests {
                     .manager
                     .capture("calendar", Action::Connect, &fixture.identity, 100)?;
             let proof = fixture.proof(&view, Digest::new(b"browser"))?;
+            let mut forged: Attestation = serde_json::from_value(serde_json::to_value(&proof)?)?;
+            forged.mac = "0".repeat(64);
+            assert!(
+                fixture
+                    .manager
+                    .authority
+                    .verify_management(&view, &forged, &fixture.identity, 102,)
+                    .is_err()
+            );
+            // The key retrieval is known, but this MAC is rejected. It cannot
+            // consume the rightful original before the valid confirmation.
+            fixture.manager.pending(&view.id, &fixture.identity, 102)?;
             let mut changed = view.clone();
             changed.action = Action::Disconnect;
             assert!(
