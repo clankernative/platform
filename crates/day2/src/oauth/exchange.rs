@@ -339,6 +339,7 @@ pub(in crate::oauth) fn authorize_managed_exchange(
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
+    guard.require_intent(input.intent)?;
     guard.with_current(
         super::native_management::Phase::DispatchCommit,
         now,
@@ -606,6 +607,7 @@ pub(in crate::oauth) fn settle_managed(
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
 ) -> Result<bool> {
+    guard.require_intent(current.intent)?;
     let qualified = super::profiles::qualify_outbound_connect(
         current.intent,
         current.binding,

@@ -902,7 +902,23 @@ pub(in crate::oauth) struct StartGuard<'a> {
     session: &'a Digest,
 }
 
+fn require_connect_intent(view: &View, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+    ensure!(
+        view.action == Action::Connect && view.fence.is_none()
+            && intent.attempt == view.id && intent.slot == view.slot.as_str()
+            && intent.owner == view.human && intent.expires_at == view.expires_at
+            && intent.expected_generation.is_none() && intent.expected_epoch == 1
+            && intent.proposed_generation == 1,
+        "OAuth consumer original intent or slot/version changed"
+    );
+    Ok(())
+}
+
 impl StartGuard<'_> {
+    pub(in crate::oauth) fn require_intent(&self, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+        require_connect_intent(self.view, intent)
+    }
+
     pub(in crate::oauth) fn with_current<T>(
         &self,
         now: i64,
@@ -943,6 +959,10 @@ pub(in crate::oauth) struct FinishGuard<'a> {
 }
 
 impl FinishGuard<'_> {
+    pub(in crate::oauth) fn require_intent(&self, intent: &crate::oauth::connect::ConnectIntent) -> Result<()> {
+        require_connect_intent(self.view, intent)
+    }
+
     pub(in crate::oauth) fn with_current<T>(
         &self,
         phase: crate::oauth::native_management::Phase,
@@ -1242,6 +1262,29 @@ mod tests {
                 .append_pair("iss", crate::oauth::google::ISSUER);
             Ok((view, session, query.finish()))
         }
+    }
+
+    #[test]
+    fn consumer_guards_cannot_substitute_a_different_committed_attempt() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let (a, session, _) = fixture.connect()?;
+            let (b, _, _) = fixture.connect()?;
+            let db = store::open(fixture.manager.runtime.db())?;
+            let (intent_a, _) = fixture.manager.context(&db, &a.id)?;
+            let (intent_b, _) = fixture.manager.context(&db, &b.id)?;
+            let start = StartGuard { manager: &fixture.manager, view: &a, identity: &fixture.identity, session: &session };
+            let finish = FinishGuard { manager: &fixture.manager, view: &a, identity: &fixture.identity, session: &session };
+            start.require_intent(&intent_a)?;
+            finish.require_intent(&intent_a)?;
+            assert!(start.require_intent(&intent_b).is_err());
+            assert!(finish.require_intent(&intent_b).is_err());
+            let mut changed_version = intent_a;
+            changed_version.expected_epoch += 1;
+            assert!(start.require_intent(&changed_version).is_err());
+            assert!(finish.require_intent(&changed_version).is_err());
+            Ok(())
+        })
     }
 
     #[test]
