@@ -65,6 +65,10 @@ fn selected_file(
 struct IssuerBirthOwner {
     child: Child,
     peer: Option<MessageProcess>,
+    // Keep the actual startup peer alive while the child admits the queued
+    // grant. A buffered packet plus HUP must remain a refusal, even if the
+    // sending provisioner itself is still alive.
+    startup: Channel,
     _listener: Listener,
     socket_identity: (u64, u64),
     storage: StorageSocketDirectory,
@@ -126,7 +130,7 @@ pub(super) fn start() -> Result<Provisioner> {
     let (listener, listener_child) =
         Listener::create(&mut acquisition).context("native_enrollment_listener")?;
     let metadata = std::fs::symlink_metadata("/run/day2-native-enrollment/issuer.sock")?;
-    let (mut channel, child_channel) =
+    let (channel, child_channel) =
         Channel::pair(&mut acquisition).context("native_enrollment_startup_channel")?;
     let child = Command::new(ISSUER)
         .arg("issuer")
@@ -139,6 +143,7 @@ pub(super) fn start() -> Result<Provisioner> {
     let mut birth = IssuerBirthOwner {
         child,
         peer: None,
+        startup: channel,
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
         storage,
@@ -146,7 +151,7 @@ pub(super) fn start() -> Result<Provisioner> {
     birth.peer = Some(
         grant_child(
             &mut birth.child,
-            &mut channel,
+            &mut birth.startup,
             &root,
             &mut current,
             &policy,

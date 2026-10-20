@@ -399,6 +399,40 @@ mod tests {
     }
 
     #[test]
+    fn queued_startup_packet_with_closed_peer_refuses_wait_while_sender_is_live() {
+        let mut acquisition = NativeAcquisition::begin(5).unwrap();
+        let (channel, sender) = Channel::pair(&mut acquisition).unwrap();
+        let packet = Packet::BirthChallenge {
+            policy: Digest::new(b"test-only"),
+            nonce: Digest::new(b"native-startup"),
+        };
+        net::send(
+            &sender,
+            &serde_json::to_vec(&packet).unwrap(),
+            SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+        )
+        .unwrap();
+        // Closing the socket is distinct from the sender process exiting.
+        // The startup owner must retain its endpoint after publishing a grant.
+        drop(sender);
+        let error = wait(&channel.socket, PollFlags::IN, &mut acquisition).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native_enrollment_socket_closed_or_timeout"
+        );
+        let self_pidfd = rustix::process::pidfd_open(
+            rustix::process::getpid(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        crate::security_epoch::native_enrollment::process::live(
+            &File::from(self_pidfd),
+            &mut acquisition,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn truncation_consumes_the_packet_and_permanently_refuses_the_channel() {
         let mut acquisition = NativeAcquisition::begin(5).unwrap();
         let (mut channel, sender) = Channel::pair(&mut acquisition).unwrap();
