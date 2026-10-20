@@ -42,6 +42,14 @@ impl OfflineCargoSources {
             )
             .env("CARGO_NET_OFFLINE", "true")
             .env("CARGO_TERM_COLOR", "never")
+            // Operator Cargo configuration may enable a wrapper outside the
+            // admitted toolchain. Preparation uses only the pinned compiler.
+            .env(
+                "RUSTC",
+                cargo.parent().context("Cargo binary parent")?.join("rustc"),
+            )
+            .env("RUSTC_WRAPPER", "")
+            .env("RUSTC_WORKSPACE_WRAPPER", "")
             .env(
                 "PATH",
                 format!(
