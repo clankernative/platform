@@ -554,6 +554,23 @@ fn observe_anchored_file(
     file: &File,
     expected_length: usize,
 ) -> Result<FileIdentity> {
+    observe_anchored_file_shape(directory, anchor, file, Some(expected_length as u64))
+}
+
+fn observe_current_anchored_file(
+    directory: &File,
+    anchor: &super::DirectoryIdentity,
+    file: &File,
+) -> Result<FileIdentity> {
+    observe_anchored_file_shape(directory, anchor, file, None)
+}
+
+fn observe_anchored_file_shape(
+    directory: &File,
+    anchor: &super::DirectoryIdentity,
+    file: &File,
+    expected_length: Option<u64>,
+) -> Result<FileIdentity> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (directory, anchor, file, expected_length);
@@ -579,7 +596,7 @@ fn observe_anchored_file(
                 && observed.stx_uid == directory.stx_uid
                 && observed.stx_nlink == 1
                 && observed.stx_ino != 0
-                && observed.stx_size == expected_length as u64
+                && expected_length.is_none_or(|length| observed.stx_size == length)
                 && observed.stx_dev_major == anchor.device_major
                 && observed.stx_dev_minor == anchor.device_minor
                 && observed.stx_mnt_id == anchor.mount,
