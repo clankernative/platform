@@ -64,6 +64,12 @@ message retains the actual received `SCM_PIDFD`; malformed, truncated, extra-FD
 or unsupported ancillary data refuse. `SO_PEERPIDFD` alone cannot identify a
 sender after socket inheritance or transfer.
 
+The workspace pins the reviewed sender-pidfd implementation in the
+[clankernative/rustix fork](https://github.com/clankernative/rustix/tree/6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0).
+It owns and closes all kernel-installed process and rights descriptors even
+when ancillary framing or selection validation refuses a packet. Platform host
+code uses its safe API; no local dependency override is required.
+
 The issuer joins the retained process to one running container task init using
 the fixed containerd socket and read-only version, Tasks.List/Get,
 Containers.Get and CRI Version/ContainerStatus calls. Lists over 128 tasks or
