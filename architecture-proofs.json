@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:489e768db072a0b9802b0a98ba7a73a3d7f5e074833ac612dabeb7562a680121",
+      "fingerprint": "sha256:50d5a10cb6c5a8bb649dd754c8a9a648620a9dbd82ef12abfc88898e4046f726",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
