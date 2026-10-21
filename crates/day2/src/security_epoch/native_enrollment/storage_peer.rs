@@ -64,7 +64,7 @@ pub(crate) struct InitialHolderRendezvous {
 // Completed transport DATA still owns real nontransferable resources. It is
 // not an application-serializable or clonable supplier for another executor.
 const _: () = {
-    macro_rules! absent {
+    macro_rules! assert_not_impl {
         ($owner:ty, $bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
@@ -74,16 +74,16 @@ const _: () = {
             let _ = <$owner as Ambiguous<_>>::check;
         }};
     }
-    absent!(InitialHolderConnection, Clone);
-    absent!(InitialHolderConnection, Send);
-    absent!(InitialHolderConnection, Sync);
-    absent!(InitialHolderConnection, serde::Serialize);
-    absent!(InitialHolderConnection, serde::Deserialize<'static>);
-    absent!(InitialHolderRendezvous, Clone);
-    absent!(InitialHolderRendezvous, Send);
-    absent!(InitialHolderRendezvous, Sync);
-    absent!(InitialHolderRendezvous, serde::Serialize);
-    absent!(InitialHolderRendezvous, serde::Deserialize<'static>);
+    assert_not_impl!(InitialHolderConnection, Clone);
+    assert_not_impl!(InitialHolderConnection, Send);
+    assert_not_impl!(InitialHolderConnection, Sync);
+    assert_not_impl!(InitialHolderConnection, serde::Serialize);
+    assert_not_impl!(InitialHolderConnection, serde::Deserialize<'static>);
+    assert_not_impl!(InitialHolderRendezvous, Clone);
+    assert_not_impl!(InitialHolderRendezvous, Send);
+    assert_not_impl!(InitialHolderRendezvous, Sync);
+    assert_not_impl!(InitialHolderRendezvous, serde::Serialize);
+    assert_not_impl!(InitialHolderRendezvous, serde::Deserialize<'static>);
 };
 
 pub(crate) struct InitialHolderServer<'file, 'role> {

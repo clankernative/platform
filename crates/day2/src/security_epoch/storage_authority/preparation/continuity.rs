@@ -79,7 +79,7 @@ pub(in crate::security_epoch::storage_authority) struct PendingPhysicalFilePhase
 }
 
 const _: () = {
-    macro_rules! absent {
+    macro_rules! assert_not_impl {
         ($owner:ty, $bound:path) => {{
             trait Ambiguous<T> {
                 fn check() {}
@@ -89,19 +89,19 @@ const _: () = {
             let _ = <$owner as Ambiguous<_>>::check;
         }};
     }
-    absent!(PendingPreparedFilePhase<'static>, Clone);
-    absent!(PendingPreparedFilePhase<'static>, Send);
-    absent!(PendingPreparedFilePhase<'static>, Sync);
-    absent!(PendingPreparedFilePhase<'static>, serde::Serialize);
-    absent!(
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Send);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Sync);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, serde::Serialize);
+    assert_not_impl!(
         PendingPreparedFilePhase<'static>,
         serde::Deserialize<'static>
     );
-    absent!(PendingPhysicalFilePhase<'static>, Clone);
-    absent!(PendingPhysicalFilePhase<'static>, Send);
-    absent!(PendingPhysicalFilePhase<'static>, Sync);
-    absent!(PendingPhysicalFilePhase<'static>, serde::Serialize);
-    absent!(
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Send);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Sync);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, serde::Serialize);
+    assert_not_impl!(
         PendingPhysicalFilePhase<'static>,
         serde::Deserialize<'static>
     );
