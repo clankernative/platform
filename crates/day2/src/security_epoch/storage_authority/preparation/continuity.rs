@@ -282,17 +282,9 @@ impl PreparedFileContinuity {
         })
     }
 
-    /// Own a fresh provider/device/mount phase on the SAME original file.
-    /// Closing the continuation before any I/O retains abandonment/refusal.
-    /// Only native activation/serving composition may use this physical input;
-    /// constructing it alone never grants an active writer or control send.
-    pub(crate) fn begin_physical_phase<'file, 'role>(
-        &'file mut self,
-        stage: EnrolledRoleStage<'role>,
-    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
-        self.begin_pending_physical_phase()?.acquire(stage)
-    }
-
+    /// Close the SAME original file before readiness I/O. The pending input
+    /// owns no provider or role permission; acquire still needs its actual
+    /// original stage and all current physical guards.
     pub(in crate::security_epoch::storage_authority) fn begin_pending_physical_phase(
         &mut self,
     ) -> Result<PendingPhysicalFilePhase<'_>> {
