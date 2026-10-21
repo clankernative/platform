@@ -2,6 +2,7 @@
 
 use super::serving_peer_wire::{Message, Statement};
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::ServingSender};
 use anyhow::{Result, ensure};
 
@@ -27,13 +28,13 @@ impl Peer {
         };
         match &mut owner.processes[0] {
             ServingSender::Shell(process) => {
-                process.check_identity(acquisition)?;
+                process.check_identity(acquisition, &HashCosts::disabled())?;
                 stage.check_serving_shell_statement(
                     &owner.statement,
                     process.data(),
                     acquisition,
                 )?;
-                process.check_identity(acquisition)?
+                process.check_identity(acquisition, &HashCosts::disabled())?
             }
             ServingSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
@@ -75,7 +76,7 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        process.check_identity(acquisition, &HashCosts::disabled())?;
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.check_continuity(&self.statement, stage, acquisition)?;
@@ -114,7 +115,7 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        process.check_identity(acquisition, &HashCosts::disabled())?;
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.bind(&self.statement, stage, acquisition)?

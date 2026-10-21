@@ -3,6 +3,7 @@
 
 use super::{Channel, configure, wait};
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
     EnrolledRoleStage, NativeRole,
     process::MessageProcess,
@@ -139,9 +140,14 @@ impl Channel {
                 &bytes[..received.bytes],
             )?;
             let process = match stage.serving_peer_role()? {
-                NativeRole::SecurityShell => ServingSender::Shell(Box::new(
-                    MessageProcess::receive(received, &expected_code, acquisition)?,
-                )),
+                NativeRole::SecurityShell => {
+                    ServingSender::Shell(Box::new(MessageProcess::receive(
+                        received,
+                        &expected_code,
+                        acquisition,
+                        &HashCosts::disabled(),
+                    )?))
+                }
                 NativeRole::EpochController => {
                     ServingSender::Controller(ControllerReceipt::receive(received, acquisition)?)
                 }

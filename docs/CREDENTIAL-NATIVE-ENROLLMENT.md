@@ -147,3 +147,52 @@ ownership on both Linux backends. These tests do not qualify the selected live
 GKE/runtime profile or turn the existing human/storage refusals into success.
 The immutable dependency pin and real operator boot/profile qualification must
 be in place before publishing or deploying the supplier.
+
+## Bounded issuer cost observations
+
+The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
+for its first sixteen accepted connections. Each day2_native_issuer_cost_v1
+record has a sequence, the fixed limit, an outcome and fixed operation rows.
+Later connections disable diagnostic sampling and logging; the normal admission
+protocol and enrollment table continue unchanged. A partial/export failure is
+terminal and never retries a record or a native operation. A preexisting fatal
+native error retains its original cause.
+
+Every row is [operation, [attempts, read_bytes, inclusive_total_us, max_us]].
+Only hash rows report bytes: these are counts actually returned by hash reads,
+including partial failed attempts, rather than selected length multiplied by
+an inferred pass count. Other rows use null for bytes. Missing, rewound or
+overflowing measurements remain null, never a synthetic zero. Hash subjects
+distinguish issuer self, requester, containerd, and parent checks before and
+after serving the request. Each original peer check still performs both full
+hashes. There is no digest cache, executable-join optimization, changed clock
+origin or extended deadline in this diagnostic.
+
+Hash timings include the original read/checksum/bounds and clock-check work,
+not just checksum CPU time. Identity-body rows include their nested hashes and
+end before the existing final pidfd liveness/original-clock guard. Earlier
+failures record the failed body and preserve that error. The containerd RPC
+group includes the fixed connection and RPC sequence; the Kubernetes group
+includes the existing metadata, cluster and Kubernetes joins. Their attempt
+counts describe group invocations, not HTTP requests or RPC messages.
+Runtime, serve, parent and snapshot scopes are inclusive too: nested rows must
+not be added together.
+
+The original connection remains open through the existing post-request parent
+check, which still uses its own fresh bounded acquisition. Its parent-after
+and hash rows are separate from the grant-producing interval. All temporary
+request observations, the channel and both acquisitions unwind before emission.
+Long-lived issuer owners stay idle during logging. Parent failures still stop
+the issuer generation; a failed client request alone still consumes only its
+own connection. Diagnostics never publish error text, URLs, paths, process IDs,
+credentials, keys, request nonces or provider payloads.
+
+Elapsed values come from separate diagnostic boot-clock reads and never feed a
+native acquisition, signed grant, permission or retry. Their overhead still
+spends the original interval. Records do not measure caller work, queue time
+before accept or their own log-write delay; logging can perturb the next queued
+client. An outcome describes the return of existing calls, not readiness,
+reliable completion or proof that an ambiguous send had no effect. Actual issuer
+and Controller measurements require source/image/profile-bound deployment by
+the operator. The existing read-only one-observation/ownerless-hold procedure and
+retained failed originals remain separate evidence.

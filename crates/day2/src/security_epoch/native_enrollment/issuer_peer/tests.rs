@@ -1,4 +1,5 @@
 use super::*;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
     channel::Channel,
     process::SelfSnapshot,
@@ -43,7 +44,7 @@ fn actual_message_receipt_requires_root_binding_and_never_recovers_after_mismatc
     let mut policy = crate::security_epoch::native_enrollment::tests::policy(&root);
     policy.provisioner_code = code.clone();
     policy.issuer_code = code.clone();
-    let current = SelfSnapshot::acquire(&code, &mut acquisition).unwrap();
+    let current = SelfSnapshot::acquire(&code, &mut acquisition, &HashCosts::disabled()).unwrap();
     let certificate = certificate(
         &root,
         &policy,
@@ -84,7 +85,12 @@ fn unprivileged_client() {
     );
     let bytes = std::env::var("DAY2_ISSUER_RECEIPT_TEST_POLICY").unwrap();
     let policy: EnrollmentPolicy = crate::json::decode(bytes.as_bytes()).unwrap();
-    let mut current = SelfSnapshot::acquire(&policy.issuer_code, &mut acquisition).unwrap();
+    let mut current = SelfSnapshot::acquire(
+        &policy.issuer_code,
+        &mut acquisition,
+        &HashCosts::disabled(),
+    )
+    .unwrap();
     let request = protocol::nonce("cross-uid-issuer").unwrap();
     let mut channel = Channel::startup(&mut acquisition).unwrap();
     channel
@@ -139,7 +145,7 @@ fn unprivileged_client_receives_root_issuer_without_ptrace() {
     let mut policy = crate::security_epoch::native_enrollment::tests::policy(&root);
     policy.provisioner_code = code.clone();
     policy.issuer_code = code.clone();
-    let current = SelfSnapshot::acquire(&code, &mut acquisition).unwrap();
+    let current = SelfSnapshot::acquire(&code, &mut acquisition, &HashCosts::disabled()).unwrap();
     let (mut channel, child_socket) = Channel::pair(&mut acquisition).unwrap();
     let child = ChildGuard(
         Command::new(std::env::current_exe().unwrap())

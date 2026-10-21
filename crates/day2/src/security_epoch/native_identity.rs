@@ -3,6 +3,7 @@
 //! Authentication and first-holder/file producers remain separate prerequisites.
 
 use super::native_clock::NativeAcquisition;
+use super::native_enrollment::issuer_costs::HashCosts;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use std::{marker::PhantomData, rc::Rc};
@@ -25,6 +26,7 @@ impl NativeProcessObservation {
     pub(super) fn acquire(
         expected_executable: &Digest,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<Self> {
         let result = (|| {
             #[cfg(target_os = "linux")]
@@ -39,27 +41,29 @@ impl NativeProcessObservation {
                     identity.2 > 0 && identity.2 <= 512 * 1024 * 1024,
                     "epoch_native_executable_bound"
                 );
-                let mut hash = Context::new(&SHA256);
-                let mut buffer = [0_u8; 65_536];
-                let mut size = 0_u64;
-                loop {
-                    acquisition.remaining()?;
-                    let count = executable.read(&mut buffer)?;
-                    if count == 0 {
-                        break;
+                let code: Digest = costs.hash(|read_bytes| {
+                    let mut hash = Context::new(&SHA256);
+                    let mut buffer = [0_u8; 65_536];
+                    let mut size = 0_u64;
+                    loop {
+                        acquisition.remaining()?;
+                        let count = executable.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        size = size
+                            .checked_add(count as u64)
+                            .ok_or_else(|| anyhow::anyhow!("epoch_native_executable_bound"))?;
+                        *read_bytes = size;
+                        ensure!(size <= identity.2, "epoch_native_executable_changed");
+                        hash.update(&buffer[..count]);
                     }
-                    size = size
-                        .checked_add(count as u64)
-                        .ok_or_else(|| anyhow::anyhow!("epoch_native_executable_bound"))?;
-                    ensure!(size <= identity.2, "epoch_native_executable_changed");
-                    hash.update(&buffer[..count]);
-                }
-                ensure!(
-                    size == identity.2 && file_identity(&executable)? == identity,
-                    "epoch_native_executable_changed"
-                );
-                let code: Digest =
-                    format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()?;
+                    ensure!(
+                        size == identity.2 && file_identity(&executable)? == identity,
+                        "epoch_native_executable_changed"
+                    );
+                    format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()
+                })?;
                 ensure!(
                     code == *expected_executable,
                     "epoch_native_executable_pin_mismatch"
@@ -79,7 +83,7 @@ impl NativeProcessObservation {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = expected_executable;
+                let _ = (expected_executable, costs);
                 anyhow::bail!("epoch_native_process_platform_unsupported")
             }
         })();
@@ -157,7 +161,12 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert!(
-            NativeProcessObservation::acquire(&Digest::new(b"code"), &mut acquisition).is_err()
+            NativeProcessObservation::acquire(
+                &Digest::new(b"code"),
+                &mut acquisition,
+                &HashCosts::disabled()
+            )
+            .is_err()
         );
         assert!(acquisition.remaining().is_err());
     }
@@ -167,12 +176,19 @@ mod tests {
     fn linux_observer_retains_actual_self_executable_and_refuses_wrong_pin() {
         let code = Digest::new(&std::fs::read("/proc/self/exe").unwrap());
         let mut acquisition = NativeAcquisition::begin(5).unwrap();
-        let mut observed = NativeProcessObservation::acquire(&code, &mut acquisition).unwrap();
+        let mut observed =
+            NativeProcessObservation::acquire(&code, &mut acquisition, &HashCosts::disabled())
+                .unwrap();
         assert_eq!(observed.code(), &code);
         observed.check(&mut acquisition).unwrap();
         let mut wrong = NativeAcquisition::begin(5).unwrap();
         assert!(
-            NativeProcessObservation::acquire(&Digest::new(b"other-code"), &mut wrong).is_err()
+            NativeProcessObservation::acquire(
+                &Digest::new(b"other-code"),
+                &mut wrong,
+                &HashCosts::disabled()
+            )
+            .is_err()
         );
         assert!(wrong.remaining().is_err());
     }
