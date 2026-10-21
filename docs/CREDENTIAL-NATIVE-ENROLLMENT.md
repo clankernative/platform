@@ -421,22 +421,35 @@ The containerd RPC group took 16,695 microseconds and the Kubernetes group
 not be added to their nested hash rows. This is a particular observed exchange,
 not a latency or availability bound.
 
-Each retained peer check now hashes all freshly opened selected executable
-bytes once instead of hashing two joined descriptors of the same file. The
-initial observation still hashes the selected executable independently. Every
-later check also performs a new complete read; there is no digest, path, inode
-or cross-stage authorization cache. Diagnostic hash counters still report the
-actual read attempts and bytes, including a failing partial read.
+One current identity observation can check one to five retained message-process
+owners of the same actual process together. Each owner still comes from its
+actual received kernel handle; signed process DATA cannot construct one. The
+observation requires equal sealed process DATA and joins every held proc root,
+process directory, executable and namespace descriptor to fresh native reads.
+Every actual pidfd must be live before the reads and at the final guard.
+Different actors refuse even when their selected executable bytes match.
 
-Before and after that read, held and current descriptors must agree on device,
+That observation hashes all freshly opened selected executable bytes once.
+Each new message-process observation still hashes its executable independently;
+later identity observations also perform a new complete read. Nothing checked
+is returned for reuse, and no observation may span intervening I/O, signatures
+or stage boundaries. The issuer uses this primitive for its adjacent Hello and
+Bind sender checks before signing. It retains both actual sender owners and all
+other runtime and publication guards. Diagnostic hash counters report actual
+read attempts and bytes, including a failing partial read; identity-body counts
+describe shared observations rather than the number of retained handles.
+
+Before and after that read, every held and current descriptor must agree on device,
 inode, regular-file size, modification time and change time. The existing
 512 MiB ceiling, 64 KiB bounded reads and original-clock checks remain. After
 the remaining process/namespace checks, the caller reopens the actual procfs
-executable path and joins all three descriptors to the earlier stamp. The
-original pidfd liveness/original-clock check remains the final native guard;
-diagnostic sampling finishes before it. Any refusal still latches the peer and
-the same acquisition. No role lifetime, signed ceiling or native deadline is
-extended or reset.
+executable path and joins every held descriptor, the current descriptor and that
+final path descriptor to the earlier stamp. Every original pidfd's
+liveness/original-clock check remains at the end; diagnostic sampling finishes
+before these final guards. Any refusal latches every owner supplied to the
+observation and the same acquisition, including empty or oversized group
+refusal. A later clock cannot revive refused owners. No role lifetime, signed
+ceiling or native deadline is extended or reset.
 
 These joins operate under the existing trusted executable/node profile.
 Metadata fields are observations, not an atomic snapshot or immutable content
@@ -446,3 +459,7 @@ behavioral equivalence for hostile concurrent mutation of executable files or
 containment from actors that can replace the trusted native code. A source-bound
 issuer/Controller rebuild and another real-node observation must establish any
 actual performance gain; portable tests alone do not qualify preparation.
+Metadata equality and observer read-only access do not justify an issuer-lifetime
+containerd digest cache under this contract. Fresh full hashing remains required
+at each distinct identity observation, including guards around runtime and
+Kubernetes work.
