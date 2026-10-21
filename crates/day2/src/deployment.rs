@@ -859,6 +859,11 @@ pub fn run_epoch_controller(instance: &Path, app: &str) -> Result<()> {
     crate::security_epoch::controller::run(instance, app)
 }
 
+/// One read-only actual-Controller observation, with no original creation.
+pub fn observe_epoch_controller_preparation(instance: &Path, app: &str) -> Result<()> {
+    crate::security_epoch::controller::observe_preparation(instance, app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

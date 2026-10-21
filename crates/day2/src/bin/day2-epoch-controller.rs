@@ -5,6 +5,13 @@
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let result = match arguments.as_slice() {
+        [mode, instance, app] if mode == "--observe-preparation-read-only" => match app.to_str() {
+            Some(app) => day2::deployment::observe_epoch_controller_preparation(
+                std::path::Path::new(instance),
+                app,
+            ),
+            None => Err(anyhow::anyhow!("controller app argument")),
+        },
         [instance, app] => match app.to_str() {
             Some(app) => {
                 day2::deployment::run_epoch_controller(std::path::Path::new(instance), app)

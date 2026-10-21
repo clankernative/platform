@@ -1,5 +1,6 @@
 //! Bounded historical observations from the real Controller executor. Nothing
 //! accepts these records as a native owner, permission, readiness or replay.
+use super::preparation_timing::Summary;
 use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
     kernel::{Holder, Request, Snapshot},
@@ -45,6 +46,8 @@ pub(in crate::security_epoch) struct Recorder<W> {
     at: FailurePhase,
     refused: bool,
     export_failed: bool,
+    preparation_timing: Option<Summary>,
+    read_only_observed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -318,6 +321,12 @@ enum Observation {
     FirstHolderDurabilityCompleted {
         seed: Digest,
         holder: Digest,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timing: Option<Summary>,
+    },
+    PreparationReadOnlyObserved {
+        completed: bool,
+        timing: Summary,
     },
     BootstrapCompleted {
         step: Step,
@@ -338,6 +347,8 @@ enum Observation {
         at: FailurePhase,
         #[serde(skip_serializing_if = "Option::is_none")]
         preparation: Option<PreparationFailure>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timing: Option<Summary>,
     },
 }
 
@@ -363,6 +374,8 @@ impl<W: RecordOutput> Recorder<W> {
             at: FailurePhase::Selection,
             refused: false,
             export_failed: false,
+            preparation_timing: None,
+            read_only_observed: false,
         }
     }
 
@@ -398,14 +411,32 @@ impl<W: RecordOutput> Recorder<W> {
 
     pub(super) fn first_holder(&mut self, seed: &OriginalSeedCore, holder: &Holder) -> Result<()> {
         ensure!(
-            self.incarnation.is_some() && !self.first_holder,
+            self.incarnation.is_some() && !self.first_holder && !self.read_only_observed,
             "native_evidence_first_holder_order"
         );
         self.emit(Observation::FirstHolderDurabilityCompleted {
             seed: seed.digest()?,
             holder: Digest::of(&("day2-controller-first-holder-evidence-v1", holder))?,
+            timing: self.preparation_timing.clone(),
         })?;
         self.first_holder = true;
+        Ok(())
+    }
+
+    pub(super) fn preparation_timings(&mut self, timing: Summary) {
+        self.preparation_timing = Some(timing);
+    }
+
+    pub(super) fn preparation_read_only(&mut self, timing: Summary, completed: bool) -> Result<()> {
+        ensure!(
+            self.incarnation.is_some()
+                && !self.first_holder
+                && !self.read_only_observed
+                && self.next == 0,
+            "native_evidence_read_only_order"
+        );
+        self.emit(Observation::PreparationReadOnlyObserved { completed, timing })?;
+        self.read_only_observed = true;
         Ok(())
     }
 
@@ -488,6 +519,9 @@ impl<W: RecordOutput> Recorder<W> {
             self.emit(Observation::Refused {
                 at: self.at,
                 preparation,
+                // This completed preparation DATA remains attributable if a
+                // later listener/holder phase refuses before first-holder log.
+                timing: self.preparation_timing.clone(),
             })?;
             self.refused = true;
         }
@@ -758,6 +792,58 @@ mod tests {
                 .is_err()
         );
         assert_eq!(records(&recorder.output).len(), 4);
+    }
+
+    #[test]
+    fn maximal_timing_data_fits_existing_records_and_read_only_observation_cannot_claim_holder() {
+        let (mut recorder, seed, holder, ..) = fixture();
+        recorder
+            .enrolled(Digest::new(b"Controller timing"))
+            .unwrap();
+        recorder.preparation_timings(
+            super::super::preparation_timing::Timings::maximal_summary_fixture(),
+        );
+        recorder.first_holder(&seed, &holder).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        recorder
+            .refuse(Some(&PreparationFailure::at(
+                PreparationStep::OriginalRetention,
+                anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+            )))
+            .unwrap();
+        assert_eq!(records(&recorder.output).len(), 3);
+
+        let (mut recorder, seed, holder, ..) = fixture();
+        recorder
+            .enrolled(Digest::new(b"Controller read-only"))
+            .unwrap();
+        recorder
+            .preparation_read_only(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+                true,
+            )
+            .unwrap();
+        assert!(recorder.first_holder(&seed, &holder).is_err());
+        assert!(
+            recorder
+                .preparation_read_only(
+                    super::super::preparation_timing::Timings::new().summary(),
+                    true
+                )
+                .is_err()
+        );
+        recorder.enter(FailurePhase::Preparation);
+        recorder.refuse(None).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[1]["observation"]["event"],
+            "preparation_read_only_observed"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["observation"]["event"] != "first_holder_durability_completed")
+        );
     }
 
     #[test]

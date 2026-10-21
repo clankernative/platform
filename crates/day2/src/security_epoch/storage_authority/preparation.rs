@@ -280,8 +280,12 @@ impl OriginalCreatorFd<'_> {
                         acquisition,
                     )?;
                     let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
-                    let read =
-                        rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)?;
+                    let read = self
+                        .authority
+                        .timings()
+                        .measure(super::Operation::Read, || {
+                            rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)
+                        })?;
                     ensure!(
                         read > 0 && read <= end - offset,
                         "original_file_read_progress"
@@ -460,8 +464,13 @@ impl PreparationCoordinator<'_> {
             while offset < bytes.len() {
                 self.check_file(offset, acquisition)?;
                 let end = (offset + INITIAL_IO_CHUNK_BYTES).min(bytes.len());
-                let written =
-                    rustix::io::pwrite(self.file_ref()?, &bytes[offset..end], offset as u64)?;
+                let file = self.file_ref()?;
+                let written = self
+                    .authority
+                    .timings()
+                    .measure(super::Operation::Write, || {
+                        rustix::io::pwrite(file, &bytes[offset..end], offset as u64)
+                    })?;
                 ensure!(
                     written > 0 && written <= end - offset,
                     "original_file_write_progress"
@@ -473,12 +482,19 @@ impl PreparationCoordinator<'_> {
             }
             self.phase = PreparationPhase::FileSync;
             self.check_file(bytes.len(), acquisition)?;
-            rustix::fs::fsync(self.file_ref()?)?;
+            let file = self.file_ref()?;
+            self.authority
+                .timings()
+                .measure(super::Operation::FileSync, || rustix::fs::fsync(file))?;
             self.check_file(bytes.len(), acquisition)?;
             #[cfg(test)]
             plan.fixture_cut(self.phase)?;
             self.phase = PreparationPhase::DirectorySync;
-            rustix::fs::fsync(&self.authority.directory)?;
+            self.authority
+                .timings()
+                .measure(super::Operation::DirectorySync, || {
+                    rustix::fs::fsync(&self.authority.directory)
+                })?;
             self.check_file(bytes.len(), acquisition)?;
             #[cfg(test)]
             plan.fixture_cut(self.phase)?;
@@ -489,8 +505,13 @@ impl PreparationCoordinator<'_> {
             while offset < readback.len() {
                 self.check_file(bytes.len(), acquisition)?;
                 let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
-                let read =
-                    rustix::io::pread(self.file_ref()?, &mut readback[offset..end], offset as u64)?;
+                let file = self.file_ref()?;
+                let read = self
+                    .authority
+                    .timings()
+                    .measure(super::Operation::Read, || {
+                        rustix::io::pread(file, &mut readback[offset..end], offset as u64)
+                    })?;
                 ensure!(
                     read > 0 && read <= end - offset,
                     "original_file_read_progress"
