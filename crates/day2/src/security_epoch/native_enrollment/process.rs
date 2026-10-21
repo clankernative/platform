@@ -1,6 +1,7 @@
 //! Retained identity, not a renewable permission. Only the private kernel packet
 //! and fixed runtime adapters construct it; certificate rows cannot adopt it.
 
+use super::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::protocol::ProcessData;
 use crate::security_epoch::{
     namespace_protocol, native_clock::NativeAcquisition, native_namespace as ns,
@@ -30,8 +31,13 @@ pub(super) struct SelfSnapshot {
 }
 
 impl SelfSnapshot {
-    pub(super) fn acquire(code: &Digest, acquisition: &mut NativeAcquisition) -> Result<Self> {
-        let process = crate::security_epoch::NativeProcessObservation::acquire(code, acquisition)?;
+    pub(super) fn acquire(
+        code: &Digest,
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<Self> {
+        let process =
+            crate::security_epoch::NativeProcessObservation::acquire(code, acquisition, costs)?;
         let namespace = crate::security_epoch::NativeNamespaceObservation::acquire(acquisition)?;
         let proc = ns::open_root(acquisition)?;
         let root = open_process(&proc, std::process::id(), acquisition)?;
@@ -94,12 +100,14 @@ impl MessageProcess {
         packet: ReceivedPidfdPacket,
         expected_code: &Digest,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<Self> {
         Self::observe(
             packet.process,
             packet.credentials.process,
             expected_code,
             acquisition,
+            costs,
         )
     }
 
@@ -109,6 +117,7 @@ impl MessageProcess {
         socket: &std::os::unix::net::UnixStream,
         code: &Digest,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<Self> {
         acquisition.remaining()?;
         let credentials =
@@ -117,7 +126,13 @@ impl MessageProcess {
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_runtime_peer_pid"))?;
         let pidfd = nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerPidfd)?;
         acquisition.remaining()?;
-        Self::observe(pidfd, KernelPidVisibility::Visible(pid), code, acquisition)
+        Self::observe(
+            pidfd,
+            KernelPidVisibility::Visible(pid),
+            code,
+            acquisition,
+            costs,
+        )
     }
 
     fn observe(
@@ -125,6 +140,7 @@ impl MessageProcess {
         visibility: KernelPidVisibility,
         expected_code: &Digest,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<Self> {
         let result = (|| {
             let pid = match visibility {
@@ -138,7 +154,7 @@ impl MessageProcess {
             let proc = ns::open_root(acquisition)?;
             let process = open_process(&proc, pid, acquisition)?;
             let mut executable = executable(&process, acquisition)?;
-            let code = hash(&mut executable, acquisition)?;
+            let code = hash(&mut executable, acquisition, costs)?;
             ensure!(code == *expected_code, "native_enrollment_code_mismatch");
             let mut namespaces = BTreeMap::new();
             let mut identities = BTreeMap::new();
@@ -172,7 +188,7 @@ impl MessageProcess {
                 refused: false,
                 local: PhantomData,
             };
-            owner.check_identity(acquisition)?;
+            owner.check_identity(acquisition, costs)?;
             Ok(owner)
         })();
         if result.is_err() {
@@ -187,7 +203,12 @@ impl MessageProcess {
 
     /// Re-observes the original retained process in a fresh bounded acquisition.
     /// This does not extend any earlier acquisition or grant a role by itself.
-    pub(super) fn check_identity(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
+    pub(super) fn check_identity(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<()> {
+        let mut timing = costs.start_identity();
         let result = (|| {
             ensure!(!self.refused, "native_enrollment_process_refused");
             ensure!(
@@ -220,8 +241,8 @@ impl MessageProcess {
                 "native_enrollment_executable_replaced"
             );
             ensure!(
-                hash(&mut self.executable, acquisition)? == self.data.code
-                    && hash(&mut current_executable, acquisition)? == self.data.code,
+                hash(&mut self.executable, acquisition, costs)? == self.data.code
+                    && hash(&mut current_executable, acquisition, costs)? == self.data.code,
                 "native_enrollment_executable_changed"
             );
             for name in NAMESPACES {
@@ -240,9 +261,14 @@ impl MessageProcess {
                 1024,
                 acquisition,
             )?)?)?;
+            // Diagnostic sampling finishes before the original final guard.
+            costs.finish_identity(&mut timing);
             live(&self.pidfd, acquisition)?;
             Ok(())
         })();
+        // On earlier errors there is no authority to return. Record the failed
+        // body without replacing its error or clearing the original refusal.
+        costs.finish_identity(&mut timing);
         if result.is_err() {
             self.refused = true;
             acquisition.refuse();
@@ -302,27 +328,30 @@ fn file_identity(file: &File) -> Result<(u64, u64, u64, i64, i64)> {
     Ok((m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
 }
 
-fn hash(file: &mut File, acquisition: &mut NativeAcquisition) -> Result<Digest> {
-    let identity = file_identity(file)?;
-    file.seek(SeekFrom::Start(0))?;
-    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = [0_u8; 65_536];
-    let mut total = 0_u64;
-    loop {
-        acquisition.remaining()?;
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
+fn hash(file: &mut File, acquisition: &mut NativeAcquisition, costs: &HashCosts) -> Result<Digest> {
+    costs.hash(|read_bytes| {
+        let identity = file_identity(file)?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut buffer = [0_u8; 65_536];
+        let mut total = 0_u64;
+        loop {
+            acquisition.remaining()?;
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            *read_bytes = total;
+            ensure!(total <= identity.2, "native_enrollment_executable_changed");
+            hasher.update(&buffer[..count]);
         }
-        total += count as u64;
-        ensure!(total <= identity.2, "native_enrollment_executable_changed");
-        hasher.update(&buffer[..count]);
-    }
-    ensure!(
-        total == identity.2 && file_identity(file)? == identity,
-        "native_enrollment_executable_changed"
-    );
-    format!("sha256:{}", crate::hex(hasher.finish().as_ref())).try_into()
+        ensure!(
+            total == identity.2 && file_identity(file)? == identity,
+            "native_enrollment_executable_changed"
+        );
+        format!("sha256:{}", crate::hex(hasher.finish().as_ref())).try_into()
+    })
 }
 
 fn start(process: &File, pid: u32, acquisition: &mut NativeAcquisition) -> Result<u64> {

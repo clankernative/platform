@@ -2,6 +2,7 @@
 
 use super::storage_peer_wire::{Message, StageStatement};
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::StorageSender};
 use anyhow::{Result, ensure};
 
@@ -27,9 +28,9 @@ impl Peer {
         };
         match &mut owner.processes[0] {
             StorageSender::App(process) => {
-                process.check_identity(acquisition)?;
+                process.check_identity(acquisition, &HashCosts::disabled())?;
                 stage.check_storage_app_statement(&owner.statement, process.data(), acquisition)?;
-                process.check_identity(acquisition)?
+                process.check_identity(acquisition, &HashCosts::disabled())?
             }
             StorageSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
@@ -71,7 +72,7 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "storage_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        process.check_identity(acquisition, &HashCosts::disabled())?;
                     }
                     StorageSender::Controller(receipt) => {
                         receipt.check_continuity(&self.statement, stage, acquisition)?;
@@ -110,7 +111,7 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "storage_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        process.check_identity(acquisition, &HashCosts::disabled())?;
                     }
                     StorageSender::Controller(receipt) => {
                         receipt.bind(&self.statement, stage, acquisition)?

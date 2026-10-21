@@ -1,6 +1,7 @@
 //! One bounded sequence-packet exchange. No FD adoption or raw ancillary API is
 //! exposed to a caller. The private birth owner is the only socketpair creator.
 
+use super::issuer_costs::HashCosts;
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     process::MessageProcess,
@@ -132,22 +133,25 @@ impl Channel {
         &mut self,
         expected_code: &Digest,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<(Packet, MessageProcess)> {
-        self.receive_selected(ExpectedCode::Exact(expected_code), acquisition)
+        self.receive_selected(ExpectedCode::Exact(expected_code), acquisition, costs)
     }
 
     pub(super) fn receive_role(
         &mut self,
         policy: &super::policy::EnrollmentPolicy,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<(Packet, MessageProcess)> {
-        self.receive_selected(ExpectedCode::Role(policy), acquisition)
+        self.receive_selected(ExpectedCode::Role(policy), acquisition, costs)
     }
 
     fn receive_selected(
         &mut self,
         selection: ExpectedCode<'_>,
         acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
     ) -> Result<(Packet, MessageProcess)> {
         let result = (|| {
             let (packet, received) = self.receive_kernel(acquisition)?;
@@ -160,7 +164,7 @@ impl Channel {
                     policy.code(*role)
                 }
             };
-            let process = MessageProcess::receive(received, expected_code, acquisition)?;
+            let process = MessageProcess::receive(received, expected_code, acquisition, costs)?;
             acquisition.remaining()?;
             Ok((packet, process))
         })();
@@ -391,16 +395,28 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
-        let (packet, mut process) = channel.receive(&code, &mut acquisition).unwrap();
+        let (packet, mut process) = channel
+            .receive(&code, &mut acquisition, &HashCosts::disabled())
+            .unwrap();
         assert!(matches!(packet, Packet::BirthChallenge { .. }));
         assert_eq!(process.data().process, child.0.id());
         assert_ne!(process.data().process, connection_creator as u32);
-        process.check_identity(&mut acquisition).unwrap();
+        process
+            .check_identity(&mut acquisition, &HashCosts::disabled())
+            .unwrap();
         child.0.kill().unwrap();
         child.0.wait().unwrap();
-        assert!(process.check_identity(&mut acquisition).is_err());
+        assert!(
+            process
+                .check_identity(&mut acquisition, &HashCosts::disabled())
+                .is_err()
+        );
         let mut later = NativeAcquisition::begin(5).unwrap();
-        assert!(process.check_identity(&mut later).is_err());
+        assert!(
+            process
+                .check_identity(&mut later, &HashCosts::disabled())
+                .is_err()
+        );
     }
 
     #[test]
@@ -449,12 +465,20 @@ mod tests {
         .unwrap();
         assert!(
             channel
-                .receive(&Digest::new(b"not-a-code-proof"), &mut acquisition)
+                .receive(
+                    &Digest::new(b"not-a-code-proof"),
+                    &mut acquisition,
+                    &HashCosts::disabled()
+                )
                 .is_err()
         );
         let mut later = NativeAcquisition::begin(5).unwrap();
         let error = channel
-            .receive(&Digest::new(b"anything"), &mut later)
+            .receive(
+                &Digest::new(b"anything"),
+                &mut later,
+                &HashCosts::disabled(),
+            )
             .err()
             .unwrap()
             .to_string();

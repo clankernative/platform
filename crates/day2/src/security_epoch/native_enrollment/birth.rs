@@ -2,6 +2,7 @@
 //! nonce and listener itself and retains its actual Child. No CSR adoption.
 
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
     policy::EnrollmentPolicy,
@@ -96,8 +97,12 @@ pub(super) fn start() -> Result<Provisioner> {
     let mut acquisition =
         NativeAcquisition::begin(5).context("native_enrollment_original_clock")?;
     let policy = load_policy(&mut acquisition).context("native_enrollment_policy")?;
-    let mut current = SelfSnapshot::acquire(&policy.provisioner_code, &mut acquisition)
-        .context("native_enrollment_provisioner_self")?;
+    let mut current = SelfSnapshot::acquire(
+        &policy.provisioner_code,
+        &mut acquisition,
+        &HashCosts::disabled(),
+    )
+    .context("native_enrollment_provisioner_self")?;
     current
         .require_node_init(&mut acquisition)
         .context("native_enrollment_node_init")?;
@@ -176,7 +181,7 @@ impl Provisioner {
             .peer
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_birth_missing"))?
-            .check_identity(&mut check)?;
+            .check_identity(&mut check, &HashCosts::disabled())?;
         Ok(())
     }
 }
@@ -205,7 +210,8 @@ fn grant_child(
             },
             acquisition,
         )?;
-        let (packet, mut peer) = channel.receive(&policy.issuer_code, acquisition)?;
+        let (packet, mut peer) =
+            channel.receive(&policy.issuer_code, acquisition, &HashCosts::disabled())?;
         let Packet::BirthKey {
             nonce: echoed,
             public_key,
@@ -234,7 +240,7 @@ fn grant_child(
             provisioner: current.data.clone(),
         };
         current.check(acquisition)?;
-        peer.check_identity(acquisition)?;
+        peer.check_identity(acquisition, &HashCosts::disabled())?;
         ensure!(
             child.try_wait()?.is_none(),
             "native_enrollment_birth_child_stopped"
@@ -245,7 +251,7 @@ fn grant_child(
             RootSigner::Fixture(key) => key.sign("issuer-birth", &data)?,
         };
         current.check(acquisition)?;
-        peer.check_identity(acquisition)?;
+        peer.check_identity(acquisition, &HashCosts::disabled())?;
         ensure!(
             child.try_wait()?.is_none(),
             "native_enrollment_birth_child_stopped"
@@ -272,12 +278,20 @@ impl IssuerOwner {
     pub(super) fn born() -> Result<Self> {
         let mut acquisition = NativeAcquisition::begin(5)?;
         let policy = load_policy(&mut acquisition)?;
-        let mut current = SelfSnapshot::acquire(&policy.issuer_code, &mut acquisition)?;
+        let mut current = SelfSnapshot::acquire(
+            &policy.issuer_code,
+            &mut acquisition,
+            &HashCosts::disabled(),
+        )?;
         current.require_node_init(&mut acquisition)?;
         let mut channel = Channel::startup(&mut acquisition)?;
         let listener = Listener::startup(&mut acquisition)?;
         let key = KeyOwner::generate()?;
-        let (packet, mut parent) = channel.receive(&policy.provisioner_code, &mut acquisition)?;
+        let (packet, mut parent) = channel.receive(
+            &policy.provisioner_code,
+            &mut acquisition,
+            &HashCosts::disabled(),
+        )?;
         let Packet::BirthChallenge {
             policy: selected,
             nonce,
@@ -302,8 +316,11 @@ impl IssuerOwner {
             },
             &mut acquisition,
         )?;
-        let (packet, mut grant_parent) =
-            channel.receive(&policy.provisioner_code, &mut acquisition)?;
+        let (packet, mut grant_parent) = channel.receive(
+            &policy.provisioner_code,
+            &mut acquisition,
+            &HashCosts::disabled(),
+        )?;
         let Packet::BirthGrant { certificate } = packet else {
             anyhow::bail!("native_enrollment_birth_order")
         };
@@ -317,8 +334,8 @@ impl IssuerOwner {
             "native_enrollment_birth_binding"
         );
         current.check(&mut acquisition)?;
-        parent.check_identity(&mut acquisition)?;
-        grant_parent.check_identity(&mut acquisition)?;
+        parent.check_identity(&mut acquisition, &HashCosts::disabled())?;
+        grant_parent.check_identity(&mut acquisition, &HashCosts::disabled())?;
         Ok(Self {
             policy,
             key,
@@ -348,10 +365,19 @@ mod tests {
         let selected = std::env::var("DAY2_ENROLLMENT_BIRTH_TEST_POLICY").unwrap();
         let policy: EnrollmentPolicy = crate::json::decode(selected.as_bytes()).unwrap();
         let mut acquisition = NativeAcquisition::begin(5).unwrap();
-        let current = SelfSnapshot::acquire(&policy.issuer_code, &mut acquisition).unwrap();
+        let current = SelfSnapshot::acquire(
+            &policy.issuer_code,
+            &mut acquisition,
+            &HashCosts::disabled(),
+        )
+        .unwrap();
         let mut channel = Channel::startup(&mut acquisition).unwrap();
         let (packet, parent) = channel
-            .receive(&policy.provisioner_code, &mut acquisition)
+            .receive(
+                &policy.provisioner_code,
+                &mut acquisition,
+                &HashCosts::disabled(),
+            )
             .unwrap();
         let Packet::BirthChallenge {
             policy: digest,
@@ -387,7 +413,11 @@ mod tests {
             }
         }
         let (packet, grant_parent) = channel
-            .receive(&policy.provisioner_code, &mut acquisition)
+            .receive(
+                &policy.provisioner_code,
+                &mut acquisition,
+                &HashCosts::disabled(),
+            )
             .unwrap();
         let Packet::BirthGrant { certificate } = packet else {
             panic!("birth grant order")
@@ -421,7 +451,8 @@ mod tests {
             let mut policy = crate::security_epoch::native_enrollment::tests::policy(&root);
             policy.provisioner_code = code.clone();
             policy.issuer_code = code.clone();
-            let mut current = SelfSnapshot::acquire(&code, &mut acquisition).unwrap();
+            let mut current =
+                SelfSnapshot::acquire(&code, &mut acquisition, &HashCosts::disabled()).unwrap();
             let (mut channel, child_socket) = Channel::pair(&mut acquisition).unwrap();
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
@@ -456,10 +487,13 @@ mod tests {
             } else {
                 let mut peer = result.unwrap();
                 assert_eq!(peer.data().process, child.0.id());
-                let (reply, ack_peer) = channel.receive(&code, &mut acquisition).unwrap();
+                let (reply, ack_peer) = channel
+                    .receive(&code, &mut acquisition, &HashCosts::disabled())
+                    .unwrap();
                 assert!(matches!(reply, Packet::BirthChallenge { .. }));
                 assert_eq!(peer.data(), ack_peer.data());
-                peer.check_identity(&mut acquisition).unwrap();
+                peer.check_identity(&mut acquisition, &HashCosts::disabled())
+                    .unwrap();
             }
         }
     }

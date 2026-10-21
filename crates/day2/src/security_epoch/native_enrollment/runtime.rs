@@ -2,6 +2,7 @@
 //! The selected trusted containerd/shim/runc and node init are in the TCB. This
 //! profile admits only task-init native hosts, never ancestor/cgroup guesses.
 
+use super::issuer_costs::{Costs, Operation, Subject};
 use crate::security_epoch::native_enrollment::{
     NativeRole, policy::EnrollmentPolicy, process::MessageProcess, runtime_wire as wire,
 };
@@ -27,8 +28,9 @@ pub(super) fn current(
     role: NativeRole,
     peer: &mut MessageProcess,
     acquisition: &mut NativeAcquisition,
+    costs: &Costs,
 ) -> Result<RuntimeBinding> {
-    peer.check_identity(acquisition)?;
+    peer.check_identity(acquisition, &costs.hashes(Subject::Requester))?;
     require_kernel(policy, acquisition)?;
     let socket = rustix::net::socket_with(
         rustix::net::AddressFamily::UNIX,
@@ -42,135 +44,143 @@ pub(super) fn current(
     )?;
     let stream = UnixStream::from(socket);
     acquisition.remaining()?;
-    let mut runtime =
-        MessageProcess::runtime_peer(&stream, &policy.runtime.containerd_code, acquisition)?;
+    let mut runtime = MessageProcess::runtime_peer(
+        &stream,
+        &policy.runtime.containerd_code,
+        acquisition,
+        &costs.hashes(Subject::Containerd),
+    )?;
     require_common(peer.data(), runtime.data())?;
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let container = executor.block_on(async {
-        let socket = tokio::net::UnixStream::from_std(stream)?;
-        let mut socket = Some(socket);
-        let endpoint = tonic::transport::Endpoint::from_static("http://[::1]:50051");
-        let connection = endpoint.connect_with_connector(tower::service_fn(move |_| {
-            let socket = socket.take();
-            async move {
-                socket.map(hyper_util::rt::TokioIo::new).ok_or_else(|| {
-                    std::io::Error::other("native_enrollment_runtime_reconnect_refused")
-                })
-            }
-        }));
-        let channel = tokio::time::timeout(acquisition.remaining()?, connection).await??;
-        let mut grpc = Grpc::new(channel)
-            .max_decoding_message_size(1_048_576)
-            .max_encoding_message_size(8192);
-        let version: wire::Version = request(
-            &mut grpc,
-            wire::Empty {},
-            "/containerd.services.version.v1.Version/Version",
-            acquisition,
-        )
-        .await?;
-        ensure!(
-            version.version == policy.runtime.containerd_version
-                && version.revision == policy.runtime.containerd_revision,
-            "native_enrollment_containerd_version"
-        );
-        let cri: wire::CriVersion = request(
-            &mut grpc,
-            wire::CriVersionRequest {
-                version: "0.1.0".to_owned(),
-            },
-            "/runtime.v1.RuntimeService/Version",
-            acquisition,
-        )
-        .await?;
-        ensure!(
-            cri.runtime_name == "containerd"
-                && cri.runtime_version == policy.runtime.containerd_version
-                && cri.runtime_api_version == policy.runtime.cri_version,
-            "native_enrollment_cri_version"
-        );
-        let tasks: wire::Tasks = request(
-            &mut grpc,
-            wire::Empty {},
-            "/containerd.services.tasks.v1.Tasks/List",
-            acquisition,
-        )
-        .await?;
-        let id = task_id(&tasks, peer.data().process)?;
-        let first: wire::TaskReply = request(
-            &mut grpc,
-            wire::GetTask {
-                container_id: id.clone(),
-                exec_id: String::new(),
-            },
-            "/containerd.services.tasks.v1.Tasks/Get",
-            acquisition,
-        )
-        .await?;
-        require_task(
-            first
-                .process
-                .as_ref()
-                .context("native_enrollment_runtime_task_missing")?,
-            peer.data().process,
-            &id,
-        )?;
-        let response: wire::ContainerReply = request(
-            &mut grpc,
-            wire::GetContainer { id: id.clone() },
-            "/containerd.services.containers.v1.Containers/Get",
-            acquisition,
-        )
-        .await?;
-        let container = response
-            .container
-            .context("native_enrollment_container_missing")?;
-        ensure!(
-            container.id == id
-                && container
-                    .runtime
+    let container = costs.measure(Operation::ContainerdRpcGroup, || {
+        executor.block_on(async {
+            let socket = tokio::net::UnixStream::from_std(stream)?;
+            let mut socket = Some(socket);
+            let endpoint = tonic::transport::Endpoint::from_static("http://[::1]:50051");
+            let connection = endpoint.connect_with_connector(tower::service_fn(move |_| {
+                let socket = socket.take();
+                async move {
+                    socket.map(hyper_util::rt::TokioIo::new).ok_or_else(|| {
+                        std::io::Error::other("native_enrollment_runtime_reconnect_refused")
+                    })
+                }
+            }));
+            let channel = tokio::time::timeout(acquisition.remaining()?, connection).await??;
+            let mut grpc = Grpc::new(channel)
+                .max_decoding_message_size(1_048_576)
+                .max_encoding_message_size(8192);
+            let version: wire::Version = request(
+                &mut grpc,
+                wire::Empty {},
+                "/containerd.services.version.v1.Version/Version",
+                acquisition,
+            )
+            .await?;
+            ensure!(
+                version.version == policy.runtime.containerd_version
+                    && version.revision == policy.runtime.containerd_revision,
+                "native_enrollment_containerd_version"
+            );
+            let cri: wire::CriVersion = request(
+                &mut grpc,
+                wire::CriVersionRequest {
+                    version: "0.1.0".to_owned(),
+                },
+                "/runtime.v1.RuntimeService/Version",
+                acquisition,
+            )
+            .await?;
+            ensure!(
+                cri.runtime_name == "containerd"
+                    && cri.runtime_version == policy.runtime.containerd_version
+                    && cri.runtime_api_version == policy.runtime.cri_version,
+                "native_enrollment_cri_version"
+            );
+            let tasks: wire::Tasks = request(
+                &mut grpc,
+                wire::Empty {},
+                "/containerd.services.tasks.v1.Tasks/List",
+                acquisition,
+            )
+            .await?;
+            let id = task_id(&tasks, peer.data().process)?;
+            let first: wire::TaskReply = request(
+                &mut grpc,
+                wire::GetTask {
+                    container_id: id.clone(),
+                    exec_id: String::new(),
+                },
+                "/containerd.services.tasks.v1.Tasks/Get",
+                acquisition,
+            )
+            .await?;
+            require_task(
+                first
+                    .process
                     .as_ref()
-                    .is_some_and(|r| r.name == "io.containerd.runc.v2"),
-            "native_enrollment_runtime_kind"
-        );
-        let cri: wire::CriStatusReply = request(
-            &mut grpc,
-            wire::CriStatusRequest {
-                container_id: id.clone(),
-                verbose: false,
-            },
-            "/runtime.v1.RuntimeService/ContainerStatus",
-            acquisition,
-        )
-        .await?;
-        let cri = cri.status.context("native_enrollment_cri_status_missing")?;
-        let last: wire::TaskReply = request(
-            &mut grpc,
-            wire::GetTask {
-                container_id: id.clone(),
-                exec_id: String::new(),
-            },
-            "/containerd.services.tasks.v1.Tasks/Get",
-            acquisition,
-        )
-        .await?;
-        ensure!(first == last, "native_enrollment_task_changed");
-        Ok::<_, anyhow::Error>((container, cri))
+                    .context("native_enrollment_runtime_task_missing")?,
+                peer.data().process,
+                &id,
+            )?;
+            let response: wire::ContainerReply = request(
+                &mut grpc,
+                wire::GetContainer { id: id.clone() },
+                "/containerd.services.containers.v1.Containers/Get",
+                acquisition,
+            )
+            .await?;
+            let container = response
+                .container
+                .context("native_enrollment_container_missing")?;
+            ensure!(
+                container.id == id
+                    && container
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|r| r.name == "io.containerd.runc.v2"),
+                "native_enrollment_runtime_kind"
+            );
+            let cri: wire::CriStatusReply = request(
+                &mut grpc,
+                wire::CriStatusRequest {
+                    container_id: id.clone(),
+                    verbose: false,
+                },
+                "/runtime.v1.RuntimeService/ContainerStatus",
+                acquisition,
+            )
+            .await?;
+            let cri = cri.status.context("native_enrollment_cri_status_missing")?;
+            let last: wire::TaskReply = request(
+                &mut grpc,
+                wire::GetTask {
+                    container_id: id.clone(),
+                    exec_id: String::new(),
+                },
+                "/containerd.services.tasks.v1.Tasks/Get",
+                acquisition,
+            )
+            .await?;
+            ensure!(first == last, "native_enrollment_task_changed");
+            Ok::<_, anyhow::Error>((container, cri))
+        })
     })?;
-    runtime.check_identity(acquisition)?;
-    peer.check_identity(acquisition)?;
-    let binding = kubernetes(
-        policy,
-        role,
-        &container.0,
-        &container.1,
-        peer.data(),
-        acquisition,
-    )?;
-    runtime.check_identity(acquisition)?;
-    peer.check_identity(acquisition)?;
+    runtime.check_identity(acquisition, &costs.hashes(Subject::Containerd))?;
+    peer.check_identity(acquisition, &costs.hashes(Subject::Requester))?;
+    let binding = costs.measure(Operation::KubernetesGroup, || {
+        kubernetes(
+            policy,
+            role,
+            &container.0,
+            &container.1,
+            peer.data(),
+            acquisition,
+        )
+    })?;
+    runtime.check_identity(acquisition, &costs.hashes(Subject::Containerd))?;
+    peer.check_identity(acquisition, &costs.hashes(Subject::Requester))?;
     Ok(binding)
 }
 

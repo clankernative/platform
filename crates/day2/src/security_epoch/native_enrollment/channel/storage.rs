@@ -3,6 +3,7 @@
 
 use super::{Channel, configure, wait};
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
     EnrolledRoleStage, NativeRole,
     process::MessageProcess,
@@ -167,6 +168,7 @@ impl Channel {
                     received,
                     &expected_code,
                     acquisition,
+                    &HashCosts::disabled(),
                 )?)),
                 NativeRole::EpochController => {
                     StorageSender::Controller(ControllerReceipt::receive(received, acquisition)?)

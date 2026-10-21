@@ -3,6 +3,8 @@
 
 use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
 #[cfg(target_os = "linux")]
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
+#[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::protocol;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
@@ -113,7 +115,8 @@ impl EnrolledProcessRoleOwner {
                 "native_enrollment_scope_mismatch"
             );
             let key = KeyOwner::generate()?;
-            let mut current = SelfSnapshot::acquire(policy.code(role), &mut acquisition)?;
+            let mut current =
+                SelfSnapshot::acquire(policy.code(role), &mut acquisition, &HashCosts::disabled())?;
             let (certificate, grant, issuer, _nonce_peer, _channel) =
                 exchange(&policy, role, &key, &mut current, &mut acquisition)?;
             let incarnation = Digest::of(&(
@@ -169,8 +172,11 @@ impl EnrolledProcessRoleOwner {
                     );
                     self.issuer.check_live(&mut acquisition)?;
                     self.certificate.verify(&self.policy)?;
-                    let mut current =
-                        SelfSnapshot::acquire(self.policy.code(self.role), &mut acquisition)?;
+                    let mut current = SelfSnapshot::acquire(
+                        self.policy.code(self.role),
+                        &mut acquisition,
+                        &HashCosts::disabled(),
+                    )?;
                     ensure!(
                         current.data == self.self_data,
                         "native_enrollment_self_changed"

@@ -9,6 +9,7 @@
 mod birth;
 #[cfg(target_os = "linux")]
 mod channel;
+pub(in crate::security_epoch) mod issuer_costs;
 #[cfg(target_os = "linux")]
 mod issuer_peer;
 #[cfg(target_os = "linux")]
