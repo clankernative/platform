@@ -159,8 +159,38 @@ enum PreparationErrorCategory {
     TransportUnavailable,
     SocketPollTimeout,
     SocketUnexpectedEvents,
+    ChannelClosed,
+    ChannelProfileChanged,
     RemoteStageExpired,
     ProcessExited,
+    ProcessNotVisible,
+    ProcessIdentityChanged,
+    #[cfg(target_os = "linux")]
+    PacketSocketProfile,
+    #[cfg(target_os = "linux")]
+    PacketEmptyPayloadBuffer,
+    #[cfg(target_os = "linux")]
+    PacketClosedOrEmpty,
+    #[cfg(target_os = "linux")]
+    PacketTruncated,
+    #[cfg(target_os = "linux")]
+    PacketMalformedAncillary,
+    #[cfg(target_os = "linux")]
+    PacketUnexpectedAncillary,
+    #[cfg(target_os = "linux")]
+    PacketMissingProcess,
+    #[cfg(target_os = "linux")]
+    PacketDuplicateProcess,
+    #[cfg(target_os = "linux")]
+    PacketSenderUnavailable,
+    #[cfg(target_os = "linux")]
+    PacketMissingCredentials,
+    #[cfg(target_os = "linux")]
+    PacketDuplicateCredentials,
+    #[cfg(target_os = "linux")]
+    PacketMalformedCredentials,
+    #[cfg(target_os = "linux")]
+    PacketDescriptorNotCloexec,
     ResponseStatusOrBound,
     AdmissionRejected,
     PermissionDenied,
@@ -246,8 +276,28 @@ fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory
         Some("native_enrollment_socket_unexpected_events") => {
             return Category::SocketUnexpectedEvents;
         }
+        Some("storage_peer_channel_closed" | "storage_peer_idle_channel_closed") => {
+            return Category::ChannelClosed;
+        }
+        Some("storage_peer_channel_cloexec_required" | "storage_peer_listener_cloexec_lost") => {
+            return Category::ChannelProfileChanged;
+        }
         Some("storage_peer_remote_stage_expired") => return Category::RemoteStageExpired,
         Some("native_enrollment_process_exited") => return Category::ProcessExited,
+        Some("native_enrollment_pid_not_visible" | "storage_peer_controller_pid_not_visible") => {
+            return Category::ProcessNotVisible;
+        }
+        Some(
+            "native_enrollment_process_owner_changed"
+            | "native_enrollment_proc_mount_changed"
+            | "native_enrollment_process_replaced"
+            | "native_enrollment_process_start_changed"
+            | "native_enrollment_boot_changed"
+            | "native_enrollment_code_mismatch"
+            | "native_enrollment_namespace_changed"
+            | "native_enrollment_child_time_namespace"
+            | "native_enrollment_process_leader",
+        ) => return Category::ProcessIdentityChanged,
         Some(
             "epoch_native_clock_rewind_or_expired"
             | "epoch_native_acquisition_expired"
@@ -285,13 +335,37 @@ fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory
         ) => return Category::AdmissionRejected,
         _ => {}
     }
+    let errno = error.downcast_ref::<rustix::io::Errno>().copied();
+    // The pinned packet error does not expose its errno through Error::source.
+    // Inspect its typed variants directly; never parse or format its Display.
+    #[cfg(target_os = "linux")]
+    let errno = if let Some(packet) = error.downcast_ref::<rustix::net::RecvPidfdError>() {
+        use rustix::net::RecvPidfdError as Packet;
+        match packet {
+            Packet::Io(errno) => Some(*errno),
+            Packet::SocketProfile => return Category::PacketSocketProfile,
+            Packet::EmptyPayloadBuffer => return Category::PacketEmptyPayloadBuffer,
+            Packet::ClosedOrEmptyPacket => return Category::PacketClosedOrEmpty,
+            Packet::Truncated => return Category::PacketTruncated,
+            Packet::MalformedAncillary => return Category::PacketMalformedAncillary,
+            Packet::UnexpectedAncillary => return Category::PacketUnexpectedAncillary,
+            Packet::MissingProcess => return Category::PacketMissingProcess,
+            Packet::DuplicateProcess => return Category::PacketDuplicateProcess,
+            Packet::SenderUnavailable(_) => return Category::PacketSenderUnavailable,
+            Packet::MissingCredentials => return Category::PacketMissingCredentials,
+            Packet::DuplicateCredentials => return Category::PacketDuplicateCredentials,
+            Packet::MalformedCredentials => return Category::PacketMalformedCredentials,
+            Packet::DescriptorNotCloexec => return Category::PacketDescriptorNotCloexec,
+            _ => return Category::Other,
+        }
+    } else {
+        errno
+    };
     let kind = error
         .downcast_ref::<std::io::Error>()
         .map(std::io::Error::kind)
         .or_else(|| {
-            error
-                .downcast_ref::<rustix::io::Errno>()
-                .map(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()).kind())
+            errno.map(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()).kind())
         });
     match kind {
         Some(std::io::ErrorKind::PermissionDenied) => Category::PermissionDenied,
@@ -300,9 +374,8 @@ fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory
         Some(std::io::ErrorKind::TimedOut) => Category::TimedOut,
         Some(std::io::ErrorKind::Unsupported) => Category::Unsupported,
         Some(_)
-            if error.downcast_ref::<rustix::io::Errno>().is_some_and(|e| {
-                *e == rustix::io::Errno::LOOP || *e == rustix::io::Errno::XDEV
-            }) =>
+            if errno
+                .is_some_and(|e| e == rustix::io::Errno::LOOP || e == rustix::io::Errno::XDEV) =>
         {
             Category::PathResolution
         }
@@ -965,6 +1038,34 @@ mod tests {
                 "native_enrollment_socket_unexpected_events",
                 Category::SocketUnexpectedEvents,
             ),
+            ("storage_peer_channel_closed", Category::ChannelClosed),
+            ("storage_peer_idle_channel_closed", Category::ChannelClosed),
+            (
+                "storage_peer_channel_cloexec_required",
+                Category::ChannelProfileChanged,
+            ),
+            (
+                "storage_peer_listener_cloexec_lost",
+                Category::ChannelProfileChanged,
+            ),
+            (
+                "native_enrollment_pid_not_visible",
+                Category::ProcessNotVisible,
+            ),
+            (
+                "storage_peer_controller_pid_not_visible",
+                Category::ProcessNotVisible,
+            ),
+            (
+                "native_enrollment_code_mismatch",
+                Category::ProcessIdentityChanged,
+            ),
+            (
+                "native_enrollment_namespace_changed",
+                Category::ProcessIdentityChanged,
+            ),
+            ("storage_peer_channel_closed /SECRET", Category::Other),
+            ("native_enrollment_code_mismatch /SECRET", Category::Other),
             ("native_enrollment_process_exited", Category::ProcessExited),
             (
                 "storage_peer_remote_stage_expired",
@@ -1103,6 +1204,100 @@ mod tests {
         }
     }
     impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn receive_boundary_categories_preserve_causes_without_exporting_error_text() {
+        for (code, category) in [
+            ("storage_peer_channel_closed", "channel_closed"),
+            (
+                "storage_peer_channel_cloexec_required",
+                "channel_profile_changed",
+            ),
+            ("native_enrollment_pid_not_visible", "process_not_visible"),
+            (
+                "native_enrollment_process_replaced",
+                "process_identity_changed",
+            ),
+            ("storage_peer_channel_closed /SECRET Bearer TOKEN", "other"),
+        ] {
+            let error = anyhow::Error::msg(code.to_owned()).context(MustNotDisplay);
+            let error = PreparationFailure::at(PreparationStep::FirstHello, error);
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(error.downcast_ref::<String>().unwrap(), code);
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let boundary = &rows[1]["observation"]["preparation"];
+            assert_eq!(boundary["step"], "first_hello");
+            assert_eq!(boundary["category"], category);
+            let exported = String::from_utf8(recorder.output).unwrap();
+            for private in [code, "/SECRET", "Bearer", "TOKEN"] {
+                assert!(!exported.contains(private));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn typed_packet_failures_keep_their_closed_category_and_original_cause() {
+        use rustix::{io::Errno, net::RecvPidfdError as Packet};
+        for (packet, category) in [
+            (Packet::SocketProfile, "packet_socket_profile"),
+            (Packet::EmptyPayloadBuffer, "packet_empty_payload_buffer"),
+            (Packet::ClosedOrEmptyPacket, "packet_closed_or_empty"),
+            (Packet::Truncated, "packet_truncated"),
+            (Packet::MalformedAncillary, "packet_malformed_ancillary"),
+            (Packet::UnexpectedAncillary, "packet_unexpected_ancillary"),
+            (Packet::MissingProcess, "packet_missing_process"),
+            (Packet::DuplicateProcess, "packet_duplicate_process"),
+            (
+                Packet::SenderUnavailable(Errno::SRCH),
+                "packet_sender_unavailable",
+            ),
+            (
+                Packet::SenderUnavailable(Errno::PERM),
+                "packet_sender_unavailable",
+            ),
+            (Packet::MissingCredentials, "packet_missing_credentials"),
+            (Packet::DuplicateCredentials, "packet_duplicate_credentials"),
+            (Packet::MalformedCredentials, "packet_malformed_credentials"),
+            (
+                Packet::DescriptorNotCloexec,
+                "packet_descriptor_not_cloexec",
+            ),
+            (Packet::Io(Errno::ACCESS), "permission_denied"),
+            (Packet::Io(Errno::NOENT), "not_found"),
+            (Packet::Io(Errno::EXIST), "already_exists"),
+            (Packet::Io(Errno::TIMEDOUT), "timed_out"),
+            (Packet::Io(Errno::LOOP), "path_resolution"),
+            (Packet::Io(Errno::XDEV), "path_resolution"),
+            (Packet::Io(Errno::IO), "io"),
+        ] {
+            let error = anyhow::Error::new(packet).context(MustNotDisplay);
+            let error = PreparationFailure::at(PreparationStep::FirstHello, error);
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(error.downcast_ref::<Packet>(), Some(&packet));
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let boundary = &rows[1]["observation"]["preparation"];
+            assert_eq!(boundary["step"], "first_hello");
+            assert_eq!(boundary["category"], category);
+            let exported = String::from_utf8(recorder.output).unwrap();
+            assert!(!exported.contains("PIDFD packet reception failed"));
+            assert!(!exported.contains("native_enrollment"));
+        }
+    }
 
     #[test]
     fn first_holder_refusals_keep_fixed_inner_boundaries_timings_and_record_bound() {
