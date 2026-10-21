@@ -300,7 +300,7 @@ mod tests;
 /// creator can be retained. All error paths stop the caller; there is no
 /// conversion of a refused/unknown original into a new candidate or adoption.
 pub(in crate::security_epoch) fn prepare_controller_initial(
-    instance: &std::path::Path,
+    metadata: &crate::store::InitialStoreMetadata,
     stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
@@ -308,7 +308,7 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
     let (authority, mut acquisition) =
         NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
     let layout =
-        preparation::ReviewedFileLayout::prepare(instance, &authority.selection, &mut acquisition)
+        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::ImageAdmission, error))?;
     match preparation::prepare_original_file(authority, &layout, &mut acquisition) {
         NativeOriginalPreparationOutcome::Prepared(creator) => {

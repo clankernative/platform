@@ -44,6 +44,20 @@ fn run_inner(instance_path: &Path, app: &str, evidence: &mut Evidence) -> Result
         .context("native_controller_epoch_required")?
         .clone();
     evidence.select(&policy, &store)?;
+    // Artifact/instance admission produces desired DATA, not a role, storage
+    // owner or prepared image. Do its worker exchanges before creating any
+    // native acquisition; the original phase still rechecks this selection.
+    evidence.enter(FailurePhase::Preparation);
+    let metadata = crate::store::InitialStoreMetadata::load(instance_path, app)
+        .and_then(|metadata| {
+            metadata.require_native_selection(
+                &store,
+                &policy.runtime_profile.app_artifact,
+                &policy,
+            )?;
+            Ok(metadata)
+        })
+        .map_err(|error| PreparationFailure::at(PreparationStep::ImageAdmission, error))?;
     evidence.enter(FailurePhase::Enrollment);
     let mut role = EnrolledProcessRoleOwner::enroll_current_thread(
         &policy.scope,
@@ -52,7 +66,7 @@ fn run_inner(instance_path: &Path, app: &str, evidence: &mut Evidence) -> Result
     evidence.enrolled(role.historical_incarnation_data())?;
     evidence.enter(FailurePhase::Preparation);
     let mut file = storage_authority::prepare_controller_initial(
-        instance_path,
+        &metadata,
         role.begin_current_stage()
             .map_err(|error| PreparationFailure::at(PreparationStep::RoleStage, error))?,
         &policy,

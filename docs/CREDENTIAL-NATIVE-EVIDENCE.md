@@ -93,6 +93,12 @@ pre/post checks; it does not establish that a request was sent or a filesystem
 operation completed. It distinguishes the role-stage acquisition, selected
 profile/CA/credentials, fixed provider joins, block/mount checks, private-directory
 creation, memory-image admission and original-file preparation/retention.
+Desired instance/artifact admission runs before enrollment, so a preparation
+refusal there can have no Controller incarnation or preceding `enrolled` event.
+That admission is DATA only; no native acquisition, original seed or file owner
+exists yet. Native image initialization and file retention still use the same
+original bounded phase. The ordering does not assert a latency cause or a later
+successful preparation.
 
 Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
 transport unavailable, response status or bound, admission rejected, known OS
