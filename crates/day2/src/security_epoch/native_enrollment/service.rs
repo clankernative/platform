@@ -192,8 +192,11 @@ fn serve(
             .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))
     })?;
     issuer.certificate.verify(&issuer.policy)?;
-    peer.check_identity(acquisition, &costs.hashes(Subject::Requester))?;
-    bound.check_identity(acquisition, &costs.hashes(Subject::Requester))?;
+    super::process::MessageProcess::check_same_actor(
+        &mut [&mut peer, &mut bound],
+        acquisition,
+        &costs.hashes(Subject::Requester),
+    )?;
     let (origin, deadline) = acquisition.interval_data()?;
     let data = StageData {
         issuer: issuer.certificate.digest()?,

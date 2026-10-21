@@ -71,10 +71,11 @@ pub(super) fn hash(
     })
 }
 
-/// Hash the freshly opened descriptor once, joining both descriptors before
-/// and after it. Each invocation rereads all bytes; no cross-check/stage cache.
+/// Hash one freshly opened descriptor once, joining EVERY retained descriptor
+/// before and after it. The caller joins these to the same actual live actor.
+/// Each invocation rereads all bytes; no cross-check/stage cache.
 pub(super) fn begin_check(
-    held: &File,
+    held: &[&File],
     current: &mut File,
     selected: &Digest,
     acquisition: &mut NativeAcquisition,
@@ -82,19 +83,27 @@ pub(super) fn begin_check(
 ) -> Result<Stamp> {
     let result = (|| {
         acquisition.remaining()?;
-        let before = identity(held)?;
         ensure!(
-            identity(current)? == before,
-            "native_enrollment_executable_replaced"
+            (1..=5).contains(&held.len()),
+            "native_enrollment_executable_owner_bound"
         );
+        let before = identity(current)?;
+        for file in held {
+            ensure!(
+                identity(file)? == before,
+                "native_enrollment_executable_replaced"
+            );
+        }
         ensure!(
             hash(current, acquisition, costs)? == *selected,
             "native_enrollment_executable_changed"
         );
-        ensure!(
-            identity(held)? == before && identity(current)? == before,
-            "native_enrollment_executable_changed"
-        );
+        for file in held.iter().copied().chain([&*current]) {
+            ensure!(
+                identity(file)? == before,
+                "native_enrollment_executable_changed"
+            );
+        }
         acquisition.remaining()?;
         Ok(before)
     })();
@@ -107,7 +116,7 @@ pub(super) fn begin_check(
 /// The caller reopens the actual procfs executable path after its other native
 /// checks. ctime strengthens mutation detection but is not a content version.
 pub(super) fn finish_check(
-    held: &File,
+    held: &[&File],
     current: &File,
     final_path: &File,
     before: &Stamp,
@@ -116,11 +125,15 @@ pub(super) fn finish_check(
     let result = (|| {
         acquisition.remaining()?;
         ensure!(
-            identity(held)? == *before
-                && identity(current)? == *before
-                && identity(final_path)? == *before,
-            "native_enrollment_executable_changed"
+            (1..=5).contains(&held.len()),
+            "native_enrollment_executable_owner_bound"
         );
+        for file in held.iter().copied().chain([current, final_path]) {
+            ensure!(
+                identity(file)? == *before,
+                "native_enrollment_executable_changed"
+            );
+        }
         acquisition.remaining()?;
         Ok(())
     })();
@@ -154,16 +167,35 @@ mod tests {
         selected: &Digest,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Stamp> {
-        super::begin_check(held, current, selected, acquisition, &HashCosts::disabled())
+        super::begin_check(
+            &[held],
+            current,
+            selected,
+            acquisition,
+            &HashCosts::disabled(),
+        )
+    }
+
+    fn finish_check(
+        held: &File,
+        current: &File,
+        final_path: &File,
+        before: &Stamp,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        super::finish_check(&[held], current, final_path, before, acquisition)
     }
 
     #[test]
-    fn diagnostic_counts_one_complete_read_per_fresh_check_without_a_cache() -> Result<()> {
+    fn multiple_retained_descriptors_share_one_fresh_read_without_a_cache() -> Result<()> {
         let d = tempfile::tempdir()?;
         let p = d.path().join("selected");
         let bytes = vec![23; 65_536 + 17];
         fs::write(&p, &bytes)?;
-        let held = File::open(&p)?;
+        let held = (0..5)
+            .map(|_| File::open(&p))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let held = held.iter().collect::<Vec<_>>();
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
         let mut output = Vec::new();
@@ -175,7 +207,7 @@ mod tests {
                 let stamp =
                     super::begin_check(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
                 assert_eq!(current.stream_position()?, bytes.len() as u64);
-                finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+                super::finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
             }
             recorder.emit(&costs, Outcome::Completed)?;
         }
@@ -187,6 +219,44 @@ mod tests {
         assert_eq!(rows[0][0], "hash_requester");
         assert_eq!(rows[0][1][0], 2);
         assert_eq!(rows[0][1][1], 2 * bytes.len());
+        Ok(())
+    }
+
+    #[test]
+    fn every_retained_descriptor_must_join_before_and_after_the_read() -> Result<()> {
+        let d = tempfile::tempdir()?;
+        let p = d.path().join("selected");
+        let q = d.path().join("other");
+        fs::write(&p, b"selected")?;
+        fs::write(&q, b"selected")?;
+        let held = (0..5)
+            .map(|_| File::open(&p))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let other = File::open(&q)?;
+        for index in 0..5 {
+            let mut current = File::open(&p)?;
+            let mut owners = held.iter().collect::<Vec<_>>();
+            owners[index] = &other;
+            let mut a = acquisition(Duration::from_secs(5));
+            assert!(
+                super::begin_check(
+                    &owners,
+                    &mut current,
+                    &Digest::new(b"selected"),
+                    &mut a,
+                    &HashCosts::disabled(),
+                )
+                .is_err()
+            );
+            assert!(a.remaining().is_err());
+
+            let mut a = acquisition(Duration::from_secs(5));
+            let stamp = begin_check(&held[0], &mut current, &Digest::new(b"selected"), &mut a)?;
+            assert!(
+                super::finish_check(&owners, &current, &File::open(&p)?, &stamp, &mut a).is_err()
+            );
+            assert!(a.remaining().is_err());
+        }
         Ok(())
     }
 

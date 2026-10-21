@@ -201,52 +201,87 @@ impl MessageProcess {
         acquisition: &mut NativeAcquisition,
         costs: &HashCosts,
     ) -> Result<()> {
+        Self::check_same_actor(&mut [self], acquisition, costs)
+    }
+
+    /// One fresh observation for 1..=5 retained handles of the SAME actual actor.
+    /// Every owner originates in a kernel packet or the fixed runtime socket;
+    /// matching signed DATA alone cannot join them. Every actual native handle
+    /// is rechecked, with one full current executable read for this observation.
+    /// No reusable checked token escapes. Call again at every later guard; do
+    /// not share this observation across I/O, signatures or stage boundaries.
+    pub(super) fn check_same_actor(
+        processes: &mut [&mut Self],
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<()> {
         let mut timing = costs.start_identity();
         let result = (|| {
-            ensure!(!self.refused, "native_enrollment_process_refused");
             ensure!(
-                self.local_process == std::process::id()
-                    && self.thread == std::thread::current().id(),
-                "native_enrollment_process_owner_changed"
+                (1..=5).contains(&processes.len()),
+                "native_enrollment_process_owner_bound"
             );
-            live(&self.pidfd, acquisition)?;
+            let first = &*processes[0];
+            for owner in processes.iter() {
+                ensure!(!owner.refused, "native_enrollment_process_refused");
+                ensure!(
+                    owner.local_process == std::process::id()
+                        && owner.thread == std::thread::current().id(),
+                    "native_enrollment_process_owner_changed"
+                );
+                ensure!(
+                    owner.data == first.data,
+                    "native_enrollment_process_actor_changed"
+                );
+                live(&owner.pidfd, acquisition)?;
+            }
             let proc = ns::open_root(acquisition)?;
+            let current = open_process(&proc, first.data.process, acquisition)?;
+            let proc_identity = ns::proc_identity(&proc)?;
+            let process_identity = ns::proc_identity(&current)?;
+            for owner in processes.iter() {
+                ensure!(
+                    proc_identity == ns::proc_identity(&owner.proc)?,
+                    "native_enrollment_proc_mount_changed"
+                );
+                ensure!(
+                    process_identity == ns::proc_identity(&owner.process)?,
+                    "native_enrollment_process_replaced"
+                );
+            }
             ensure!(
-                ns::proc_identity(&proc)? == ns::proc_identity(&self.proc)?,
-                "native_enrollment_proc_mount_changed"
-            );
-            let current = open_process(&proc, self.data.process, acquisition)?;
-            ensure!(
-                ns::proc_identity(&current)? == ns::proc_identity(&self.process)?,
-                "native_enrollment_process_replaced"
-            );
-            ensure!(
-                start(&current, self.data.process, acquisition)? == self.data.start_ticks,
+                start(&current, first.data.process, acquisition)? == first.data.start_ticks,
                 "native_enrollment_process_start_changed"
             );
             ensure!(
-                boot(acquisition)? == self.data.boot,
+                boot(acquisition)? == first.data.boot,
                 "native_enrollment_boot_changed"
             );
             let mut current_executable = executable(&current, acquisition)?;
+            let held_executables = processes
+                .iter()
+                .map(|owner| &owner.executable)
+                .collect::<Vec<_>>();
             let executable_stamp = executable_bytes::begin_check(
-                &self.executable,
+                &held_executables,
                 &mut current_executable,
-                &self.data.code,
+                &first.data.code,
                 acquisition,
                 costs,
             )?;
             for name in NAMESPACES {
-                let current = ns::open_namespace(&current, name, acquisition)?;
-                for fd in [&current, &self.namespaces[name]] {
+                let namespace = ns::open_namespace(&current, name, acquisition)?;
+                for fd in std::iter::once(&namespace)
+                    .chain(processes.iter().map(|owner| &owner.namespaces[name]))
+                {
                     let value = ns::namespace_identity(fd)?;
                     ensure!(
-                        (value.device, value.inode) == self.data.namespaces[name],
+                        (value.device, value.inode) == first.data.namespaces[name],
                         "native_enrollment_namespace_changed"
                     );
                 }
             }
-            let mut offsets = ns::open_proc(&self.process, "timens_offsets", acquisition)?;
+            let mut offsets = ns::open_proc(&current, "timens_offsets", acquisition)?;
             namespace_protocol::require_zero(&namespace_protocol::offsets(&ns::read_proc(
                 &mut offsets,
                 1024,
@@ -256,7 +291,7 @@ impl MessageProcess {
             // Earlier descriptors alone cannot observe a later exec/path change.
             let final_executable = executable(&current, acquisition)?;
             executable_bytes::finish_check(
-                &self.executable,
+                &held_executables,
                 &current_executable,
                 &final_executable,
                 &executable_stamp,
@@ -265,14 +300,18 @@ impl MessageProcess {
             // Diagnostic sampling finishes before the final pidfd/original-clock
             // guard. Held executable FDs survive process exit.
             costs.finish_identity(&mut timing);
-            live(&self.pidfd, acquisition)?;
+            for owner in processes.iter() {
+                live(&owner.pidfd, acquisition)?;
+            }
             Ok(())
         })();
         // On earlier errors there is no authority to return. Record the failed
         // body without replacing its error or clearing the original refusal.
         costs.finish_identity(&mut timing);
         if result.is_err() {
-            self.refused = true;
+            for owner in processes.iter_mut() {
+                owner.refused = true;
+            }
             acquisition.refuse();
         }
         result
@@ -359,4 +398,260 @@ pub(super) fn boot(acquisition: &mut NativeAcquisition) -> Result<String> {
         "native_enrollment_boot_format"
     );
     Ok(value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security_epoch::native_enrollment::{
+        channel::Channel,
+        issuer_costs::{Outcome, Recorder, Subject},
+        protocol::Packet,
+    };
+    use std::{
+        process::{Command, Stdio},
+        time::Duration,
+    };
+
+    fn packet() -> Packet {
+        Packet::BirthChallenge {
+            policy: Digest::new(b"same-actor-test-only"),
+            nonce: Digest::new(b"actual-kernel-packets"),
+        }
+    }
+
+    fn self_receipts(count: usize) -> Result<Vec<MessageProcess>> {
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let mut a = NativeAcquisition::begin(5)?;
+        let (mut channel, sender) = Channel::pair(&mut a)?;
+        let mut owners = Vec::new();
+        for _ in 0..count {
+            let mut a = NativeAcquisition::begin(5)?;
+            rustix::net::send(
+                &sender,
+                &serde_json::to_vec(&packet())?,
+                rustix::net::SendFlags::DONTWAIT | rustix::net::SendFlags::NOSIGNAL,
+            )?;
+            let (_, owner) = channel.receive(&code, &mut a, &HashCosts::disabled())?;
+            owners.push(owner);
+        }
+        Ok(owners)
+    }
+
+    struct ChildOwner(std::process::Child);
+
+    impl Drop for ChildOwner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "actual SCM_PIDFD sender subprocess for same-actor controls"]
+    fn packet_child() -> Result<()> {
+        ensure!(std::env::var_os("DAY2_NATIVE_SAME_ACTOR_CHILD").is_some());
+        let mut a = NativeAcquisition::begin(5)?;
+        let mut channel = Channel::startup(&mut a)?;
+        for _ in 0..2 {
+            channel.send(&packet(), &mut a)?;
+        }
+        loop {
+            std::thread::park();
+        }
+    }
+
+    fn child_receipts(costs: &HashCosts) -> Result<(ChildOwner, Vec<MessageProcess>)> {
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let mut a = NativeAcquisition::begin(5)?;
+        let (mut channel, sender) = Channel::pair(&mut a)?;
+        let child = ChildOwner(
+            Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "security_epoch::native_enrollment::process::tests::packet_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("DAY2_NATIVE_SAME_ACTOR_CHILD", "1")
+                .stdin(Stdio::from(sender))
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()?,
+        );
+        let mut owners = Vec::new();
+        for _ in 0..2 {
+            let mut a = NativeAcquisition::begin(5)?;
+            let (_, owner) = channel.receive(&code, &mut a, costs)?;
+            assert_eq!(owner.data().process, child.0.id());
+            owners.push(owner);
+        }
+        Ok((child, owners))
+    }
+
+    fn recorded(output: Vec<u8>) -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(
+            String::from_utf8(output)?
+                .strip_prefix("day2-native-issuer-cost ")
+                .unwrap(),
+        )?)
+    }
+
+    #[test]
+    fn actual_same_actor_receipts_share_only_one_fresh_observation() -> Result<()> {
+        let mut owners = self_receipts(5)?;
+        let length = std::fs::metadata("/proc/self/exe")?.len();
+        let mut output = Vec::new();
+        {
+            let mut recorder = Recorder::new(&mut output);
+            let costs = recorder.connection();
+            for _ in 0..2 {
+                let mut a = NativeAcquisition::begin(5)?;
+                MessageProcess::check_same_actor(
+                    &mut owners.iter_mut().collect::<Vec<_>>(),
+                    &mut a,
+                    &costs.hashes(Subject::Requester),
+                )?;
+                a.remaining()?;
+            }
+            recorder.emit(&costs, Outcome::Completed)?;
+        }
+        let record = recorded(output)?;
+        let rows = record["rows"].as_array().unwrap();
+        let hash = rows.iter().find(|r| r[0] == "hash_requester").unwrap();
+        assert_eq!(hash[1][0], 2);
+        assert_eq!(hash[1][1], 2 * length);
+        let body = rows
+            .iter()
+            .find(|r| r[0] == "identity_requester_body")
+            .unwrap();
+        assert_eq!(body[1][0], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_real_actor_is_hashed_on_receipt_and_refuses_the_entire_group() -> Result<()> {
+        let mut local = self_receipts(1)?.remove(0);
+        let length = std::fs::metadata("/proc/self/exe")?.len();
+        let mut output = Vec::new();
+        {
+            let mut recorder = Recorder::new(&mut output);
+            let costs = recorder.connection();
+            let (_child, mut owners) = child_receipts(&costs.hashes(Subject::Requester))?;
+            let mut a = NativeAcquisition::begin(5)?;
+            let error = MessageProcess::check_same_actor(
+                &mut [&mut local, &mut owners[0]],
+                &mut a,
+                &costs.hashes(Subject::Requester),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "native_enrollment_process_actor_changed");
+            assert!(a.remaining().is_err());
+            for owner in [&mut local, &mut owners[0]] {
+                let mut later = NativeAcquisition::begin(5)?;
+                assert!(
+                    owner
+                        .check_identity(&mut later, &HashCosts::disabled())
+                        .is_err()
+                );
+                assert!(later.remaining().is_err());
+            }
+            // The ungrouped second actual receipt was not refused by association.
+            owners[1].check_identity(&mut NativeAcquisition::begin(5)?, &HashCosts::disabled())?;
+            recorder.emit(&costs, Outcome::Completed)?;
+        }
+        let record = recorded(output)?;
+        let hash = record["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r[0] == "hash_requester")
+            .unwrap();
+        // Each NEW receipt still has its initial full hash plus fresh identity
+        // check. A matching executable digest never adopts another process.
+        assert_eq!(hash[1][0], 4);
+        assert_eq!(hash[1][1], 4 * length);
+        Ok(())
+    }
+
+    #[test]
+    fn exited_actual_actor_refuses_every_retained_receipt() -> Result<()> {
+        let (mut child, mut owners) = child_receipts(&HashCosts::disabled())?;
+        child.0.kill()?;
+        child.0.wait()?;
+        let mut a = NativeAcquisition::begin(5)?;
+        let error = MessageProcess::check_same_actor(
+            &mut owners.iter_mut().collect::<Vec<_>>(),
+            &mut a,
+            &HashCosts::disabled(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native_enrollment_process_exited");
+        assert!(a.remaining().is_err());
+        for owner in &mut owners {
+            let mut later = NativeAcquisition::begin(5)?;
+            assert!(
+                owner
+                    .check_identity(&mut later, &HashCosts::disabled())
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expired_original_refuses_all_owners_and_a_new_clock_cannot_revive_them() -> Result<()> {
+        let mut owners = self_receipts(2)?;
+        let mut a = NativeAcquisition::fixture(
+            Digest::new(b"expired-same-actor-only"),
+            std::process::id(),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert!(
+            MessageProcess::check_same_actor(
+                &mut owners.iter_mut().collect::<Vec<_>>(),
+                &mut a,
+                &HashCosts::disabled(),
+            )
+            .is_err()
+        );
+        assert!(a.remaining().is_err());
+        for owner in &mut owners {
+            let mut later = NativeAcquisition::begin(5)?;
+            assert!(
+                owner
+                    .check_identity(&mut later, &HashCosts::disabled())
+                    .is_err()
+            );
+            assert!(later.remaining().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_and_oversized_groups_refuse_without_a_permission_token() -> Result<()> {
+        let mut a = NativeAcquisition::begin(5)?;
+        assert!(MessageProcess::check_same_actor(&mut [], &mut a, &HashCosts::disabled()).is_err());
+        assert!(a.remaining().is_err());
+        let mut owners = self_receipts(6)?;
+        let mut a = NativeAcquisition::begin(5)?;
+        let error = MessageProcess::check_same_actor(
+            &mut owners.iter_mut().collect::<Vec<_>>(),
+            &mut a,
+            &HashCosts::disabled(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native_enrollment_process_owner_bound");
+        assert!(a.remaining().is_err());
+        for owner in &mut owners {
+            let mut later = NativeAcquisition::begin(5)?;
+            assert!(
+                owner
+                    .check_identity(&mut later, &HashCosts::disabled())
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
 }
