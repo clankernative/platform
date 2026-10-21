@@ -90,6 +90,8 @@ const _: () = {
         }};
     }
     assert_not_impl!(PendingPreparedFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Copy);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Default);
     assert_not_impl!(PendingPreparedFilePhase<'static>, Send);
     assert_not_impl!(PendingPreparedFilePhase<'static>, Sync);
     assert_not_impl!(PendingPreparedFilePhase<'static>, serde::Serialize);
@@ -98,6 +100,8 @@ const _: () = {
         serde::Deserialize<'static>
     );
     assert_not_impl!(PendingPhysicalFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Copy);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Default);
     assert_not_impl!(PendingPhysicalFilePhase<'static>, Send);
     assert_not_impl!(PendingPhysicalFilePhase<'static>, Sync);
     assert_not_impl!(PendingPhysicalFilePhase<'static>, serde::Serialize);

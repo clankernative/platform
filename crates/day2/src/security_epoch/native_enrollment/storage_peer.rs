@@ -75,11 +75,15 @@ const _: () = {
         }};
     }
     assert_not_impl!(InitialHolderConnection, Clone);
+    assert_not_impl!(InitialHolderConnection, Copy);
+    assert_not_impl!(InitialHolderConnection, Default);
     assert_not_impl!(InitialHolderConnection, Send);
     assert_not_impl!(InitialHolderConnection, Sync);
     assert_not_impl!(InitialHolderConnection, serde::Serialize);
     assert_not_impl!(InitialHolderConnection, serde::Deserialize<'static>);
     assert_not_impl!(InitialHolderRendezvous, Clone);
+    assert_not_impl!(InitialHolderRendezvous, Copy);
+    assert_not_impl!(InitialHolderRendezvous, Default);
     assert_not_impl!(InitialHolderRendezvous, Send);
     assert_not_impl!(InitialHolderRendezvous, Sync);
     assert_not_impl!(InitialHolderRendezvous, serde::Serialize);
