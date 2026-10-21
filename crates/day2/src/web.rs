@@ -1687,8 +1687,8 @@ impl Host {
                 }
             },
         );
-        // App modules have ordinary browser authority. This policy governs loaded
-        // resources, not the behavior of admitted JavaScript or Datastar expressions.
+        // Admission selects trusted host/package code and explicitly reviewed exceptions.
+        // CSP remains defense in depth, not component-level browser isolation.
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(

@@ -1,7 +1,10 @@
 # App-Owned UI POC
 
-Apps own ordinary `.html` templates, CSS, assets and native browser JavaScript.
-The link-directory examples below come from the platform's
+Apps own ordinary `.html` templates, CSS, assets and checked bindings; Roc owns
+business and view meaning. They do not author JavaScript entrypoints, bootstraps,
+callbacks or Datastar expressions. CUI is a build-time catalog with reviewed
+local behaviors; Custom Elements are optional and are not a sandbox. The
+link-directory examples below come from the platform's
 [row-authority fixture](../fixtures/row-authority-web-conformance/README.md) and
 [HTTP presentation overlay](../fixtures/http-conformance/README.md).
 HTML is not written through a Roc UI DSL. The platform does not
@@ -26,7 +29,6 @@ app/                Staged conformance app with the HTTP overlay
   pages/Routes.roc  Typed queries, routes and template handles
   ui/
     app.css         App stylesheet entrypoint
-    app.js          Native browser module entrypoint
     pages/
       directory.html Page layout, loops and conditionals
       details.html   A link's detail page
@@ -148,9 +150,11 @@ bounds are POC constraints, not a claim that every existing Jinja app is
 compatible without changes.
 
 The host adds the HTTP document and protected transport boundary. The app's
-stylesheet and JavaScript module are loaded from its bound artifact.
-Platform security screens, such as sign-in and audit, retain platform styling;
-the app page does not load the platform's `web.css`.
+stylesheet is loaded from its bound artifact. Platform security screens, such
+as sign-in and audit, retain platform styling; the app page does not load the
+platform's `web.css`. Platform-owned Datastar/form transport remains trusted.
+Host-generated transport directives are added after source admission and cannot
+be forged by app templates or concrete content.
 
 Templates reference images using `{{ asset('icons_plus') }}`. The build checks
 the key and the host resolves it through the bound app/instance/artifact-scoped
@@ -206,32 +210,55 @@ accepted command creates a second durable invocation. Only `403`, `409` and `422
 retain the draft and its original ticket. Live pages mark the status region
 `success`, `pending` or `failure` accordingly.
 
-`ui/app.js` owns browser-only interactions such as local filtering and copying
-a link. It is ordinary browser JavaScript, not Roc and not deterministic by
-construction. Event handling must continue to work after Datastar replaces the
-main region. Browser-only search or display state is not a database command;
-creating and archiving a link always goes through the platform command path.
+The default policy rejects app-authored JavaScript resources and nonempty
+script entrypoints. Two existing app behaviors are retained as explicit
+unchanged-module exceptions, not as a general JavaScript mode:
 
-The POC retains platform-generated Datastar command submission behavior. Apps
-can also author Datastar `data-*` expressions and native module behavior. These
-expressions are executable browser code with the same trust boundary as the
-app module, not a restricted or pure expression language. Never interpolate
-user-provided strings into an expression; use escaped data attributes and
-checked command bindings instead. Template admission rejects interpolation in
-executable-expression contexts. The host's command form bindings remain
-protected.
+| App namespace | Exact path | Required SHA-256 |
+| --- | --- | --- |
+| `notifications` | `notifications.js` | `4ae41088b340a78bf3ba53e56d5163805448b5d330330401c8e267cc3820857e` |
+| `chart-live` | `app.js` | `a200c72e74c8d38d888829979b8619b36cb145a6aaa315578d63a97da09d7aca` |
+| `chart-live` | `chart-navigation.js` | `156b19235681b17e1bc4f36628435c2d2b12b58e38ad75e1889bba824f96115f` |
+
+These Platform-owned records bind exact namespace, path and bytes. Changed bytes,
+another path/namespace or any unlisted module fail admission; no new exception
+app code may be authored. CUI-generated modules use the separate host receipt
+path described below. App-authored Datastar execution/reactivity directives
+(including event, init, effect, computed, signals, bind, text, show, class, attr
+and style forms), inline handlers and script injection are rejected during
+source admission and concrete content validation. Inert app `data-*` metadata,
+including closed `data-query-*` declarations, remains available. The platform
+retains host-generated Datastar command submission and live-query transport:
+those directives are added after app source admission, and the reserved
+transport fields cannot be forged by the app. Keep one DOM writer and preserve
+unsaved drafts during updates. Apps need no local callback to submit a query or
+command; Platform coordinates those interactions through checked bindings.
+
+New browser behavior belongs in a reviewed CUI package or explicitly approved
+host capability, not ordinary app JavaScript. A trusted component entrypoint
+and its complete module closure require digest-checked assembly provenance from
+the host-verified managed UI provider/package. A `ui/` prefix, self-declared
+source marker or editable lockfile is not proof. This code still has ordinary
+browser-origin authority; neither package review, CSP nor admission creates a
+per-component sandbox or removes ambient authority. Browser screenshot evidence was not captured for this policy change because
+browser access was user-ended; verification is limited to focused source and
+admission tests plus formatting.
 
 ## Module And Style Admission
 
-The required `App.definition.presentation` explicitly selects stylesheet and script
-paths under `ui/`; an empty string means no entry. There is no npm,
-package installation, per-app build script or CDN module import. The build
-parses JavaScript imports, admits the local dependency graph and records the
-resource bytes, media types and hashes in the immutable app artifact. Template
-files and their include graph are also admitted and pinned; templates are
-server-rendering inputs, not executable browser modules. Styles
-also pass admission; external style imports and resource URLs are not an
-unrestricted network-loading escape hatch.
+`App.definition.presentation.stylesheet` may select the app stylesheet;
+`presentation.script` is empty by default; it accepts only the exact legacy
+namespace/path/digest exceptions listed above. There is no npm, package
+installation, per-app build script or CDN module import. Other app-authored
+`.js` resources and executable template content are rejected. A managed
+component module graph is permitted only through a digest-checked host assembly
+receipt binding `ui-package.js` and its complete reachable import closure to the
+verified provider executable, package and captured UI source authority; it is
+not selected by an app presentation script path. A lockfile or self-asserted
+source prefix is insufficient. Template files and their include graph are admitted and pinned;
+they are server-rendering inputs, not executable browser modules. Styles also
+pass admission; external style imports and resource URLs are not an unrestricted
+network-loading escape hatch.
 
 Browser resources use:
 
@@ -250,11 +277,11 @@ this POC does not claim to implement those workflows.
 
 ## Trust And Simulation
 
-The native module runs in the app page's browser origin. It can inspect the
-rendered data, manipulate its UI and submit forms using the current user's
-available authority. Type checking, import admission, CSP and HttpOnly cookies
-do not make arbitrary native app JavaScript capability-safe. The platform must
-never rely on a button being hidden, on client validation or on a particular
+Reviewed host/package browser behavior runs in the app page's browser origin
+and has ambient browser authority. Admission and provider/package review govern
+what code is shipped; they do not make it capability-safe or sandbox it. CSP,
+checked bindings and HttpOnly cookies do not remove that authority. The platform
+must never rely on a button being hidden, on client validation or on a particular
 browser event sequence for business authorization.
 
 The server still validates command contracts and tickets, checks current

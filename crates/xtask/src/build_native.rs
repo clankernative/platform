@@ -115,6 +115,11 @@ fn prepare(
     )?;
     let assets = day2_assets::package(&captured.join("assets"), &stage)?;
     let web_resources = day2::web_resources::package(&captured.join("ui"), &stage)?;
+    let component_modules =
+        day2::web_resources::generated_component_modules(&stage, &web_resources, &hashes)?;
+    if !component_modules.is_empty() {
+        day2::web_resources::bind_component_receipt(&namespace, &component_modules, &mut hashes)?;
+    }
     let templates = day2::web_templates::package(&captured.join("ui"), &stage)?;
     fs::write(
         stage.join("app/Assets.roc"),

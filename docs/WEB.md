@@ -5,7 +5,7 @@ App decisions still run in the pure native Roc worker. Rust owns HTTP, sessions,
 CSRF, transaction dispatch, rendering, asset admission and mandatory auditing.
 
 The current Links proof of concept uses ordinary app-owned HTML/Jinja templates,
-CSS and native browser modules. Roc supplies typed query data and business
+CSS and Platform-owned browser transport. Roc supplies typed query data and business
 commands, not a page-building DSL. See [UI-POC.md](UI-POC.md) for the file map.
 
 ## Experimental request-time presentations
@@ -21,12 +21,45 @@ pin, ports, limits and failure behavior.
 [Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
 deterministic simulations, real adapters, builds and remaining browser/full gates.
 
+## App-authored browser behavior
+
+Apps own Roc business and view meaning, HTML templates, CSS, assets and checked
+bindings. Platform owns query/command coordination. App-authored JavaScript
+entrypoints/resources, inline handlers and Datastar execution/reactivity
+expressions are rejected; inert app `data-*` metadata and the checked
+`data-query-*` declarations remain available. The host adds Datastar/form
+transport only after source admission. Keep one DOM writer and preserve drafts.
+
+There are deliberately narrow legacy exceptions, not a general app-JavaScript
+mode: `notifications/notifications.js` and `chart-live/app.js` plus
+`chart-live/chart-navigation.js` are admitted only at their exact Platform
+namespace/path and unchanged SHA-256 module digests (the records are in
+`day2::web_resources`). Any changed bytes, another namespace/path, or extra
+module is rejected. These are retained app-authored JavaScript and therefore
+this policy is not accurately described as “no app JavaScript.” No new
+exception modules or app code may be added through this path. Changing this
+Platform-owned policy requires independent source/CI review; an app's editable
+UI lock or source metadata is not that review or an approval mechanism.
+
+Managed CUI output is separate: the host records the exact JavaScript resources
+actually emitted by the pinned provider, including metadata modules that need
+no browser bootstrap. Any generated `ui-package.js` entrypoint must have a
+complete import closure made only from those outputs. The build receipt binds
+the executable set to the captured provider, package, lock and UI source hashes;
+native admission seals those records in the artifact. A filename, self-declared
+`ui/` prefix, app-authored lockfile claim or provider marker alone grants no
+execution authority. Unattributed app JavaScript is rejected even when unused.
+CUI supplies reviewed local behavior; Custom Elements are optional, not a sandbox.
+
+These controls govern shipped source, not ambient browser capabilities. There
+is no per-component sandbox, and CSP or linting does not remove browser-origin
+authority. New behavior requires a reviewed package or an independently
+approved explicit host capability.
+
 ## Checked reactive GET forms
 
 A non-live page may opt a registered query form into the host's latest-read
-coordinator. The declaration is inert metadata: it accepts no app callback or
-executable expression, and the app needs no JavaScript for it. This is additive;
-existing app presentation scripts and templates are unaffected:
+coordinator. No app callback or executable expression is accepted:
 
 ```html
 <form id="report-search" data-page="search" data-query-on="input"

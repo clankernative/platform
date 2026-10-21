@@ -636,10 +636,13 @@ impl Definition {
             definition.validate_verification_delegation()?;
             validate_verification_setup(artifact, name, operation, definition)?;
         }
-        for (path, media) in [
-            (&self.presentation.stylesheet, "text/css; charset=utf-8"),
-            (&self.presentation.script, "text/javascript; charset=utf-8"),
-        ] {
+        crate::web_resources::validate_executable_policy(
+            &artifact.namespace,
+            &self.presentation.script,
+            &artifact.web_resources,
+            &artifact.sources,
+        )?;
+        for (path, media) in [(&self.presentation.stylesheet, "text/css; charset=utf-8")] {
             if !path.is_empty() {
                 ensure!(
                     artifact

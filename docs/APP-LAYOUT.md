@@ -36,9 +36,18 @@ Use Clanker UI for new internal-tool presentation. After installing the Platform
 CLI, `day2 platform ui-lock APP_DIRECTORY` creates the exact package lock. The
 builder discovers its bundled package and executable; apps contain no dependency
 installation scripts, copied package implementation, or provider configuration.
-Clanker remains build-only. Apps still own their templates, presentation resources,
-view models, command bindings, and ordinary semantic content.
-For a different package pin, follow the [app UI lock upgrade procedure](WEB.md#upgrading-an-app-ui-lock).
+Clanker remains build-only. Apps own Roc business/view meaning, templates,
+CSS/assets and checked bindings; CUI is a build-time catalog with reviewed
+local behaviors. Custom Elements are optional, not mandatory or a sandbox.
+Platform owns query/command coordination. Do not add callbacks, expression
+strings, bootstraps or ordinary app JavaScript. A managed component entrypoint
+and its full module closure require the host-produced, hash-bound assembly
+receipt; an app path prefix, self-claimed source marker or editable lockfile is
+not proof. The exact pre-existing Notifications and Chart Live JavaScript
+exceptions are documented in [WEB.md](WEB.md#app-authored-browser-behavior);
+they are retained unchanged modules, not a no-app-JavaScript policy claim. No
+new exception code may be added. For a different package pin, follow the
+[app UI lock upgrade procedure](WEB.md#upgrading-an-app-ui-lock).
 
 Root-level `.clanker/` design-tool metadata is excluded from ordinary source
 capture. Assembly captures only the package closure explicitly locked by

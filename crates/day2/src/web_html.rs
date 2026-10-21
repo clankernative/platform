@@ -99,6 +99,35 @@ fn href(value: &str) -> Result<()> {
     web_url(value).map(|_| ())
 }
 
+fn executable_attribute(name: &str) -> bool {
+    [
+        "attr",
+        "bind",
+        "class",
+        "computed",
+        "effect",
+        "indicator",
+        "init",
+        "json-signals",
+        "on",
+        "ref",
+        "show",
+        "signals",
+        "style",
+        "text",
+    ]
+    .iter()
+    .any(|plugin| {
+        name.strip_prefix(&format!("data-{plugin}"))
+            .is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.starts_with(':')
+                    || suffix.starts_with('-')
+                    || suffix.starts_with("__")
+            })
+    })
+}
+
 fn attributes(tag: &str, attrs: &[Attribute], transport: bool) -> Result<()> {
     ensure!(attrs.len() <= 64, "attribute_budget");
     let mut names = BTreeSet::new();
@@ -110,6 +139,7 @@ fn attributes(tag: &str, attrs: &[Attribute], transport: bool) -> Result<()> {
         );
         ensure!(
             !name.starts_with("on")
+                && !executable_attribute(&name)
                 && ![
                     "src",
                     "srcset",
@@ -852,8 +882,8 @@ mod tests {
         root["attrs"] = json!([
             {"name":"class","value":"portfolio-value custom-layout"},
             {"name":"aria-live","value":"polite"},
-            {"name":"data-effect","value":"el.textContent = $value"},
-            {"name":"data-on:input__debounce.300ms","value":"$value = el.value"},
+            {"name":"data-query-name","value":"reports.search"},
+            {"name":"data-query-param","value":"term"},
             {"name":"style","value":"display:grid;grid-template-columns:1fr 2fr;--gap:12px"}
         ]);
         assert_eq!(
@@ -861,6 +891,16 @@ mod tests {
             3
         );
         Ok(())
+    }
+
+    #[test]
+    fn generated_host_transport_is_added_after_app_attribute_admission() {
+        let attrs = command_attributes(&[attribute("class", "command")]);
+        assert!(attributes("form", &[attribute("class", "command")], true).is_ok());
+        assert_eq!(
+            markup_tag("form", &attrs, html! {}, false).into_string(),
+            "<form class=\"command\" method=\"post\" action=\"/actions\" data-on:submit__prevent=\"@post(el.action, {contentType:'form', retry:'never'})\"></form>"
+        );
     }
 
     #[test]
@@ -916,17 +956,26 @@ mod tests {
         assert!(href("https://example.com/path").is_ok());
         assert!(href("//example.com/path").is_err());
         assert!(href("javascript:run()").is_err());
-        assert!(
-            attributes(
-                "input",
-                &[attribute(
-                    "data-on:input__debounce.300ms",
-                    "$value = el.value"
-                )],
-                false
-            )
-            .is_ok()
-        );
+        for (name, value) in [
+            ("data-on:input", "run()"),
+            ("DATA-ON:INPUT__DEBOUNCE.300MS", "run()"),
+            ("data-on-click", "run()"),
+            ("data-effect__", "run()"),
+            ("data-computed:total", "1 + 2"),
+            ("data-bind:value", "$value"),
+            ("data-text", "$value"),
+            ("data-show", "$visible"),
+            ("data-class:active", "$active"),
+            ("data-attr:href", "$url"),
+            ("data-style:color", "$color"),
+            ("onclick", "run()"),
+        ] {
+            assert!(
+                attributes("input", &[attribute(name, value)], false).is_err(),
+                "{name}"
+            );
+        }
+        assert!(attributes("input", &[attribute("data-query-field", "term")], false).is_ok());
         assert!(tag_name("example.panel").is_err());
     }
 

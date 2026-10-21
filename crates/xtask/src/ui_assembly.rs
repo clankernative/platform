@@ -419,8 +419,18 @@ fn assemble_and_stage(
     for t in env.data.templates.keys() {
         hashes.insert(format!("app/ui/{t}"), sha(env.data.templates[t].as_bytes()));
     }
+    // Only resources actually emitted by the pinned assembler can become
+    // trusted browser modules. A captured file named ui-package.js is not proof.
+    hashes.retain(|key, _| !key.starts_with(day2::web_resources::GENERATED_MODULE_PREFIX));
     for r in &env.data.resources {
         hashes.insert(format!("app/{}", r.path), r.digest.clone());
+        if r.path.ends_with(".js") || r.path.ends_with(".mjs") {
+            let path = r.path.strip_prefix("ui/").context("module outside ui")?;
+            hashes.insert(
+                format!("{}{path}", day2::web_resources::GENERATED_MODULE_PREFIX),
+                r.digest.clone(),
+            );
+        }
     }
     Ok(())
 }

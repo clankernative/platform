@@ -406,6 +406,72 @@ fn simulated_assembly_rejects_tampered_inputs_and_resources_without_partial_stag
     }
 }
 
+#[test]
+fn component_module_provenance_requires_actual_provider_output_not_a_reserved_filename() {
+    for emitted in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (request, lock, package, mut bundle, mut hashes) = application_fixture(temp.path());
+        let code = if emitted {
+            "export const reviewed = true;"
+        } else {
+            "export const appAuthored = true;"
+        };
+        fs::write(temp.path().join("ui/ui-package.js"), code).unwrap();
+        hashes.insert("app/ui/ui-package.js".into(), sha(code.as_bytes()));
+        let provenance = format!(
+            "{}ui-package.js",
+            day2::web_resources::GENERATED_MODULE_PREFIX
+        );
+        // Stale or self-claimed metadata must not survive a new assembly.
+        hashes.insert(provenance.clone(), sha(code.as_bytes()));
+        if emitted {
+            bundle.resources.push(Resource {
+                path: "ui/ui-package.js".into(),
+                source: None,
+                content: Some(code.into()),
+                digest: sha(code.as_bytes()),
+                bytes: code.len(),
+                kind: "module".into(),
+            });
+        }
+        let adapter = SimulatedAssembler {
+            expected_request: request.clone(),
+            recorded_response: synthetic_bundle_response(&bundle),
+        };
+        assemble_and_stage(
+            &adapter,
+            &mut FilePublication {
+                captured: temp.path(),
+            },
+            &request,
+            &lock,
+            &package,
+            &mut hashes,
+        )
+        .unwrap();
+        assert_eq!(hashes.contains_key(&provenance), emitted);
+        // Synthetic authority values exercise policy only, not executable-pin evidence.
+        hashes.insert(
+            "ui-provider/executable".into(),
+            sha(b"synthetic reviewed provider"),
+        );
+        hashes.insert("ui-provider/input-lock".into(), sha(b"synthetic lock"));
+        let artifact = temp.path().join("artifact");
+        let catalog = day2::web_resources::package(&temp.path().join("ui"), &artifact).unwrap();
+        let closure = day2::web_resources::component_closure(&artifact, &catalog).unwrap();
+        let receipt = day2::web_resources::component_receipt("example", &closure, &hashes);
+        assert_eq!(receipt.is_ok(), emitted);
+        if !emitted {
+            assert!(
+                receipt
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not_generated_by_pinned_provider")
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn process_adapter_timeout_is_a_typed_failure() {

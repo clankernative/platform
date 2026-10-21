@@ -110,14 +110,26 @@ states, and artifact identities fail closed. Do not claim full safety-standard
 coverage, native hostile-code containment, or production readiness.
 
 Keep platform security pages, app-owned presentation and company branding
-separate. Apps own ordinary HTML templates, app styles and native browser JS
-under ui/. Roc owns typed view data, not HTML markup. Validate template syntax,
-field paths, form bindings and resource references during artifact admission.
-Escape dynamic values and validate concrete rendered forms again at runtime.
-Browser JS is presentation code, not authored automation or server
-code. No npm, package installation or app build scripts. Admit executable
-resources and their complete import graph; pin and verify all served bytes.
-Dependency admission is supply-chain governance, not a sandbox for app JS.
+separate. Roc owns business rules and typed view meaning. Apps own templates,
+CSS, assets and checked bindings; CUI is a build-time catalog plus reviewed
+local behaviors. Custom Elements are optional, not mandatory or a sandbox.
+Platform owns query/command coordination. Do not add app callbacks, expression
+strings, bootstraps or ordinary app-authored executable JavaScript. Admit inert
+`data-*` metadata and checked query declarations, but reject app-authored
+Datastar execution directives and inline handlers. Keep one DOM writer and
+preserve in-progress drafts. New behavior belongs in a reviewed package or
+explicit host capability; exceptions require separate explicit approval and are
+not ordinary app JavaScript. No npm, package installation or app build scripts.
+Trusted component modules may run only when the host verifies the component
+entrypoint and complete import closure against its managed provider/package
+assembly authority. Provider-emitted metadata modules are included even when no
+browser bootstrap is generated; unrelated app files are never included. An app
+path prefix, artifact self-claim or editable lockfile alone is not that authority. The existing Notifications and Chart Live modules
+are narrowly retained only at explicit Platform-owned app-namespace/path/digest
+records; changed bytes and new exception modules fail admission. This is a
+legacy exception, not a no-app-JavaScript claim. Host Platform JavaScript/
+Datastar remains trusted. Dependency admission is supply-chain governance, not
+a sandbox or removal of ambient browser authority.
 Platform browser JS must not read form metadata, controls or methods through
 named properties: an admitted field may be named action, method or elements.
 Admission rules about nested regions hold in both directions, so a status node

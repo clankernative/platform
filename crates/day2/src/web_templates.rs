@@ -1322,6 +1322,10 @@ fn check_html_policy(
                             _ => unreachable!(),
                         }
                     }
+                    ensure!(
+                        !executable_attribute(attr),
+                        "template_app_executable_directive_forbidden: {attr}"
+                    );
                     if matches!(
                         attr,
                         "data-ui-selected-flag" | "data-ui-checked-flag" | "data-ui-hidden-flag"
@@ -2517,6 +2521,45 @@ mod tests {
         let assets = assets::Catalog::new();
         let (analysis, variants) = analyze(&sources, "pages/live.html", &context, &assets, None)?;
         validate_live_variants(&analysis, &variants)
+    }
+
+    #[test]
+    fn app_datastar_directives_and_dynamic_attribute_names_or_values_are_rejected() {
+        for source in [
+            "<div data-on:click=\"run()\"></div>",
+            "<div DATA-ON:CLICK__ONCE=\"run()\"></div>",
+            "<div data-on-click=\"run()\"></div>",
+            "<div data-init__=\"run()\"></div>",
+            "<div data-effect:refresh=\"run()\"></div>",
+            "<div data-computed:total=\"1 + 2\"></div>",
+            "<div data-signals=\"{}\"></div>",
+            "<input data-bind:value=\"$value\">",
+            "<div data-text=\"{{ title }}\"></div>",
+            "<div data-show=\"{{ title }}\"></div>",
+            "<div data-class:active=\"{{ title }}\"></div>",
+            "<div data-attr:href=\"{{ title }}\"></div>",
+            "<div data-style:color=\"{{ title }}\"></div>",
+            "<img src=\"x\" onerror=\"run()\">",
+            "<script>run()</script>",
+        ] {
+            assert!(check_html(source, None).is_err(), "{source}");
+        }
+        assert!(check_html("<div data-query-field=\"term\"></div>", None).is_ok());
+        let sources = BTreeMap::from([(
+            "pages/live.html".into(),
+            "<div {{ title }}=\"value\"></div>".into(),
+        )]);
+        let context = Type::Record(BTreeMap::from([("title".into(), Type::String)]));
+        assert!(
+            analyze(
+                &sources,
+                "pages/live.html",
+                &context,
+                &assets::Catalog::new(),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

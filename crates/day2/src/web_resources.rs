@@ -18,6 +18,10 @@ const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const WOFF2: &str = "font/woff2";
 const WOFF2_HEADER_BYTES: usize = 48;
+pub const COMPONENT_ENTRYPOINT: &str = "ui-package.js";
+const COMPONENT_RECEIPT: &str = "ui-assembly/receipt-v1";
+const COMPONENT_MODULE_PREFIX: &str = "ui-assembly/module/";
+pub const GENERATED_MODULE_PREFIX: &str = "ui-assembly/generated-module/";
 
 pub type Catalog = BTreeMap<String, Resource>;
 
@@ -332,7 +336,7 @@ impl<'a> Visit<'a> for Imports<'_> {
     }
 }
 
-fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()> {
+fn javascript_imports(source: &str) -> Result<Vec<String>> {
     let allocator = Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
     ensure!(
@@ -352,10 +356,255 @@ fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()
     if let Some(error) = imports.error {
         bail!(error);
     }
-    for specifier in imports.imports {
+    Ok(imports.imports)
+}
+
+fn validate_javascript(source: &str, path: &str, catalog: &Catalog) -> Result<()> {
+    for specifier in javascript_imports(source)? {
         resolve_import(path, &specifier, catalog)?;
     }
     Ok(())
+}
+
+/// Resolve the complete module closure rooted at the host-generated component
+/// entrypoint. This is build-time admission, not a sandbox for browser code.
+pub fn component_closure(directory: &Path, catalog: &Catalog) -> Result<BTreeMap<String, String>> {
+    ensure!(
+        catalog
+            .get(COMPONENT_ENTRYPOINT)
+            .is_some_and(|resource| resource.media_type == JS),
+        "ui_component_entrypoint_missing"
+    );
+    let mut pending = vec![COMPONENT_ENTRYPOINT.to_owned()];
+    let mut closure = BTreeMap::new();
+    while let Some(path) = pending.pop() {
+        if closure.contains_key(&path) {
+            continue;
+        }
+        let resource = catalog.get(&path).context("ui_component_module_missing")?;
+        ensure!(resource.media_type == JS, "ui_component_module_type");
+        let source = String::from_utf8(read_blob(directory, resource)?)?;
+        for specifier in javascript_imports(&source)? {
+            if specifier == "/assets/platform/navigation.js" {
+                continue;
+            }
+            let resolved = resolve_module_path(&path, &specifier, catalog)?;
+            pending.push(resolved);
+        }
+        closure.insert(path, resource.digest.clone());
+    }
+    Ok(closure)
+}
+
+fn resolve_module_path(path: &str, specifier: &str, catalog: &Catalog) -> Result<String> {
+    ensure!(
+        (specifier.starts_with("./") || specifier.starts_with("../"))
+            && !specifier.contains(['\\', '%', '?', '#']),
+        "ui_import_not_admitted: {specifier:?}"
+    );
+    let base = url::Url::parse(&format!("https://ui.invalid/_admitted/{path}"))?;
+    let resolved = base.join(specifier)?;
+    let relative = resolved
+        .path()
+        .strip_prefix("/_admitted/")
+        .context("ui_import_path_escape")?;
+    ensure!(
+        media_type(relative)? == JS && catalog.contains_key(relative),
+        "ui_import_unresolved: {specifier:?} from {path}"
+    );
+    Ok(relative.to_owned())
+}
+
+/// Select only executable resources actually emitted by the pinned provider.
+/// Package metadata may be JavaScript without an autoload entrypoint. Neither a
+/// reserved filename nor another app-authored file becomes trusted transitively.
+pub fn generated_component_modules(
+    directory: &Path,
+    catalog: &Catalog,
+    sources: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let modules: BTreeMap<_, _> = sources
+        .iter()
+        .filter_map(|(key, hash)| {
+            key.strip_prefix(GENERATED_MODULE_PREFIX)
+                .map(|path| (path.to_owned(), hash.clone()))
+        })
+        .collect();
+    ensure!(
+        modules.iter().all(|(path, hash)| {
+            catalog
+                .get(path)
+                .is_some_and(|resource| resource.media_type == JS && resource.digest == *hash)
+                && sources.get(&format!("app/ui/{path}")) == Some(hash)
+        }),
+        "ui_component_provider_output_mismatch"
+    );
+    if modules.contains_key(COMPONENT_ENTRYPOINT) {
+        let closure = component_closure(directory, catalog)?;
+        ensure!(
+            closure
+                .iter()
+                .all(|(path, hash)| modules.get(path) == Some(hash)),
+            "ui_component_import_not_generated_by_pinned_provider"
+        );
+    }
+    Ok(modules)
+}
+
+/// Host build receipt binding the managed package/provider and exact generated
+/// executable set. The native build source manifest seals these entries.
+fn component_authority(sources: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+    let mut authority = BTreeMap::new();
+    for key in [
+        "ui-provider/executable",
+        "ui/package",
+        "ui-provider/input-lock",
+    ] {
+        authority.insert(
+            key.to_owned(),
+            sources
+                .get(key)
+                .context("ui_component_authority_missing")?
+                .clone(),
+        );
+    }
+    for (key, value) in sources {
+        if key.starts_with("ui-source/app/ui/") || key.starts_with(GENERATED_MODULE_PREFIX) {
+            authority.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(authority)
+}
+
+pub fn component_receipt(
+    namespace: &str,
+    closure: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, String>,
+) -> Result<String> {
+    ensure!(!closure.is_empty(), "ui_component_closure_empty");
+    ensure!(
+        closure.iter().all(|(path, hash)| {
+            sources.get(&format!("{GENERATED_MODULE_PREFIX}{path}")) == Some(hash)
+        }),
+        "ui_component_module_not_generated_by_pinned_provider"
+    );
+    let authority = component_authority(sources)?;
+    Ok(digest(&serde_json::to_vec(&(
+        namespace,
+        COMPONENT_ENTRYPOINT,
+        authority,
+        closure,
+    ))?))
+}
+
+pub fn bind_component_receipt(
+    namespace: &str,
+    closure: &BTreeMap<String, String>,
+    sources: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let receipt = component_receipt(namespace, closure, sources)?;
+    sources.retain(|key, _| !key.starts_with(COMPONENT_MODULE_PREFIX));
+    for (path, hash) in closure {
+        sources.insert(format!("{COMPONENT_MODULE_PREFIX}{path}"), hash.clone());
+    }
+    sources.insert(COMPONENT_RECEIPT.into(), receipt);
+    Ok(())
+}
+
+/// Validate app JavaScript admission using exact named legacy exceptions and
+/// the host-produced component closure receipt; no path-prefix grants exist.
+pub fn validate_executable_policy(
+    namespace: &str,
+    script_entrypoint: &str,
+    catalog: &Catalog,
+    sources: &BTreeMap<String, String>,
+) -> Result<()> {
+    let javascript = catalog
+        .iter()
+        .filter(|(_, resource)| resource.media_type == JS)
+        .collect::<BTreeMap<_, _>>();
+    if script_entrypoint.is_empty() && javascript.is_empty() {
+        ensure!(
+            !sources.contains_key(COMPONENT_RECEIPT),
+            "ui_component_receipt_without_modules"
+        );
+        return Ok(());
+    }
+    let mut approved = BTreeMap::new();
+    for (path, resource) in &javascript {
+        if approved_legacy_module(namespace, path, &resource.digest) {
+            approved.insert((*path).clone(), resource.digest.clone());
+        }
+    }
+    let expected_legacy = match (namespace, script_entrypoint) {
+        ("notifications", "notifications.js") => vec!["notifications.js"],
+        ("chart-live", "app.js") => vec!["app.js", "chart-navigation.js"],
+        _ => Vec::new(),
+    };
+    ensure!(
+        approved
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected_legacy.iter().copied().collect(),
+        "legacy_app_javascript_exception_set_mismatch"
+    );
+    let has_component = sources.contains_key(COMPONENT_RECEIPT);
+    if has_component {
+        let closure = sources
+            .iter()
+            .filter_map(|(key, value)| {
+                key.strip_prefix(COMPONENT_MODULE_PREFIX)
+                    .map(|path| (path.to_owned(), value.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        ensure!(
+            !closure.is_empty()
+                && closure.iter().all(|(path, hash)| {
+                    javascript
+                        .get(path)
+                        .is_some_and(|resource| resource.digest == *hash)
+                        && sources.get(&format!("app/ui/{path}")) == Some(hash)
+                }),
+            "ui_component_module_receipt_mismatch"
+        );
+        ensure!(
+            component_receipt(namespace, &closure, sources)? == sources[COMPONENT_RECEIPT],
+            "ui_component_receipt_invalid"
+        );
+        approved.extend(closure);
+    }
+    ensure!(
+        javascript.keys().all(|path| approved.contains_key(*path)),
+        "unapproved_app_executable_resource"
+    );
+    ensure!(
+        script_entrypoint.is_empty()
+            || catalog.get(script_entrypoint).is_some_and(|resource| {
+                approved_legacy_module(namespace, script_entrypoint, &resource.digest)
+            }),
+        "application JavaScript entrypoint is not an approved unchanged module"
+    );
+    Ok(())
+}
+
+fn approved_legacy_module(namespace: &str, path: &str, hash: &str) -> bool {
+    matches!(
+        (namespace, path, hash),
+        (
+            "notifications",
+            "notifications.js",
+            "sha256:4ae41088b340a78bf3ba53e56d5163805448b5d330330401c8e267cc3820857e"
+        ) | (
+            "chart-live",
+            "app.js",
+            "sha256:a200c72e74c8d38d888829979b8619b36cb145a6aaa315578d63a97da09d7aca"
+        ) | (
+            "chart-live",
+            "chart-navigation.js",
+            "sha256:156b19235681b17e1bc4f36628435c2d2b12b58e38ad75e1889bba824f96115f"
+        )
+    )
 }
 
 pub fn validate_inline_style(source: &str) -> Result<()> {
@@ -514,4 +763,230 @@ fn css_tokens<'i>(
 
 fn validate_font_url(stylesheet: Option<(&str, &Catalog)>, value: &str) -> bool {
     stylesheet.is_some_and(|(path, catalog)| resolve_font(path, value, catalog).is_ok())
+}
+
+#[cfg(test)]
+mod executable_policy_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn js(digest: &str) -> Resource {
+        Resource {
+            digest: digest.to_owned(),
+            media_type: JS.into(),
+            bytes: 1,
+        }
+    }
+
+    #[test]
+    fn retained_legacy_modules_are_exact_namespace_path_digest_approvals() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        for (app, path, expected) in [
+            (
+                "notifications",
+                "ui/notifications.js",
+                "sha256:4ae41088b340a78bf3ba53e56d5163805448b5d330330401c8e267cc3820857e",
+            ),
+            (
+                "chart-live",
+                "ui/app.js",
+                "sha256:a200c72e74c8d38d888829979b8619b36cb145a6aaa315578d63a97da09d7aca",
+            ),
+            (
+                "chart-live",
+                "ui/chart-navigation.js",
+                "sha256:156b19235681b17e1bc4f36628435c2d2b12b58e38ad75e1889bba824f96115f",
+            ),
+        ] {
+            assert_eq!(
+                digest(&std::fs::read(examples.join(app).join(path)).unwrap()),
+                expected
+            );
+        }
+        let notifications = BTreeMap::from([(
+            "notifications.js".into(),
+            js("sha256:4ae41088b340a78bf3ba53e56d5163805448b5d330330401c8e267cc3820857e"),
+        )]);
+        let sources = BTreeMap::new();
+        assert!(
+            validate_executable_policy(
+                "notifications",
+                "notifications.js",
+                &notifications,
+                &sources
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_executable_policy("other-app", "notifications.js", &notifications, &sources)
+                .is_err()
+        );
+        let changed = BTreeMap::from([(
+            "notifications.js".into(),
+            js("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )]);
+        assert!(
+            validate_executable_policy("notifications", "notifications.js", &changed, &sources)
+                .is_err()
+        );
+        let extra = BTreeMap::from([
+            (
+                "notifications.js".into(),
+                notifications["notifications.js"].clone(),
+            ),
+            (
+                "unused.js".into(),
+                js("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ),
+        ]);
+        assert!(
+            validate_executable_policy("notifications", "notifications.js", &extra, &sources)
+                .is_err()
+        );
+        assert!(
+            validate_executable_policy("notifications", "unused.js", &notifications, &sources)
+                .is_err()
+        );
+        let chart = BTreeMap::from([
+            (
+                "app.js".into(),
+                js("sha256:a200c72e74c8d38d888829979b8619b36cb145a6aaa315578d63a97da09d7aca"),
+            ),
+            (
+                "chart-navigation.js".into(),
+                js("sha256:156b19235681b17e1bc4f36628435c2d2b12b58e38ad75e1889bba824f96115f"),
+            ),
+        ]);
+        assert!(validate_executable_policy("chart-live", "app.js", &chart, &sources).is_ok());
+        assert!(validate_executable_policy("chart-live", "", &chart, &sources).is_err());
+    }
+
+    #[test]
+    fn component_receipt_binds_entrypoint_closure_and_managed_authority() -> Result<()> {
+        let temp = tempdir()?;
+        let ui = temp.path().join("source");
+        std::fs::create_dir_all(&ui)?;
+        std::fs::write(ui.join("ui-package.js"), "import './component.js';")?;
+        std::fs::write(ui.join("component.js"), "export const ready = true;")?;
+        let blob_root = temp.path().join("artifact");
+        let catalog = package(&ui, &blob_root)?;
+        let closure = component_closure(&blob_root, &catalog)?;
+        assert_eq!(
+            closure.keys().cloned().collect::<Vec<_>>(),
+            vec!["component.js", "ui-package.js"]
+        );
+
+        let mut sources = BTreeMap::from([
+            (
+                "ui-provider/executable".into(),
+                digest(b"reviewed provider"),
+            ),
+            ("ui/package".into(), digest(b"reviewed package")),
+            ("ui-provider/input-lock".into(), digest(b"captured lock")),
+        ]);
+        for (path, hash) in &closure {
+            sources.insert(format!("app/ui/{path}"), hash.clone());
+        }
+        // Authority-looking package keys plus an app-authored entrypoint are
+        // insufficient: every executable must have a host-recorded provider output.
+        assert!(bind_component_receipt("example", &closure, &mut sources).is_err());
+        for (path, hash) in &closure {
+            sources.insert(format!("{GENERATED_MODULE_PREFIX}{path}"), hash.clone());
+        }
+        bind_component_receipt("example", &closure, &mut sources)?;
+        validate_executable_policy("example", "", &catalog, &sources)?;
+        let mut with_unused = catalog.clone();
+        with_unused.insert(
+            "unused.js".into(),
+            Resource {
+                digest: digest(b"unused module"),
+                media_type: JS.into(),
+                bytes: b"unused module".len() as u64,
+            },
+        );
+        assert!(validate_executable_policy("example", "", &with_unused, &sources).is_err());
+
+        let mut forged_source = sources.clone();
+        forged_source.remove(&format!("{GENERATED_MODULE_PREFIX}component.js"));
+        assert!(validate_executable_policy("example", "", &catalog, &forged_source).is_err());
+        forged_source.insert(
+            format!("{GENERATED_MODULE_PREFIX}component.js"),
+            digest(b"different provider output"),
+        );
+        assert!(validate_executable_policy("example", "", &catalog, &forged_source).is_err());
+        let mut fake = BTreeMap::from([("ui-provider/executable".into(), digest(b"self claimed"))]);
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        fake = sources.clone();
+        fake.insert("ui-assembly/receipt-v1".into(), digest(b"fake receipt"));
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        fake = sources.clone();
+        fake.insert(
+            "ui-assembly/module/component.js".into(),
+            digest(b"changed module"),
+        );
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        fake = sources.clone();
+        fake.remove("ui-assembly/module/ui-package.js");
+        fake.insert(
+            "ui-assembly/module/components/ui-package.js".into(),
+            digest(b"fake entrypoint"),
+        );
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        fake = sources.clone();
+        fake.insert("ui/package".into(), digest(b"different reviewed package"));
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        fake = sources.clone();
+        fake.remove("ui-assembly/receipt-v1");
+        fake.insert(
+            "ui-provider/executable".into(),
+            digest(b"self claimed provider"),
+        );
+        assert!(validate_executable_policy("example", "", &catalog, &fake).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn actual_provider_metadata_is_admitted_without_granting_an_app_script_entrypoint() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let hash = digest(b"export const catalog = {};");
+        let catalog = BTreeMap::from([("clanker-properties.js".into(), js(&hash))]);
+        let mut sources = BTreeMap::from([
+            (
+                "ui-provider/executable".into(),
+                digest(b"reviewed provider"),
+            ),
+            ("ui/package".into(), digest(b"reviewed package")),
+            ("ui-provider/input-lock".into(), digest(b"captured lock")),
+            ("app/ui/clanker-properties.js".into(), hash.clone()),
+            (
+                format!("{GENERATED_MODULE_PREFIX}clanker-properties.js"),
+                hash,
+            ),
+        ]);
+        let modules = generated_component_modules(temp.path(), &catalog, &sources)?;
+        bind_component_receipt("example", &modules, &mut sources)?;
+        validate_executable_policy("example", "", &catalog, &sources)?;
+        assert!(
+            validate_executable_policy("example", "clanker-properties.js", &catalog, &sources)
+                .is_err()
+        );
+        let mut forged = catalog;
+        forged.insert(
+            "ui-package.js".into(),
+            js(&digest(b"app-authored entrypoint")),
+        );
+        assert!(validate_executable_policy("example", "", &forged, &sources).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn component_imports_must_resolve_before_receipt_creation() -> Result<()> {
+        let temp = tempdir()?;
+        let ui = temp.path().join("source");
+        std::fs::create_dir_all(&ui)?;
+        std::fs::write(ui.join("ui-package.js"), "import './missing.js';")?;
+        assert!(package(&ui, &temp.path().join("artifact")).is_err());
+        Ok(())
+    }
 }
