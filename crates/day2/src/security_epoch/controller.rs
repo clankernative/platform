@@ -146,7 +146,9 @@ fn run_inner(
     }
     evidence.enter(FailurePhase::FirstHolder);
     let stage = timings
-        .measure(Operation::FirstRole, || role.begin_current_stage())
+        .measure(Operation::FirstRole, || {
+            role.begin_initial_first_holder_stage()
+        })
         .map_err(|error| PreparationFailure::at(PreparationStep::FirstRole, error));
     evidence.preparation_timings(timings.summary());
     let result = InitialStorageContinuity::establish(file, holder_listener, stage?, &timings);

@@ -186,7 +186,7 @@ impl InitialStorageContinuity {
                 .measure(Operation::FirstReady, || listener.prepare(&mut stage))
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstReady, error))?;
             let phase = timings
-                .measure(Operation::FirstFile, || pending.acquire(stage))
+                .measure(Operation::FirstFile, || pending.acquire_first_holder(stage))
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstFile, error))?;
             timings.measure(Operation::FirstExchange, || {
                 let server = rendezvous

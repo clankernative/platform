@@ -3,7 +3,8 @@
 //!
 //! The signing root is operator-owned. Parsed certificates are DATA. A stage
 //! additionally owns the original received kernel process handle, current native
-//! self observations and the one original five-second acquisition.
+//! self observations and one original bounded acquisition. Ordinary role work
+//! remains five seconds; only the closed first-holder handshake uses ten.
 
 #[cfg(target_os = "linux")]
 mod birth;
@@ -68,6 +69,7 @@ pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, SameEnrolledOwner,
 };
+pub(in crate::security_epoch) use protocol::StagePurpose;
 
 pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]

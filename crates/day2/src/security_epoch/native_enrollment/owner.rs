@@ -9,7 +9,7 @@ use crate::security_epoch::native_enrollment::protocol;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
     policy::EnrollmentPolicy,
-    protocol::{IssuerCertificate, KeyOwner},
+    protocol::{IssuerCertificate, KeyOwner, StagePurpose},
 };
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::{
@@ -46,6 +46,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     // One-way refusal gate, never a holder permission or restored DATA flag.
     // Even a later fresh stage cannot restart an unknown initial exchange.
     initial_holder_attempted: bool,
+    initial_handshake_attempted: bool,
     serving_attempted: bool,
     #[cfg(target_os = "linux")]
     issuer: IssuerReceipt,
@@ -58,6 +59,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
 
 pub(crate) struct EnrolledRoleStage<'a> {
     owner: &'a mut EnrolledProcessRoleOwner,
+    purpose: StagePurpose,
     acquisition: NativeAcquisition,
     deadline: Duration,
     #[cfg(target_os = "linux")]
@@ -117,8 +119,14 @@ impl EnrolledProcessRoleOwner {
             let key = KeyOwner::generate()?;
             let mut current =
                 SelfSnapshot::acquire(policy.code(role), &mut acquisition, &HashCosts::disabled())?;
-            let (certificate, grant, issuer, _nonce_peer, _channel) =
-                exchange(&policy, role, &key, &mut current, &mut acquisition)?;
+            let (certificate, grant, issuer, _nonce_peer, _channel) = exchange(
+                &policy,
+                role,
+                StagePurpose::CurrentRole,
+                &key,
+                &mut current,
+                &mut acquisition,
+            )?;
             let incarnation = Digest::of(&(
                 "day2-native-enrollment-owner-v1",
                 certificate.digest()?,
@@ -139,6 +147,7 @@ impl EnrolledProcessRoleOwner {
                 thread: std::thread::current().id(),
                 refused: false,
                 initial_holder_attempted: false,
+                initial_handshake_attempted: false,
                 serving_attempted: false,
                 issuer,
                 binding: grant.data.runtime,
@@ -154,27 +163,53 @@ impl EnrolledProcessRoleOwner {
     }
 
     pub(crate) fn begin_current_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
+        self.begin_stage(StagePurpose::CurrentRole)
+    }
+
+    /// Only the original Ready/file/first-peer composition calls this entry.
+    /// Authentication still spends at most five seconds of the SAME origin.
+    pub(crate) fn begin_initial_first_holder_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
+        self.begin_stage(StagePurpose::InitialFirstHolder)
+    }
+
+    fn begin_stage(&mut self, purpose: StagePurpose) -> Result<EnrolledRoleStage<'_>> {
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = purpose;
             self.refused = true;
             anyhow::bail!("native_enrollment_platform_unsupported")
         }
         #[cfg(target_os = "linux")]
         {
             let result = (|| {
-                let mut acquisition = NativeAcquisition::begin(5)?;
+                let mut acquisition = match purpose {
+                    StagePurpose::CurrentRole => NativeAcquisition::begin(5)?,
+                    StagePurpose::InitialFirstHolder => {
+                        NativeAcquisition::begin_initial_first_holder()?
+                    }
+                };
+                let (_, ceiling) = acquisition.interval_data()?;
+                let mut authentication = acquisition.narrow(5, ceiling)?;
                 self.check_local()?;
+                purpose.require_role(self.role)?;
+                if purpose == StagePurpose::InitialFirstHolder {
+                    ensure!(
+                        !self.initial_handshake_attempted,
+                        "storage_peer_initial_handshake_already_attempted"
+                    );
+                    self.initial_handshake_attempted = true;
+                }
                 #[cfg(target_os = "linux")]
                 {
                     ensure!(
-                        super::birth::load_policy(&mut acquisition)? == self.policy,
+                        super::birth::load_policy(&mut authentication)? == self.policy,
                         "native_enrollment_operator_selection_changed"
                     );
-                    self.issuer.check_live(&mut acquisition)?;
+                    self.issuer.check_live(&mut authentication)?;
                     self.certificate.verify(&self.policy)?;
                     let mut current = SelfSnapshot::acquire(
                         self.policy.code(self.role),
-                        &mut acquisition,
+                        &mut authentication,
                         &HashCosts::disabled(),
                     )?;
                     ensure!(
@@ -184,16 +219,25 @@ impl EnrolledProcessRoleOwner {
                     let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
                         &self.policy,
                         self.role,
+                        purpose,
                         &self.key,
                         &mut current,
-                        &mut acquisition,
+                        &mut authentication,
                     )?;
                     ensure!(
                         certificate == self.certificate && grant.data.runtime == self.binding,
                         "native_enrollment_incarnation_or_runtime_changed"
                     );
-                    self.issuer.check_live(&mut acquisition)?;
-                    Ok((acquisition, current, grant, grant_peer, nonce_peer, channel))
+                    self.issuer.check_live(&mut authentication)?;
+                    Ok((
+                        acquisition,
+                        authentication,
+                        current,
+                        grant,
+                        grant_peer,
+                        nonce_peer,
+                        channel,
+                    ))
                 }
             })();
             if result.is_err() {
@@ -201,10 +245,19 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (acquisition, current, grant, grant_peer, nonce_peer, channel) = result?;
+                let (
+                    acquisition,
+                    mut authentication,
+                    current,
+                    grant,
+                    grant_peer,
+                    nonce_peer,
+                    channel,
+                ) = result?;
                 let deadline = Duration::from_nanos(grant.data.deadline_ns);
                 let mut stage = EnrolledRoleStage {
                     owner: self,
+                    purpose,
                     acquisition,
                     deadline,
                     current,
@@ -214,6 +267,13 @@ impl EnrolledProcessRoleOwner {
                     current_grant: grant,
                 };
                 stage.check()?;
+                // A ten-second peer interval never gives role authentication
+                // more than its original five-second acquisition. No reset.
+                if let Err(error) = authentication.remaining() {
+                    stage.owner.refused = true;
+                    stage.acquisition.refuse();
+                    return Err(error);
+                }
                 Ok(stage)
             }
         }
@@ -286,7 +346,58 @@ impl EnrolledRoleStage<'_> {
         max_lease_seconds: u32,
     ) -> Result<NativeAcquisition> {
         let result = (|| {
+            self.require_purpose(StagePurpose::CurrentRole)?;
             self.check()?;
+            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn require_purpose(
+        &mut self,
+        purpose: StagePurpose,
+    ) -> Result<()> {
+        if self.purpose != purpose {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+            anyhow::bail!("native_enrollment_stage_purpose_changed");
+        }
+        self.check()
+    }
+
+    pub(in crate::security_epoch) fn initial_first_holder_acquisition(
+        &mut self,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.require_purpose(StagePurpose::InitialFirstHolder)?;
+            let seconds = super::super::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
+                .as_secs()
+                .try_into()?;
+            let child = self.acquisition.narrow(seconds, self.deadline)?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    /// The initial file still honors a shorter configured ceiling. Same
+    /// origin, signed ceiling, checks and permanent refusal as peer I/O.
+    pub(in crate::security_epoch) fn initial_first_holder_file_acquisition(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.require_purpose(StagePurpose::InitialFirstHolder)?;
             let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
             self.check()?;
             Ok(child)
@@ -397,7 +508,7 @@ impl EnrolledOriginalClock {
                     && self.incarnation == stage.owner.incarnation,
                 "native_enrollment_original_clock_owner"
             );
-            stage.check()?;
+            stage.require_purpose(StagePurpose::CurrentRole)?;
             #[cfg(target_os = "linux")]
             self.anchors.check(stage)?;
             let now = boottime()?;
@@ -496,6 +607,7 @@ impl ClockAnchors {
 fn exchange(
     policy: &EnrollmentPolicy,
     role: NativeRole,
+    purpose: StagePurpose,
     key: &KeyOwner,
     current: &mut SelfSnapshot,
     acquisition: &mut NativeAcquisition,
@@ -514,6 +626,7 @@ fn exchange(
         &Packet::StageHello {
             policy: policy_hash.clone(),
             role,
+            purpose,
             public_key: public_key.clone(),
             request: request.clone(),
         },
@@ -528,12 +641,20 @@ fn exchange(
         anyhow::bail!("native_enrollment_stage_order")
     };
     ensure!(echoed == request, "native_enrollment_request_nonce");
-    let binding = (&policy_hash, role, &public_key, &request, &challenge);
+    let binding = (
+        &policy_hash,
+        role,
+        purpose,
+        &public_key,
+        &request,
+        &challenge,
+    );
     let signature = key.sign("role-bind", &binding)?;
     channel.send(
         &Packet::StageBind {
             policy: policy_hash.clone(),
             role,
+            purpose,
             public_key: public_key.clone(),
             request: request.clone(),
             challenge: challenge.clone(),
@@ -552,6 +673,7 @@ fn exchange(
         stage.data.issuer == certificate.digest()?
             && stage.data.policy == policy_hash
             && stage.data.role == role
+            && stage.data.purpose == purpose
             && stage.data.public_key == public_key
             && stage.data.request == request
             && stage.data.challenge == challenge
@@ -567,7 +689,8 @@ fn exchange(
     let now = acquisition.sample()?.elapsed;
     ensure!(
         stage.data.origin_ns < stage.data.deadline_ns
-            && stage.data.deadline_ns - stage.data.origin_ns <= 5_000_000_000
+            && u128::from(stage.data.deadline_ns - stage.data.origin_ns)
+                <= purpose.limit().as_nanos()
             && Duration::from_nanos(stage.data.origin_ns) <= now
             && now < Duration::from_nanos(stage.data.deadline_ns),
         "native_enrollment_stage_interval"

@@ -188,6 +188,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, Statement, KeyOwn
         issuer: certificate.digest().unwrap(),
         policy: policy.digest().unwrap(),
         role,
+        purpose: StagePurpose::CurrentRole,
         public_key: key.public(),
         challenge: Digest::new(b"fixture-role-challenge"),
         request: Digest::new(b"fixture-role-request"),

@@ -9,7 +9,7 @@ use crate::security_epoch::{
     credential_material::CredentialMaterial,
     identity_protocol,
     native_clock::NativeAcquisition,
-    native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner},
+    native_enrollment::{EnrolledRoleStage, NativeRole, SameEnrolledOwner, StagePurpose},
     transport::{NativeHttp, Route},
 };
 use anyhow::{Context, Result, ensure};
@@ -123,9 +123,16 @@ impl<'role> ProviderReader<'role> {
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         timings: Timings,
+        purpose: StagePurpose,
     ) -> Result<Self> {
+        stage.require_purpose(purpose)?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let mut acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+        let mut acquisition = match purpose {
+            StagePurpose::CurrentRole => stage.narrow_io_acquisition(store.max_lease_seconds)?,
+            StagePurpose::InitialFirstHolder => {
+                stage.initial_first_holder_file_acquisition(store.max_lease_seconds)?
+            }
+        };
         let selected = profile(&mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         selected
@@ -441,7 +448,8 @@ impl<'role> NativeVolumeObservation<'role> {
         store: &EpochStore,
         timings: Timings,
     ) -> Result<Self> {
-        let mut reader = ProviderReader::acquire(stage, policy, store, timings)?;
+        let mut reader =
+            ProviderReader::acquire(stage, policy, store, timings, StagePurpose::CurrentRole)?;
         let device_name = reader.observe_provider()?;
         reader.check()?;
         #[cfg(not(target_os = "linux"))]
@@ -769,13 +777,34 @@ fn ext4_internal_journal(bytes: &[u8]) -> Result<()> {
 impl NativeVolumeContinuity {
     pub(super) fn begin_current<'volume, 'role>(
         &'volume mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        self.begin_phase(stage, StagePurpose::CurrentRole)
+    }
+
+    pub(super) fn begin_first_holder<'volume, 'role>(
+        &'volume mut self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        self.begin_phase(stage, StagePurpose::InitialFirstHolder)
+    }
+
+    fn begin_phase<'volume, 'role>(
+        &'volume mut self,
         mut stage: EnrolledRoleStage<'role>,
+        purpose: StagePurpose,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let result = (|| {
+            stage.require_purpose(purpose)?;
             ensure!(self.resources.valid, "storage_native_volume_refused");
             self.owner.check(&mut stage)?;
-            let mut reader =
-                ProviderReader::acquire(stage, &self.policy, &self.store, Timings::disabled())?;
+            let mut reader = ProviderReader::acquire(
+                stage,
+                &self.policy,
+                &self.store,
+                Timings::disabled(),
+                purpose,
+            )?;
             ensure!(
                 reader.profile == self.profile,
                 "storage_native_profile_changed"

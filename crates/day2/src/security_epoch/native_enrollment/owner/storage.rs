@@ -83,7 +83,7 @@ impl EnrolledRoleStage<'_> {
         let result = (|| {
             self.check()?;
             ensure!(
-                body.sender_role() == self.owner.role,
+                body.sender_role() == self.owner.role && body.stage_purpose() == self.purpose,
                 "storage_peer_local_sender_role"
             );
             let sender = self.storage_statement()?.digest()?;
@@ -169,6 +169,7 @@ impl EnrolledRoleStage<'_> {
                 &self.owner.certificate,
                 kernel_process,
                 acquisition.sample()?.elapsed,
+                self.purpose,
             )?;
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");
@@ -208,6 +209,7 @@ impl EnrolledRoleStage<'_> {
                 NativeRole::AppHost,
                 observed,
                 acquisition.sample()?.elapsed,
+                self.purpose,
             )?;
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");

@@ -4,7 +4,7 @@
 use super::{
     NativeRole, StoragePeerPurpose,
     policy::{EnrollmentPolicy, decode_key},
-    protocol::{self, IssuerCertificate, ProcessData, SignedStage},
+    protocol::{self, IssuerCertificate, ProcessData, SignedStage, StagePurpose},
 };
 use crate::security_epoch::PreparedFileProjection;
 use anyhow::{Result, ensure};
@@ -21,14 +21,19 @@ pub(in crate::security_epoch::native_enrollment) struct OriginalInterval {
 }
 
 impl OriginalInterval {
-    pub(super) fn validate(&self, now: Duration, issuer_deadline_ns: u64) -> Result<()> {
+    pub(super) fn validate(
+        &self,
+        now: Duration,
+        issuer_deadline_ns: u64,
+        purpose: StagePurpose,
+    ) -> Result<()> {
         let origin = Duration::from_nanos(self.origin_ns);
         let deadline = Duration::from_nanos(self.deadline_ns);
         ensure!(
             origin <= now
                 && now < deadline
                 && deadline > origin
-                && deadline - origin <= Duration::from_secs(5)
+                && deadline - origin <= purpose.limit()
                 && self.deadline_ns <= issuer_deadline_ns,
             "storage_peer_original_interval"
         );
@@ -111,6 +116,7 @@ impl StageStatement {
         expected_role: NativeRole,
         message_process: &ProcessData,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
         ensure!(
             self.stage.data.process == *message_process,
@@ -122,6 +128,7 @@ impl StageStatement {
             expected_role,
             message_process.process,
             now,
+            purpose,
         )
     }
 
@@ -135,6 +142,7 @@ impl StageStatement {
         local_issuer: &IssuerCertificate,
         kernel_process: u32,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
         self.validate_sender(
             policy,
@@ -142,6 +150,7 @@ impl StageStatement {
             NativeRole::EpochController,
             kernel_process,
             now,
+            purpose,
         )
     }
 
@@ -152,13 +161,16 @@ impl StageStatement {
         expected_role: NativeRole,
         kernel_process: u32,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
+        purpose.require_role(expected_role)?;
         self.certificate.verify(policy)?;
         ensure!(
             self.certificate == *local_issuer
                 && self.stage.data.issuer == self.certificate.digest()?
                 && self.stage.data.policy == policy.digest()?
                 && self.stage.data.role == expected_role
+                && self.stage.data.purpose == purpose
                 && self.stage.data.process.process == kernel_process
                 && self.stage.data.process.code == *policy.code(expected_role),
             "storage_peer_role_issuer_process"
@@ -170,14 +182,15 @@ impl StageStatement {
             origin <= now
                 && now < deadline
                 && deadline > origin
-                && deadline - origin <= Duration::from_secs(5),
+                && deadline - origin <= purpose.limit(),
             "storage_peer_signed_stage_interval"
         );
         ensure!(
             self.original.origin_ns <= self.stage.data.origin_ns,
             "storage_peer_original_origin_changed"
         );
-        self.original.validate(now, self.stage.data.deadline_ns)?;
+        self.original
+            .validate(now, self.stage.data.deadline_ns, purpose)?;
         protocol::verify(
             &self.certificate.data.public_key,
             "role-stage",
@@ -332,6 +345,25 @@ pub(super) enum CompletionKind {
 }
 
 impl Body {
+    pub(super) fn stage_purpose(&self) -> StagePurpose {
+        match self {
+            Self::InitialReady { .. }
+            | Self::Hello { .. }
+            | Self::Offer { .. }
+            | Self::Confirm { .. }
+            | Self::Complete { .. }
+            | Self::Accepted { .. } => StagePurpose::InitialFirstHolder,
+            Self::CurrentBeginReady { .. }
+            | Self::CurrentHello { .. }
+            | Self::CurrentOffer { .. }
+            | Self::CurrentAck { .. }
+            | Self::CurrentReady { .. }
+            | Self::CurrentResult { .. }
+            | Self::CurrentConsumed { .. }
+            | Self::CurrentReleased { .. } => StagePurpose::CurrentRole,
+        }
+    }
+
     pub(super) fn matches_completion(&self, expected: &Digest, kind: CompletionKind) -> bool {
         match (self, kind) {
             (Self::CurrentResult { exchange }, CompletionKind::Result)
@@ -431,7 +463,8 @@ impl Message {
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
         ensure!(
             self.sender == statement.digest()?
-                && self.body.sender_role() == statement.stage.data.role,
+                && self.body.sender_role() == statement.stage.data.role
+                && self.body.stage_purpose() == statement.stage.data.purpose,
             "storage_peer_message_sender"
         );
         protocol::verify(

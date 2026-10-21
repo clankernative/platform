@@ -269,7 +269,7 @@ pub(crate) fn prepare_initial_app_storage(
             {
                 connection.wait_ready()?;
                 let mut role = owners.role.try_borrow_mut()?;
-                let mut stage = role.begin_current_stage()?;
+                let mut stage = role.begin_initial_first_holder_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
                 let mut offer = AuthenticatedInitialHolderOffer::receive(*connection, &mut stage)?;
                 let file = AppPreparedFile::observe_existing(

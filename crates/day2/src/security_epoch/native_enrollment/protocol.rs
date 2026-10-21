@@ -46,6 +46,7 @@ pub(super) struct StageData {
     pub issuer: Digest,
     pub policy: Digest,
     pub role: NativeRole,
+    pub purpose: StagePurpose,
     pub public_key: String,
     pub challenge: Digest,
     pub request: Digest,
@@ -53,6 +54,35 @@ pub(super) struct StageData {
     pub runtime: RuntimeBinding,
     pub origin_ns: u64,
     pub deadline_ns: u64,
+}
+
+/// Signed closed stage purpose. A longer initial handshake cannot authorize a
+/// later bootstrap operation, current writer, serving phase or Shell stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum StagePurpose {
+    CurrentRole,
+    InitialFirstHolder,
+}
+
+impl StagePurpose {
+    pub(super) fn limit(self) -> std::time::Duration {
+        match self {
+            Self::CurrentRole => std::time::Duration::from_secs(5),
+            Self::InitialFirstHolder => {
+                crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
+            }
+        }
+    }
+
+    pub(super) fn require_role(self, role: NativeRole) -> Result<()> {
+        ensure!(
+            self == Self::CurrentRole
+                || matches!(role, NativeRole::EpochController | NativeRole::AppHost),
+            "native_enrollment_stage_purpose_role"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +118,7 @@ pub(super) enum Packet {
     StageHello {
         policy: Digest,
         role: NativeRole,
+        purpose: StagePurpose,
         public_key: String,
         request: Digest,
     },
@@ -98,6 +129,7 @@ pub(super) enum Packet {
     StageBind {
         policy: Digest,
         role: NativeRole,
+        purpose: StagePurpose,
         public_key: String,
         request: Digest,
         challenge: Digest,

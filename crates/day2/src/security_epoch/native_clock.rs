@@ -9,6 +9,14 @@ use std::{marker::PhantomData, rc::Rc, time::Duration};
 
 const MAX_ACQUISITION: Duration = Duration::from_secs(5);
 
+/// Only the initial first-holder rendezvous/exchange may spend this original
+/// interval. The composed path estimate was about 6.3s; the actual former 5s run refused
+/// at 5.001s: 2.003s role, 0.017s Ready, 0.985s file, 1.996s peer. The user
+/// selected ten seconds without dropping fresh-content checks. Ordinary acquisitions,
+/// including the role-authentication subphase, remain capped at five seconds.
+pub(in crate::security_epoch) const INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT: Duration =
+    Duration::from_secs(10);
+
 /// One original interval for code, identity, credentials, metadata and epoch I/O.
 /// No production scalar/config constructor, clock replacement or renewal exists.
 pub(crate) struct NativeAcquisition {
@@ -31,12 +39,19 @@ impl NativeAcquisition {
             (1..=60).contains(&max_lease_seconds),
             "epoch_native_acquisition_bound"
         );
+        Self::begin_bounded(MAX_ACQUISITION.min(Duration::from_secs(u64::from(max_lease_seconds))))
+    }
+
+    pub(super) fn begin_initial_first_holder() -> Result<Self> {
+        Self::begin_bounded(INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT)
+    }
+
+    fn begin_bounded(limit: Duration) -> Result<Self> {
         let origin = boottime()?;
         let process = std::process::id();
         let mut nonce = [0_u8; 32];
         crate::host_inputs::Entropy::fill(&crate::host_inputs::SecureEntropy, &mut nonce)?;
         let domain = Digest::of(&("day2-native-epoch-acquisition-v1", process, nonce))?;
-        let limit = MAX_ACQUISITION.min(Duration::from_secs(u64::from(max_lease_seconds)));
         let deadline = origin
             .checked_add(limit)
             .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?;
@@ -272,6 +287,76 @@ mod tests {
             Duration::from_millis(100)
         );
         assert!(original.narrow(1, Duration::from_secs(200)).is_err());
+        assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn initial_handshake_keeps_spent_time_and_ten_second_equality_refusal() {
+        assert_eq!(
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+            Duration::from_secs(10)
+        );
+        assert_eq!(MAX_ACQUISITION, Duration::from_secs(5));
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"initial-first-holder"),
+            std::process::id(),
+            Duration::from_secs(100),
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+        );
+        let mut authentication = original.narrow(5, Duration::from_secs(110)).unwrap();
+        assert_eq!(authentication.domain, original.domain);
+        assert_eq!(authentication.origin, original.origin);
+        authentication.fixture_time = Some(Duration::from_secs(102));
+        authentication.remaining().unwrap();
+        // Model a successful authentication before spending the remaining
+        // original peer interval; a refused child is never a fallback route.
+        original.fixture_time = Some(Duration::from_millis(106_300));
+        let mut peer = original
+            .narrow(
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
+                    .as_secs()
+                    .try_into()
+                    .unwrap(),
+                Duration::from_secs(110),
+            )
+            .unwrap();
+        assert_eq!(peer.domain, original.domain);
+        assert_eq!(peer.origin, original.origin);
+        assert_eq!(peer.remaining().unwrap(), Duration::from_millis(3_700));
+        peer.fixture_time = Some(Duration::from_secs(110));
+        assert!(peer.remaining().is_err());
+        peer.fixture_time = Some(Duration::from_secs(107));
+        assert!(peer.remaining().is_err());
+        original.fixture_time = Some(Duration::from_secs(110));
+        assert!(original.narrow(60, Duration::from_secs(120)).is_err());
+        original.fixture_time = Some(Duration::from_secs(101));
+        assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn initial_file_cap_and_signed_ceiling_only_narrow_the_original_interval() {
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"initial-file-cap"),
+            std::process::id(),
+            Duration::from_secs(100),
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+        );
+        original.fixture_time = Some(Duration::from_secs(102));
+        let mut configured = original.narrow(3, Duration::from_secs(110)).unwrap();
+        assert_eq!(configured.remaining().unwrap(), Duration::from_secs(1));
+        configured.fixture_time = Some(Duration::from_secs(103));
+        assert!(configured.remaining().is_err());
+        let mut signed = original.narrow(30, Duration::from_secs(108)).unwrap();
+        assert_eq!(signed.remaining().unwrap(), Duration::from_secs(6));
+        assert!(original.narrow(0, Duration::from_secs(110)).is_err());
+        assert!(original.remaining().is_err());
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"initial-invalid-file-cap"),
+            std::process::id(),
+            Duration::from_secs(100),
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+        );
+        assert!(original.narrow(61, Duration::from_secs(110)).is_err());
         assert!(original.remaining().is_err());
     }
 

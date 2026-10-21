@@ -3,7 +3,7 @@
 use super::{
     NativeRole,
     policy::{EnrollmentPolicy, decode_key},
-    protocol::{self, IssuerCertificate, ProcessData, SignedStage},
+    protocol::{self, IssuerCertificate, ProcessData, SignedStage, StagePurpose},
     storage_peer_wire::OriginalInterval,
 };
 use anyhow::{Result, ensure};
@@ -72,6 +72,7 @@ impl Statement {
                 && self.stage.data.issuer == issuer.digest()?
                 && self.stage.data.policy == policy.digest()?
                 && self.stage.data.role == role
+                && self.stage.data.purpose == StagePurpose::CurrentRole
                 && self.stage.data.process.process == pid
                 && self.stage.data.process.code == *policy.code(role)
                 && observed.is_none_or(|actual| self.stage.data.process == *actual),
@@ -88,7 +89,8 @@ impl Statement {
                 && self.original.origin_ns <= self.stage.data.origin_ns,
             "serving_peer_signed_interval"
         );
-        self.original.validate(now, self.stage.data.deadline_ns)?;
+        self.original
+            .validate(now, self.stage.data.deadline_ns, StagePurpose::CurrentRole)?;
         protocol::verify(
             &issuer.data.public_key,
             "role-stage",

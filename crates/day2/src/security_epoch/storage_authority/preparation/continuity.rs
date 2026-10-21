@@ -332,8 +332,27 @@ impl<'file> PendingPreparedFilePhase<'file> {
         self,
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.acquire_phase(stage, false)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn acquire_first_holder<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.acquire_phase(stage, true)
+    }
+
+    fn acquire_phase<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+        initial: bool,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
         self.disposition.check()?;
-        let phase = self.volume.begin_current(stage)?;
+        let phase = if initial {
+            self.volume.begin_first_holder(stage)?
+        } else {
+            self.volume.begin_current(stage)?
+        };
         let mut current = CurrentPreparedFilePhase {
             phase,
             selection: self.selection,

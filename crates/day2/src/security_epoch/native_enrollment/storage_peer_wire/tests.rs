@@ -241,6 +241,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, K
         issuer: certificate.digest().unwrap(),
         policy: policy.digest().unwrap(),
         role,
+        purpose: StagePurpose::CurrentRole,
         public_key: key.public(),
         challenge: Digest::new(b"fixture-role-challenge"),
         request: Digest::new(b"fixture-role-request"),
@@ -304,6 +305,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
             NativeRole::AppHost,
             &stage.stage.data.process,
             now,
+            StagePurpose::CurrentRole,
         )
         .unwrap();
     for role in [NativeRole::EpochController, NativeRole::SecurityShell] {
@@ -314,7 +316,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     &stage.certificate,
                     role,
                     &stage.stage.data.process,
-                    now
+                    now,
+                    StagePurpose::CurrentRole,
                 )
                 .is_err()
         );
@@ -328,7 +331,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -341,7 +345,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &issuer,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -353,7 +358,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     &stage.certificate,
                     NativeRole::AppHost,
                     &stage.stage.data.process,
-                    time
+                    time,
+                    StagePurpose::CurrentRole,
                 )
                 .is_err()
         );
@@ -367,7 +373,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -380,7 +387,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -388,7 +396,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
 
 #[test]
 fn storage_messages_bind_original_stage_nonce_step_and_projection() {
-    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let (_policy, stage, key) = initial_fixture(NativeRole::AppHost);
     let hello = signed(
         &stage,
         &key,
@@ -435,8 +443,8 @@ fn storage_messages_bind_original_stage_nonce_step_and_projection() {
 
 #[test]
 fn initial_ready_requires_a_controller_signature_and_closed_record_shape() {
-    let (_, controller, key) = fixture(NativeRole::EpochController);
-    let (_, app, _) = fixture(NativeRole::AppHost);
+    let (_, controller, key) = initial_fixture(NativeRole::EpochController);
+    let (_, app, _) = initial_fixture(NativeRole::AppHost);
     let ready = signed(
         &controller,
         &key,
@@ -489,7 +497,7 @@ fn initial_ready_requires_a_controller_signature_and_closed_record_shape() {
 
 #[test]
 fn initial_hello_must_echo_the_ready_nonce_even_with_a_valid_app_signature() {
-    let (_, app, key) = fixture(NativeRole::AppHost);
+    let (_, app, key) = initial_fixture(NativeRole::AppHost);
     let nonce = Digest::new(b"controller ready");
     let hello = signed(
         &app,
@@ -540,7 +548,7 @@ fn initial_hello_must_echo_the_ready_nonce_even_with_a_valid_app_signature() {
 
 #[test]
 fn first_offer_cannot_replace_the_ready_stage_clock_or_nonce() {
-    let (_, ready, _, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    let (_, ready, _, issuer) = initial_fixture_with_issuer(NativeRole::EpochController);
     let nonce = Digest::new(b"controller ready nonce");
     let exchange = Exchange {
         app_stage: Digest::new(b"app stage"),
@@ -609,7 +617,7 @@ fn transcript_changes_do_not_alias_another_exchange() {
 
 #[test]
 fn storage_wire_refuses_duplicate_unknown_array_and_oversized_records() {
-    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let (_policy, stage, key) = initial_fixture(NativeRole::AppHost);
     let hello = signed(
         &stage,
         &key,
@@ -650,7 +658,7 @@ fn storage_wire_refuses_duplicate_unknown_array_and_oversized_records() {
 
 #[test]
 fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data() {
-    let (policy, controller, key) = fixture(NativeRole::EpochController);
+    let (policy, controller, key) = initial_fixture(NativeRole::EpochController);
     let now = Duration::from_secs(102);
     controller
         .validate_attested_controller(
@@ -658,6 +666,7 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
             &controller.certificate,
             controller.stage.data.process.process,
             now,
+            StagePurpose::InitialFirstHolder,
         )
         .unwrap();
     assert!(
@@ -666,7 +675,8 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
                 &policy,
                 &controller.certificate,
                 controller.stage.data.process.process + 1,
-                now
+                now,
+                StagePurpose::InitialFirstHolder,
             )
             .is_err()
     );
@@ -678,13 +688,14 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
         },
     );
     complete.verify(&controller).unwrap();
-    let (policy, app, _key) = fixture(NativeRole::AppHost);
+    let (policy, app, _key) = initial_fixture(NativeRole::AppHost);
     assert!(
         app.validate_attested_controller(
             &policy,
             &app.certificate,
             app.stage.data.process.process,
-            now
+            now,
+            StagePurpose::InitialFirstHolder,
         )
         .is_err()
     );
@@ -728,7 +739,8 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             &old.certificate,
             NativeRole::AppHost,
             &old.stage.data.process,
-            now
+            now,
+            StagePurpose::CurrentRole,
         )
         .is_err()
     );
@@ -739,6 +751,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             NativeRole::AppHost,
             &old.stage.data.process,
             now,
+            StagePurpose::CurrentRole,
         )
         .unwrap();
     let hello = signed(
@@ -976,4 +989,171 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
         .verify(&controller)
         .is_err()
     );
+}
+
+fn initial_fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
+    let (policy, statement, key, _) = initial_fixture_with_issuer(role);
+    (policy, statement, key)
+}
+
+fn initial_fixture_with_issuer(
+    role: NativeRole,
+) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
+    let (policy, mut statement, key, issuer) = fixture_with_issuer(role);
+    statement.stage.data.purpose = StagePurpose::InitialFirstHolder;
+    statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+    (policy, statement, key, issuer)
+}
+
+#[test]
+fn initial_ten_second_grants_never_authorize_current_or_serving_work() {
+    use crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
+    use crate::security_epoch::native_enrollment::serving_peer_wire::Statement;
+    assert_eq!(StagePurpose::CurrentRole.limit(), Duration::from_secs(5));
+    assert_eq!(
+        StagePurpose::InitialFirstHolder.limit(),
+        INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
+    );
+    assert!(
+        StagePurpose::InitialFirstHolder
+            .require_role(NativeRole::SecurityShell)
+            .is_err()
+    );
+    for role in [NativeRole::AppHost, NativeRole::EpochController] {
+        let (policy, mut statement, _, issuer) = initial_fixture_with_issuer(role);
+        let deadline = Duration::from_nanos(statement.stage.data.origin_ns)
+            + INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
+        statement.stage.data.deadline_ns = deadline.as_nanos().try_into().unwrap();
+        statement.original.deadline_ns = statement.stage.data.deadline_ns;
+        statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+        let check = |statement: &StageStatement, now, purpose| {
+            statement.validate(
+                &policy,
+                &statement.certificate,
+                role,
+                &statement.stage.data.process,
+                now,
+                purpose,
+            )
+        };
+        check(
+            &statement,
+            Duration::from_millis(106_300),
+            StagePurpose::InitialFirstHolder,
+        )
+        .unwrap();
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(110),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(99),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        let serving = Statement {
+            certificate: statement.certificate.clone(),
+            stage: statement.stage.clone(),
+            original: statement.original.clone(),
+        };
+        assert!(
+            serving
+                .validate(
+                    &policy,
+                    &statement.certificate,
+                    role,
+                    statement.stage.data.process.process,
+                    Some(&statement.stage.data.process),
+                    Duration::from_secs(102)
+                )
+                .is_err()
+        );
+        // Even a correctly signed CurrentRole cannot acquire a ten-second span.
+        let mut ordinary = statement.clone();
+        ordinary.stage.data.purpose = StagePurpose::CurrentRole;
+        ordinary.stage.signature = issuer.sign("role-stage", &ordinary.stage.data).unwrap();
+        assert!(
+            check(
+                &ordinary,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        let mut over = statement.clone();
+        over.stage.data.deadline_ns += 1;
+        over.original.deadline_ns += 1;
+        over.stage.signature = issuer.sign("role-stage", &over.stage.data).unwrap();
+        assert!(
+            check(
+                &over,
+                Duration::from_secs(102),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        let mut changed = statement.clone();
+        changed.stage.data.purpose = StagePurpose::CurrentRole;
+        changed.stage.data.deadline_ns = 105_000_000_000;
+        changed.original.deadline_ns = 105_000_000_000;
+        assert!(
+            check(
+                &changed,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        // A short initial grant still cannot be replayed as ordinary authority.
+        let mut short = statement.clone();
+        short.stage.data.deadline_ns = 105_000_000_000;
+        short.original.deadline_ns = 105_000_000_000;
+        short.stage.signature = issuer.sign("role-stage", &short.stage.data).unwrap();
+        check(
+            &short,
+            Duration::from_secs(102),
+            StagePurpose::InitialFirstHolder,
+        )
+        .unwrap();
+        assert!(check(&short, Duration::from_secs(102), StagePurpose::CurrentRole).is_err());
+    }
+}
+
+#[test]
+fn signed_storage_messages_cannot_cross_initial_and_current_purposes() {
+    let (_, initial, key) = initial_fixture(NativeRole::AppHost);
+    let message = signed(
+        &initial,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"current"),
+        },
+    );
+    assert!(message.verify(&initial).is_err());
+    let (_, current, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &current,
+        &key,
+        Body::Hello {
+            app: Box::new(current.clone()),
+            nonce: Digest::new(b"app"),
+            controller_nonce: Digest::new(b"controller"),
+        },
+    );
+    assert!(message.verify(&current).is_err());
 }

@@ -115,12 +115,14 @@ fn serve(
     let Packet::StageHello {
         policy,
         role,
+        purpose,
         public_key,
         request,
     } = packet
     else {
         anyhow::bail!("native_enrollment_role_order")
     };
+    purpose.require_role(role)?;
     ensure!(
         policy == issuer.policy.digest()?,
         "native_enrollment_policy_mismatch"
@@ -154,6 +156,7 @@ fn serve(
     let Packet::StageBind {
         policy: selected,
         role: selected_role,
+        purpose: selected_purpose,
         public_key: selected_key,
         request: echoed,
         challenge: answered,
@@ -165,6 +168,7 @@ fn serve(
     ensure!(
         selected == policy
             && selected_role == role
+            && selected_purpose == purpose
             && selected_key == public_key
             && echoed == request
             && answered == challenge
@@ -174,7 +178,7 @@ fn serve(
     protocol::verify(
         &public_key,
         "role-bind",
-        &(&policy, role, &public_key, &request, &challenge),
+        &(&policy, role, purpose, &public_key, &request, &challenge),
         &signature,
     )?;
     let runtime = costs.measure(Operation::Runtime, || {
@@ -197,11 +201,17 @@ fn serve(
         acquisition,
         &costs.hashes(Subject::Requester),
     )?;
-    let (origin, deadline) = acquisition.interval_data()?;
+    let (origin, _) = acquisition.interval_data()?;
+    // Serving this request still has the original five-second issuer budget.
+    // Only a signed initial-holder grant carries the longer peer lifetime.
+    let deadline = origin
+        .checked_add(purpose.limit())
+        .ok_or_else(|| anyhow::anyhow!("native_enrollment_stage_interval_overflow"))?;
     let data = StageData {
         issuer: issuer.certificate.digest()?,
         policy,
         role,
+        purpose,
         public_key: public_key.clone(),
         challenge,
         request,
