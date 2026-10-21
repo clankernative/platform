@@ -264,7 +264,7 @@ impl<W: Write> Recorder<W> {
         };
         let json = serde_json::to_string(&record)?;
         anyhow::ensure!(
-            PREFIX.len() + json.len() + 1 <= RECORD_BYTES,
+            PREFIX.len() + json.len() < RECORD_BYTES,
             "native_issuer_cost_record_bound"
         );
         self.output
