@@ -333,6 +333,103 @@ mod linux {
         .unwrap()
     }
 
+    fn multi_batch_layout() -> (
+        tempfile::TempDir,
+        ReviewedStorageSelection,
+        ReviewedFileLayout,
+        NativeAcquisition,
+    ) {
+        let (directory, selection, mut plan, interval) = layout();
+        image_fixture::reserve_empty_fixture_pages(
+            &mut plan.image,
+            2 * INITIAL_IO_CHUNK_BYTES + 17,
+        );
+        plan.proposal.image = Digest::new(plan.image.bytes());
+        plan.proposal.length = plan.image.bytes().len();
+        assert!(plan.proposal.length > 2 * INITIAL_IO_CHUNK_BYTES);
+        assert!(plan.proposal.length < 3 * INITIAL_IO_CHUNK_BYTES);
+        (directory, selection, plan, interval)
+    }
+
+    #[test]
+    fn multiple_initial_batches_preserve_complete_image_and_latch_tail_tampering() {
+        let (directory, selected, plan, mut interval) = multi_batch_layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("multi-batch local filesystem fixture failed");
+        };
+        assert_eq!(
+            std::fs::read(directory.path().join(INITIAL_FILE)).unwrap(),
+            plan.image.bytes()
+        );
+        let db = rusqlite::Connection::open_with_flags(
+            directory.path().join(INITIAL_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(db);
+        owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .unwrap();
+        let offset = INITIAL_IO_CHUNK_BYTES + 7;
+        let byte = plan.image.bytes()[offset];
+        owner.file.write_all_at(&[byte ^ 1], offset as u64).unwrap();
+        assert_eq!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut interval)
+                .unwrap_err()
+                .to_string(),
+            "original_file_continuity_bytes"
+        );
+        owner.file.write_all_at(&[byte], offset as u64).unwrap();
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut acquisition())
+                .is_err()
+        );
+        assert!(interval.remaining().is_err());
+        assert_eq!(owner.file.metadata().unwrap().ino(), owner.identity.inode);
+    }
+
+    #[test]
+    fn a_refused_first_initial_batch_never_writes_the_remaining_image_or_resumes() {
+        let (directory, selected, mut plan, mut interval) = multi_batch_layout();
+        let auth = authority(&directory, selected, &mut interval);
+        plan.fixture_refusal = Some(PreparationPhase::Write);
+        let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("first-batch error did not retain the refused original");
+        };
+        let file = owner.file.as_ref().unwrap();
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            INITIAL_IO_CHUNK_BYTES as u64
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(INITIAL_FILE)).unwrap(),
+            &plan.image.bytes()[..INITIAL_IO_CHUNK_BYTES]
+        );
+        assert!(owner.authority.check_current(&mut acquisition()).is_err());
+        assert!(interval.remaining().is_err());
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            INITIAL_IO_CHUNK_BYTES as u64
+        );
+    }
+
     #[test]
     fn prepared_owner_keeps_original_interval_and_refuses_restored_file_after_tamper() {
         for wrong_interval in [false, true] {

@@ -3,7 +3,7 @@
 //! Namespace, Kubernetes and volume DATA cannot construct the native owner.
 //! Live profile qualification and current counter/writer admission are separate.
 
-use super::controller::evidence::{PreparationFailure, PreparationStep};
+use super::controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep};
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -307,35 +307,47 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
 ) -> Result<PreparedFileContinuity> {
     let (authority, mut acquisition) =
         NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
+    let mut progress = PreparationProgress {
+        acquired_us: acquisition.last_checked_elapsed_micros(),
+        ..PreparationProgress::default()
+    };
     let layout =
-        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition)
-            .map_err(|error| PreparationFailure::at(PreparationStep::ImageAdmission, error))?;
-    match preparation::prepare_original_file(authority, &layout, &mut acquisition) {
+        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition);
+    progress.image_us = acquisition.last_checked_elapsed_micros();
+    let layout = layout.map_err(|error| {
+        PreparationFailure::with_progress(PreparationStep::ImageAdmission, error, progress)
+    })?;
+    let outcome = preparation::prepare_original_file(authority, &layout, &mut acquisition);
+    progress.prepared_us = acquisition.last_checked_elapsed_micros();
+    match outcome {
         NativeOriginalPreparationOutcome::Prepared(creator) => {
             let original = PreparedInitialFile::retain_original(creator, layout, acquisition);
             match original.retain_for_current_phases() {
                 PreparedRetentionOutcome::Retained(file) => Ok(*file),
                 PreparedRetentionOutcome::Refused { original, error } => {
                     let _refused_original = original;
-                    Err(PreparationFailure::at(
+                    Err(PreparationFailure::with_progress(
                         PreparationStep::OriginalRetention,
                         error,
+                        progress,
                     ))
                 }
             }
         }
         NativeOriginalPreparationOutcome::RefusedBeforeAttempt(original) => {
             let _refused_original = original;
-            Err(PreparationFailure::at(
+            Err(PreparationFailure::with_progress(
                 PreparationStep::OriginalPreparation,
                 anyhow::anyhow!("native_controller_initial_preparation_refused"),
+                progress,
             ))
         }
         NativeOriginalPreparationOutcome::RefusedAfterAttempt(original) => {
             let _refused_original = original;
-            Err(PreparationFailure::at(
+            Err(PreparationFailure::with_progress(
                 PreparationStep::OriginalPreparation,
                 anyhow::anyhow!("native_controller_initial_preparation_unknown"),
+                progress,
             ))
         }
     }

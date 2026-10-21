@@ -848,6 +848,7 @@
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
+        "pub (super) fn last_checked_elapsed_micros (& self) -> Option < u32 >",
         "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >",
         "fn observe (& mut self , now : Duration) -> Result < Sample >",
         "pub (super) fn refuse (& mut self)",
@@ -876,6 +877,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn last_checked_elapsed_micros (& self) -> Option < u32 >"
         },
         {
           "owner": "NativeAcquisition",

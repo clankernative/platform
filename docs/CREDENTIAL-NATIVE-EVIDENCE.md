@@ -100,6 +100,17 @@ exists yet. Native image initialization and file retention still use the same
 original bounded phase. The ordering does not assert a latency cause or a later
 successful preparation.
 
+When available, `progress` contains fixed optional `acquired_us`, `image_us`,
+`prepared_us` and `last_checked_us` fields. Each copies cumulative microseconds
+from an already successful sample of the same original acquisition. Recording
+them reads no clock and changes no validity flag or deadline. A failed or expired
+sample is not included, so the values are not exact boundary times, operation
+durations or current remaining time. Missing values stay absent. Retention can
+identify `original_retention_before`, `original_retention_owner` or
+`original_retention_after`, while preserving any more specific inner boundary.
+The progress is emitted only with the existing refusal after unwinding; there is
+no extra in-phase log I/O or successful-preparation receipt.
+
 Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
 transport unavailable, response status or bound, admission rejected, known OS
 error categories, or `other`. The combined response category does not reveal or

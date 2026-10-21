@@ -205,6 +205,14 @@ layout. Authenticating that projection through the real enrolled controller
 peer is still mandatory before holder participation or activation; this decoder
 supplies neither permission.
 
+Original creation, complete readback and original retention rereads use at most
+one MiB per `pwrite`/`pread` call. Every call still has the complete native/file
+checks before and after it; partial progress loops and exact whole-image equality
+remain mandatory. The image is already resident and bounded to 16 MiB. This avoids
+repeating the nested observation tree for every 64 KiB of the same initial image.
+It does not change the original five-second acquisition or claim a hard syscall
+time bound. Later App/current serving reads retain their separate 64 KiB batches.
+
 Only a successfully checked preparation may consume the original creator into
 `PreparedFileContinuity`. That transition captures the real `SameEnrolledOwner`
 while the original preparation still passes, then moves the same file, directory

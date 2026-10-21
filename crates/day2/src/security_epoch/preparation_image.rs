@@ -742,6 +742,40 @@ pub(super) mod tests {
         (directory, runtime)
     }
 
+    // Grow only the SQLite freelist of a synthetic test image. Logical rows,
+    // schema, seed and marker remain unchanged; this supplies no native owner.
+    #[cfg(target_os = "linux")]
+    pub(in crate::security_epoch) fn reserve_empty_fixture_pages(
+        image: &mut InitialPreparationImage,
+        payload_bytes: usize,
+    ) {
+        let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
+        memory
+            .connection
+            .deserialize_read_exact(MAIN_DB, image.bytes(), image.bytes().len(), false)
+            .unwrap();
+        assert_eq!(
+            memory
+                .connection
+                .query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        memory
+            .connection
+            .execute(
+                "INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,?1)",
+                ["x".repeat(payload_bytes)],
+            )
+            .unwrap();
+        memory
+            .connection
+            .execute("DELETE FROM items WHERE id=1", [])
+            .unwrap();
+        image.image = memory.freeze(&mut acquisition()).unwrap();
+        assert_eq!(image.image.schema(), &image.core.schema_contract);
+    }
+
     pub(in crate::security_epoch) fn incarnations() -> Incarnations {
         Incarnations {
             record: Digest::new(b"record"),
