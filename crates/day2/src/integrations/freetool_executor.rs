@@ -8,8 +8,49 @@ use std::io::Read;
 
 const PATH: &str = "/v1/executor";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CredentialAction {
+    Status,
+    Replace,
+    Retain,
+    Clear,
+}
+
+impl CredentialAction {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Status => "/v1/credentials/status",
+            Self::Replace => "/v1/credentials/replace",
+            Self::Retain => "/v1/credentials/retain",
+            Self::Clear => "/v1/credentials/clear",
+        }
+    }
+}
+
 pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Result<Vec<u8>> {
-    ensure!(body.len() <= 1_100_000, "freetool_service_request_budget");
+    send_to_path(endpoint, credential, PATH, body)
+}
+
+pub(crate) fn send_credential(
+    endpoint: &str,
+    credential: &Credentials,
+    action: CredentialAction,
+    body: &[u8],
+) -> Result<Vec<u8>> {
+    send_to_path(endpoint, credential, action.path(), body)
+}
+
+fn send_to_path(
+    endpoint: &str,
+    credential: &Credentials,
+    path: &str,
+    body: &[u8],
+) -> Result<Vec<u8>> {
+    let maximum_bytes = if path == PATH { 1_100_000 } else { 16_384 };
+    ensure!(
+        body.len() <= maximum_bytes,
+        "freetool_service_request_budget"
+    );
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
@@ -20,7 +61,7 @@ pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Res
         .map_err(|_| anyhow::anyhow!("freetool_nonce_unavailable"))?;
     let nonce = crate::hex(&nonce_bytes);
     let body_digest = crate::hex(digest(&SHA256, body).as_ref());
-    let canonical = format!("POST\n{PATH}\n{timestamp}\n{nonce}\n{body_digest}");
+    let canonical = format!("POST\n{path}\n{timestamp}\n{nonce}\n{body_digest}");
     let signature = crate::hex(&credential.sign_executor_request(canonical.as_bytes())?);
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -29,7 +70,7 @@ pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Res
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let response = client
-        .post(format!("{}{PATH}", endpoint.trim_end_matches('/')))
+        .post(format!("{}{path}", endpoint.trim_end_matches('/')))
         .header("content-type", "application/json")
         .header("x-freetool-timestamp", timestamp)
         .header("x-freetool-nonce", nonce)
@@ -38,6 +79,17 @@ pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Res
         .body(body.to_vec())
         .send()
         .context("freetool_service_unavailable")?;
+    if path != PATH && !response.status().is_success() {
+        // Translate only the HTTP status, never a service error body that might
+        // accidentally include submitted credential material.
+        let failure = match response.status().as_u16() {
+            400 => crate::error::Failure::InvalidForm,
+            401 | 403 => crate::error::Failure::ResourceForbidden,
+            409 => crate::error::Failure::VersionConflict,
+            _ => crate::error::Failure::CredentialUnavailable,
+        };
+        anyhow::bail!(failure);
+    }
     ensure!(response.status().is_success(), "freetool_service_rejected");
     ensure!(
         response
@@ -51,8 +103,13 @@ pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Res
         "freetool_service_response_invalid"
     );
     let mut bytes = Vec::new();
-    response.take(1_100_001).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 1_100_000, "freetool_service_response_budget");
+    response
+        .take((maximum_bytes + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= maximum_bytes,
+        "freetool_service_response_budget"
+    );
     Ok(bytes)
 }
 
@@ -159,6 +216,101 @@ mod tests {
             ),
             "unexpected loopback response"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn credential_transport_redacts_rejections_and_preserves_conflict() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request(&mut stream)?;
+            let leaked = b"a-provider-must-never-echo-this-secret";
+            write!(
+                stream,
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                leaked.len()
+            )?;
+            stream.write_all(leaked)?;
+            Ok(())
+        });
+        let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
+        let error =
+            send_credential(&endpoint, &credential, CredentialAction::Replace, b"{}").unwrap_err();
+        assert_eq!(
+            crate::error::classify(&error),
+            crate::error::Failure::VersionConflict
+        );
+        assert!(!format!("{error:?}").contains("echo-this-secret"));
+        server.join().expect("loopback thread")?;
+        Ok(())
+    }
+
+    #[test]
+    fn credential_transport_signs_only_allowlisted_private_routes() -> Result<()> {
+        for (action, path) in [
+            (CredentialAction::Status, "/v1/credentials/status"),
+            (CredentialAction::Replace, "/v1/credentials/replace"),
+            (CredentialAction::Retain, "/v1/credentials/retain"),
+            (CredentialAction::Clear, "/v1/credentials/clear"),
+        ] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            let endpoint = format!("http://{}", listener.local_addr()?);
+            let key = vec![0x42; 32];
+            let key_hex = crate::hex(&key);
+            let server = thread::spawn(move || -> Result<()> {
+                let (mut stream, _) = listener.accept()?;
+                let (headers, body) = read_request(&mut stream)?;
+                ensure!(
+                    headers.starts_with(&format!("POST {path} HTTP/1.1\r\n")),
+                    "credential route mismatch"
+                );
+                ensure!(
+                    body == br#"{"identity":{}}"#,
+                    "credential request body changed"
+                );
+                let header = |name: &str| -> Result<String> {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name)
+                                .then(|| value.trim().to_owned())
+                        })
+                        .context("missing credential auth header")
+                };
+                let timestamp = header("x-freetool-timestamp")?;
+                let nonce = header("x-freetool-nonce")?;
+                let supplied_digest = header("x-freetool-body-sha256")?;
+                let signature = header("x-freetool-signature")?;
+                ensure!(nonce.len() == 48, "nonce is not 24 random bytes");
+                ensure!(
+                    supplied_digest == crate::hex(digest(&SHA256, &body).as_ref()),
+                    "credential digest mismatch"
+                );
+                let canonical = format!("POST\n{path}\n{timestamp}\n{nonce}\n{supplied_digest}");
+                let signing_key = hmac::Key::new(hmac::HMAC_SHA256, &key);
+                let signature = decode_hex(&signature).context("bad signature hex")?;
+                hmac::verify(&signing_key, canonical.as_bytes(), &signature)
+                    .map_err(|_| anyhow::anyhow!("bad credential signature"))?;
+                let response = br#"{"status":"absent","credential_id":null,"version":0}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.len()
+                )?;
+                stream.write_all(response)?;
+                Ok(())
+            });
+            let credential = Credentials::bearer(key_hex)?;
+            let body = br#"{"identity":{}}"#;
+            let response = send_credential(&endpoint, &credential, action, body);
+            server
+                .join()
+                .map_err(|_| anyhow::anyhow!("loopback server panicked"))??;
+            response?;
+        }
         Ok(())
     }
 

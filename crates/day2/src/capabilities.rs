@@ -247,6 +247,7 @@ pub(crate) fn authorized(
             ResourceTarget::FreetoolExecutor {
                 service_id,
                 allowed_resources,
+                ..
             } => (service_id, allowed_resources),
             _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
         };

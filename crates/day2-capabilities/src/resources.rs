@@ -163,6 +163,11 @@ pub enum ResourceTarget {
     FreetoolExecutor {
         service_id: String,
         allowed_resources: BTreeSet<String>,
+        /// Explicit native-browser custody authority, separate from execution
+        /// and result reads. The native host also requires current Roc edit
+        /// permission. Empty by default; an executor grant alone cannot enroll.
+        #[serde(default)]
+        credential_managers: BTreeSet<String>,
     },
 }
 
@@ -295,6 +300,7 @@ impl ResourceTarget {
             Self::FreetoolExecutor {
                 service_id,
                 allowed_resources,
+                credential_managers,
             } => {
                 name(service_id)?;
                 ensure!(
@@ -303,6 +309,17 @@ impl ResourceTarget {
                 );
                 for resource in allowed_resources {
                     bounded_text(resource, 256)?;
+                }
+                ensure!(
+                    credential_managers.len() <= 256,
+                    "freetool_credential_manager_budget"
+                );
+                for actor in credential_managers {
+                    bounded_text(actor, 256)?;
+                    ensure!(
+                        actor.bytes().all(|b| b.is_ascii_graphic()),
+                        "invalid_freetool_credential_manager"
+                    );
                 }
                 Ok(())
             }
@@ -413,12 +430,18 @@ impl ResourceTarget {
                 Self::FreetoolExecutor {
                     service_id,
                     allowed_resources,
+                    credential_managers,
                 },
                 Self::FreetoolExecutor {
                     service_id: parent_service,
                     allowed_resources: parent_resources,
+                    credential_managers: parent_managers,
                 },
-            ) => service_id == parent_service && allowed_resources.is_subset(parent_resources),
+            ) => {
+                service_id == parent_service
+                    && allowed_resources.is_subset(parent_resources)
+                    && credential_managers.is_subset(parent_managers)
+            }
             (
                 Self::NotificationMailbox { topics },
                 Self::NotificationMailbox { topics: parent },

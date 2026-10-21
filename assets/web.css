@@ -57,6 +57,9 @@ td button { min-height: 32px; font-size: 13px; padding: 6px 9px; }
 .login { max-width: 540px; padding-top: 64px; }
 .login .stack { gap: 24px; }
 .login form { margin-top: 8px; }
+.credentials input, .credentials select { font-size: 16px; }
+.credentials p { overflow-wrap: anywhere; }
+.credentials details > p, .credentials details > form { margin-top: 16px; }
 .audit-list { border-top: 1px solid #dfe4e4; }
 .audit-list details { border-bottom: 1px solid #dfe4e4; }
 .audit-list summary { display: grid; grid-template-columns: 16px minmax(130px, 1.4fr) minmax(80px, 1fr) 80px 160px; gap: 12px; padding: 16px 10px; align-items: center; cursor: pointer; font-size: 13px; }

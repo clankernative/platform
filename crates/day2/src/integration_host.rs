@@ -89,6 +89,36 @@ impl Host {
         )
     }
 
+    pub(crate) fn freetool_credential_request(
+        &self,
+        connection: &LiveConnection,
+        action: integrations::FreetoolCredentialAction,
+        body: &[u8],
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            !self.simulated_providers,
+            "freetool_credential_custody_offline"
+        );
+        let LiveConnection::FreetoolExecutor { endpoint, .. } = connection else {
+            anyhow::bail!("freetool_executor_connection_mismatch");
+        };
+        let credential = self
+            .resolver
+            .resolve(connection)
+            .map_err(|_| anyhow::anyhow!("freetool_service_key_unavailable"))?;
+        integrations::freetool_credential_request(endpoint, &credential, action, body).map_err(
+            |error| {
+                use crate::error::Failure;
+                anyhow::anyhow!(match crate::error::classify(&error) {
+                    Failure::InvalidForm => Failure::InvalidForm,
+                    Failure::ResourceForbidden => Failure::ResourceForbidden,
+                    Failure::VersionConflict => Failure::VersionConflict,
+                    _ => Failure::CredentialUnavailable,
+                })
+            },
+        )
+    }
+
     pub(crate) fn freetool_request(
         &self,
         database: &Path,
