@@ -2593,14 +2593,14 @@
         "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
-        "pub (crate) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome",
+        "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (crate) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ >) -> InitialStorageOutcome"
+          "signature": "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome"
         }
       ],
       "material_uses": [
