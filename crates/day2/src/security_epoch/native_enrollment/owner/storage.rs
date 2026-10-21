@@ -187,8 +187,9 @@ impl EnrolledRoleStage<'_> {
         result
     }
 
-    /// The caller holds the actual MessageProcess and checks its original
-    /// pidfd/code/namespaces around this DATA comparison, never a caller PID.
+    /// Validate DATA from the caller's retained actual MessageProcess. Before a
+    /// Peer escapes, its closed factory must freshly check that owner's original
+    /// pidfd/code/namespaces after this comparison; a caller PID cannot adopt it.
     pub(in crate::security_epoch::native_enrollment) fn check_storage_app_statement(
         &mut self,
         statement: &StageStatement,

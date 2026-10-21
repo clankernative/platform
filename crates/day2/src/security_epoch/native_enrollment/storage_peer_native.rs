@@ -30,14 +30,13 @@ impl Peer {
         };
         match &mut owner.processes[0] {
             StorageSender::App(process) => {
-                process.check_identity(acquisition, &HashCosts::disabled())?;
-                stage.check_storage_app_statement(&owner.statement, process.data(), acquisition)?;
-                process.check_identity(acquisition, &HashCosts::disabled())?
+                stage.check_storage_app_statement(&owner.statement, process.data(), acquisition)?
             }
             StorageSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
             }
         }
+        // No peer escapes before this new, complete native sender observation.
         owner.check(stage, acquisition)?;
         Ok(owner)
     }

@@ -29,19 +29,16 @@ impl Peer {
             valid: true,
         };
         match &mut owner.processes[0] {
-            ServingSender::Shell(process) => {
-                process.check_identity(acquisition, &HashCosts::disabled())?;
-                stage.check_serving_shell_statement(
-                    &owner.statement,
-                    process.data(),
-                    acquisition,
-                )?;
-                process.check_identity(acquisition, &HashCosts::disabled())?
-            }
+            ServingSender::Shell(process) => stage.check_serving_shell_statement(
+                &owner.statement,
+                process.data(),
+                acquisition,
+            )?,
             ServingSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
             }
         }
+        // No peer escapes before this new, complete native sender observation.
         owner.check(stage, acquisition)?;
         Ok(owner)
     }
