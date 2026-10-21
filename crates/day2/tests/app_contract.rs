@@ -247,6 +247,122 @@ expect encoded.contains("\"operation\":\"app.create\"") and encoded.contains("\"
 }
 
 #[test]
+fn native_freetool_executor_sdk_encodes_closed_wire_variants() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let temporary = crate::support::compiler::stage(&root)?;
+    let stage = temporary.path();
+    day2::sdk::stage(&root.join("sdk"), &stage.join("sdk"))?;
+    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+    let source = r##"app [step] { pf: platform "sdk/main.roc" }
+import pf.FreetoolExecutor
+import pf.Context
+import pf.Effects
+import pf.Observe
+import pf.Tx
+step : Str -> Str
+step = |raw| raw
+run : FreetoolExecutor.Run
+run = { resource_id: "resource", configuration_id: "configuration", immutable_version: 2, configuration_digest: "configuration-digest", run_id: "run", arguments_digest: "arguments-digest" }
+context = Context.from_wire({ invocation_id: "invocation", actor: "actor", now: 1, authentication: "request", caller: [], authenticated: "", delegation_rule: "" })
+http : FreetoolExecutor.Plan
+http = Http({ method: "POST", url: "https://example.test/?q=\"quoted\"", headers: [{name: "X-Example", value: "line\\quoted\""}], body: "é\n" })
+sql : FreetoolExecutor.Plan
+sql = Postgres({ resource_binding_id: "resource\\\"", statement: "SELECT $1, '\"quoted\"'", parameters: [Null, Boolean(Bool.True), Integer(-42), Decimal("1.2300"), Text("line\n\"quoted\"\\"), Bytes([0, 255]), Date("2026-10-21"), Timestamp("2026-10-21T12:00:00Z")] })
+expect FreetoolExecutor.encode_sql_value(Null) == "{\"type\":\"null\"}"
+expect FreetoolExecutor.encode_sql_value(Boolean(Bool.True)) == "{\"type\":\"boolean\",\"value\":true}"
+expect FreetoolExecutor.encode_sql_value(Integer(-42)) == "{\"type\":\"integer\",\"value\":-42}"
+expect FreetoolExecutor.encode_sql_value(Decimal("1.2300")) == "{\"type\":\"decimal\",\"value\":\"1.2300\"}"
+expect FreetoolExecutor.encode_sql_value(Text("line\n\"quoted\"\\")) == "{\"type\":\"text\",\"value\":\"line\\n\\\"quoted\\\"\\\\\"}"
+expect FreetoolExecutor.encode_sql_value(Bytes([0, 255])) == "{\"type\":\"bytes\",\"value\":[0,255]}"
+expect FreetoolExecutor.encode_sql_value(Date("2026-10-21")) == "{\"type\":\"date\",\"value\":\"2026-10-21\"}"
+expect FreetoolExecutor.encode_sql_value(Timestamp("2026-10-21T12:00:00Z")) == "{\"type\":\"timestamp\",\"value\":\"2026-10-21T12:00:00Z\"}"
+expect FreetoolExecutor.encode_plan(sql) == EXPECTED_SQL
+request = |next| {
+    program = FreetoolExecutor.bind(context).program().and_then(next)
+    match Tx.evaluate(program, []) {
+        Pending(binding) => match Tx.evaluate(program, [{instruction: binding.instruction, result: "{\"token\":\"fixture-handle\"}", error: ""}]) {
+            Pending(action) => Ok(action.instruction)
+            _ => Err("expected executor action")
+        }
+        _ => Err("expected resource binding")
+    }
+}
+expect match request(|executor| FreetoolExecutor.register(executor, run, http).program()) {
+    Ok(instruction) => {
+        parsed : Try({handle : Str, run : FreetoolExecutor.Run, plan : {kind : Str, method : Str, url : Str, headers : List(List(Str)), body : List(U8)}}, _)
+        parsed = Json.parse(instruction.data)
+        match parsed {
+            Ok(value) => instruction.kind == "external" and instruction.model == "freetool.register.v1" and value.handle == "fixture-handle" and value.run == run and value.plan.kind == "http" and value.plan.body == "é\n".to_utf8() and value.plan.url == "https://example.test/?q=\"quoted\"" and value.plan.headers == [["X-Example", "line\\quoted\""]]
+            Err(_) => Bool.False
+        }
+    }
+    Err(_) => Bool.False
+}
+expect match request(|executor| FreetoolExecutor.execute(executor, run).program()) {
+    Ok(instruction) => {
+        parsed : Try({handle : Str, run : FreetoolExecutor.Run}, _)
+        parsed = Json.parse(instruction.data)
+        instruction.kind == "external" and instruction.model == "freetool.execute.v1" and parsed == Ok({handle: "fixture-handle", run})
+    }
+    Err(_) => Bool.False
+}
+expect match request(|executor| FreetoolExecutor.status(executor, run).program()) {
+    Ok(instruction) => instruction.kind == "observe" and instruction.model == "freetool.status.v1"
+    Err(_) => Bool.False
+}
+expect match request(|executor| FreetoolExecutor.result_page(executor, run, 10, 20).program()) {
+    Ok(instruction) => {
+        parsed : Try({handle : Str, run : FreetoolExecutor.Run, offset : U64, limit : U32}, _)
+        parsed = Json.parse(instruction.data)
+        instruction.kind == "observe" and instruction.model == "freetool.result_page.v1" and parsed == Ok({handle: "fixture-handle", run, offset: 10, limit: 20})
+    }
+    Err(_) => Bool.False
+}
+"##;
+    let expected_sql = serde_json::to_string(&json!({
+        "kind": "postgres", "resource_binding_id": "resource\\\"", "statement": "SELECT $1, '\"quoted\"'",
+        "parameters": [
+            {"type": "null"}, {"type": "boolean", "value": true}, {"type": "integer", "value": -42},
+            {"type": "decimal", "value": "1.2300"}, {"type": "text", "value": "line\n\"quoted\"\\"},
+            {"type": "bytes", "value": [0, 255]}, {"type": "date", "value": "2026-10-21"},
+            {"type": "timestamp", "value": "2026-10-21T12:00:00Z"}
+        ]
+    }))?;
+    // Preserve the wire's field order while using serde to escape every value.
+    let expected: Value = serde_json::from_str(&expected_sql)?;
+    let expected_sql = format!(
+        "{{\"kind\":\"postgres\",\"resource_binding_id\":{},\"statement\":{},\"parameters\":{}}}",
+        expected["resource_binding_id"], expected["statement"], expected["parameters"]
+    );
+    fs::write(
+        stage.join("app.roc"),
+        source.replace("EXPECTED_SQL", &serde_json::to_string(&expected_sql)?),
+    )?;
+    let output = crate::support::compiler::output(
+        day2::sandbox::compiler(
+            &root,
+            stage,
+            &root.join("../.toolchains/roc").canonicalize()?,
+        )?
+        .args(["test", "--no-cache"])
+        .arg(stage.join("app.roc")),
+        std::time::Duration::from_secs(60),
+    )?;
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success() && diagnostics.contains("All (13) tests passed"),
+        "Freetool SDK wire contracts: {diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
 fn native_workspace_directory_pages_decode_through_public_sdk() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
