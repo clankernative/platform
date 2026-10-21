@@ -17,6 +17,9 @@ PageBinding :: { metadata : Metadata }.{
 		output_type : Str,
 		live : Bool,
 		live_refresh_ms : U64,
+		# Optional registered page path, with the same input type, rendered when
+		# this page fails on the server. Empty retains the platform error page.
+		failure_page : Str,
 	}
 
 	from_read : Config, Read(a, b) -> PageBinding
@@ -34,6 +37,7 @@ PageBinding :: { metadata : Metadata }.{
 				output_type: operation.output_type,
 				live: Bool.False,
 				live_refresh_ms: 0,
+				failure_page: "",
 			},
 		}
 	}
@@ -66,6 +70,12 @@ PageBinding :: { metadata : Metadata }.{
 	live_refresh_every = |binding, milliseconds| {
 		..binding,
 		metadata: { ..binding.metadata, live: Bool.True, live_refresh_ms: milliseconds },
+	}
+
+	with_failure_page : PageBinding, PageBinding -> PageBinding
+	with_failure_page = |binding, fallback| {
+		..binding,
+		metadata: { ..binding.metadata, failure_page: fallback.metadata.path },
 	}
 
 	metadata : PageBinding -> Metadata

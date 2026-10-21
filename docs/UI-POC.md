@@ -97,6 +97,9 @@ For detail pages the actual `Ref(Model)` comes from the request path, not a
 dummy ID in a complete default DTO. The URL matcher and URL builder share one
 host route catalog. A nonempty catalog requires an explicit `/` page whose
 query inputs are all defaulted; no list-order landing-page convention applies.
+`.on_failure(page)` names another registered page with the same input type to
+render, under the original 5xx status, when this page fails on the server; see
+[WEB.md](WEB.md#app-owned-failure-pages).
 
 For `/`, the pure Roc worker returns typed query data. The Rust host
 validates that data against the generated output schema and renders

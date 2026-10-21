@@ -6,6 +6,8 @@
 //! resolves exact names first and `name/%s` wildcards second, beside two page
 //! routes. Nothing here stands in for the runtime: links are created through the
 //! app's own command and every visit is a real invocation with its audit record.
+//! The directory page also declares an app-owned failure page, exercised here by
+//! taking the link table away under the running server.
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2::{
@@ -103,6 +105,7 @@ fn instance(artifact: &str) -> Value {
         "edge":{"origin":ORIGIN,"iap_audience":AUDIENCE},
         "authority":{"version":1,"admins":[],"operations":{
             "go.missing_link":{"actors":[VISITOR],"mode":{"kind":"read"},"models":{}},
+            "go.directory_unavailable":{"actors":[VISITOR],"mode":{"kind":"read"},"models":{}},
             "go.list":{"actors":everyone,"mode":{"kind":"read"},
                 "models":links(json!({"read":true,"rows":{"kind":"all"}}))},
             "go.create":{"actors":[VISITOR],"mode":{"kind":"current_state"},
@@ -255,6 +258,27 @@ impl Server {
             .header("sec-fetch-dest", "document")
             .header("sec-fetch-mode", "navigate")
             .header("sec-fetch-site", "cross-site")
+    }
+
+    /// Take the link table away under the running server, as a storage fault
+    /// would: every query that reads links now fails on the server.
+    fn break_link_storage(&self) -> Result<()> {
+        rusqlite::Connection::open(self.runtime.db())?
+            .execute_batch("ALTER TABLE links RENAME TO links_unavailable")?;
+        Ok(())
+    }
+
+    /// The response statuses the platform recorded for page requests, oldest first.
+    fn page_statuses(&self) -> Result<Vec<u16>> {
+        let db = rusqlite::Connection::open(self.runtime.db())?;
+        let mut statement = db.prepare(
+            "SELECT status FROM day2_web_events
+             WHERE category='page' AND status<>102 ORDER BY sequence",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Every lifecycle event of the visit command — admission, refusal and
@@ -553,6 +577,94 @@ fn fallback_queries_keep_their_own_authority_and_visit_api_still_fails() -> Resu
 }
 
 #[test]
+fn a_directory_that_fails_on_the_server_renders_its_app_failure_page() -> Result<()> {
+    let server = Server::start()?;
+    // The page succeeds while storage is healthy, and the failure page is an
+    // ordinary page of its own.
+    let directory = server.follow("/", VISITOR)?;
+    assert_eq!(directory.status(), StatusCode::OK);
+    assert!(directory.text()?.contains("Go links"));
+    let unavailable = server.follow("/unavailable", VISITOR)?;
+    assert_eq!(unavailable.status(), StatusCode::OK);
+    server.break_link_storage()?;
+
+    for (path, limit) in [("/", "20"), ("/?limit=7", "7")] {
+        let response = server.follow(path, VISITOR)?;
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let body = refused(response, StatusCode::INTERNAL_SERVER_ERROR, false)?;
+        assert!(body.contains("Go links are unavailable"), "{body}");
+        // The failure page received the page's decoded input, and nothing about
+        // the failure: no storage detail and none of the platform page's text.
+        assert!(
+            body.contains(&format!("up to {limit} links once it is back")),
+            "{body}"
+        );
+        for leaked in [
+            "links_unavailable",
+            "no such table",
+            "idempotency key",
+            "Return to workspace",
+            "Day2",
+        ] {
+            assert!(!body.contains(leaked), "{leaked}: {body}");
+        }
+    }
+    let statuses = server.page_statuses()?;
+    assert_eq!(statuses[statuses.len() - 2..], [500, 500]);
+
+    // Without the combinator a page keeps the platform error page, and a
+    // client error on the page that has one is still the platform's answer.
+    let body = refused(
+        server.follow("/about", VISITOR)?,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        false,
+    )?;
+    assert!(body.contains("Retry commands with the same idempotency key."));
+    assert!(!body.contains("Go links are unavailable"));
+    let body = refused(
+        server.follow("/?limit=many", VISITOR)?,
+        StatusCode::BAD_REQUEST,
+        false,
+    )?;
+    assert!(!body.contains("Go links are unavailable"));
+
+    // The JSON API answers the same failure with its ordinary error.
+    let response = server
+        .client
+        .get(format!("{}/api/go.list?after=&limit=20", server.origin))
+        .header(HOST, AUTHORITY)
+        .header("x-goog-iap-jwt-assertion", server.signer.person(VISITOR))
+        .send()?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: Value = serde_json::from_str(&response.text()?)?;
+    assert_eq!(error["error"]["code"], "internal_error");
+    Ok(())
+}
+
+#[test]
+fn a_failure_page_that_fails_too_answers_the_platform_page_for_the_original_failure() -> Result<()>
+{
+    let server = Server::start()?;
+    // The browser may list links but holds no grant for the failure page's query.
+    assert_eq!(server.follow("/", BROWSER)?.status(), StatusCode::OK);
+    refused(
+        server.follow("/unavailable", BROWSER)?,
+        StatusCode::FORBIDDEN,
+        false,
+    )?;
+    server.break_link_storage()?;
+    let body = refused(
+        server.follow("/", BROWSER)?,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        false,
+    )?;
+    assert!(body.contains("Retry commands with the same idempotency key."));
+    assert!(!body.contains("Go links are unavailable"));
+    assert!(!body.contains("not authorized"));
+    Ok(())
+}
+
+#[test]
 fn platform_paths_and_page_routes_keep_precedence() -> Result<()> {
     let server = Server::start()?;
     let before = server.audited_visits()?.len();
@@ -698,8 +810,16 @@ fn declarations_are_admitted_only_against_the_bound_command_contract() -> Result
         .context("run xtask verify or set DAY2_TEST_REDIRECT_ARTIFACT")?;
     let loaded = day2::artifact::LoadedArtifact::load(&artifact)?;
     let admitted = loaded.contract().clone();
-    // The positive control: the fixture as built is admitted.
+    // The positive control: the fixture as built is admitted, including the
+    // directory's app-owned failure page bound through `Page.on_failure`.
     day2::redirects::Catalog::from_artifact(&admitted)?;
+    assert_eq!(
+        day2::routing::Catalog::from_artifact(&admitted)?
+            .route("links")?
+            .failure_page
+            .as_deref(),
+        Some("directory_unavailable")
+    );
     let mut collision = admitted.clone();
     collision.redirects[0].name = collision.pages[0].name.clone();
     assert!(day2::routing::Catalog::from_artifact(&collision).is_err());

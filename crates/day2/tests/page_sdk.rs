@@ -75,13 +75,21 @@ OtherInput := { id : I64 }
             "Valid",
             r#"subject : Read(ListInput, Str), Read(DetailInput, Str) -> List(PageBinding)
 subject = |list, detail| {
+    unavailable : Page(ListInput)
+    unavailable = Page.define({ name: "unavailable", title: "Unavailable", path: "/unavailable", template: Templates.directory }, list)
     directory : Page(ListInput)
-    directory = Page.define({ name: "links", title: "Links", path: "/", template: Templates.directory }, list).live().with_defaults({ after: Cursor.start, limit: PageSize.default })
+    directory = Page.define({ name: "links", title: "Links", path: "/", template: Templates.directory }, list).live().with_defaults({ after: Cursor.start, limit: PageSize.default }).on_failure(unavailable)
     item : Page(DetailInput)
     item = Page.define({ name: "link", title: "Details", path: "/links/{id}", template: Templates.details }, detail).live_refresh_every(5000)
-    [directory.register(), item.register()]
+    [directory.register(), unavailable.register(), item.register()]
 }"#,
             true,
+        ),
+        (
+            "FailurePageWrongInput",
+            r#"subject : Read(ListInput, Str), Read(DetailInput, Str) -> Page(ListInput)
+subject = |list, detail| Page.define({ name: "links", title: "Links", path: "/", template: Templates.directory }, list).on_failure(Page.define({ name: "link", title: "Details", path: "/links/{id}", template: Templates.details }, detail))"#,
+            false,
         ),
         (
             "WrongQueryInput",
@@ -220,6 +228,11 @@ expect periodic.register().metadata().live == Bool.True
 expect periodic.register().metadata().live_refresh_ms == 5000
 expect periodic.live().with_query_defaults({{ limit: 10.I64 }}).register().metadata().live_refresh_ms == 5000
 expect empty.with_defaults({{ after: Cursor.start, limit: PageSize.default }}).live().register().metadata().live == Bool.True
+fallback = Page.define({{ name: "unavailable", title: "Unavailable", path: "/unavailable", template: Templates.details }}, read)
+expect empty.register().metadata().failure_page == ""
+expect empty.on_failure(fallback).register().metadata().failure_page == "/unavailable"
+expect live.on_failure(fallback).with_defaults({{ after: Cursor.start, limit: PageSize.default }}).live().register().metadata().failure_page == "/unavailable"
+expect fallback.register().metadata().failure_page == ""
 poisoned = QueryBinding.define(read, |_context, bounds| Query.page(Selection.all(model, bounds.after, bounds.limit)).map(|_| "poisoned"))
 poisoned_page = Page.define(config, Read.define("links.list", input, output)).with_defaults({{ after: Cursor.start, limit: PageSize.default }}).register()
 product : Product.Contract
@@ -279,7 +292,7 @@ step = |_| full.register().metadata().defaults
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        report.contains("All (19) tests passed"),
+        report.contains("All (23) tests passed"),
         "all defaults and registered-query dispatch expectations must execute: {report}"
     );
     Ok(())

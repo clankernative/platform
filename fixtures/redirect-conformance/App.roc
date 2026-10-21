@@ -3,6 +3,7 @@ import DeleteLink
 import VisitLink
 import ListLinks
 import MissingLink
+import DirectoryUnavailable
 import LinkErrors
 import LinkInvariants
 import Routes
@@ -18,11 +19,13 @@ App :: [].{
 			visit: VisitLink.definition,
 			list: ListLinks.definition,
 			missing_link: MissingLink.definition,
+			directory_unavailable: DirectoryUnavailable.definition,
 		},
 		pages: {
 			links: Routes.directory.register(),
 			about: Routes.about.register(),
 			missing_link: Routes.missing_link.register(),
+			directory_unavailable: Routes.directory_unavailable.register(),
 		},
 		redirects: { prefixed: Redirects.prefixed.register(), bare: Redirects.bare.register() },
 		properties: { links: LinkInvariants.links },

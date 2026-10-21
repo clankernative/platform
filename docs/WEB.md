@@ -431,6 +431,49 @@ recovery of accepted work. Upgrade requires draining accepted invocations and
 pending invocations, then explicit migration and activation. Company authority is
 still required for execution; loading a legacy artifact grants no permission.
 
+### App-owned failure pages
+
+A page whose query or rendering fails on the server normally answers the
+platform error page. An app can render its own page instead, such as a warning
+beside a hypothetical calculator:
+
+```roc
+dashboard : Page(GetDashboardTypes.Input)
+dashboard = Page.route({ title: "Equity", path: "/", template: Templates.dashboard }, Reads.get_dashboard)
+    .with_defaults({})
+    .on_failure(dashboard_unavailable)
+
+dashboard_unavailable : Page(GetDashboardTypes.Input)
+dashboard_unavailable = Page.route(
+    { title: "Equity", path: "/unavailable", template: Templates.dashboard_unavailable },
+    Reads.dashboard_unavailable,
+).with_defaults({})
+```
+
+Register both pages under `App.definition.pages`. The typed combinator binds the
+fallback by its registered path, mirroring a redirect's `on_not_found`. Route
+admission refuses an absent page, the page itself, a different input type, a live
+fallback and a fallback that declares its own failure page.
+
+Only server failures use the fallback: internal, storage, worker and timeout
+failures, which answer 500, 503 or 504. The response keeps that status, so
+monitors and clients still see a failure. Invalid input, sign-in, authority,
+conflict, not-found and declared application failures keep their usual platform
+answers. The original failure is logged and its query audited exactly as before.
+
+The fallback query receives the page's complete decoded input and runs under its
+own grant and audit; it adds no authority. Nothing about the failure reaches Roc
+or the template: no error code, message, stack or invocation detail. Prefer a
+fallback query that reads nothing, or reads less, than the page it replaces. If
+the fallback fails too, including for lack of its grant, the person sees the
+platform error page for the original failure with its original status.
+
+`on_failure` governs the page's own GET response. Command responses, live
+refreshes, `/api/*` JSON and MCP calls answer the same failures unchanged. The
+fallback remains an ordinary page at its own path. The executable
+[redirect conformance fixture](../fixtures/redirect-conformance/README.md) binds
+one to its directory and exercises it in `crates/day2/tests/redirect_routes.rs`.
+
 ## App contract export
 
 Export a normally built, admitted artifact as deterministic typed JSON:

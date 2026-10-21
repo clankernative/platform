@@ -1142,6 +1142,7 @@ mod tests {
                     output_type: "Output".into(),
                     live: true,
                     live_refresh_ms: 0,
+                    failure_page: String::new(),
                 },
                 Page {
                     name: "featured".into(),
@@ -1154,6 +1155,7 @@ mod tests {
                     output_type: "Output".into(),
                     live: false,
                     live_refresh_ms: 0,
+                    failure_page: String::new(),
                 },
             ],
             schedules: vec![crate::artifact::Schedule {
