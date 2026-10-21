@@ -57,7 +57,10 @@ checks surround the signing call and final channel publication.
 
 KMS keeps the root private key; the issuer/client process keys remain local.
 Privileged process inspection and compromised authorized provisioners are still
-part of the native trust boundary. This source creates no KMS resource or grant.
+part of the native trust boundary. The separate operator root at
+`deploy/gke/stacks/native-enrollment-root` creates the key and exact version;
+it grants only the selected provisioner KSA the fixed key-scoped metadata,
+public-key and signing permissions.
 The software Ed25519 profile still needs actual deployment qualification.
 See [KMS signing](https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/asymmetricSign)
 and [algorithm support](https://docs.cloud.google.com/kms/docs/algorithms).
