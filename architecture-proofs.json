@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:5e6e93c8c57121a9c2d801b4ec7c6e1406d40636815fe11be8cafbedbf0ddbc9",
+      "fingerprint": "sha256:d9a6d2f9a4c996d0e2b8379bcc1d85a418074c99f84acbf4baa12e73afe1bf9a",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -18,11 +18,320 @@
     }
   ],
   "proofs": [
-    {"source":"crates/day2/src/oauth/management/app.rs","type_name":"CaptureStart","owning_children":[],"methods":[],"factories":[{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn start (& self) -> & CaptureStart"},{"owner":"Manager","signature":"pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"}],"material_uses":[],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/management/app.rs","type_name":"CommittedCapture","owning_children":[],"methods":["pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent","pub (in crate :: oauth) fn start (& self) -> & CaptureStart"],"factories":[{"owner":"Manager","signature":"pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"}],"material_uses":[{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent"},{"owner":"CommittedCapture < '_ >","signature":"pub (in crate :: oauth) fn start (& self) -> & CaptureStart"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"AppCreator","owning_children":[],"methods":["pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"],"factories":[{"owner":null,"signature":"pub (super) fn capture_app < 'a > (start : & 'a super :: management :: app :: CaptureStart , app : & str) -> Result < AppCreator < 'a > >"}],"material_uses":[{"owner":"AppCreator < '_ >","signature":"pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"}],"proof_uses":[],"kind":"private_material","consuming_methods":["bind"]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"OriginalPhase","owning_children":[],"methods":["pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >","pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"],"factories":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"}],"material_uses":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
-    {"source":"crates/day2/src/oauth/native_management.rs","type_name":"RoleStage","owning_children":[],"methods":["pub (crate) fn check (& mut self) -> Result < () >","pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >","pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"],"factories":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"}],"material_uses":[{"owner":null,"signature":"fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"},{"owner":null,"signature":"pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"},{"owner":"OriginalPhase < '_ >","signature":"pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn check (& mut self) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"},{"owner":"RoleStage < '_ >","signature":"pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"}],"proof_uses":[],"kind":"private_material","consuming_methods":[]},
+    {
+      "source": "crates/day2/src/oauth/management/app.rs",
+      "type_name": "CaptureStart",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+        },
+        {
+          "owner": "Manager",
+          "signature": "pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/management/app.rs",
+      "type_name": "CommittedCapture",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent",
+        "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+      ],
+      "factories": [
+        {
+          "owner": "Manager",
+          "signature": "pub (super) fn capture (& self , registration : & str , action : Action , identity : & iap :: Verified , now : i64) -> Result < View >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn intent (& self) -> & crate :: oauth :: fresh_auth :: FreshIntent"
+        },
+        {
+          "owner": "CommittedCapture < '_ >",
+          "signature": "pub (in crate :: oauth) fn start (& self) -> & CaptureStart"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "AppCreator",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >",
+        "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn capture_app < 'a > (start : & 'a super :: management :: app :: CaptureStart , app : & str) -> Result < AppCreator < 'a > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >"
+        },
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "bind"
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "PendingWriter",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self) -> Result < () >",
+        "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "fn refuse (& mut self)",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppCreator < '_ >",
+          "signature": "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (super) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "Consumer",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn arm (& mut self) -> Result < () >",
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn prepare_finalization (& mut self) -> Result < () >",
+        "fn refuse (& mut self)",
+        "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >",
+        "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >",
+        "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_consumer_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , role : NativeRole , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn with_consumer_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , role : NativeRole , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_consumer < T > (intent : & FreshIntent , phase : Phase , wall : i64 , operation : impl FnOnce (& mut Consumer < '_ , '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "fn prepare_finalization (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn arm (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "OriginalPhase",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >",
+        "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >",
+        "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >",
+        "fn refuse (& mut self)",
+        "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >",
+        "fn require_signature_intent (& self , expected : & FreshIntent) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "fn require_signature_intent (& self , expected : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check_with_native (& mut self , stage : & mut EnrolledRoleStage < '_ > , entry_wall : i64) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RoleStage",
+      "owning_children": [],
+      "methods": [
+        "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >",
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
+        "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_app_role < T > (scope : & AuthorityScope , phase : RuntimePhase , use_current : impl FnOnce (& mut RoleStage < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn with_current_original < T > (intent : & FreshIntent , phase : Phase , wall : i64 , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "OriginalPhase < '_ >",
+          "signature": "pub (crate) fn require_signature (& mut self , role : & mut RoleStage < '_ > , expected : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < 'role >",
+          "signature": "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >"
+        },
+        {
+          "owner": "RoleStage < 'role >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < 'role >",
+          "signature": "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "RoleStage < 'role >",
+          "signature": "pub (crate) fn with_native < T > (& mut self , use_native : impl FnOnce (& mut EnrolledRoleStage < '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
     {
       "source": "crates/day2/src/security_epoch/native_connection_peer.rs",
       "type_name": "NativeConnectionPeerObservation",
@@ -216,11 +525,11 @@
         },
         {
           "owner": null,
-          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>, current: &mut super::native_management::Consumer<'_, '_, '_>) -> Result<Option<ExchangeDispatchPermit>>"
         },
         {
           "owner": null,
-          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: Option<&super::management::app::FinishGuard<'_>>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>,)>) -> Result<Option<ExchangeDispatchPermit>>"
         }
       ]
     },
@@ -278,7 +587,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+          "signature": "pub (super) fn ensure_current (runtime : & crate :: store :: Runtime , request : & crate :: protocol :: Request , registration : & str , subject : & str , selection : & usage :: Selection , started_at : i64 , serving : & mut super :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < Resolution >"
         }
       ],
       "material_uses": [
@@ -303,7 +612,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn ensure_current(runtime: &crate::store::Runtime, request: &crate::protocol::Request, registration: &str, subject: &str, selection: &usage::Selection, started_at: i64) -> Result<Resolution>"
+          "signature": "pub (super) fn ensure_current (runtime : & crate :: store :: Runtime , request : & crate :: protocol :: Request , registration : & str , subject : & str , selection : & usage :: Selection , started_at : i64 , serving : & mut super :: native_management :: RuntimeConsumer < '_ , '_ >) -> Result < Resolution >"
         },
         {
           "owner": "Resolution",
@@ -3147,6 +3456,67 @@
         {
           "owner": "InitialHolderListener",
           "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "RuntimeConsumer",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self) -> Result < () >",
+        "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
+        "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn with_runtime_response < T > (scope : & AuthorityScope , identity : & ResponseIdentity , complete : bool , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
         }
       ],
       "proof_uses": [],

@@ -28,6 +28,16 @@ impl ActiveAppStorageContinuity {
                 binding,
             ))?,
         };
+        let evidence = crate::security_epoch::serving::ConsumerScopeEvidence::app(
+            Digest::of(&(
+                "day2-controller-evidence-selection-v1",
+                &self.policy,
+                &self.store,
+            ))?,
+            stage.incarnation_data()?,
+            request.binding.clone(),
+            purpose,
+        );
         let mut physical = self.storage.begin_current(stage, request)?;
         physical.await_known(stage)?;
         let mut reads = AuthenticatedReads::acquire(
@@ -58,6 +68,7 @@ impl ActiveAppStorageContinuity {
             continuation: &mut self.valid,
             disposition: ServingDisposition::Unarmed,
             purpose,
+            evidence,
         })
     }
 
@@ -228,8 +239,20 @@ impl<'storage> CurrentAppServingPhase<'storage> {
         )?;
         self.observed = observed;
         self.check(stage)?;
+        // The exact final coherent provider observation is historical DATA.
+        // No completion is exported until the actual peer ACK and postcheck.
+        self.evidence
+            .snapshot(crate::security_epoch::journal::snapshot_digest(
+                self.observed.snapshot(),
+            )?);
+        let known = self.disposition == ServingDisposition::Known;
         self.physical.finish_checked(stage)?;
+        stage.check()?;
         *self.continuation = true;
+        if known {
+            self.evidence
+                .record(crate::security_epoch::serving::ConsumerScopeResult::Completed);
+        }
         Ok(())
     }
 
@@ -247,31 +270,47 @@ impl<'storage> CurrentAppServingPhase<'storage> {
         }));
         match result {
             Ok(Ok(value)) if self.disposition == ServingDisposition::Known => {
+                let evidence = self.evidence.clone();
                 match self.finish_scope(stage) {
                     Ok(()) => crate::security_epoch::serving::ScopeOutcome::Known(value),
-                    Err(error) => crate::security_epoch::serving::ScopeOutcome::Refused(error),
+                    Err(error) => {
+                        evidence.record(
+                            crate::security_epoch::serving::ConsumerScopeResult::FinalScopeRefused,
+                        );
+                        crate::security_epoch::serving::ScopeOutcome::Refused(error)
+                    }
                 }
             }
             Ok(Err(error)) if self.disposition == ServingDisposition::Excluded => {
+                let evidence = self.evidence.clone();
                 match self.finish_scope(stage) {
                     Ok(()) => crate::security_epoch::serving::ScopeOutcome::Excluded(error),
                     Err(cause) => {
+                        evidence.record(
+                            crate::security_epoch::serving::ConsumerScopeResult::FinalScopeRefused,
+                        );
                         crate::security_epoch::serving::ScopeOutcome::Refused(error.context(cause))
                     }
                 }
             }
             Ok(Err(error)) => {
                 self.refuse();
+                self.evidence
+                    .record(crate::security_epoch::serving::ConsumerScopeResult::OperationRefused);
                 crate::security_epoch::serving::ScopeOutcome::Refused(error)
             }
             Ok(Ok(_)) => {
                 self.refuse();
+                self.evidence
+                    .record(crate::security_epoch::serving::ConsumerScopeResult::Unsettled);
                 crate::security_epoch::serving::ScopeOutcome::Refused(anyhow::anyhow!(
                     "native_serving_result_not_settled"
                 ))
             }
             Err(payload) => {
                 self.refuse();
+                self.evidence
+                    .record(crate::security_epoch::serving::ConsumerScopeResult::Panicked);
                 std::panic::resume_unwind(payload)
             }
         }

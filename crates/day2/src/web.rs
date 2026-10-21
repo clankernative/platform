@@ -591,13 +591,19 @@ async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
     handle_native(host, request).await
 }
 
-pub(crate) fn native_scopes(
+pub(crate) fn native_selections(
     host: &Host,
-) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
     host.oauth
         .as_ref()
         .context("native OAuth receiver missing")?
-        .native_scopes()
+        .native_selections()
+}
+
+pub(crate) fn native_runtime_response_scope(
+    host: &Host,
+) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+    crate::oauth::native_management::runtime_response_scope(&host.runtime)
 }
 
 pub(crate) async fn native_pump(

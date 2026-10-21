@@ -167,17 +167,14 @@ impl Attestation {
         session: Digest,
         key: (&[u8; 32], String),
         now: i64,
-        current: (
-            &mut super::native_management::RoleStage<'_>,
-            &mut super::native_management::OriginalPhase<'_>,
-        ),
+        current: &mut super::native_management::Consumer<'_, '_, '_>,
     ) -> Result<Self> {
-        proof.require_management_authentication()?;
+        proof.require_management_authentication(current)?;
         view.validate(identity, now)?;
         let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
         proof.require_intent(&intent, identity)?;
         proof.require_current(now)?;
-        current.1.require_signature(current.0, &intent)?;
+        current.require_signature(&intent)?;
         let mut value = Self {
             view: view.digest()?,
             session,

@@ -338,15 +338,21 @@ pub(in crate::oauth) fn authorize_managed_exchange(
     input: OutboundQualification<'_>,
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
+    current: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
-    authorize_checked(db, input, now, Some(guard))
+    guard.require_intent(input.intent)?;
+    guard.require_consumer(current, super::native_management::Phase::DispatchCommit)?;
+    authorize_checked(db, input, now, Some((guard, current)))
 }
 
 fn authorize_checked(
     db: &mut Connection,
     input: OutboundQualification<'_>,
     now: i64,
-    guard: Option<&super::management::app::FinishGuard<'_>>,
+    mut guard: Option<(
+        &super::management::app::FinishGuard<'_>,
+        &mut super::native_management::Consumer<'_, '_, '_>,
+    )>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
@@ -357,7 +363,8 @@ fn authorize_checked(
         input.instance,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(guard) = guard {
+    if let Some((guard, current)) = &mut guard {
+        current.check()?;
         guard.check(&tx, now)?;
     }
     let row: Option<(ConnectIntent, String, String, String)> = tx
@@ -415,10 +422,15 @@ fn authorize_checked(
         params![input.intent.attempt, now],
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
-    if let Some(guard) = guard {
+    if let Some((guard, current)) = &mut guard {
+        current.check()?;
         guard.commit_dispatch(&tx)?;
     }
-    tx.commit()?;
+    if let Some((_, current)) = guard {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(Some(ExchangeDispatchPermit {
         intent: stored_intent,
         binding: stored_exchange,
@@ -427,13 +439,30 @@ fn authorize_checked(
     }))
 }
 
-/// The callback parser owns the one-time claim; the code is encrypted in its
-/// transaction using the current qualified attempt and exact exchange binding.
+/// Parser-selection DATA shared by pure syntax preflight and the actual claim.
+pub(super) fn callback_parameters(
+    reviewed: &super::profiles::ReviewedBrowserCodeProfile,
+) -> super::protocol::CallbackParameters {
+    if reviewed.issuer_url == super::google::ISSUER
+        && reviewed.token_endpoint == super::google::TOKEN
+    {
+        super::catalog::Adapter::GoogleCalendar.callback_parameters()
+    } else {
+        super::protocol::CallbackParameters {
+            require_issuer: true,
+            allowed_extras: Default::default(),
+        }
+    }
+}
+
+/// The parser owns the one-time claim; the code is encrypted in its transaction
+/// using the current qualified attempt and exact exchange binding.
 pub(crate) fn handle_qualified_callback(
     db: &mut Connection,
     input: OutboundQualification<'_>,
     ingress: super::outbound::CallbackIngress<'_>,
     key: &crate::managed_credentials::crypto::KeyLease,
+    current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
 ) -> Result<super::outbound::CallbackOutcome> {
     let qualified = super::profiles::qualify_outbound_connect(
         input.intent,
@@ -448,17 +477,8 @@ pub(crate) fn handle_qualified_callback(
         "callback attempt mismatch"
     );
     let callback_code_ref = ingress.code_ref;
-    let parameters = if input.reviewed.issuer_url == super::google::ISSUER
-        && input.reviewed.token_endpoint == super::google::TOKEN
-    {
-        super::catalog::Adapter::GoogleCalendar.callback_parameters()
-    } else {
-        super::protocol::CallbackParameters {
-            require_issuer: true,
-            allowed_extras: Default::default(),
-        }
-    };
-    super::outbound::handle_callback_profile(db, ingress, &parameters, |tx, code| {
+    let parameters = callback_parameters(input.reviewed);
+    super::outbound::handle_callback_profile(db, ingress, &parameters, current, |tx, code| {
         let binding = load_binding(tx, &qualified.intent().attempt)?
             .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
         ensure!(
@@ -580,6 +600,7 @@ pub fn settle_mapped(
         &prepared.binding,
         current_mapping_revision,
         now,
+        None,
         |tx| custody::publish_tokens(tx, prepared.material),
     )
 }
@@ -591,7 +612,10 @@ pub(in crate::oauth) fn settle_managed(
     revision: &Digest,
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
+    consumer: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<bool> {
+    guard.require_intent(current.intent)?;
+    guard.require_consumer(consumer, super::native_management::Phase::FinishCommit)?;
     let qualified = super::profiles::qualify_outbound_connect(
         current.intent,
         current.binding,
@@ -611,6 +635,7 @@ pub(in crate::oauth) fn settle_managed(
         &prepared.binding,
         revision,
         now,
+        Some(consumer),
         |tx| {
             guard.check(tx, now)?;
             custody::publish_tokens(tx, prepared.material)?;

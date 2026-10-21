@@ -16,6 +16,7 @@ mod shell;
 /// phase needs its own genuine same-stage serving fence.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ServingUse {
+    Pending,
     Claim,
     Publication,
     StartCommit,
@@ -96,16 +97,171 @@ impl ResponseIdentity {
 pub(crate) enum RuntimeServingUse {
     InitialStorage,
     PendingCapture,
+    Registration,
     Read,
     Refresh,
     Response,
     ResponseComplete,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub(super) enum ScopePurpose {
     Human(ServingUse),
     Runtime(RuntimeServingUse),
+}
+
+// Historical DATA only. These capped private log records are never parsed as
+// readiness, native material or permission. Shell has no App provider snapshot
+// and cannot manufacture one from a matching binding.
+#[derive(Clone)]
+pub(in crate::security_epoch) struct ConsumerScopeEvidence {
+    role: super::native_enrollment::NativeRole,
+    selection: Option<Digest>,
+    incarnation: Digest,
+    binding: Option<Digest>,
+    purpose: Option<ScopePurpose>,
+    snapshot: Option<Digest>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum ConsumerScopeResult {
+    ExecutorEnrolled,
+    #[serde(rename = "scope_completed")]
+    Completed,
+    OperationRefused,
+    FinalScopeRefused,
+    Unsettled,
+    Panicked,
+}
+
+#[derive(Serialize)]
+struct ConsumerEvidenceRecord<'a> {
+    format: &'static str,
+    sequence: u8,
+    observation: ConsumerScopeResult,
+    role: super::native_enrollment::NativeRole,
+    selection: &'a Option<Digest>,
+    consumer_incarnation: &'a Digest,
+    binding: &'a Option<Digest>,
+    purpose: &'a Option<ScopePurpose>,
+    snapshot: &'a Option<Digest>,
+}
+
+const CONSUMER_EVIDENCE_PREFIX: &str = "day2-native-consumer-evidence ";
+const CONSUMER_EVIDENCE_LIMIT: u8 = 128;
+const CONSUMER_EVIDENCE_BYTES: usize = 2048;
+static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn next_consumer_evidence_sequence(records: &std::sync::atomic::AtomicU8) -> Option<u8> {
+    use std::sync::atomic::Ordering;
+    records
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+            (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1)
+        })
+        .ok()
+        .map(|previous| previous + 1)
+}
+
+impl ConsumerScopeEvidence {
+    pub(in crate::security_epoch) fn app(
+        selection: Digest,
+        incarnation: Digest,
+        binding: Digest,
+        purpose: ScopePurpose,
+    ) -> Self {
+        Self {
+            role: super::native_enrollment::NativeRole::AppHost,
+            selection: Some(selection),
+            incarnation,
+            binding: Some(binding),
+            purpose: Some(purpose),
+            snapshot: None,
+        }
+    }
+
+    pub(in crate::security_epoch) fn shell(incarnation: Digest, binding: Digest) -> Self {
+        Self {
+            role: super::native_enrollment::NativeRole::SecurityShell,
+            selection: None,
+            incarnation,
+            binding: Some(binding),
+            purpose: None,
+            snapshot: None,
+        }
+    }
+
+    pub(in crate::security_epoch) fn snapshot(&mut self, snapshot: Digest) {
+        self.snapshot = Some(snapshot);
+    }
+
+    fn line(&self, sequence: u8, observation: ConsumerScopeResult) -> Option<Vec<u8>> {
+        if !(1..=CONSUMER_EVIDENCE_LIMIT).contains(&sequence) {
+            return None;
+        }
+        let record = ConsumerEvidenceRecord {
+            format: "day2_native_consumer_evidence_v1",
+            sequence,
+            observation,
+            role: self.role,
+            selection: &self.selection,
+            consumer_incarnation: &self.incarnation,
+            binding: &self.binding,
+            purpose: &self.purpose,
+            snapshot: &self.snapshot,
+        };
+        let json = serde_json::to_string(&record).ok()?;
+        let line = format!("{CONSUMER_EVIDENCE_PREFIX}{json}\n");
+        (line.len() <= CONSUMER_EVIDENCE_BYTES).then(|| line.into_bytes())
+    }
+
+    pub(in crate::security_epoch) fn record(&self, observation: ConsumerScopeResult) {
+        use std::io::Write;
+        let Some(sequence) = next_consumer_evidence_sequence(&CONSUMER_EVIDENCE_RECORDS) else {
+            return;
+        };
+        let Some(line) = self.line(sequence, observation) else {
+            return;
+        };
+        // Export failure cannot change a completed native result. Missing or
+        // truncated diagnostics remain missing evidence, never a positive claim.
+        let _ = std::io::stderr().lock().write_all(&line);
+    }
+}
+
+/// Only the actual final HTTP executor calls this after genuine enrollment and
+/// its checked App/Shell stage. This reports no file, P3, consumer or readiness
+/// success; Shell still needs a real human request to enter a serving scope.
+pub(crate) fn record_executor_enrollment(
+    stage: &mut EnrolledRoleStage<'_>,
+    policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    store: &day2_capabilities::security_epoch::EpochStore,
+    role: super::native_enrollment::NativeRole,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            role,
+            super::native_enrollment::NativeRole::AppHost
+                | super::native_enrollment::NativeRole::SecurityShell
+        ),
+        "native HTTP enrollment role refused"
+    );
+    stage.check_selection(policy, store, role)?;
+    let evidence = ConsumerScopeEvidence {
+        role,
+        selection: Some(Digest::of(&(
+            "day2-controller-evidence-selection-v1",
+            policy,
+            store,
+        ))?),
+        incarnation: stage.incarnation_data()?,
+        binding: None,
+        purpose: None,
+        snapshot: None,
+    };
+    stage.check_selection(policy, store, role)?;
+    evidence.record(ConsumerScopeResult::ExecutorEnrolled);
+    Ok(())
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -215,6 +371,7 @@ enum ParticipantOwner {
 pub(crate) struct CurrentShellServingPhase<'peer> {
     peer: super::native_enrollment::CurrentServingPeerPhase<'peer>,
     disposition: super::bootstrap::ServingDisposition,
+    evidence: ConsumerScopeEvidence,
 }
 
 impl ServingParticipant {
@@ -551,6 +708,92 @@ mod response_tests {
     use super::*;
 
     #[test]
+    fn enrollment_observation_does_not_invent_a_serving_binding_or_snapshot() {
+        for role in [
+            super::super::native_enrollment::NativeRole::AppHost,
+            super::super::native_enrollment::NativeRole::SecurityShell,
+        ] {
+            // Format DATA only. This fixture never constructs a native stage or
+            // calls the actual checked enrollment-observation producer.
+            let evidence = ConsumerScopeEvidence {
+                role,
+                selection: Some(Digest::new(b"selected policy DATA")),
+                incarnation: Digest::new(b"historical incarnation DATA"),
+                binding: None,
+                purpose: None,
+                snapshot: None,
+            };
+            let line = String::from_utf8(
+                evidence
+                    .line(1, ConsumerScopeResult::ExecutorEnrolled)
+                    .unwrap(),
+            )
+            .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap()).unwrap();
+            assert_eq!(value["observation"], "executor_enrolled");
+            for field in ["binding", "purpose", "snapshot"] {
+                assert!(value[field].is_null());
+            }
+            assert!(value["selection"].is_string());
+            assert!(value["consumer_incarnation"].is_string());
+        }
+    }
+
+    #[test]
+    fn consumer_diagnostic_budget_cannot_wrap_or_reopen_after_exhaustion() {
+        let records = std::sync::atomic::AtomicU8::new(0);
+        for expected in 1..=128 {
+            assert_eq!(next_consumer_evidence_sequence(&records), Some(expected));
+        }
+        for _ in 0..1024 {
+            assert_eq!(next_consumer_evidence_sequence(&records), None);
+        }
+        assert_eq!(records.load(std::sync::atomic::Ordering::Relaxed), 128);
+    }
+
+    #[test]
+    fn historical_consumer_records_are_bounded_redacted_and_keep_shell_snapshot_absent() {
+        let private = "PRIVATE_token_subject_callback_url";
+        let digest = Digest::new(private.as_bytes());
+        let mut app = ConsumerScopeEvidence::app(
+            digest.clone(),
+            digest.clone(),
+            digest.clone(),
+            ScopePurpose::Runtime(RuntimeServingUse::Registration),
+        );
+        app.snapshot(digest.clone());
+        let shell = ConsumerScopeEvidence::shell(digest.clone(), digest.clone());
+        for (record, has_snapshot) in [(&app, true), (&shell, false)] {
+            assert!(record.line(0, ConsumerScopeResult::Completed).is_none());
+            assert!(record.line(129, ConsumerScopeResult::Completed).is_none());
+            for (result, expected) in [
+                (ConsumerScopeResult::Completed, "scope_completed"),
+                (ConsumerScopeResult::OperationRefused, "operation_refused"),
+                (
+                    ConsumerScopeResult::FinalScopeRefused,
+                    "final_scope_refused",
+                ),
+                (ConsumerScopeResult::Unsettled, "unsettled"),
+                (ConsumerScopeResult::Panicked, "panicked"),
+            ] {
+                let bytes = record.line(128, result).unwrap();
+                assert!(bytes.len() <= CONSUMER_EVIDENCE_BYTES);
+                let line = String::from_utf8(bytes).unwrap();
+                assert_eq!(line.lines().count(), 1);
+                assert!(!line.contains(private));
+                let json: serde_json::Value =
+                    serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap())
+                        .unwrap();
+                assert_eq!(json["observation"], expected);
+                assert_eq!(json["binding"], digest.as_str());
+                assert_eq!(json["snapshot"].is_string(), has_snapshot);
+                assert_eq!(json["selection"].is_string(), has_snapshot);
+            }
+        }
+    }
+
+    #[test]
     fn equal_digest_and_identity_cannot_cross_human_and_runtime_holds() {
         let digest = Digest::new(b"deliberately equal context bytes");
         let human = HoldContext::Human(digest.clone());
@@ -593,6 +836,7 @@ mod response_tests {
         for purpose in [
             RuntimeServingUse::InitialStorage,
             RuntimeServingUse::PendingCapture,
+            RuntimeServingUse::Registration,
             RuntimeServingUse::Read,
             RuntimeServingUse::Refresh,
         ] {
@@ -782,6 +1026,208 @@ mod native_admission_tests {
                 .security_epochs
                 .is_empty()
         );
+        Ok(())
+    }
+}
+
+/// The ordinary database path cannot adopt or initialize storage selected for
+/// native bootstrap. Check this BEFORE `.state` metadata, directory creation,
+/// active-authority reads or SQLite open. Desired policy and an old SQL row do
+/// not recreate a current physical holder after executor/process loss.
+///
+/// There is no successful native Runtime admission constructor yet. A future
+/// path must consume the actual activated same-file/current-owner composition;
+/// it must not replace this refusal with a boolean or a stored receipt. Apps
+/// without a native bootstrap selection retain their ordinary storage path.
+pub(crate) fn require_runtime_admission(
+    instance: &crate::artifact::Instance,
+    app: &str,
+) -> Result<()> {
+    let Some(control) = &instance.control else {
+        return Ok(());
+    };
+    if control
+        .security_bootstraps
+        .values()
+        .any(|policy| policy.scope.app.as_str() == app)
+    {
+        anyhow::bail!("native runtime storage authority unavailable");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runtime_admission_tests {
+    use super::*;
+    use anyhow::Context;
+
+    fn selected_profile_instance() -> Result<crate::artifact::Instance> {
+        let mut instance = crate::oauth::clients::tests::security_instance("workspace", true)?;
+        let control = instance.control.as_mut().context("fixture control")?;
+        let (alias, store) = control
+            .security_epochs
+            .iter()
+            .find(|(_, store)| store.scope.app.as_str() == "workspace")
+            .map(|(alias, store)| (alias.clone(), store.clone()))
+            .context("fixture epoch")?;
+        let mut policy = super::super::control_slot_tests::policy(&store);
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { project, .. } =
+            &store.provider;
+        policy.cluster.project = project.clone();
+        policy.epoch_store.id = alias;
+        policy.control_store.epoch_store = policy.epoch_store.clone();
+        control
+            .security_bootstraps
+            .insert("native".to_owned().try_into()?, policy);
+        crate::artifact::Instance::from_bytes(&serde_json::to_vec(&instance)?)
+    }
+
+    #[test]
+    fn explicit_native_profile_selection_cannot_downgrade_invalid_metadata() -> Result<()> {
+        let instance = selected_profile_instance()?;
+        let policy = instance
+            .native_bootstrap_for("workspace")?
+            .context("explicit native profile")?;
+        let scope = policy.scope.clone();
+        assert_eq!(
+            crate::oauth::native_management::selected_scopes(&instance, Some("workspace"))?,
+            vec![scope]
+        );
+        for mutation in [
+            "foreign_installation",
+            "foreign_environment",
+            "duplicate_policy",
+            "missing_epoch",
+            "ambiguous_epoch",
+        ] {
+            let mut invalid = instance.clone();
+            let control = invalid.control.as_mut().unwrap();
+            match mutation {
+                "foreign_installation" => {
+                    control
+                        .security_bootstraps
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .scope
+                        .installation = "foreign".to_owned().try_into()?;
+                }
+                "foreign_environment" => {
+                    control
+                        .security_bootstraps
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .scope
+                        .environment = "foreign".to_owned().try_into()?;
+                }
+                "duplicate_policy" => {
+                    let copy = control.security_bootstraps.values().next().unwrap().clone();
+                    control
+                        .security_bootstraps
+                        .insert("second".to_owned().try_into()?, copy);
+                }
+                "missing_epoch" => {
+                    control.security_epochs.remove(&policy.epoch_store.id);
+                }
+                "ambiguous_epoch" => {
+                    let copy = control.security_epochs[&policy.epoch_store.id].clone();
+                    control
+                        .security_epochs
+                        .insert("second".to_owned().try_into()?, copy);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                invalid.native_bootstrap_for("workspace").is_err(),
+                "{mutation}"
+            );
+            assert!(
+                crate::oauth::native_management::selected_scopes(&invalid, Some("workspace"))
+                    .is_err(),
+                "{mutation} became prerequisite-only startup"
+            );
+        }
+        let mut prerequisite_only = instance.clone();
+        prerequisite_only
+            .control
+            .as_mut()
+            .unwrap()
+            .security_bootstraps
+            .clear();
+        let prerequisite_only =
+            crate::artifact::Instance::from_bytes(&serde_json::to_vec(&prerequisite_only)?)?;
+        assert!(
+            prerequisite_only
+                .native_bootstrap_for("workspace")?
+                .is_none()
+        );
+        assert!(
+            crate::oauth::native_management::selected_scopes(&prerequisite_only, None)?.is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_native_bootstrap_refuses_before_state_creation_metadata_or_database_open()
+    -> Result<()> {
+        let mut instance = crate::oauth::clients::tests::security_instance("workspace", false)?;
+        let control = instance.control.as_mut().context("fixture control")?;
+        let (alias, store) = control
+            .security_epochs
+            .iter()
+            .find(|(_, store)| store.scope.app.as_str() == "workspace")
+            .map(|(alias, store)| (alias.clone(), store.clone()))
+            .context("fixture epoch")?;
+        let mut policy = super::super::control_slot_tests::policy(&store);
+        let day2_capabilities::security_epoch::EpochProvider::FirestoreNativeV1 { project, .. } =
+            &store.provider;
+        policy.cluster.project = project.clone();
+        policy.epoch_store.id = alias;
+        policy.control_store.epoch_store = policy.epoch_store.clone();
+        control
+            .security_bootstraps
+            .insert("native".to_owned().try_into()?, policy);
+        // Pass the ACTUAL strict operator loader, not a fixture-only relaxed
+        // decoder or a fabricated permission/supplier matrix.
+        let bytes = serde_json::to_vec(&instance)?;
+        crate::artifact::Instance::from_bytes(&bytes)?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("instance.json");
+        std::fs::write(&path, bytes)?;
+        let state = directory.path().join(".state");
+        let refused = || -> Result<()> {
+            let error = crate::store::Runtime::load(&path, "workspace")
+                .err()
+                .context("native Runtime unexpectedly admitted")?;
+            assert_eq!(error.to_string(), "native_runtime_current_serving_required");
+            Ok(())
+        };
+        refused()?;
+        assert!(
+            !state.exists(),
+            "startup created ordinary state before native admission"
+        );
+        // Even querying/chmodding the ordinary state directory is too early.
+        std::fs::write(&state, b"must not inspect this as a directory")?;
+        refused()?;
+        assert_eq!(
+            std::fs::read(&state)?,
+            b"must not inspect this as a directory"
+        );
+        std::fs::remove_file(&state)?;
+        std::fs::create_dir(&state)?;
+        let database = state.join("workspace.sqlite");
+        std::fs::write(
+            &database,
+            b"old copied authority/receipt is not a native owner",
+        )?;
+        refused()?;
+        assert_eq!(
+            std::fs::read(&database)?,
+            b"old copied authority/receipt is not a native owner"
+        );
+        assert_eq!(std::fs::read_dir(&state)?.count(), 1);
         Ok(())
     }
 }

@@ -13,6 +13,26 @@ and nominal requirement digest, and a matching reviewed provider profile. The
 host catalog derives scopes for exactly the declaration's actions. Unselected
 declarations confer no OAuth authority.
 
+Native execution is explicitly selected by `control.security_bootstraps`, rather
+than inferred from a connection or epoch catalog. Empty selection can serve
+registration and prerequisite pages but installs no native owner. A selected
+profile requires genuine enrollment, the original App file/first holder and
+current serving authority; failure never switches to the prerequisite mode.
+
+Connect and disconnect consume separate App and Shell originals on their final
+OS threads, plus a current native scope at each commit, provider exchange,
+session, signature and response. Natural read/refresh uses its own current App
+scope and never borrows the human's five-minute authentication as an autonomous
+grant. Runtime responses and human responses have different tagged connection
+holds: partial progress is not completion, and a late or different connection
+cannot clear or refuse the rightful hold. Successful local transport completion
+does not prove human receipt. Approval and credential enrollment remain
+unsupported by this management producer.
+
+Source checks and offline replay do not qualify the actual provider/kernel
+profile. Initial/current serving and the live connect/read/refresh/disconnect
+campaign must pass separately before claiming a qualified native deployment.
+
 ## Instance contract
 
 Each entry in `oauth_connections` uses the declaration's registration name as

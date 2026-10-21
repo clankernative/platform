@@ -1,7 +1,7 @@
 //! Google OIDC for the security shell. IAP identifies incoming requests; the
-//! owned two-phase flow verifies issuer ordering. Genuine native original
-//! lifetime/current role/epoch/final settlement are still required, and the
-//! production post-Pending proof guard remains closed until qualified.
+//! owned two-phase flow verifies issuer ordering. Production management consumes
+//! genuine native original, role, epoch and final consumer scopes; provider
+//! observations alone cannot create those owners or authenticate a session.
 
 use super::{
     approval_keys::{GcpSecretReader, GcpSecretVersion},
@@ -485,8 +485,8 @@ impl Reauthenticated {
         self.authenticated_at
     }
 
-    /// Signed timestamps alone do not establish authentication after the local
-    /// pending request. No production causal producer is admitted yet.
+    /// Approval and credential enrollment remain unsupported. Their observations
+    /// cannot use the OAuth management producer or its owner scopes.
     pub(in crate::oauth) fn require_post_pending_authentication(&self) -> Result<()> {
         #[cfg(test)]
         if self.isolated_fixture {
@@ -520,8 +520,62 @@ impl Reauthenticated {
         }
         // An owned issuer-order observation is necessary but not a factory for
         // genuine original lifetime/current role/epoch or final app settlement.
-        // No production success branch is installed before those are supplied.
+        // This non-consuming path never activates the management producer.
         anyhow::bail!(PRODUCER_UNAVAILABLE)
+    }
+
+    /// Consume the verified issuer-order chain at its actual Shell session or
+    /// signer, retaining the same enrolled original and genuine serving scope.
+    /// This lends no transferable permit and never reconstructs native owners.
+    pub(in crate::oauth) fn require_management_authentication(
+        &self,
+        current: &mut super::native_management::Consumer<'_, '_, '_>,
+    ) -> Result<()> {
+        self.validate_management_observation()?;
+        #[cfg(test)]
+        if self.isolated_fixture {
+            return Ok(());
+        }
+        let order = self.ordering.as_ref().context(PRODUCER_UNAVAILABLE)?;
+        if let Err(error) = current.require_management_producer(&self.intent) {
+            return Err(anyhow::Error::new(ProviderObservationUnavailable(
+                ProviderObservationData {
+                    version: 1,
+                    kind: "google_provider_prerequisite",
+                    outcome: "signed_auth_time_and_ordering_verified_native_producer_unavailable",
+                    baseline_iat: order.baseline.claims.iat,
+                    fresh_auth_time: order.fresh.claims.auth_time,
+                    profile: observation_profile(&order.fresh.profile)?,
+                    correlation: order.observation_correlation.clone(),
+                },
+            ))
+            .context(error));
+        }
+        self.require_current(effects::wall_time()?)?;
+        current.check()
+    }
+
+    /// Pure negative preflight before any key or native acquisition. A valid
+    /// observation is DATA; only the consuming method above can authenticate.
+    pub(in crate::oauth) fn validate_management_observation(&self) -> Result<()> {
+        self.intent.require_oauth_management()?;
+        #[cfg(test)]
+        if self.isolated_fixture {
+            return Ok(());
+        }
+        let order = self.ordering.as_ref().context(PRODUCER_UNAVAILABLE)?;
+        ensure!(
+            order.original == self.intent.commitment()?
+                && order.fresh.issuer == order.baseline.issuer
+                && order.fresh.profile == order.baseline.profile
+                && order.fresh.claims.sub == order.baseline.claims.sub
+                && order.fresh.claims.aud == order.baseline.claims.aud
+                && order.fresh.claims.auth_time == self.authenticated_at
+                && order.fresh.claims.auth_time > order.baseline.claims.iat
+                && order.fresh.claims.auth_time <= order.fresh.claims.iat,
+            "Google original ordering context changed"
+        );
+        Ok(())
     }
 
     pub(in crate::oauth) fn deadline(&self) -> Result<i64> {
@@ -1209,11 +1263,19 @@ impl GoogleOidc {
                     bundle.profile == expected_profile,
                     "Google baseline profile changed"
                 );
-                let token = self.exchange.exchange(
-                    code,
-                    &bundle.baseline.verifier,
-                    &self.redirect_uri,
-                    &self.client_id,
+                let token = super::native_management::with_consumer(
+                    &flight.original.intent,
+                    super::native_management::Phase::ShellAuthentication,
+                    now,
+                    |current| {
+                        current.arm()?;
+                        self.exchange.exchange(
+                            code,
+                            &bundle.baseline.verifier,
+                            &self.redirect_uri,
+                            &self.client_id,
+                        )
+                    },
                 )?;
                 let at = Self::owned_now(&flight.original, now)?;
                 let baseline =
@@ -1241,11 +1303,19 @@ impl GoogleOidc {
                     pending.profile == expected_profile,
                     "Google fresh profile changed"
                 );
-                let token = self.exchange.exchange(
-                    code,
-                    &pending.fresh.verifier,
-                    &self.redirect_uri,
-                    &self.client_id,
+                let token = super::native_management::with_consumer(
+                    &flight.original.intent,
+                    super::native_management::Phase::ShellAuthentication,
+                    now,
+                    |current| {
+                        current.arm()?;
+                        self.exchange.exchange(
+                            code,
+                            &pending.fresh.verifier,
+                            &self.redirect_uri,
+                            &self.client_id,
+                        )
+                    },
                 )?;
                 let at = Self::owned_now(&flight.original, now)?;
                 let fresh =

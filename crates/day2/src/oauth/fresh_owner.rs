@@ -110,6 +110,14 @@ pub(crate) struct CallData {
 }
 
 impl CallData {
+    /// Closed operation selection DATA; it supplies no native serving scope.
+    pub(super) fn native_phase(&self) -> super::native_management::Phase {
+        match &self.operation {
+            OperationData::Claim {} => super::native_management::Phase::Claim,
+            OperationData::Publish { .. } => super::native_management::Phase::Publication,
+        }
+    }
+
     pub(super) fn claim(intent: &FreshIntent, owner: Digest) -> Result<Self> {
         Ok(Self {
             purpose: PurposeData::from_intent(intent),

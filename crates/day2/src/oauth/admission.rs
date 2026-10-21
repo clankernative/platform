@@ -197,13 +197,17 @@ impl ArtifactShellSigner {
         session: Digest,
         now: i64,
     ) -> Result<super::management::Attestation> {
-        proof.require_management_authentication()?;
+        proof.validate_management_observation()?;
         let intent = super::fresh_auth::FreshIntent::management(view, identity)?;
-        super::native_management::with_current_original(
+        super::native_management::with_consumer(
             &intent,
             super::native_management::Phase::Signature,
             now,
-            |role, original| {
+            |current| {
+                proof.require_management_authentication(current)?;
+                // Key retrieval is a disclosure attempt on this SAME scope.
+                // Final signing consumes its one finalization below.
+                current.arm()?;
                 let state = self
                     .state
                     .read()
@@ -222,7 +226,7 @@ impl ArtifactShellSigner {
                     "OAuth management key changed"
                 );
                 let at = proof.observe_current(now)?;
-                original.check(role)?;
+                current.check()?;
                 super::management::Attestation::sign(
                     view,
                     proof,
@@ -230,7 +234,7 @@ impl ArtifactShellSigner {
                     session,
                     (&key.bytes, key.version),
                     at,
-                    (role, original),
+                    current,
                 )
             },
         )
@@ -1125,26 +1129,39 @@ impl ArtifactApprovalAuthority {
         identity: &crate::iap::Verified,
         now: i64,
     ) -> Result<()> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let selected = management_selection(&state.selected, view)?;
-        let reference = &selected.shell_attestation;
-        let key = state
-            .keys
-            .as_ref()
-            .context("OAuth selected key provider missing")?
-            .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
-        ensure!(
-            key.binding == reference.binding
-                && key.version == reference.version
-                && key.purpose == ApprovalKeyPurpose::ShellAttestation,
-            "OAuth management key changed"
-        );
-        let at = super::effects::wall_time()?;
-        ensure!(at >= now, "OAuth management clock moved backwards");
-        proof.verify(view, identity, &key.bytes, &key.version, at)
+        super::native_management::with_consumer(
+            &super::fresh_auth::FreshIntent::management(view, identity)?,
+            super::native_management::Phase::Verification,
+            now,
+            |current| {
+                current.arm()?;
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
+                let selected = management_selection(&state.selected, view)?;
+                let reference = &selected.shell_attestation;
+                let key = state
+                    .keys
+                    .as_ref()
+                    .context("OAuth selected key provider missing")?
+                    .load(reference, ApprovalKeyPurpose::ShellAttestation)?;
+                ensure!(
+                    key.binding == reference.binding
+                        && key.version == reference.version
+                        && key.purpose == ApprovalKeyPurpose::ShellAttestation,
+                    "OAuth management key changed"
+                );
+                let at = super::effects::wall_time()?;
+                ensure!(at >= now, "OAuth management clock moved backwards");
+                current.check()?;
+                // Key retrieval completed under this SAME armed scope. A bad
+                // signature is a known input exclusion, not an unknown send or
+                // write; settle that known result without burning the rightful
+                // original. Retrieval/current failures still refuse it.
+                Ok(proof.verify(view, identity, &key.bytes, &key.version, at))
+            },
+        )?
     }
 
     pub(super) fn management_client(&self, view: &super::management::View) -> Result<String> {
@@ -2133,6 +2150,7 @@ pub(super) mod tests {
                 now: 998,
             },
             &terms.custody_key,
+            None,
         )?;
         ensure!(
             matches!(
@@ -4195,11 +4213,11 @@ pub(super) mod tests {
             assert!(refused.is_err_and(|e| e.to_string().contains("producer unavailable")));
             assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
             super::super::native_management::reserve_shell(&intent, 104)?;
-            let refused = super::super::native_management::with_current_original(
+            let refused = super::super::native_management::with_consumer(
                 &intent,
                 super::super::native_management::Phase::Signature,
                 104,
-                |role, original| {
+                |current| {
                     Attestation::sign(
                         &view,
                         &actual,
@@ -4207,7 +4225,7 @@ pub(super) mod tests {
                         session.clone(),
                         (&[11; 32], "11".into()),
                         104,
-                        (role, original),
+                        current,
                     )
                 },
             );
@@ -4219,6 +4237,8 @@ pub(super) mod tests {
             assert!(clock.requests().is_empty());
             // A separate, explicitly isolated per-proof witness keeps native
             // conformance tests meaningful. It is absent from production builds.
+            // The refused prerequisite never reached signing. This is a known
+            // exclusion, not an ambiguous mutation that burns the original.
             super::super::native_management::reserve_shell(&intent, 104)?;
             let isolated = VerifiedAuthTime::from_google(shell_oidc::Reauthenticated::fixture(
                 intent,

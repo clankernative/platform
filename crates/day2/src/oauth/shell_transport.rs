@@ -439,12 +439,21 @@ impl AppApprovalReceiver {
         super::native_http::serve_receiver(self, listener).await
     }
 
-    pub(crate) fn native_scopes(
+    pub(crate) fn native_selections(
         &self,
-    ) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+    ) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
         self.management
             .as_ref()
-            .map_or_else(|| Ok(Vec::new()), |manager| manager.native_scopes())
+            .map_or_else(|| Ok(Vec::new()), |manager| manager.native_selections())
+    }
+
+    pub(crate) fn native_runtime_response_scope(
+        &self,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        self.management.as_ref().map_or_else(
+            || Ok(None),
+            |manager| manager.native_runtime_response_scope(),
+        )
     }
 
     fn dispatch(

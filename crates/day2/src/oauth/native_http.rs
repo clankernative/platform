@@ -14,7 +14,6 @@ use hyper::{rt, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use std::{
     cell::RefCell,
-    convert::Infallible,
     future::Future,
     io,
     pin::Pin,
@@ -26,6 +25,9 @@ use std::{
     thread::ThreadId,
 };
 use tokio::{net::TcpListener, runtime::Handle};
+
+#[cfg(test)]
+use std::convert::Infallible;
 
 thread_local! {
     // Only timer creation enters this handle. Keeping an entered Tokio runtime
@@ -138,17 +140,17 @@ impl Endpoint {
         }
         use crate::security_epoch::native_enrollment::NativeRole;
         let (scopes, role) = match self {
-            Self::Shell(shell) => (shell.native_scopes().to_vec(), NativeRole::SecurityShell),
-            Self::App(host) => (crate::web::native_scopes(host)?, NativeRole::AppHost),
-            Self::Receiver(receiver) => (receiver.native_scopes()?, NativeRole::AppHost),
+            Self::Shell(shell) => (
+                shell.native_selections().to_vec(),
+                NativeRole::SecurityShell,
+            ),
+            Self::App(host) => (crate::web::native_selections(host)?, NativeRole::AppHost),
+            Self::Receiver(receiver) => (receiver.native_selections()?, NativeRole::AppHost),
             #[cfg(test)]
             Self::Test(_) => return Ok(()),
             #[cfg(test)]
             Self::Prepared(_, _) => anyhow::bail!("nested native fixture preparation"),
         };
-        if scopes.is_empty() {
-            return Ok(());
-        } // No selected management consumer.
         super::native_management::install(&scopes, role)
     }
 
@@ -162,6 +164,19 @@ impl Endpoint {
             #[cfg(test)]
             Self::Prepared(_, _) => panic!("native fixture not prepared"),
         }
+    }
+
+    fn prepare_response(&self, sink: &super::native_management::Sink) -> Result<()> {
+        let scope = match self {
+            Self::App(host) => crate::web::native_runtime_response_scope(host)?,
+            Self::Receiver(receiver) => receiver.native_runtime_response_scope()?,
+            Self::Shell(_) => None,
+            #[cfg(test)]
+            Self::Test(_) => None,
+            #[cfg(test)]
+            Self::Prepared(_, _) => anyhow::bail!("native fixture preparation not complete"),
+        };
+        sink.prepare_response(scope)
     }
 }
 
@@ -232,14 +247,14 @@ impl Launch {
                 admission,
             } => run(endpoint, listener, capacity, admission, shutdown, false).await,
             Self::App(startup, admission) => {
-                let scopes = startup.scopes()?;
+                let scopes = startup.selections()?;
                 super::native_management::install(
                     &scopes,
                     crate::security_epoch::native_enrollment::NativeRole::AppHost,
                 )?;
                 let (host, listener) = (*startup).prepare(admission.clone())?;
                 ensure!(
-                    crate::web::native_scopes(&host)? == scopes,
+                    crate::web::native_selections(&host)? == scopes,
                     "native App startup scope changed"
                 );
                 run(
@@ -351,12 +366,26 @@ async fn run(
                 };
                 let admitted = admission.clone();
                 connections.push(async move {
+                    struct Completion {
+                        sink: super::native_management::Sink,
+                        known: bool,
+                    }
+                    impl Drop for Completion {
+                        fn drop(&mut self) {
+                            if !self.known { self.sink.abort(); }
+                        }
+                    }
+                    let mut completion = Completion { sink: sink.clone(), known: false };
                     let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                         let admitted = admitted.clone();
                         let sink = sink.clone();
                         async move {
                             let response = sink.scope(endpoint.handle(request.map(Body::new), admitted)).await;
-                            Ok::<_, Infallible>(response)
+                            if endpoint.prepare_response(&sink).is_err() {
+                                sink.abort();
+                                return Err(io::Error::other("native response authority unavailable"));
+                            }
+                            Ok::<_, io::Error>(response)
                         }
                     });
                     // A failed write means delivery is unknown/failed. Never
@@ -365,7 +394,11 @@ async fn run(
                         .timer(OwnerTimer)
                         .header_read_timeout(std::time::Duration::from_secs(3))
                         .serve_connection(connection_io, service);
-                    let _ = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await;
+                    if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
+                        // Known local transport completion only. This is not
+                        // evidence that a browser/human received the bytes.
+                        completion.known = completion.sink.finish().is_ok();
+                    }
                 });
             }
         }
@@ -432,34 +465,19 @@ impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
         }
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_flush(cx))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
         this.sink
-            .with_current(|| Pin::new(&mut this.inner).poll_shutdown(cx))
-            .unwrap_or_else(|_| {
-                Poll::Ready(Err(io::Error::other(
-                    "native response original unavailable",
-                )))
-            })
+            .poll_io(|| Pin::new(&mut this.inner).poll_shutdown(cx))
     }
 }
 

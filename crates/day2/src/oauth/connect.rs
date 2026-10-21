@@ -305,8 +305,11 @@ pub(super) fn begin_managed(
     prepared: super::exchange::PreparedAuthorization,
     now: i64,
     guard: &super::management::app::StartGuard<'_>,
+    current: &mut super::native_management::Consumer<'_, '_, '_>,
 ) -> Result<bool> {
     let (intent, callback, exchange, verifier) = prepared.parts();
+    guard.require_intent(intent)?;
+    guard.require_consumer(current)?;
     callback.verify(intent)?;
     begin_inner_checked(
         db,
@@ -314,7 +317,7 @@ pub(super) fn begin_managed(
         Some(callback),
         Some((exchange, verifier)),
         now,
-        Some(guard),
+        Some((guard, current)),
     )
 }
 
@@ -327,7 +330,10 @@ fn begin_inner_checked(
         &super::custody::PreparedVerifier,
     )>,
     now: i64,
-    guard: Option<&super::management::app::StartGuard<'_>>,
+    mut guard: Option<(
+        &super::management::app::StartGuard<'_>,
+        &mut super::native_management::Consumer<'_, '_, '_>,
+    )>,
 ) -> Result<bool> {
     validate(intent)?;
     ensure!(
@@ -338,7 +344,8 @@ fn begin_inner_checked(
         "invalid connect attempt lifetime"
     );
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(guard) = guard {
+    if let Some((guard, current)) = &mut guard {
+        current.check()?;
         guard.check(&tx, now)?;
     }
     if !slot_matches(&tx, intent)? {
@@ -379,11 +386,16 @@ fn begin_inner_checked(
         super::custody::publish_verifier(&tx, verifier)?;
     }
     if inserted == 1
-        && let Some(guard) = guard
+        && let Some((guard, current)) = &mut guard
     {
+        current.check()?;
         guard.commit(&tx)?;
     }
-    tx.commit()?;
+    if let Some((_, current)) = guard {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(inserted == 1)
 }
 
@@ -667,6 +679,7 @@ pub(super) fn activate_mapped(
         None,
         current_mapping_revision,
         now,
+        None,
         custody_publish,
     )
 }
@@ -677,6 +690,7 @@ pub(super) fn activate_mapped_bound(
     binding: &super::exchange::ExchangeBinding,
     current_mapping_revision: &Digest,
     now: i64,
+    current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
     activate_mapped_inner(
@@ -685,6 +699,7 @@ pub(super) fn activate_mapped_bound(
         Some(binding),
         current_mapping_revision,
         now,
+        current,
         custody_publish,
     )
 }
@@ -695,6 +710,7 @@ fn activate_mapped_inner(
     exchange: Option<&super::exchange::ExchangeBinding>,
     current_mapping_revision: &Digest,
     now: i64,
+    current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
     let intent: Option<ConnectIntent> = db
@@ -735,6 +751,7 @@ fn activate_mapped_inner(
             exchange,
         },
         now,
+        current,
         custody_publish,
     )
 }
@@ -759,6 +776,7 @@ fn activate(
             exchange: None,
         },
         now,
+        None,
         custody_publish,
     )
 }
@@ -788,6 +806,7 @@ pub(super) fn activate_external_bound(
             exchange: Some(exchange),
         },
         now,
+        None,
         custody_publish,
     )
 }
@@ -798,6 +817,7 @@ fn activate_bound(
     account_scope: (&str, &str),
     guard: ActivationGuard<'_>,
     now: i64,
+    mut current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
     custody_publish: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<bool> {
     let (account, scope_evidence) = account_scope;
@@ -805,6 +825,9 @@ fn activate_bound(
     identifier(account)?;
     identifier(scope_evidence)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(current) = &mut current {
+        current.check()?;
+    }
     let row: Option<(ConnectIntent, String, Option<String>, Option<String>)> = tx
         .query_row(
             "SELECT slot, expected_generation, expected_epoch, proposed_generation, owner,
@@ -867,7 +890,11 @@ fn activate_bound(
             code_ref = NULL, account = NULL, scope_evidence = NULL WHERE attempt = ?1",
             [attempt],
         )?;
-        tx.commit()?;
+        if let Some(current) = current {
+            current.commit(tx)?;
+        } else {
+            tx.commit()?;
+        }
         return Ok(false);
     }
     let affinity = Digest::of(&(
@@ -882,6 +909,9 @@ fn activate_bound(
         intent.proposed_generation,
         intent.expected_epoch,
     ))?;
+    if let Some(current) = &mut current {
+        current.check()?;
+    }
     custody_publish(&tx)?;
     if let Some(exchange) = guard.exchange
         && state != "awaiting_account_approval"
@@ -925,7 +955,11 @@ fn activate_bound(
          scope_evidence = ?3, code_ref = NULL WHERE attempt = ?1",
         params![attempt, account, scope_evidence],
     )?;
-    tx.commit()?;
+    if let Some(current) = current {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(true)
 }
 

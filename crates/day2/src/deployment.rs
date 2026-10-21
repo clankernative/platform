@@ -16,6 +16,9 @@ use std::{
 };
 
 const PROC_BUDGET: u64 = 1_048_576;
+// Fixed S3 volume ABI, also enforced by the native file/provider join. This
+// pathname is selection DATA; it cannot supply a retained file or holder.
+const NATIVE_STORAGE_MOUNT: &str = "/state";
 
 /// Read-only desired metadata for the native OAuth runtime. This emits pins and
 /// callback URLs, never readiness and never client or custody secret bytes.
@@ -416,6 +419,31 @@ fn layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, P
     Ok((instance_path, profile, state))
 }
 
+/// Desired deployment DATA only. Native bootstrap must not inspect a serving
+/// pathname or open its active-authority rows before the final enrolled App
+/// executor authenticates and retains the original file.
+fn initial_layout(instance_path: &Path, app: &str) -> Result<(PathBuf, RuntimeProfile, PathBuf)> {
+    ensure!(
+        fs::symlink_metadata(instance_path)?.file_type().is_file(),
+        "instance must be a regular file"
+    );
+    let instance_path = instance_path.canonicalize()?;
+    let instance = Instance::load(&instance_path)?;
+    let binding = instance.apps.get(app).context("app_not_installed")?;
+    let profile = binding
+        .runtime
+        .clone()
+        .context("deployment profile required")?;
+    profile.validate()?;
+    let root = instance_path.parent().context("installation root")?;
+    artifact_directory(root, &root.join(&binding.artifact))?;
+    if let Some(branding) = &instance.branding {
+        regular_path(root, Path::new(branding), true)?;
+    }
+    let state = PathBuf::from(NATIVE_STORAGE_MOUNT);
+    Ok((instance_path, profile, state))
+}
+
 fn replica_lock(state: &Path, app: &str) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     day2_contracts::names::identifier(app)?;
@@ -557,7 +585,7 @@ pub(crate) async fn serve_with_oauth(
 /// and instance selections are DATA until that owner enrolls; no initialized
 /// storage owner or borrowed role crosses the launch boundary.
 pub(crate) struct NativeAppStartup {
-    runtime: Runtime,
+    runtime: AppStartupRuntime,
     declared: Instance,
     providers: Option<crate::oauth::host::Providers>,
     configure: Box<dyn FnOnce(Runtime) -> Result<Runtime> + Send>,
@@ -566,7 +594,34 @@ pub(crate) struct NativeAppStartup {
     replicas: u8,
 }
 
+enum AppStartupRuntime {
+    Ordinary(Box<Runtime>),
+    Initial(Box<crate::store::InitialStoreMetadata>),
+}
+
+impl AppStartupRuntime {
+    fn app(&self) -> &str {
+        match self {
+            Self::Ordinary(runtime) => runtime.app(),
+            Self::Initial(metadata) => metadata.app(),
+        }
+    }
+
+    fn artifact(&self) -> &crate::artifact::LoadedArtifact {
+        match self {
+            Self::Ordinary(runtime) => runtime.artifact(),
+            Self::Initial(metadata) => metadata.artifact(),
+        }
+    }
+}
+
 impl NativeAppStartup {
+    pub(crate) fn selections(
+        &self,
+    ) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
+        crate::oauth::native_management::selected_profiles(&self.declared, Some(self.runtime.app()))
+    }
+
     pub(crate) fn scopes(&self) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
         crate::oauth::native_management::selected_scopes(&self.declared, Some(self.runtime.app()))
     }
@@ -579,16 +634,38 @@ impl NativeAppStartup {
             admission.load(Ordering::Acquire),
             "native App startup admission closed"
         );
-        for scope in self.scopes()? {
-            crate::oauth::native_management::with_current_app_role(
-                &scope,
-                crate::oauth::native_management::RuntimePhase::InitialStorage,
-                |stage| stage.check(),
-            )?;
-        }
-        // S3's InitialStorage consumer runs within Runtime::initialize here,
-        // after enrollment and before ordinary schema initialization/serving.
-        let security = admit_store(&self.runtime)?;
+        let scopes = self.scopes()?;
+        let native_initial = matches!(&self.runtime, AppStartupRuntime::Initial(_));
+        let runtime = match self.runtime {
+            AppStartupRuntime::Ordinary(runtime) => {
+                for scope in scopes {
+                    crate::oauth::native_management::with_current_app_role(
+                        &scope,
+                        crate::oauth::native_management::RuntimePhase::InitialStorage,
+                        |stage| stage.check(),
+                    )?;
+                }
+                *runtime
+            }
+            AppStartupRuntime::Initial(metadata) => {
+                let [scope] = scopes.as_slice() else {
+                    anyhow::bail!("native App startup scope required")
+                };
+                crate::oauth::native_management::prepare_initial_app_storage(
+                    &metadata,
+                    &self.declared,
+                )?;
+                crate::oauth::native_management::load_initial_app_runtime(scope, *metadata)?
+            }
+        };
+        // Native admission already checked the existing store while its actual
+        // participant and stage were held. It must never run an initializer or
+        // open ordinary serving SQL again outside that native scope.
+        let security = if native_initial {
+            None
+        } else {
+            admit_store(&runtime)?
+        };
         ensure!(
             admission.load(Ordering::Acquire),
             "native App startup admission closed"
@@ -596,7 +673,7 @@ impl NativeAppStartup {
         if let Some(requirements) = &security {
             requirements.require_runtime()?;
         }
-        let runtime = (self.configure)(self.runtime)?;
+        let runtime = (self.configure)(runtime)?;
         let providers = match self.providers {
             Some(providers) => providers,
             None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
@@ -657,11 +734,29 @@ async fn serve_configured(
             declared.edge(app)?;
         }
     }
-    let (instance_path, profile, state) = layout(instance_path, app)?;
+    let initial_storage = oauth && declared.native_bootstrap_for(app)?.is_some();
+    let (instance_path, profile, state) = if initial_storage {
+        initial_layout(instance_path, app)?
+    } else {
+        layout(instance_path, app)?
+    };
     kernel_guards(&instance_path, &state, profile.resources())?;
     crate::worker::qualify_sandbox()?;
-    let _lease = replica_lock(&state, app)?;
-    let runtime = Runtime::load(&instance_path, app)?;
+    // Native storage gets its actual holder/writer exclusivity from S3. Do not
+    // create an ordinary state lock before that file has been authenticated.
+    let _lease = if initial_storage {
+        None
+    } else {
+        Some(replica_lock(&state, app)?)
+    };
+    let runtime = if initial_storage {
+        AppStartupRuntime::Initial(Box::new(crate::store::InitialStoreMetadata::load(
+            &instance_path,
+            app,
+        )?))
+    } else {
+        AppStartupRuntime::Ordinary(Box::new(Runtime::load(&instance_path, app)?))
+    };
     // Runtime loading samples the active database binding independently. Check
     // the actual selected code too, so activation between layout and load cannot
     // select a writable artifact outside the kernel-guarded read-only tree.
@@ -676,7 +771,10 @@ async fn serve_configured(
             == Some(day2_assets::hash_part(runtime.artifact().id())?),
         "active deployment artifact address mismatch"
     );
-    let security = if oauth { None } else { admit_store(&runtime)? };
+    let security = match &runtime {
+        AppStartupRuntime::Ordinary(runtime) if !oauth => admit_store(runtime)?,
+        _ => None,
+    };
     if let Ok(expected) = std::env::var("DAY2_EXPECTED_ARTIFACT") {
         ensure!(
             expected == runtime.artifact().id(),
@@ -730,6 +828,10 @@ async fn serve_configured(
         .context("shutdown grace exceeded; pending work remains recoverable")??;
         return cause;
     }
+    let AppStartupRuntime::Ordinary(runtime) = runtime else {
+        anyhow::bail!("native storage requires its owning OAuth executor")
+    };
+    let runtime = *runtime;
     if let Some(requirements) = &security {
         requirements.require_runtime()?;
     }
@@ -1074,6 +1176,58 @@ mod tests {
             std::os::unix::fs::symlink(root.join("artifacts"), root.join(".state"))?;
             assert!(layout(&instance, "reports").is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn initial_layout_uses_desired_code_without_reading_or_creating_serving_state() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let id = "b".repeat(64);
+        fs::create_dir_all(root.join("artifacts").join(&id))?;
+        let instance = root.join("instance.json");
+        fs::write(
+            &instance,
+            serde_json::to_vec(&json!({
+                "installation":"example", "environment":"development",
+                "apps":{"reports":{
+                    "artifact":format!("artifacts/{id}"), "readers":["demo"], "writers":["demo"],
+                    "runtime":profile()
+                }}
+            }))?,
+        )?;
+        let state = root.join(".state");
+        assert_eq!(
+            initial_layout(&instance, "reports")?.2,
+            Path::new(NATIVE_STORAGE_MOUNT)
+        );
+        assert!(!state.exists(), "desired metadata created serving state");
+        fs::write(&state, b"must not inspect this as a directory")?;
+        initial_layout(&instance, "reports")?;
+        assert_eq!(fs::read(&state)?, b"must not inspect this as a directory");
+        assert!(layout(&instance, "reports").is_err());
+        fs::remove_file(&state)?;
+        fs::create_dir(&state)?;
+        let database = state.join("reports.sqlite");
+        fs::write(&database, b"not an authority database")?;
+        initial_layout(&instance, "reports")?;
+        assert_eq!(fs::read(&database)?, b"not an authority database");
+        assert!(layout(&instance, "reports").is_err());
+        fs::remove_dir_all(&state)?;
+        #[cfg(unix)]
+        {
+            let outside = temporary.path().join("unselected-state");
+            fs::create_dir(&outside)?;
+            fs::write(outside.join("reports.sqlite"), b"unselected state")?;
+            std::os::unix::fs::symlink(&outside, &state)?;
+            initial_layout(&instance, "reports")?;
+            assert_eq!(
+                fs::read(outside.join("reports.sqlite"))?,
+                b"unselected state"
+            );
+            assert!(layout(&instance, "reports").is_err());
+        }
+        assert!(initial_layout(&instance, "other_app").is_err());
         Ok(())
     }
 
