@@ -46,6 +46,44 @@ variable "kube_context" {
   default     = ""
 }
 
+variable "runtime_identity" {
+  description = "Optional basic GKE workload identity, with no platform app-call, OAuth, readiness or secret capabilities. Named token-creator targets grant Google's full serviceAccountTokenCreator role, including signing as those targets."
+  type = object({
+    service_account_id             = string
+    token_creator_service_accounts = set(string)
+  })
+  default = null
+  validation {
+    condition = var.runtime_identity == null ? true : (
+      can(regex("^[a-z][-a-z0-9]{4,28}[a-z0-9]$", var.runtime_identity.service_account_id)) &&
+      length(var.runtime_identity.token_creator_service_accounts) <= 32 &&
+      alltrue([for target in var.runtime_identity.token_creator_service_accounts : try(
+        can(regex("^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/serviceAccounts/[a-z0-9_-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", target)) && split("@", split("/", target)[3])[1] == "${split("/", target)[1]}.iam.gserviceaccount.com",
+        false
+      )])
+    )
+    error_message = "runtime_identity requires a valid service account id and up to 32 fully qualified, project-matched token-creator targets."
+  }
+  validation {
+    condition     = var.runtime_identity == null || (var.app_calls == null && var.oauth_runtime == null)
+    error_message = "runtime_identity cannot be combined with app_calls or oauth_runtime; select exactly one runtime identity mode."
+  }
+  validation {
+    condition     = var.runtime_identity == null || length(var.runtime_secret_ids) == 0
+    error_message = "runtime_identity is the basic identity mode and cannot be combined with runtime_secret_ids."
+  }
+}
+
+variable "image_pushers" {
+  description = "Optional service accounts granted Artifact Registry writer on this app's repository only."
+  type        = set(string)
+  default     = []
+  validation {
+    condition     = length(var.image_pushers) <= 32 && alltrue([for principal in var.image_pushers : can(regex("^serviceAccount:[a-z0-9_-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", principal))])
+    error_message = "image_pushers must contain at most 32 serviceAccount: principals."
+  }
+}
+
 variable "app_id" {
   description = "Platform app id. Names the namespace (<namespace_prefix><app_id>), static IP (<app_id>-ip), Artifact Registry repository (<app_id>), state bucket (<project_id>-<app_id>-state) and backup plan (<app_id>-backup)."
   type        = string

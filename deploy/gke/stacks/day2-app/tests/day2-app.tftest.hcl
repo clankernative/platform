@@ -628,6 +628,59 @@ run "renders_instance_from_platform_contract" {
   }
 }
 
+# Mock-only pass-through witness, not a real Linux qualification receipt.
+run "preserves_exact_artifact_native_security_requirements" {
+  command = plan
+  variables {
+    security_requirements = {
+      version            = 1
+      artifact           = "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+      platform_inventory = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      roc_version        = "mocked-compiler"
+      containment = {
+        kind = "linux_qualified_v1"
+        evidence = {
+          receipt_digest     = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          platform_inventory = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          toolchain          = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          runtime_image      = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          runtime_supervisor = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          runtime_sandbox    = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          checks             = ["mock-only-witness"]
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.security == var.security_requirements
+    error_message = "Pass the operator-reviewed native object unchanged; Terraform must not invent qualification or replace native admission."
+  }
+}
+
+run "rejects_security_requirements_for_another_artifact" {
+  command = plan
+  variables {
+    security_requirements = {
+      version     = 1
+      artifact    = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      containment = { kind = "linux_qualified_v1" }
+    }
+  }
+  expect_failures = [var.security_requirements]
+}
+
+run "rejects_macos_security_requirements_for_gke" {
+  command = plan
+  variables {
+    security_requirements = {
+      version     = 1
+      artifact    = "sha256:9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+      containment = { kind = "macos_sandbox_v1" }
+    }
+  }
+  expect_failures = [var.security_requirements]
+}
+
 run "renders_the_installation_shell_from_its_contract" {
   command = plan
   variables {
