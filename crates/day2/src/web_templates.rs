@@ -318,6 +318,16 @@ impl Analysis<'_> {
             .routes
             .context("template_routes_require_explicit_routing")?;
         if namespace.id == "platform" {
+            if method.name == "freetool_credentials" {
+                let [ast::CallArg::Kwarg("resource_id", value)] = call.args.as_slice() else {
+                    bail!("template_freetool_credentials_resource_argument_required")
+                };
+                ensure!(
+                    self.expression(value, context)? == Type::String,
+                    "template_freetool_credentials_resource_string_required"
+                );
+                return Ok(true);
+            }
             ensure!(
                 ["audit", "docs", "openapi"].contains(&method.name) && call.args.is_empty(),
                 "template_unknown_platform_navigation"
@@ -2394,6 +2404,14 @@ impl minijinja::value::Object for Platform {
         method: &str,
         args: &[minijinja::Value],
     ) -> std::result::Result<minijinja::Value, minijinja::Error> {
+        if method == "freetool_credentials" {
+            let (kwargs,): (minijinja::value::Kwargs,) = minijinja::value::from_args(args)?;
+            let resource: String = kwargs.get("resource_id")?;
+            kwargs.assert_all_used()?;
+            let path = crate::freetool_executor::credential_management_path(&resource)
+                .map_err(template_error)?;
+            return Ok(minijinja::Value::from_object(Navigation(path)));
+        }
         if !args.is_empty() {
             return Err(template_error("template_unknown_platform_navigation"));
         }

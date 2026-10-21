@@ -1,6 +1,6 @@
 //! Private adapter for the typed Freetool executor capability pack.
 //!
-//! The SDK's nominal contracts are translated here into the executor service's
+//! The SDK's typed contracts are translated here into the executor service's
 //! wire DTOs. Trusted dispatch facts are supplied by Runtime; Roc may supply only
 //! the already-authorized business execution identity and complete plan.
 use anyhow::{Context, Result, ensure};
@@ -11,6 +11,15 @@ use std::path::Path;
 
 pub const MAX_RESULT_PAGE_BYTES: u32 = 12_000;
 pub const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
+pub(crate) const CREDENTIALS_PATH_PREFIX: &str = "/__freetool/credentials/";
+
+pub(crate) fn credential_management_path(resource: &str) -> Result<String> {
+    ensure!(
+        crate::identity::valid_for(resource, "res"),
+        "invalid_freetool_credential_resource"
+    );
+    Ok(format!("{CREDENTIALS_PATH_PREFIX}{resource}"))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
