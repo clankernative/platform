@@ -130,3 +130,56 @@ resource selection, authenticated transport and original acquisition are
 unchanged. This avoids unrelated instance metadata; it does not filter disks,
 truncate a response, retry a failed read or establish the cause of a prior
 refusal.
+## Preparation timing diagnosis
+
+`day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
+one-process diagnostic for the actual enrolled Controller. It performs the
+ordinary artifact/instance admission, role-stage exchange and selected provider,
+device and mount acquisition, followed by exactly sixteen current-volume checks
+under that same original interval. It returns unconditionally before seed,
+private-directory, initial-file, first-holder, bootstrap or serving construction.
+It never opens the existing native SQLite file or writes provider/control state.
+Run it only with the actual source/image/profile bindings and preserve any first
+refusal. It is not permission to retry a failed original; arrange a single
+execution and stop the diagnostic workload afterwards.
+
+Its `preparation_read_only_observed` record contains `completed` and `timing`.
+Completion means the fixed read-only calls returned, not readiness or a current
+permission. A failed read-only run instead emits the ordinary single refusal
+with its original boundary and timing. An export failure remains terminal and
+does not replace an earlier native error. The ordinary executor instead caches
+the same preparation summary into its existing first-holder or first refusal
+record (including a later listener/holder refusal). The twelve-record and 2048-byte bounds remain unchanged; logging
+does not run inside the measured original phase.
+
+Each timing row is `[fixed_operation, [calls, total_us, max_us]]`. Durations come
+from separate diagnostic Linux boot-clock reads, never from cached successful
+authority samples. They are **inclusive**: for example `volume_acquisition`
+contains its network and `native_check` rows, and `original_file` contains its
+read/write/sync/check rows. Do not add nested rows together. Missing, rewound or
+overflowed measurements are `null`, never zero or success. Measurement overhead
+spends the original deadline; no diagnostic value feeds an acquisition, issuer,
+budget, retry or renewal. Later serving phases disable collection. The final
+retention guard is deliberately not wrapped in an ending clock read: it remains
+the last I/O before the infallible owner transfer.
+
+On 2026-10-21, separate native Rust controls ran ten times on the selected
+oauthcalendar node and retained disk, with its actual Controller KSA for metadata
+reads. The complete eleven-request metadata sequence measured 600–1170 ms
+(median 727 ms); the Firestore **database metadata GET** measured 39–237 ms.
+Synthetic 946176-byte scratch-file writes measured 0.49–0.78 ms, file fsync
+3.10–8.72 ms, directory fsync 0.002–0.003 ms, and readback/equality 0.36–1.04 ms.
+Only a process-created sibling scratch directory/files were changed and removed;
+the failed SQLite and native directory were not opened for contents or modified.
+Both disposable probes were removed. Parent-root metadata changed from scratch
+creation/removal. Pod creation to the CSI successful-attach event was eight
+seconds, using coarse Kubernetes timestamps including scheduling/CSI overhead;
+attachment preceded the timed file operations and is outside the original
+Controller's five-second preparation interval.
+
+These are infrastructure controls, not timings inside the failed Controller
+invocation or evidence that its bound is reliable. The original observed failure
+was 5.002 seconds from enrollment to refusal. Its role exchange, image preparation
+and nested native validation costs still require the source-bound Controller
+diagnostic; neither a passing scratch run nor original I/O batching proves a
+cause, a complete latency budget, or successful native preparation.

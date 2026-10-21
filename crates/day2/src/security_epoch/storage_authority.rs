@@ -4,6 +4,7 @@
 //! Live profile qualification and current counter/writer admission are separate.
 
 use super::controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep};
+use super::controller::preparation_timing::{Operation, Timings};
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -162,8 +163,12 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'role>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        timings: &Timings,
     ) -> Result<(Self, NativeAcquisition)> {
-        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)
+        let mut volume = timings
+            .measure(Operation::VolumeAcquisition, || {
+                NativeVolumeObservation::acquire(stage, policy, store, timings.clone())
+            })
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageAcquisition, error))?;
         let seed = volume
             .original_seed()
@@ -190,6 +195,14 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         };
         authority.check_current(&mut acquisition)?;
         Ok((authority, acquisition))
+    }
+
+    fn timings(&self) -> Timings {
+        match &self.issuer {
+            StorageIssuerOwner::Native(volume) => volume.timings(),
+            #[cfg(test)]
+            StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => Timings::disabled(),
+        }
     }
     pub(super) fn check_current(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
         let result = (|| {
@@ -304,20 +317,24 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
     stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
+    timings: &Timings,
 ) -> Result<PreparedFileContinuity> {
     let (authority, mut acquisition) =
-        NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
+        NativeStorageCreationAuthority::acquire_initial(stage, policy, store, timings)?;
     let mut progress = PreparationProgress {
         acquired_us: acquisition.last_checked_elapsed_micros(),
         ..PreparationProgress::default()
     };
-    let layout =
-        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition);
+    let layout = timings.measure(Operation::Image, || {
+        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition)
+    });
     progress.image_us = acquisition.last_checked_elapsed_micros();
     let layout = layout.map_err(|error| {
         PreparationFailure::with_progress(PreparationStep::ImageAdmission, error, progress)
     })?;
-    let outcome = preparation::prepare_original_file(authority, &layout, &mut acquisition);
+    let outcome = timings.measure(Operation::OriginalFile, || {
+        preparation::prepare_original_file(authority, &layout, &mut acquisition)
+    });
     progress.prepared_us = acquisition.last_checked_elapsed_micros();
     match outcome {
         NativeOriginalPreparationOutcome::Prepared(creator) => {
@@ -351,4 +368,23 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
             ))
         }
     }
+}
+
+/// Fixed read-only diagnostic frontier. Actual provider/role/device/mount
+/// checks run under ONE original interval; errors stop it permanently. No seed,
+/// private-directory/file factory, SQLite open, provider mutation or owner is
+/// returned. Existing originals are never inspected or adopted.
+pub(in crate::security_epoch) fn observe_preparation_read_only(
+    stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+    timings: &Timings,
+) -> Result<()> {
+    let mut volume = timings.measure(Operation::VolumeAcquisition, || {
+        NativeVolumeObservation::acquire(stage, policy, store, timings.clone())
+    })?;
+    for _ in 0..16 {
+        volume.check_current()?;
+    }
+    Ok(())
 }

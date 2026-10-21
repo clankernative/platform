@@ -105,8 +105,9 @@ impl<'role> PreparedInitialFile<'role> {
     /// original file/anchor/stage remain owned by the refused outcome. A later
     /// acquisition cannot restart an expired or failed preparation.
     pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
+        let timings = self.creator.authority.timings();
         let binding = (|| {
-            self.check_original().map_err(|error| {
+            timings.measure(crate::security_epoch::controller::preparation_timing::Operation::RetentionBefore, || self.check_original()).map_err(|error| {
                 PreparationFailure::with_progress(
                     PreparationStep::OriginalRetentionBefore,
                     error,
@@ -117,7 +118,7 @@ impl<'role> PreparedInitialFile<'role> {
                 )
             })?;
             let binding = match &mut self.creator.authority.issuer {
-                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => volume.capture_same_owner().map_err(|error| {
+                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => timings.measure(crate::security_epoch::controller::preparation_timing::Operation::RetentionOwner, || volume.capture_same_owner()).map_err(|error| {
                     PreparationFailure::with_progress(
                         PreparationStep::OriginalRetentionOwner,
                         error,
@@ -132,6 +133,8 @@ impl<'role> PreparedInitialFile<'role> {
                     anyhow::bail!("storage_native_retention_requires_enrolled_controller")
                 }
             };
+            // The final genuine guard must remain the final I/O before the
+            // infallible owner move. Do not wrap it in a diagnostic clock read.
             self.check_original().map_err(|error| {
                 PreparationFailure::with_progress(
                     PreparationStep::OriginalRetentionAfter,

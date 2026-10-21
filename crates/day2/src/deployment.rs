@@ -920,6 +920,11 @@ pub fn qualify_native_enrollment(role: &str) -> anyhow::Result<serde_json::Value
     crate::security_epoch::native_enrollment::qualify(role)
 }
 
+/// One read-only actual-Controller observation, with no original creation.
+pub fn observe_epoch_controller_preparation(instance: &Path, app: &str) -> Result<()> {
+    crate::security_epoch::controller::observe_preparation(instance, app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

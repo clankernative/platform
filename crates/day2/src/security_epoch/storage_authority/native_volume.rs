@@ -4,6 +4,7 @@
 
 use super::{DirectoryIdentity, directory_identity, persistent_disk::PersistentDiskSelection};
 use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
+use crate::security_epoch::controller::preparation_timing::{Operation, Timings};
 use crate::security_epoch::{
     credential_material::CredentialMaterial,
     identity_protocol,
@@ -31,6 +32,7 @@ struct ProviderReader<'role> {
     controller: CredentialMaterial,
     kubernetes: CredentialMaterial,
     acquisition: NativeAcquisition,
+    timings: Timings,
 }
 
 pub(super) struct NativeVolumeObservation<'role> {
@@ -120,6 +122,7 @@ impl<'role> ProviderReader<'role> {
         mut stage: EnrolledRoleStage<'role>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        timings: Timings,
     ) -> Result<Self> {
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let mut acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
@@ -134,61 +137,85 @@ impl<'role> ProviderReader<'role> {
         let mut http = NativeHttp::new(store, &policy.cluster, &ca)
             .map_err(|error| PreparationFailure::at(PreparationStep::TransportSetup, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let source = CredentialMaterial::metadata_source(&mut acquisition)
+        let source = timings
+            .measure(Operation::MetadataToken, || {
+                CredentialMaterial::metadata_source(&mut acquisition)
+            })
             .map_err(|error| PreparationFailure::at(PreparationStep::MetadataCredential, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        identity_protocol::project(
-            store,
-            &http
-                .request(
-                    Route::Project,
-                    &source.authorization()?,
-                    None,
-                    &mut acquisition,
+        timings
+            .measure(Operation::Project, || {
+                identity_protocol::project(
+                    store,
+                    &http
+                        .request(
+                            Route::Project,
+                            &source.authorization()?,
+                            None,
+                            &mut acquisition,
+                        )
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::ProjectIdentity, error)
+                        })?,
                 )
-                .map_err(|error| PreparationFailure::at(PreparationStep::ProjectIdentity, error))?,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::ProjectIdentity, error))?;
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::ProjectIdentity, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)
+        timings
+            .measure(Operation::Cluster, || {
+                http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)
+            })
             .map_err(|error| PreparationFailure::at(PreparationStep::ClusterIdentity, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        identity_protocol::google_service_account(
-            &policy.controller.google_service_account,
-            &policy.cluster.project,
-            &http
-                .request(
-                    Route::GoogleAccount(&policy.controller.google_service_account),
-                    &source.authorization()?,
-                    None,
+        timings
+            .measure(Operation::ControllerIdentity, || {
+                identity_protocol::google_service_account(
+                    &policy.controller.google_service_account,
+                    &policy.cluster.project,
+                    &http
+                        .request(
+                            Route::GoogleAccount(&policy.controller.google_service_account),
+                            &source.authorization()?,
+                            None,
+                            &mut acquisition,
+                        )
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::ControllerIdentity, error)
+                        })?,
+                )
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::ControllerIdentity, error))?;
+        stage.check_selection(policy, store, NativeRole::EpochController)?;
+        let controller = timings
+            .measure(Operation::ControllerToken, || {
+                CredentialMaterial::mint_target(
+                    &source,
+                    &policy.controller.google_service_account,
+                    &http,
                     &mut acquisition,
                 )
-                .map_err(|error| {
-                    PreparationFailure::at(PreparationStep::ControllerIdentity, error)
-                })?,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::ControllerIdentity, error))?;
+            })
+            .map_err(|error| {
+                PreparationFailure::at(PreparationStep::ControllerCredential, error)
+            })?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let controller = CredentialMaterial::mint_target(
-            &source,
-            &policy.controller.google_service_account,
-            &http,
-            &mut acquisition,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::ControllerCredential, error))?;
-        stage.check_selection(policy, store, NativeRole::EpochController)?;
-        identity_protocol::database(
-            store,
-            &http
-                .request(
-                    Route::Database,
-                    &controller.authorization()?,
-                    None,
-                    &mut acquisition,
+        timings
+            .measure(Operation::Database, || {
+                identity_protocol::database(
+                    store,
+                    &http
+                        .request(
+                            Route::Database,
+                            &controller.authorization()?,
+                            None,
+                            &mut acquisition,
+                        )
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::EpochDatabase, error)
+                        })?,
                 )
-                .map_err(|error| PreparationFailure::at(PreparationStep::EpochDatabase, error))?,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::EpochDatabase, error))?;
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::EpochDatabase, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let kubernetes = CredentialMaterial::kubernetes_api(&mut acquisition).map_err(|error| {
             PreparationFailure::at(PreparationStep::KubernetesCredential, error)
@@ -204,6 +231,7 @@ impl<'role> ProviderReader<'role> {
             controller,
             kubernetes,
             acquisition,
+            timings,
         })
     }
 
@@ -225,6 +253,14 @@ impl<'role> ProviderReader<'role> {
 
     fn get(&mut self, route: Route<'_>) -> Result<Value> {
         self.check()?;
+        let operation = match &route {
+            Route::PersistentVolumeClaim { .. } => Operation::Claim,
+            Route::PersistentVolume(_) => Operation::Volume,
+            Route::Node(_) => Operation::Node,
+            Route::ComputeDisk { .. } => Operation::Disk,
+            Route::ComputeInstance { .. } => Operation::Instance,
+            _ => anyhow::bail!("storage_provider_route_unavailable"),
+        };
         let google = match route {
             Route::ComputeDisk { .. } | Route::ComputeInstance { .. } => true,
             Route::PersistentVolumeClaim { .. } | Route::PersistentVolume(_) | Route::Node(_) => {
@@ -237,9 +273,10 @@ impl<'role> ProviderReader<'role> {
         } else {
             self.kubernetes.authorization()?
         };
-        let result = self
-            .http
-            .request(route, &authorization, None, &mut self.acquisition);
+        let result = self.timings.measure(operation, || {
+            self.http
+                .request(route, &authorization, None, &mut self.acquisition)
+        });
         // Always perform the original postcheck, including after a failed
         // request. Preserve the first request failure instead of replacing it
         // with the acquisition-refused consequence of that same failure.
@@ -310,6 +347,9 @@ impl<'role> ProviderReader<'role> {
 }
 
 impl<'role> NativeVolumeObservation<'role> {
+    pub(super) fn timings(&self) -> Timings {
+        self.reader.timings.clone()
+    }
     pub(super) fn original_seed(
         &mut self,
     ) -> Result<crate::security_epoch::seed_core::OriginalSeedCore> {
@@ -399,8 +439,9 @@ impl<'role> NativeVolumeObservation<'role> {
         stage: EnrolledRoleStage<'role>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        timings: Timings,
     ) -> Result<Self> {
-        let mut reader = ProviderReader::acquire(stage, policy, store)?;
+        let mut reader = ProviderReader::acquire(stage, policy, store, timings)?;
         let device_name = reader.observe_provider()?;
         reader.check()?;
         #[cfg(not(target_os = "linux"))]
@@ -497,7 +538,8 @@ impl NativeVolumeResources {
     }
 
     fn check_current(&mut self, reader: &mut ProviderReader<'_>) -> Result<()> {
-        let result = (|| {
+        let timings = reader.timings.clone();
+        let result = timings.measure(Operation::NativeCheck, || {
             ensure!(self.valid, "storage_native_volume_refused");
             reader.check()?;
             ensure!(
@@ -559,7 +601,7 @@ impl NativeVolumeResources {
                 )?;
                 reader.check()
             }
-        })();
+        });
         if result.is_err() {
             self.valid = false;
             reader.acquisition.refuse();
@@ -732,7 +774,8 @@ impl NativeVolumeContinuity {
         let result = (|| {
             ensure!(self.resources.valid, "storage_native_volume_refused");
             self.owner.check(&mut stage)?;
-            let mut reader = ProviderReader::acquire(stage, &self.policy, &self.store)?;
+            let mut reader =
+                ProviderReader::acquire(stage, &self.policy, &self.store, Timings::disabled())?;
             ensure!(
                 reader.profile == self.profile,
                 "storage_native_profile_changed"

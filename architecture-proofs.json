@@ -1201,15 +1201,16 @@
         }
       ],
       "methods": [
-        "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >",
+        "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : & Timings) -> Result < (Self , NativeAcquisition) >",
         "pub (super) fn check_current (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn filesystem_fixture (selection : ReviewedStorageSelection , directory : File , acquisition : & mut NativeAcquisition) -> Result < Self >",
-        "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
+        "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)",
+        "fn timings (& self) -> Timings"
       ],
       "factories": [
         {
           "owner": "NativeStorageCreationAuthority < 'role >",
-          "signature": "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (Self , NativeAcquisition) >"
+          "signature": "pub (super) fn acquire_initial (stage : crate :: security_epoch :: native_enrollment :: EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : & Timings) -> Result < (Self , NativeAcquisition) >"
         }
       ],
       "material_uses": [
@@ -1228,6 +1229,10 @@
         {
           "owner": "NativeStorageCreationAuthority < 'role >",
           "signature": "fn refuse_preparation (& mut self , acquisition : & mut NativeAcquisition)"
+        },
+        {
+          "owner": "NativeStorageCreationAuthority < 'role >",
+          "signature": "fn timings (& self) -> Timings"
         },
         {
           "owner": "NativeStorageCreationAuthority < 'role >",
@@ -1919,18 +1924,19 @@
       "type_name": "NativeVolumeObservation",
       "owning_children": [],
       "methods": [
-        "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >",
+        "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < Self >",
         "pub (super) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
         "pub (super) fn check_current (& mut self) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
         "pub (super) fn create_initial_directory (& mut self) -> Result < (File , DirectoryIdentity , NativeAcquisition) >",
         "pub (super) fn original_seed (& mut self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
-        "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity",
+        "pub (super) fn timings (& self) -> Timings"
       ],
       "factories": [
         {
           "owner": "NativeVolumeObservation < 'role >",
-          "signature": "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
+          "signature": "pub (super) fn acquire (stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -1957,6 +1963,10 @@
         {
           "owner": "NativeVolumeObservation < 'role >",
           "signature": "pub (super) fn retain_resources (self , owner : SameEnrolledOwner) -> NativeVolumeContinuity"
+        },
+        {
+          "owner": "NativeVolumeObservation < 'role >",
+          "signature": "pub (super) fn timings (& self) -> Timings"
         }
       ],
       "proof_uses": [],
