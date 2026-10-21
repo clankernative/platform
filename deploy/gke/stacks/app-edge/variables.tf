@@ -68,6 +68,10 @@ variable "runtime_identity" {
     condition     = var.runtime_identity == null || (var.app_calls == null && var.oauth_runtime == null)
     error_message = "runtime_identity cannot be combined with app_calls or oauth_runtime; select exactly one runtime identity mode."
   }
+  validation {
+    condition     = var.runtime_identity == null || length(var.runtime_secret_ids) == 0
+    error_message = "runtime_identity is the basic identity mode and cannot be combined with runtime_secret_ids."
+  }
 }
 
 variable "image_pushers" {
