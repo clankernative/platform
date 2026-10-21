@@ -476,8 +476,6 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
             (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
-            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
-                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
             (|| {
                 self.channel
                     .check_storage_open(self.phase.controller_stage()?, &mut self.acquisition)
