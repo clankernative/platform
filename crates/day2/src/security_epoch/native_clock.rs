@@ -94,6 +94,15 @@ impl NativeAcquisition {
             .ok_or_else(|| anyhow::anyhow!("epoch_native_acquisition_expired"))
     }
 
+    /// Historical DATA from the last successful sample of THIS original
+    /// interval. Does not read a clock, check validity, issue permission or
+    /// change refusal/deadline. An expired check may be later than this value.
+    pub(super) fn last_checked_elapsed_micros(&self) -> Option<u32> {
+        self.latest
+            .checked_sub(self.origin)
+            .and_then(|elapsed| elapsed.as_micros().try_into().ok())
+    }
+
     pub(super) fn refuse(&mut self) {
         self.valid = false;
     }
@@ -184,6 +193,29 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_progress_never_samples_renews_or_clears_a_refusal() {
+        let mut acquisition = NativeAcquisition::fixture(
+            Digest::new(b"clock-progress"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        acquisition
+            .observe(Duration::from_micros(102_123_456))
+            .unwrap();
+        assert_eq!(acquisition.last_checked_elapsed_micros(), Some(2_123_456));
+        let original = (acquisition.origin, acquisition.latest, acquisition.deadline);
+        assert!(acquisition.observe(Duration::from_secs(105)).is_err());
+        assert_eq!(acquisition.last_checked_elapsed_micros(), Some(2_123_456));
+        assert_eq!(
+            (acquisition.origin, acquisition.latest, acquisition.deadline),
+            original
+        );
+        assert!(acquisition.remaining().is_err());
+        assert!(acquisition.observe(Duration::from_secs(103)).is_err());
+    }
 
     #[test]
     fn one_origin_covers_prior_observation_time_and_cannot_renew() {

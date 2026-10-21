@@ -9,6 +9,7 @@ use super::{
 use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
+    controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
     storage_authority::{
         DirectoryIdentity, ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
@@ -105,15 +106,42 @@ impl<'role> PreparedInitialFile<'role> {
     /// acquisition cannot restart an expired or failed preparation.
     pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
         let binding = (|| {
-            self.check_original()?;
+            self.check_original().map_err(|error| {
+                PreparationFailure::with_progress(
+                    PreparationStep::OriginalRetentionBefore,
+                    error,
+                    PreparationProgress {
+                        last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                        ..PreparationProgress::default()
+                    },
+                )
+            })?;
             let binding = match &mut self.creator.authority.issuer {
-                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => volume.capture_same_owner()?,
+                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => volume.capture_same_owner().map_err(|error| {
+                    PreparationFailure::with_progress(
+                        PreparationStep::OriginalRetentionOwner,
+                        error,
+                        PreparationProgress {
+                            last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                            ..PreparationProgress::default()
+                        },
+                    )
+                })?,
                 #[cfg(test)]
                 crate::security_epoch::storage_authority::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
                     anyhow::bail!("storage_native_retention_requires_enrolled_controller")
                 }
             };
-            self.check_original()?;
+            self.check_original().map_err(|error| {
+                PreparationFailure::with_progress(
+                    PreparationStep::OriginalRetentionAfter,
+                    error,
+                    PreparationProgress {
+                        last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                        ..PreparationProgress::default()
+                    },
+                )
+            })?;
             Ok(binding)
         })();
         match binding {

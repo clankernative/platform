@@ -16,6 +16,12 @@ use std::fs::File;
 const INITIAL_FILE: &str = "day2-initial.sqlite";
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
+// Only original initialization and its retained initial-image rereads use this
+// batch. The complete image is already bounded to 16 MiB and resident in memory.
+// Keep every before/after native/file check around each actual syscall; avoid
+// repeating that full observation tree for each 64 KiB of the same image. Later
+// App/current serving operations retain their separate 64 KiB batch above.
+const INITIAL_IO_CHUNK_BYTES: usize = 1024 * 1024;
 
 mod app;
 mod continuity;
@@ -273,7 +279,7 @@ impl OriginalCreatorFd<'_> {
                         self.proposal.length,
                         acquisition,
                     )?;
-                    let end = (offset + IO_CHUNK_BYTES).min(readback.len());
+                    let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
                     let read =
                         rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)?;
                     ensure!(
@@ -453,7 +459,7 @@ impl PreparationCoordinator<'_> {
             let mut offset = 0;
             while offset < bytes.len() {
                 self.check_file(offset, acquisition)?;
-                let end = (offset + IO_CHUNK_BYTES).min(bytes.len());
+                let end = (offset + INITIAL_IO_CHUNK_BYTES).min(bytes.len());
                 let written =
                     rustix::io::pwrite(self.file_ref()?, &bytes[offset..end], offset as u64)?;
                 ensure!(
@@ -482,7 +488,7 @@ impl PreparationCoordinator<'_> {
             let mut offset = 0;
             while offset < readback.len() {
                 self.check_file(bytes.len(), acquisition)?;
-                let end = (offset + IO_CHUNK_BYTES).min(readback.len());
+                let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
                 let read =
                     rustix::io::pread(self.file_ref()?, &mut readback[offset..end], offset as u64)?;
                 ensure!(

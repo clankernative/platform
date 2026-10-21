@@ -72,7 +72,7 @@ pub(in crate::security_epoch) enum FailurePhase {
 }
 
 /// Fixed diagnostic DATA only. No field carries a path, URL, response body,
-/// credential, arbitrary message, elapsed-time assertion or permission.
+/// credential, arbitrary message, measured latency assertion or permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum PreparationStep {
@@ -104,6 +104,25 @@ pub(in crate::security_epoch) enum PreparationStep {
     ImageAdmission,
     OriginalPreparation,
     OriginalRetention,
+    OriginalRetentionBefore,
+    OriginalRetentionOwner,
+    OriginalRetentionAfter,
+}
+
+/// Cumulative microseconds from the last successful samples of the SAME
+/// original acquisition at fixed boundaries. No clock is read for these fields;
+/// absent samples stay absent. Values are historical progress DATA, not exact
+/// boundary timestamps, operation durations, remaining time or authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub(in crate::security_epoch) struct PreparationProgress {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) acquired_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) image_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) prepared_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) last_checked_us: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -128,6 +147,8 @@ enum PreparationErrorCategory {
 pub(in crate::security_epoch) struct PreparationFailure {
     step: PreparationStep,
     category: PreparationErrorCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<PreparationProgress>,
 }
 
 impl std::fmt::Display for PreparationFailure {
@@ -149,7 +170,27 @@ impl PreparationFailure {
         let context = Self {
             step,
             category: preparation_error_category(&error),
+            progress: None,
         };
+        error.context(context)
+    }
+
+    pub(in crate::security_epoch) fn with_progress(
+        step: PreparationStep,
+        error: anyhow::Error,
+        mut progress: PreparationProgress,
+    ) -> anyhow::Error {
+        let mut context = Self::observe(&error);
+        if context.step == PreparationStep::Unknown {
+            context.step = step;
+        }
+        if let Some(inner) = context.progress {
+            progress.acquired_us = progress.acquired_us.or(inner.acquired_us);
+            progress.image_us = progress.image_us.or(inner.image_us);
+            progress.prepared_us = progress.prepared_us.or(inner.prepared_us);
+            progress.last_checked_us = inner.last_checked_us.or(progress.last_checked_us);
+        }
+        context.progress = Some(progress);
         error.context(context)
     }
 
@@ -157,6 +198,7 @@ impl PreparationFailure {
         error.downcast_ref::<Self>().copied().unwrap_or(Self {
             step: PreparationStep::Unknown,
             category: preparation_error_category(error),
+            progress: None,
         })
     }
 }
@@ -859,11 +901,59 @@ mod tests {
             PreparationFailure {
                 step: PreparationStep::ClaimBinding,
                 category: PreparationErrorCategory::PermissionDenied,
+                progress: None,
             }
         );
         assert_eq!(
             error.downcast_ref::<std::io::Error>().unwrap().kind(),
             std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn preparation_progress_keeps_inner_boundary_and_fixed_private_record_bound() {
+        let error = PreparationFailure::with_progress(
+            PreparationStep::OriginalRetentionBefore,
+            anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+            PreparationProgress {
+                last_checked_us: Some(u32::MAX),
+                ..PreparationProgress::default()
+            },
+        );
+        let error = PreparationFailure::with_progress(
+            PreparationStep::OriginalRetention,
+            error,
+            PreparationProgress {
+                acquired_us: Some(u32::MAX),
+                image_us: Some(u32::MAX),
+                prepared_us: Some(u32::MAX),
+                last_checked_us: Some(1),
+            },
+        );
+        assert_eq!(
+            error.downcast_ref::<&'static str>(),
+            Some(&"epoch_native_clock_rewind_or_expired")
+        );
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        let preparation = &rows[1]["observation"]["preparation"];
+        assert_eq!(preparation["step"], "original_retention_before");
+        assert_eq!(preparation["category"], "clock_expired_or_rewound");
+        assert_eq!(
+            preparation["progress"],
+            serde_json::json!({
+                "acquired_us":u32::MAX, "image_us":u32::MAX,
+                "prepared_us":u32::MAX, "last_checked_us":u32::MAX,
+            })
+        );
+        assert_eq!(preparation.as_object().unwrap().len(), 3);
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("rewind_or_expired")
         );
     }
 
