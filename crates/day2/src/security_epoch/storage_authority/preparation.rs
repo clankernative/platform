@@ -26,6 +26,7 @@ const INITIAL_IO_CHUNK_BYTES: usize = 1024 * 1024;
 mod app;
 mod continuity;
 pub(crate) use app::{AppFileContinuity, AppPreparedFile};
+pub(super) use continuity::PendingPhysicalFilePhase;
 pub(crate) use continuity::{
     CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
     PreparedRetentionOutcome,

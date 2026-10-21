@@ -117,6 +117,7 @@ impl ResponseBinding {
 // same owner but cannot enter another bootstrap or consumer callback.
 enum AppStorage {
     Connected(Box<crate::security_epoch::native_enrollment::InitialHolderConnection>),
+    ShellConnected(Box<crate::security_epoch::native_enrollment::ShellServingConnection>),
     Refused,
     Bootstrapping(Box<crate::security_epoch::AppStorageBootstrap>),
     Participant(Box<ServingParticipant>),
@@ -135,7 +136,7 @@ impl AppStorage {
                 storage.refuse();
                 Self::RefusedParticipant(storage)
             }
-            Self::Connected(_) | Self::Refused => Self::Refused,
+            Self::Connected(_) | Self::ShellConnected(_) | Self::Refused => Self::Refused,
         };
     }
 }
@@ -164,11 +165,12 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                     )?,
                 )),
                 NativeRole::SecurityShell => {
-                    let peer = crate::security_epoch::native_enrollment::ShellServingPeer::connect(
-                        &mut stage,
-                    )?;
+                    let connection =
+                        crate::security_epoch::native_enrollment::ShellServingConnection::connect(
+                            &mut stage,
+                        )?;
                     stage.check_selection(&selection.policy, &selection.store, kind)?;
-                    AppStorage::Participant(Box::new(ServingParticipant::shell(peer)))
+                    AppStorage::ShellConnected(Box::new(connection))
                 }
                 NativeRole::EpochController => {
                     anyhow::bail!("native HTTP controller role refused")
@@ -181,6 +183,19 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                 kind,
             )?;
             storage
+        };
+        let storage = match storage {
+            AppStorage::ShellConnected(mut connection) => {
+                while !connection.idle_ready()? {
+                    std::thread::park_timeout(Duration::from_millis(5));
+                }
+                let mut stage = role.begin_current_stage()?;
+                stage.check_selection(&selection.policy, &selection.store, kind)?;
+                let peer = connection.receive(&mut stage)?;
+                stage.check_selection(&selection.policy, &selection.store, kind)?;
+                AppStorage::Participant(Box::new(ServingParticipant::shell(peer)))
+            }
+            storage => storage,
         };
         ensure!(
             selected
@@ -276,12 +291,13 @@ pub(crate) fn prepare_initial_app_storage(
             // steps receives a fresh stage from this SAME enrollment. A failed
             // or incomplete step cannot restart this once-only startup attempt.
             for _ in 0..6 {
-                let mut role = owners.role.try_borrow_mut()?;
-                let mut stage = role.begin_current_stage()?;
-                stage.check_selection(policy, store, NativeRole::AppHost)?;
                 let AppStorage::Bootstrapping(storage) = &mut owners.storage else {
                     anyhow::bail!("native App bootstrap owner unavailable")
                 };
+                storage.prepare_current()?;
+                let mut role = owners.role.try_borrow_mut()?;
+                let mut stage = role.begin_current_stage()?;
+                stage.check_selection(policy, store, NativeRole::AppHost)?;
                 storage.advance(&mut stage)?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
             }
@@ -337,6 +353,7 @@ fn with_app_participant<T>(
             anyhow::bail!("native active App holder unavailable")
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            storage.prepare_current()?;
             let mut role = owners.role.try_borrow_mut()?;
             let mut stage = role.begin_current_stage()?;
             stage.check_for(scope, NativeRole::AppHost)?;
@@ -647,6 +664,7 @@ impl AppCreator<'_> {
                 let AppStorage::Participant(participant) = &mut owners.storage else {
                     anyhow::bail!("native Pending participant unavailable")
                 };
+                participant.prepare_current()?;
                 let mut role = owners.role.try_borrow_mut()?;
                 let mut stage = role.begin_current_stage()?;
                 stage.check_selection(
@@ -1094,6 +1112,7 @@ fn with_runtime_response<T>(
         };
         // Pure exact-holder exclusion BEFORE touching the winner's role/clock.
         crate::security_epoch::serving::require_runtime_response(participant, scope, identity)?;
+        participant.prepare_current()?;
         let mut role = owner.role.try_borrow_mut()?;
         let mut stage = role.begin_current_stage()?;
         stage.check_selection(&owner.selection.policy, &owner.selection.store, owner.kind)?;
@@ -1643,6 +1662,12 @@ fn with_current_for_role<T>(
             stored.response.require_bound(intent, identity)?;
         } else {
             validate_enlist(owners.kind, intent, &stored.response)?;
+        }
+        if expected.is_some() {
+            let AppStorage::Participant(participant) = &mut owners.storage else {
+                anyhow::bail!("native serving participant unavailable");
+            };
+            participant.prepare_current()?;
         }
         let role = stored.original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;

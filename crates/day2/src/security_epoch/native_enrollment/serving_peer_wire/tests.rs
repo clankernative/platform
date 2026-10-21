@@ -1,5 +1,153 @@
 //! Cryptographic DATA controls; no native owner, role or storage permission.
 use super::*;
+
+#[test]
+fn ready_packets_are_controller_signed_closed_data_before_any_serving_scope() {
+    let (_, controller, key, _) = fixture_with_issuer(NativeRole::EpochController);
+    let (_, shell, _, _) = fixture_with_issuer(NativeRole::SecurityShell);
+    for body in [
+        Body::InitialBeginReady {
+            controller: Box::new(controller.clone()),
+            nonce: Digest::new(b"ready"),
+        },
+        Body::CurrentBeginReady {
+            controller: Box::new(controller.clone()),
+            initial: Digest::new(b"original"),
+            sequence: 1,
+            nonce: Digest::new(b"ready"),
+        },
+    ] {
+        let ready = signed(&controller, &key, body);
+        let bytes = serde_json::to_vec(&ready).unwrap();
+        decode(&bytes).unwrap().verify(&controller).unwrap();
+        assert!(decode(&bytes).unwrap().verify(&shell).is_err());
+        let original = serde_json::to_value(&ready).unwrap();
+        for path in [
+            "/body/controller",
+            "/body/controller/stage",
+            "/body/controller/original",
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(path).unwrap() = serde_json::json!([]);
+            assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let mut changed = original.clone();
+        changed["body"]["role"] = serde_json::json!("epoch_controller");
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+        let mut missing = original;
+        missing["body"].as_object_mut().unwrap().remove("nonce");
+        assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let nonce = serde_json::to_string(&Digest::new(b"ready")).unwrap();
+        let duplicate = String::from_utf8(bytes).unwrap().replace(
+            &format!("\"nonce\":{nonce}"),
+            &format!("\"nonce\":{nonce},\"nonce\":{nonce}"),
+        );
+        assert!(decode(duplicate.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn shell_hello_cannot_change_ready_nonce_original_or_sequence_even_with_valid_signature() {
+    let (_, shell, key, _) = fixture_with_issuer(NativeRole::SecurityShell);
+    let nonce = Digest::new(b"controller readiness");
+    let initial = Digest::new(b"original peer");
+    for (body, expected_initial, sequence) in [
+        (
+            Body::Hello {
+                shell: Box::new(shell.clone()),
+                nonce: Digest::new(b"shell nonce"),
+                controller_nonce: nonce.clone(),
+            },
+            None,
+            0,
+        ),
+        (
+            Body::CurrentHello {
+                shell: Box::new(shell.clone()),
+                initial: initial.clone(),
+                sequence: 1,
+                binding: Digest::new(b"actual consumer"),
+                nonce: Digest::new(b"shell nonce"),
+                controller_nonce: nonce.clone(),
+            },
+            Some(initial.clone()),
+            1,
+        ),
+    ] {
+        let hello = signed(&shell, &key, body);
+        let bytes = serde_json::to_vec(&hello).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        decoded.verify(&shell).unwrap();
+        decoded
+            .hello(expected_initial.as_ref(), sequence, &nonce)
+            .unwrap();
+        assert!(
+            decoded
+                .hello(
+                    expected_initial.as_ref(),
+                    sequence,
+                    &Digest::new(b"different ready")
+                )
+                .is_err()
+        );
+        assert!(
+            decoded
+                .hello(expected_initial.as_ref(), sequence + 1, &nonce)
+                .is_err()
+        );
+        assert!(
+            decoded
+                .hello(Some(&Digest::new(b"foreign original")), sequence, &nonce)
+                .is_err()
+        );
+        let mut missing = serde_json::to_value(&hello).unwrap();
+        missing["body"]
+            .as_object_mut()
+            .unwrap()
+            .remove("controller_nonce");
+        assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn shell_offer_cannot_renew_or_replace_the_ready_stage_or_nonce() {
+    let (_, ready, _, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    let nonce = Digest::new(b"controller ready");
+    let exchange = Exchange {
+        initial: Some(Digest::new(b"retained peer")),
+        sequence: 1,
+        binding: Some(Digest::new(b"consumer")),
+        shell_stage: Digest::new(b"shell stage"),
+        controller_stage: ready.digest().unwrap(),
+        shell_nonce: Digest::new(b"shell nonce"),
+        controller_nonce: nonce.clone(),
+    };
+    exchange
+        .require_begin_ready(&ready, &nonce, &ready)
+        .unwrap();
+    let mut later = ready.clone();
+    later.stage.data.challenge = Digest::new(b"later actual grant data");
+    later.stage.signature = issuer.sign("role-stage", &later.stage.data).unwrap();
+    assert!(ready.same_enrollment(&later));
+    assert!(
+        exchange
+            .require_begin_ready(&ready, &nonce, &later)
+            .is_err()
+    );
+    let mut clock = ready.clone();
+    clock.original.origin_ns += 1;
+    assert!(
+        exchange
+            .require_begin_ready(&ready, &nonce, &clock)
+            .is_err()
+    );
+    assert!(
+        exchange
+            .require_begin_ready(&ready, &Digest::new(b"different ready"), &ready)
+            .is_err()
+    );
+    assert!(ready.require_fresh(&ready).is_err());
+}
 use crate::security_epoch::{
     native_enrollment::{
         protocol::{IssuerData, KeyOwner, RuntimeBinding, StageData},
@@ -194,6 +342,7 @@ fn message_key_possession_is_serving_domain_and_sender_role_bound() {
     let body = Body::Hello {
         shell: Box::new(statement.clone()),
         nonce: Digest::new(b"hello"),
+        controller_nonce: Digest::new(b"controller-ready"),
     };
     let mut message = signed(&statement, &key, body);
     message.verify(&statement).unwrap();
@@ -268,6 +417,7 @@ fn closed_wire_refuses_duplicate_unknown_array_oversize_and_app_protocol_records
         Body::Hello {
             shell: Box::new(statement.clone()),
             nonce: Digest::new(b"hello"),
+            controller_nonce: Digest::new(b"controller-ready"),
         },
     );
     let bytes = serde_json::to_vec(&message).unwrap();

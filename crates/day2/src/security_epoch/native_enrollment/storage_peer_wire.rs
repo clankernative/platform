@@ -242,6 +242,21 @@ pub(super) struct CurrentExchange {
 }
 
 impl CurrentExchange {
+    pub(super) fn require_begin_ready(
+        &self,
+        ready: &StageStatement,
+        nonce: &Digest,
+        offered: &StageStatement,
+    ) -> Result<()> {
+        ensure!(
+            offered == ready
+                && self.controller_stage == ready.digest()?
+                && self.controller_nonce == *nonce,
+            "storage_peer_current_ready_stage_or_nonce_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-current-storage-peer-exchange-v1", self))
     }
@@ -274,12 +289,19 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
     Accepted {
         exchange: Digest,
     },
+    CurrentBeginReady {
+        controller: Box<StageStatement>,
+        initial: Digest,
+        sequence: u64,
+        nonce: Digest,
+    },
     CurrentHello {
         app: Box<StageStatement>,
         initial: Digest,
         sequence: u64,
         request: StoragePeerRequest,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     CurrentOffer {
         controller: Box<StageStatement>,
@@ -332,6 +354,7 @@ impl Body {
             Self::InitialReady { .. }
             | Self::Offer { .. }
             | Self::Complete { .. }
+            | Self::CurrentBeginReady { .. }
             | Self::CurrentOffer { .. }
             | Self::CurrentReady { .. }
             | Self::CurrentResult { .. }
@@ -349,6 +372,40 @@ pub(in crate::security_epoch::native_enrollment) struct Message {
 }
 
 impl Message {
+    /// Closed current-request selection DATA. Actual sender, signature and
+    /// original-role validation remain mandatory in the native receiver.
+    pub(super) fn current_hello(
+        &self,
+        initial: &Digest,
+        sequence: u64,
+        controller_nonce: &Digest,
+        expected: Option<&StoragePeerRequest>,
+    ) -> Result<(&StageStatement, &Digest, &StoragePeerRequest)> {
+        match &self.body {
+            Body::CurrentHello {
+                app,
+                initial: selected,
+                sequence: number,
+                request,
+                nonce,
+                controller_nonce: echoed,
+            } => {
+                ensure!(
+                    selected == initial
+                        && *number == sequence
+                        && echoed == controller_nonce
+                        && expected.map_or_else(
+                            || request.purpose == StoragePeerPurpose::CurrentServing,
+                            |expected| request == expected,
+                        ),
+                    "storage_peer_current_request_changed"
+                );
+                Ok((app, nonce, request))
+            }
+            _ => anyhow::bail!("storage_peer_expected_current_hello"),
+        }
+    }
+
     /// Checked wire DATA only. The real receiver still authenticates the
     /// signature, actual sender handles, current role and both native clocks.
     pub(super) fn initial_hello(
@@ -401,7 +458,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         .pointer("/body/step")
         .and_then(serde_json::Value::as_str)
     {
-        Some("initial_ready") => require_stage_objects(&value, "/body/controller")?,
+        Some("initial_ready" | "current_begin_ready") => {
+            require_stage_objects(&value, "/body/controller")?
+        }
         Some("hello") => require_stage_objects(&value, "/body/app")?,
         Some("offer") => {
             require_stage_objects(&value, "/body/controller")?;

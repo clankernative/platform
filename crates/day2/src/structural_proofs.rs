@@ -32,6 +32,46 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>,
+        Sync
+    );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::ControllerCurrentRendezvous<'static>
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerCurrentRendezvous<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerCurrentRendezvous<'static>,
+        Sync
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::ShellServingConnection);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ShellServingConnection,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ShellServingConnection,
+        Sync
+    );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::ControllerServingRendezvous<'static>
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingRendezvous<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::ControllerServingRendezvous<'static>,
+        Sync
+    );
     assert_consuming!(crate::oauth::native_management::RuntimeConsumer<'static, 'static>);
     assert_not_impl!(
         crate::oauth::native_management::RuntimeConsumer<'static, 'static>,

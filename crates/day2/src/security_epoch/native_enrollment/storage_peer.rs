@@ -4,7 +4,8 @@
 
 mod continuation;
 pub(crate) use continuation::{
-    AppHolderPeerContinuity, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
+    AppHolderPeerContinuity, ControllerCurrentRendezvous, ControllerHolderPeerContinuity,
+    CurrentStoragePeerPhase, PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
 
 #[cfg(target_os = "linux")]

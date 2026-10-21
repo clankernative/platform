@@ -375,6 +375,15 @@ pub(crate) struct CurrentShellServingPhase<'peer> {
 }
 
 impl ServingParticipant {
+    /// Only wakeup/readiness DATA is exchanged here. The caller acquires its
+    /// real fresh role afterwards; no provider or consumer scope is returned.
+    pub(crate) fn prepare_current(&mut self) -> Result<()> {
+        match &mut self.native {
+            ParticipantOwner::App(app) => app.prepare_current(),
+            ParticipantOwner::Shell(peer) => peer.prepare_current(),
+        }
+    }
+
     pub(crate) fn app(app: super::ActiveAppStorageContinuity) -> Self {
         Self {
             native: ParticipantOwner::App(Box::new(app)),

@@ -374,6 +374,43 @@ and Controller measurements require source/image/profile-bound deployment by
 the operator. The existing read-only one-observation/ownerless-hold procedure and
 retained failed originals remain separate evidence.
 
+## Current-operation rendezvous
+
+App bootstrap and App/Shell serving use a bounded untrusted wakeup on their
+already retained socket before acquiring the client's next role. The wakeup
+contains only the channel kind, original exchange digest and next sequence. It
+has a closed 256-byte JSON schema and a single nonblocking send; a failed or
+partial notification cannot be retried. The Controller also waits for actual
+pending DATA before each of its six bootstrap role acquisitions.
+
+The Controller closes its original file continuation before readiness I/O. Its
+actual fresh role sends a signed begin-ready statement before the provider and
+physical-file work, allowing that work to overlap the client's fresh issuer
+RPC. The exact role stage, narrowed acquisition and nonce remain fixed through
+the later exchange. The client's freshly signed Hello echoes the readiness
+nonce, and Offer must preserve the entire readiness statement and request
+transcript. A queued wakeup is never a signer, role, file, P3 or consumer proof.
+Its strict kernel receive is deliberately discarded as untrusted DATA; the
+authenticated Ready, Hello and later messages retain their own actual sender
+handles.
+
+App file continuity has separate Ready, Queued, Busy and Refused states. Queued
+notification DATA cannot restore an abandoned phase or substitute for the
+actual retained peer and fresh role. Only known completion after the existing
+physical, provider, original and consumer postchecks returns continuity to
+Ready. Each current client receives exactly five authenticated messages
+(begin-ready, offer, ready, result/known, release); all five actual sender
+handles remain checked until final completion.
+
+Initial Shell transport setup also completes separately on its owning
+executor. It retains only same-owner connection DATA, and the authenticated
+exchange requires a different fresh issuer grant after actual readiness.
+Neither this setup nor the current-operation wakeup renews an old acquisition,
+human original, failed operation or permission. The original five-second stage
+limits and all provider/consumer checks remain in force. These are source and
+protocol properties; real-node timing and the complete OAuth lifecycle still
+require live qualification.
+
 ## Fresh executable joins in current peer checks
 
 The actual issuer baseline on 21 October measured 16 requester hash reads

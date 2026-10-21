@@ -2,6 +2,172 @@
 //! message pidfd, original file, P3 or first-holder owner is constructed here.
 
 use super::*;
+
+#[test]
+fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_signed() {
+    let (_, app, key) = fixture(NativeRole::AppHost);
+    let initial = Digest::new(b"one retained peer");
+    let ready_nonce = Digest::new(b"one controller ready");
+    let request = StoragePeerRequest {
+        purpose: StoragePeerPurpose::CurrentServing,
+        binding: Digest::new(b"actual consumer"),
+    };
+    let hello = signed(
+        &app,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(app.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            request: request.clone(),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: ready_nonce.clone(),
+        },
+    );
+    let encoded = serde_json::to_vec(&hello).unwrap();
+    let decoded = decode(&encoded).unwrap();
+    decoded.verify(&app).unwrap();
+    decoded
+        .current_hello(&initial, 1, &ready_nonce, None)
+        .unwrap();
+    decoded
+        .current_hello(&initial, 1, &ready_nonce, Some(&request))
+        .unwrap();
+    assert!(
+        decoded
+            .current_hello(&initial, 1, &Digest::new(b"other ready"), None)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello(&initial, 2, &ready_nonce, None)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello(&Digest::new(b"other original"), 1, &ready_nonce, None)
+            .is_err()
+    );
+    let foreign = StoragePeerRequest {
+        purpose: request.purpose,
+        binding: Digest::new(b"another consumer"),
+    };
+    assert!(
+        decoded
+            .current_hello(&initial, 1, &ready_nonce, Some(&foreign))
+            .is_err()
+    );
+    let bootstrap = StoragePeerRequest {
+        purpose: StoragePeerPurpose::BootstrapCreate,
+        binding: request.binding.clone(),
+    };
+    let wrong_purpose = signed(
+        &app,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(app.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            request: bootstrap.clone(),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: ready_nonce.clone(),
+        },
+    );
+    wrong_purpose.verify(&app).unwrap();
+    assert!(
+        wrong_purpose
+            .current_hello(&initial, 1, &ready_nonce, None)
+            .is_err()
+    );
+    wrong_purpose
+        .current_hello(&initial, 1, &ready_nonce, Some(&bootstrap))
+        .unwrap();
+    let mut missing = serde_json::to_value(&hello).unwrap();
+    missing["body"]
+        .as_object_mut()
+        .unwrap()
+        .remove("controller_nonce");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+}
+
+#[test]
+fn current_begin_ready_cannot_be_replaced_by_a_later_grant_clock_or_nonce() {
+    let (_, controller, key, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    let nonce = Digest::new(b"one current ready");
+    let initial = Digest::new(b"original peer");
+    let ready = signed(
+        &controller,
+        &key,
+        Body::CurrentBeginReady {
+            controller: Box::new(controller.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            nonce: nonce.clone(),
+        },
+    );
+    let bytes = serde_json::to_vec(&ready).unwrap();
+    decode(&bytes).unwrap().verify(&controller).unwrap();
+    let exchange = CurrentExchange {
+        initial,
+        sequence: 1,
+        request: StoragePeerRequest {
+            purpose: StoragePeerPurpose::CurrentServing,
+            binding: Digest::new(b"consumer"),
+        },
+        app_stage: Digest::new(b"fresh app stage"),
+        controller_stage: controller.digest().unwrap(),
+        app_nonce: Digest::new(b"fresh app nonce"),
+        controller_nonce: nonce.clone(),
+    };
+    exchange
+        .require_begin_ready(&controller, &nonce, &controller)
+        .unwrap();
+    let mut replacement = controller.clone();
+    replacement.stage.data.challenge = Digest::new(b"later role grant");
+    replacement.stage.signature = issuer.sign("role-stage", &replacement.stage.data).unwrap();
+    assert!(replacement.same_enrollment(&controller));
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &nonce, &replacement)
+            .is_err()
+    );
+    let mut replacement = controller.clone();
+    replacement.original.origin_ns += 1;
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &nonce, &replacement)
+            .is_err()
+    );
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &Digest::new(b"different ready"), &controller)
+            .is_err()
+    );
+    assert!(
+        controller
+            .require_new_grant(&controller.grant_digest().unwrap())
+            .is_err()
+    );
+    let original = serde_json::to_value(&ready).unwrap();
+    for path in [
+        "/body/controller",
+        "/body/controller/stage",
+        "/body/controller/original",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    for field in ["initial", "sequence", "nonce"] {
+        let mut changed = original.clone();
+        changed["body"].as_object_mut().unwrap().remove(field);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let duplicate = String::from_utf8(bytes)
+        .unwrap()
+        .replace("\"sequence\":1", "\"sequence\":1,\"sequence\":1");
+    assert!(decode(duplicate.as_bytes()).is_err());
+}
 use crate::security_epoch::{
     native_enrollment::{
         protocol::{IssuerData, KeyOwner, RuntimeBinding, StageData},
@@ -587,6 +753,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
                 binding: Digest::new(b"exact-request"),
             },
             nonce: Digest::new(b"fresh-app-nonce"),
+            controller_nonce: Digest::new(b"controller-ready"),
         },
     );
     hello.verify(&fresh).unwrap();
@@ -665,6 +832,7 @@ fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
                 binding: Digest::new(b"request"),
             },
             nonce: Digest::new(b"nonce"),
+            controller_nonce: Digest::new(b"controller-ready"),
         },
     );
     let encoded = serde_json::to_vec(&hello).unwrap();

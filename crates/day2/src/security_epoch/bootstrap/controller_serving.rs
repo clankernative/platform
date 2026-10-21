@@ -74,14 +74,16 @@ impl ActiveControllerStorageContinuity {
     /// it is never interpreted as a fresh App role or Shell database identity.
     pub(in crate::security_epoch) fn serve_shell_current(
         &mut self,
-        stage: EnrolledRoleStage<'_>,
+        mut stage: EnrolledRoleStage<'_>,
         peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
     ) -> Result<ServingObservation> {
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
-            let mut physical = self.storage.begin_current_controller(stage)?;
-            let mut shell = peer.accept_current(physical.controller_stage()?)?;
+            let pending = self.storage.begin_pending_current_controller()?;
+            let rendezvous = peer.prepare_current(&mut stage)?;
+            let mut physical = pending.acquire(stage)?;
+            let mut shell = rendezvous.accept_current(physical.controller_stage()?)?;
             let binding = shell.request_binding().clone();
             let mut reads = AuthenticatedReads::acquire(
                 &self.policy,

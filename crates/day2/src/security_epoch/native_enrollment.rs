@@ -17,6 +17,8 @@ mod issuer_peer;
 #[cfg(target_os = "linux")]
 mod operations;
 mod owner;
+#[cfg(any(target_os = "linux", test))]
+mod peer_idle;
 mod policy;
 #[cfg(target_os = "linux")]
 mod process;
@@ -42,12 +44,14 @@ mod storage_peer_wire;
 mod storage_socket_directory;
 
 pub(crate) use serving_peer::{
-    ControllerServingListener, ControllerServingPeer, CurrentServingPeerPhase, ShellServingPeer,
+    ControllerServingListener, ControllerServingPeer, ControllerServingRendezvous,
+    CurrentServingPeerPhase, ShellServingConnection, ShellServingPeer,
 };
 pub(crate) use storage_peer::{
     AppHolderPeerContinuity, AuthenticatedAppFirstHolder, AuthenticatedControllerFirstHolder,
-    AuthenticatedInitialHolderOffer, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
-    InitialHolderConnection, InitialHolderListener, InitialHolderServer,
+    AuthenticatedInitialHolderOffer, ControllerCurrentRendezvous, ControllerHolderPeerContinuity,
+    CurrentStoragePeerPhase, InitialHolderConnection, InitialHolderListener, InitialHolderServer,
+    PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
 pub(crate) use storage_peer_wire::StoragePeerRequest;
 
