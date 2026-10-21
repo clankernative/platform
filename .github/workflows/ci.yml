@@ -79,7 +79,10 @@ jobs:
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
+      # Match the exact compiled-test producer environment for cache admission.
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_TEST_LTO: 'off'
+      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
       SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
