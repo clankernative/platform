@@ -96,7 +96,7 @@ pub(super) fn begin_check(
         }
         ensure!(
             hash(current, acquisition, costs)? == *selected,
-            "native_enrollment_executable_changed"
+            "native_enrollment_code_mismatch"
         );
         for file in held.iter().copied().chain([&*current]) {
             ensure!(

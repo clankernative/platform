@@ -600,7 +600,7 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => panic!("a wrong selected digest must not return a native owner"),
             };
-            assert_eq!(error.to_string(), "native_enrollment_executable_changed");
+            assert_eq!(error.to_string(), "native_enrollment_code_mismatch");
             assert!(a.remaining().is_err());
             let mut later = NativeAcquisition::begin(5)?;
             let error = match channel.receive(&code, &mut later, &HashCosts::disabled()) {
