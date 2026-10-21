@@ -3,7 +3,9 @@
 use super::storage_peer_wire::{Message, StageStatement};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
-use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::StorageSender};
+use crate::security_epoch::native_enrollment::{
+    EnrolledRoleStage, channel::StorageSender, process::MessageProcess,
+};
 use anyhow::{Result, ensure};
 
 pub(super) struct Peer {
@@ -65,6 +67,7 @@ impl Peer {
                     && self.statement.stage.data.role == stage.storage_peer_role()?,
                 "storage_peer_original_issuer_or_role_changed"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     StorageSender::App(process) => {
@@ -72,12 +75,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "storage_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition, &HashCosts::disabled())?;
+                        same_actor.push(process.as_mut());
                     }
                     StorageSender::Controller(receipt) => {
                         receipt.check_continuity(&self.statement, stage, acquisition)?;
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_storage_acquisition(acquisition)
         })();
@@ -104,6 +114,7 @@ impl Peer {
                     < std::time::Duration::from_nanos(self.statement.original.deadline_ns),
                 "storage_peer_remote_stage_expired"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     StorageSender::App(process) => {
@@ -111,12 +122,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "storage_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition, &HashCosts::disabled())?;
+                        same_actor.push(process.as_mut());
                     }
                     StorageSender::Controller(receipt) => {
                         receipt.bind(&self.statement, stage, acquisition)?
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_storage_acquisition(acquisition)
         })();

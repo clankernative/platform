@@ -3,7 +3,9 @@
 use super::serving_peer_wire::{Message, Statement};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
-use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::ServingSender};
+use crate::security_epoch::native_enrollment::{
+    EnrolledRoleStage, channel::ServingSender, process::MessageProcess,
+};
 use anyhow::{Result, ensure};
 
 pub(super) struct Peer {
@@ -69,6 +71,7 @@ impl Peer {
                     && self.statement.stage.data.role == stage.serving_peer_role()?,
                 "serving_peer_original_issuer_or_role_changed"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     ServingSender::Shell(process) => {
@@ -76,12 +79,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition, &HashCosts::disabled())?;
+                        same_actor.push(process.as_mut());
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.check_continuity(&self.statement, stage, acquisition)?;
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_serving_acquisition(acquisition)
         })();
@@ -108,6 +118,7 @@ impl Peer {
                     < std::time::Duration::from_nanos(self.statement.original.deadline_ns),
                 "serving_peer_remote_stage_expired"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     ServingSender::Shell(process) => {
@@ -115,12 +126,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition, &HashCosts::disabled())?;
+                        same_actor.push(process.as_mut());
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.bind(&self.statement, stage, acquisition)?
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_serving_acquisition(acquisition)
         })();
