@@ -35,21 +35,18 @@ pub(super) struct ReviewedFileLayout {
 }
 
 impl ReviewedFileLayout {
-    /// Artifact admission and memory initialization both spend the caller's
-    /// already-started native acquisition. No ordinary Runtime is constructed.
+    /// Revalidate previously admitted desired DATA and initialize memory inside
+    /// the caller's original acquisition. No ordinary Runtime is constructed.
+    /// The initializer reloads the complete instance and requires the SAME
+    /// digest; the image binds this metadata's scope/app/artifact to the seed.
     pub(super) fn prepare(
-        instance_path: &std::path::Path,
+        metadata: &crate::store::InitialStoreMetadata,
         selection: &ReviewedStorageSelection,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let result = (|| {
             acquisition.remaining()?;
-            let metadata = crate::store::InitialStoreMetadata::load(
-                instance_path,
-                selection.policy().scope.app.as_str(),
-            )?;
-            acquisition.remaining()?;
-            Self::prepare_metadata(&metadata, selection, acquisition)
+            Self::prepare_metadata(metadata, selection, acquisition)
         })();
         if result.is_err() {
             acquisition.refuse();

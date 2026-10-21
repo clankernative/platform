@@ -580,8 +580,9 @@ pub(crate) struct InitialStoreMetadata {
 }
 
 impl InitialStoreMetadata {
-    /// Desired configuration checks only, inside an already genuine native
-    /// scope. Neither this metadata nor the returned Instance grants authority.
+    /// Desired configuration checks only, before enrollment or inside a genuine
+    /// native scope. Neither this metadata nor the returned Instance creates a
+    /// role, native acquisition or authority; consumers supply their own scope.
     pub(crate) fn require_native_selection(
         &self,
         selected: &day2_capabilities::security_epoch::EpochStore,

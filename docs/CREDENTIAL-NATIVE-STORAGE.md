@@ -130,6 +130,15 @@ cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
 there is no inverse projection-to-owner constructor.
 
 Fresh image preparation takes `InitialStoreMetadata`, not `Runtime::load`.
+The Controller admits the desired instance and artifact before enrollment and
+the original storage acquisition. Artifact worker exchanges produce DATA only;
+they create no role, seed, prepared image, file owner or native permission.
+The complete native policy/store/artifact selection is checked before enrollment.
+Inside the unchanged five-second acquisition, memory initialization reloads the
+complete instance and requires its admitted digest, while image construction
+binds scope/app/artifact to the actual native seed. All provider, clock, original
+file, sync/readback and retention checks remain within their original interval.
+Pre-admission cannot renew an expired or refused acquisition or adopt a file.
 The metadata loader admits the desired Instance and artifact, checks schedule
 and ingress bindings, and retains the exact selected Instance digest. It has no
 serving database path and does not create, open or inspect `.state`. The same

@@ -78,18 +78,74 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
 }
 
 #[test]
-fn failed_layout_artifact_admission_refuses_the_original_acquisition() {
-    let (directory, selection, _plan, _interval) = layout();
+fn missing_current_instance_refuses_pre_admitted_metadata_and_original_acquisition() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(directory.path().join("instance.json")).unwrap();
     let mut interval = acquisition();
-    assert!(
-        ReviewedFileLayout::prepare(
-            &directory.path().join("instance.json"),
-            &selection,
-            &mut interval
-        )
-        .is_err()
-    );
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).is_err());
     assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
+}
+
+#[test]
+fn changed_current_instance_refuses_pre_admitted_metadata_without_persistent_state() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    let path = directory.path().join("instance.json");
+    let mut changed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    changed["apps"]["calendar"]["writers"] = serde_json::json!(["changed@example.com"]);
+    std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    let mut interval = acquisition();
+    let error = ReviewedFileLayout::prepare(&runtime, &selection, &mut interval)
+        .err()
+        .unwrap();
+    assert!(error.downcast_ref::<crate::error::Failure>().is_some());
+    assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
+}
+
+#[test]
+fn pre_admitted_metadata_keeps_the_original_budget_and_cannot_clear_refusal() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    let mut original = acquisition();
+    let (origin, deadline) = original.interval_data().unwrap();
+    ReviewedFileLayout::prepare(&runtime, &selection, &mut original).unwrap();
+    assert_eq!(original.interval_data().unwrap(), (origin, deadline));
+    original.refuse();
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut original).is_err());
+    assert!(original.remaining().is_err());
+    let mut expired = NativeAcquisition::fixture(
+        Digest::new(b"expired-pre-admitted-metadata"),
+        std::process::id(),
+        Duration::from_secs(100),
+        Duration::ZERO,
+    );
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut expired).is_err());
+    assert!(expired.remaining().is_err());
     assert!(!directory.path().join(".state").exists());
 }
 
