@@ -167,17 +167,18 @@ mod tests {
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
         let mut output = Vec::new();
-        let mut recorder = Recorder::new(&mut output);
-        let costs = recorder.connection();
-        let hashes = costs.hashes(Subject::Requester);
-        for _ in 0..2 {
-            let stamp =
-                super::begin_check(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
-            assert_eq!(current.stream_position()?, bytes.len() as u64);
-            finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+        {
+            let mut recorder = Recorder::new(&mut output);
+            let costs = recorder.connection();
+            let hashes = costs.hashes(Subject::Requester);
+            for _ in 0..2 {
+                let stamp =
+                    super::begin_check(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
+                assert_eq!(current.stream_position()?, bytes.len() as u64);
+                finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+            }
+            recorder.emit(&costs, Outcome::Completed)?;
         }
-        recorder.emit(&costs, Outcome::Completed)?;
-        drop(recorder);
         let output = String::from_utf8(output)?;
         let record: serde_json::Value =
             serde_json::from_str(output.strip_prefix("day2-native-issuer-cost ").unwrap())?;
