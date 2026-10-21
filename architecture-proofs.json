@@ -908,14 +908,14 @@
       "type_name": "NativeProcessObservation",
       "owning_children": [],
       "methods": [
-        "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition) -> Result < Self >",
+        "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition , costs : & HashCosts) -> Result < Self >",
         "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (super) fn code (& self) -> & Digest"
       ],
       "factories": [
         {
           "owner": "NativeProcessObservation",
-          "signature": "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition) -> Result < Self >"
+          "signature": "pub (super) fn acquire (expected_executable : & Digest , acquisition : & mut NativeAcquisition , costs : & HashCosts) -> Result < Self >"
         }
       ],
       "material_uses": [
