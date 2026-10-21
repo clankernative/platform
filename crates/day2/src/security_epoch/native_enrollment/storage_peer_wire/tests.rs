@@ -577,7 +577,9 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
         ),
     ];
     for (body, kind, sender, key) in cases {
-        let mut message = signed(sender, key, body);
+        let message = signed(sender, key, body);
+        let encoded = serde_json::to_vec(&message).unwrap();
+        let mut message = decode(&encoded).unwrap();
         message.verify(sender).unwrap();
         assert!(message.body.matches_completion(&exchange, kind));
         assert!(!message.body.matches_completion(&foreign, kind));
@@ -594,6 +596,27 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
             );
             assert_eq!(message.body.matches_completion(&exchange, other), expected);
         }
+        for (field, value) in [
+            ("unexpected", serde_json::json!(true)),
+            ("exchange", serde_json::Value::Null),
+            ("step", serde_json::json!("current_unknown")),
+        ] {
+            let mut changed = serde_json::to_value(&message).unwrap();
+            changed["body"][field] = value;
+            assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let mut missing = serde_json::to_value(&message).unwrap();
+        missing["body"].as_object_mut().unwrap().remove("exchange");
+        assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let exchange_json = serde_json::to_string(&exchange).unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let duplicate = encoded.replacen(
+            &format!("\"exchange\":{exchange_json}"),
+            &format!("\"exchange\":{exchange_json},\"exchange\":{exchange_json}"),
+            1,
+        );
+        assert_ne!(duplicate, encoded);
+        assert!(decode(duplicate.as_bytes()).is_err());
         match &mut message.body {
             Body::CurrentResult { exchange }
             | Body::CurrentConsumed { exchange }

@@ -380,7 +380,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
             require_object(&value, "/body/exchange")?;
             require_object(&value, "/body/exchange/request")?;
         }
-        Some("confirm" | "complete" | "accepted" | "current_ack" | "current_ready") => {}
+        Some(
+            "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
+            | "current_result" | "current_consumed" | "current_released",
+        ) => {}
         _ => anyhow::bail!("storage_peer_step"),
     }
     Ok(serde_json::from_value(value)?)
