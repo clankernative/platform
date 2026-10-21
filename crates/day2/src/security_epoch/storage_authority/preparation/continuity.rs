@@ -71,6 +71,42 @@ pub(in crate::security_epoch::storage_authority) struct PendingPreparedFilePhase
     disposition: FilePhaseDisposition<'file>,
 }
 
+/// The physical counterpart has a distinct acquisition method: legitimate
+/// later writes must never be accepted as an unchanged initial image. Its
+/// private inputs are still only closed continuity, not native permission.
+pub(in crate::security_epoch::storage_authority) struct PendingPhysicalFilePhase<'file> {
+    inputs: PendingPreparedFilePhase<'file>,
+}
+
+const _: () = {
+    macro_rules! absent {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    absent!(PendingPreparedFilePhase<'static>, Clone);
+    absent!(PendingPreparedFilePhase<'static>, Send);
+    absent!(PendingPreparedFilePhase<'static>, Sync);
+    absent!(PendingPreparedFilePhase<'static>, serde::Serialize);
+    absent!(
+        PendingPreparedFilePhase<'static>,
+        serde::Deserialize<'static>
+    );
+    absent!(PendingPhysicalFilePhase<'static>, Clone);
+    absent!(PendingPhysicalFilePhase<'static>, Send);
+    absent!(PendingPhysicalFilePhase<'static>, Sync);
+    absent!(PendingPhysicalFilePhase<'static>, serde::Serialize);
+    absent!(
+        PendingPhysicalFilePhase<'static>,
+        serde::Deserialize<'static>
+    );
+};
+
 /// A current physical-file phase after legitimate application writes. It is
 /// deliberately distinct from CurrentPreparedFilePhase: the initial exchange
 /// cannot accept it or reinterpret modified bytes as a prepared initial image.
@@ -250,30 +286,48 @@ impl PreparedFileContinuity {
         &'file mut self,
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
-        let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
-        let phase = self.volume.begin_current(stage)?;
-        let mut current = CurrentPhysicalFilePhase {
-            inner: CurrentPreparedFilePhase {
-                phase,
-                selection: &self.selection,
-                directory: &self.directory,
-                anchor: &self.anchor,
-                file: &self.file,
-                identity: &self.identity,
-                layout: &self.layout,
-                process: self.process,
-                thread: self.thread,
-                disposition,
-            },
-        };
-        current.check()?;
-        Ok(current)
+        self.begin_pending_physical_phase()?.acquire(stage)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn begin_pending_physical_phase(
+        &mut self,
+    ) -> Result<PendingPhysicalFilePhase<'_>> {
+        Ok(PendingPhysicalFilePhase {
+            inputs: self.begin_pending_initial_phase()?,
+        })
     }
 
     /// Read-only continuity observation; it grants no peer, P3 or writer
     /// authority. Legitimate later writes need the serving transition.
     pub(crate) fn check_initial(&mut self, stage: EnrolledRoleStage<'_>) -> Result<()> {
         self.begin_initial_phase(stage)?.finish_checked()
+    }
+}
+
+impl<'file> PendingPhysicalFilePhase<'file> {
+    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        let inputs = self.inputs;
+        inputs.disposition.check()?;
+        let phase = inputs.volume.begin_current(stage)?;
+        let mut current = CurrentPhysicalFilePhase {
+            inner: CurrentPreparedFilePhase {
+                phase,
+                selection: inputs.selection,
+                directory: inputs.directory,
+                anchor: inputs.anchor,
+                file: inputs.file,
+                identity: inputs.identity,
+                layout: inputs.layout,
+                process: inputs.process,
+                thread: inputs.thread,
+                disposition: inputs.disposition,
+            },
+        };
+        current.check()?;
+        Ok(current)
     }
 }
 
