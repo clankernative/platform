@@ -142,9 +142,7 @@ fn open_initial_child(root: &File) -> Result<File> {
 
 fn require_read_only(file: &File) -> Result<()> {
     ensure!(
-        rustix::fs::fstatvfs(file)?
-            .f_flag
-            .contains(StatVfsMountFlags::RDONLY),
+        read_only(file)?,
         "native_enrollment_storage_parent_writable"
     );
     Ok(())
@@ -152,12 +150,16 @@ fn require_read_only(file: &File) -> Result<()> {
 
 fn require_writable(file: &File) -> Result<()> {
     ensure!(
-        !rustix::fs::fstatvfs(file)?
-            .f_flag
-            .contains(StatVfsMountFlags::RDONLY),
+        !read_only(file)?,
         "native_enrollment_storage_child_readonly"
     );
     Ok(())
+}
+
+fn read_only(file: &File) -> Result<bool> {
+    let filesystem = rustix::fs::fstatfs(file)?;
+    let flags = u64::try_from(filesystem.f_flags)?;
+    Ok(flags & StatVfsMountFlags::RDONLY.bits() != 0)
 }
 
 /// Only the fixed child component may cross its explicitly joined bind mount.
