@@ -145,11 +145,15 @@ fn run_inner(
         std::thread::park_timeout(Duration::from_millis(5));
     }
     evidence.enter(FailurePhase::FirstHolder);
-    let storage = match InitialStorageContinuity::establish(
-        file,
-        holder_listener,
-        role.begin_current_stage()?,
-    ) {
+    let stage = timings
+        .measure(Operation::FirstRole, || role.begin_current_stage())
+        .map_err(|error| PreparationFailure::at(PreparationStep::FirstRole, error));
+    evidence.preparation_timings(timings.summary());
+    let result = InitialStorageContinuity::establish(file, holder_listener, stage?, &timings);
+    // The holder operation has returned; its failed resources have unwound or
+    // its actual continuity is retained. Diagnostic DATA grants no permission.
+    evidence.preparation_timings(timings.summary());
+    let storage = match result {
         InitialStorageOutcome::Established(storage) => *storage,
         InitialStorageOutcome::Refused { file, error } => {
             let _refused_original = file;

@@ -277,6 +277,26 @@ transition checks. App/current physical serving operations keep their separate
 nine full-image checks make nine preads instead of 135, rereading the same
 bytes. That is a source count, not a measured latency or reliability result.
 
+The subsequent first-holder operation also caches three separate inclusive
+rows: `first_role` acquires its actual fresh Controller stage, `first_file`
+begins its current same-owner file phase, and `first_exchange` includes listener
+start, the unchanged exchange, durability checks and retained completion.
+Successful return or failure unwind precedes each ending measurement; rows are
+historical DATA, not renewed permission. A `first_holder` refusal now exports
+the fixed innermost annotated `preparation.step` and closed category. Steps
+distinguish role/file/start, repeated local checks/projection,
+accept/Hello/peer/Offer/confirm/complete/acceptance, durability and retained
+completion. Each annotated exchange expression includes its stage-argument
+checks. Other unannotated DATA checks within the exchange remain
+`first_exchange`; a label does not identify every underlying syscall.
+`socket_poll_timeout` identifies a zero-result poll;
+`socket_unexpected_events` identifies an unexpected count or event mask without
+claiming every such event means a closed peer. `process_exited` identifies only
+the existing exact native liveness refusal; `remote_stage_expired` identifies
+the existing failed remote signed-stage deadline comparison. Unknown causes are never formatted or emitted. The same
+2048-byte record bound, original five-second intervals, call order, protocol,
+guards and failure behavior remain; this diagnostic addition fixes no timeout.
+
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
 for its first sixteen accepted connections through the provisioner's inherited
 stderr. Its startup channel and listener remain separate on stdin and stdout;

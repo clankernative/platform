@@ -32,9 +32,12 @@ pub(in crate::security_epoch) enum Operation {
     Instance,
     HolderRole,
     HolderListener,
+    FirstRole,
+    FirstFile,
+    FirstExchange,
 }
 
-const OPERATIONS: [Operation; 24] = [
+const OPERATIONS: [Operation; 27] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -59,6 +62,9 @@ const OPERATIONS: [Operation; 24] = [
     Operation::Instance,
     Operation::HolderRole,
     Operation::HolderListener,
+    Operation::FirstRole,
+    Operation::FirstFile,
+    Operation::FirstExchange,
 ];
 
 /// [call count, inclusive total microseconds, maximum call microseconds].
@@ -80,7 +86,7 @@ impl Measurement {
 #[derive(Clone, Debug, Serialize)]
 pub(in crate::security_epoch) struct Summary(Vec<(Operation, Measurement)>);
 
-/// One explicitly scoped collector for original preparation and listener setup.
+/// One explicitly scoped collector for preparation, listener and first holder.
 /// Other current/serving phases use disabled(), with no allocation, clock
 /// reads, inherited observations or permission.
 #[derive(Clone)]
@@ -244,6 +250,34 @@ mod tests {
             serde_json::json!([
                 ["holder_role", [1, 17, 17]],
                 ["holder_listener", [1, 29, 29]],
+            ])
+        );
+    }
+
+    #[test]
+    fn first_holder_scopes_preserve_failure_and_remain_independent_data() {
+        let timings = Timings::new();
+        for operation in [
+            Operation::FirstRole,
+            Operation::FirstFile,
+            Operation::FirstExchange,
+        ] {
+            let mut clock = [Duration::ZERO, Duration::from_micros(17)].into_iter();
+            assert_eq!(
+                timings.measure_with(
+                    operation,
+                    || Err::<(), _>("original failure"),
+                    || clock.next()
+                ),
+                Err("original failure")
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(timings.summary()).unwrap(),
+            serde_json::json!([
+                ["first_role", [1, 17, 17]],
+                ["first_file", [1, 17, 17]],
+                ["first_exchange", [1, 17, 17]]
             ])
         );
     }

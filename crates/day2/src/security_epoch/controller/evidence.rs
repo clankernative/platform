@@ -118,6 +118,21 @@ pub(in crate::security_epoch) enum PreparationStep {
     HolderInterval,
     HolderTransport,
     HolderFinalCheck,
+    FirstRole,
+    FirstFile,
+    FirstStart,
+    FirstExchange,
+    FirstCheck,
+    FirstProjection,
+    FirstAccept,
+    FirstHello,
+    FirstPeer,
+    FirstOffer,
+    FirstConfirm,
+    FirstComplete,
+    FirstAccepted,
+    FirstDurability,
+    FirstRetain,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -142,6 +157,10 @@ enum PreparationErrorCategory {
     ClockExpiredOrRewound,
     AcquisitionRefused,
     TransportUnavailable,
+    SocketPollTimeout,
+    SocketUnexpectedEvents,
+    RemoteStageExpired,
+    ProcessExited,
     ResponseStatusOrBound,
     AdmissionRejected,
     PermissionDenied,
@@ -223,6 +242,12 @@ fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory
         .copied()
         .or_else(|| error.downcast_ref::<String>().map(String::as_str));
     match code {
+        Some("native_enrollment_socket_poll_timeout") => return Category::SocketPollTimeout,
+        Some("native_enrollment_socket_unexpected_events") => {
+            return Category::SocketUnexpectedEvents;
+        }
+        Some("storage_peer_remote_stage_expired") => return Category::RemoteStageExpired,
+        Some("native_enrollment_process_exited") => return Category::ProcessExited,
         Some(
             "epoch_native_clock_rewind_or_expired"
             | "epoch_native_acquisition_expired"
@@ -521,7 +546,9 @@ impl<W: RecordOutput> Recorder<W> {
         if !self.refused {
             let preparation = if matches!(
                 self.at,
-                FailurePhase::Preparation | FailurePhase::HolderListener
+                FailurePhase::Preparation
+                    | FailurePhase::HolderListener
+                    | FailurePhase::FirstHolder
             ) {
                 error.map(PreparationFailure::observe)
             } else {
@@ -931,6 +958,20 @@ mod tests {
         use PreparationErrorCategory as Category;
         for (code, expected) in [
             (
+                "native_enrollment_socket_poll_timeout",
+                Category::SocketPollTimeout,
+            ),
+            (
+                "native_enrollment_socket_unexpected_events",
+                Category::SocketUnexpectedEvents,
+            ),
+            ("native_enrollment_process_exited", Category::ProcessExited),
+            (
+                "storage_peer_remote_stage_expired",
+                Category::RemoteStageExpired,
+            ),
+            ("storage_peer_remote_stage_expired /SECRET", Category::Other),
+            (
                 "epoch_native_clock_rewind_or_expired",
                 Category::ClockExpiredOrRewound,
             ),
@@ -1062,6 +1103,74 @@ mod tests {
         }
     }
     impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn first_holder_refusals_keep_fixed_inner_boundaries_timings_and_record_bound() {
+        for (step, name) in [
+            (PreparationStep::FirstRole, "first_role"),
+            (PreparationStep::FirstFile, "first_file"),
+            (PreparationStep::FirstStart, "first_start"),
+            (PreparationStep::FirstExchange, "first_exchange"),
+            (PreparationStep::FirstCheck, "first_check"),
+            (PreparationStep::FirstProjection, "first_projection"),
+            (PreparationStep::FirstAccept, "first_accept"),
+            (PreparationStep::FirstHello, "first_hello"),
+            (PreparationStep::FirstPeer, "first_peer"),
+            (PreparationStep::FirstOffer, "first_offer"),
+            (PreparationStep::FirstConfirm, "first_confirm"),
+            (PreparationStep::FirstComplete, "first_complete"),
+            (PreparationStep::FirstAccepted, "first_accepted"),
+            (PreparationStep::FirstDurability, "first_durability"),
+            (PreparationStep::FirstRetain, "first_retain"),
+        ] {
+            let error = PreparationFailure::at(
+                step,
+                anyhow::anyhow!("native_enrollment_socket_poll_timeout"),
+            );
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(PreparationFailure::observe(&error).step, step);
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"native_enrollment_socket_poll_timeout")
+            );
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(rows[1]["observation"]["at"], "first_holder");
+            assert_eq!(rows[1]["observation"]["preparation"]["step"], name);
+            assert_eq!(
+                rows[1]["observation"]["preparation"]["category"],
+                "socket_poll_timeout"
+            );
+            let timing = rows[1]["observation"]["timing"].as_array().unwrap();
+            for name in ["first_role", "first_file", "first_exchange"] {
+                assert!(timing.iter().any(|row| row[0] == name));
+            }
+            assert!(
+                !String::from_utf8(recorder.output)
+                    .unwrap()
+                    .contains("native_enrollment_socket")
+            );
+        }
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::FirstHolder);
+        recorder
+            .refuse(Some(&PreparationFailure::at(
+                PreparationStep::FirstPeer,
+                anyhow::Error::new(MustNotDisplay),
+            )))
+            .unwrap();
+        assert_eq!(
+            records(&recorder.output)[1]["observation"]["preparation"]["category"],
+            "other"
+        );
+    }
 
     #[test]
     fn holder_listener_refusal_keeps_inner_step_category_and_cached_preparation() {

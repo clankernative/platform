@@ -5,6 +5,10 @@ use super::{
     AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
+    controller::{
+        evidence::{PreparationFailure, PreparationStep},
+        preparation_timing::{Operation, Timings},
+    },
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
         AppHolderPeerContinuity, AuthenticatedAppFirstHolder, ControllerHolderPeerContinuity,
@@ -79,16 +83,30 @@ impl InitialStorageContinuity {
     /// selected PD/ext4 checks, file+directory synchronization and readback.
     /// No caller assertion, descriptor, projection or completed receipt enters
     /// as a substitute. A filesystem fixture cannot supply the required phase.
-    pub(crate) fn establish(
+    pub(in crate::security_epoch) fn establish(
         mut file: PreparedFileContinuity,
         listener: InitialHolderListener,
         stage: EnrolledRoleStage<'_>,
+        timings: &Timings,
     ) -> InitialStorageOutcome {
         let result = (|| {
-            let phase = file.begin_initial_phase(stage)?;
-            let mut holder = listener.start(phase)?.exchange()?;
-            holder.check_initial_durability()?;
-            holder.retain_for_activation()
+            let phase = timings
+                .measure(Operation::FirstFile, || file.begin_initial_phase(stage))
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstFile, error))?;
+            timings.measure(Operation::FirstExchange, || {
+                let server = listener
+                    .start(phase)
+                    .map_err(|error| PreparationFailure::at(PreparationStep::FirstStart, error))?;
+                let mut holder = server.exchange().map_err(|error| {
+                    PreparationFailure::at(PreparationStep::FirstExchange, error)
+                })?;
+                holder.check_initial_durability().map_err(|error| {
+                    PreparationFailure::at(PreparationStep::FirstDurability, error)
+                })?;
+                holder
+                    .retain_for_activation()
+                    .map_err(|error| PreparationFailure::at(PreparationStep::FirstRetain, error))
+            })
         })();
         match result {
             Ok(peer) => InitialStorageOutcome::Established(Box::new(Self {
