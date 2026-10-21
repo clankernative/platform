@@ -15,7 +15,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use zeroize::{Zeroize, Zeroizing};
 
-pub(super) const PREFIX: &str = "/__freetool/credentials/";
+pub(super) const PREFIX: &str = crate::freetool_executor::CREDENTIALS_PATH_PREFIX;
 const OPERATION: &str = "freetool.credential_enrollment_access";
 
 #[derive(Clone, Deserialize)]
