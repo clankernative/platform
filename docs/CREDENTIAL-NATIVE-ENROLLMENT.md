@@ -174,7 +174,9 @@ production App/Shell lifecycle, human, storage, writer or OAuth permission.
 ## Bounded issuer cost observations
 
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
-for its first sixteen accepted connections. Each day2_native_issuer_cost_v1
+for its first sixteen accepted connections through the provisioner's inherited
+stderr. Its startup channel and listener remain separate on stdin and stdout;
+records never enter either protocol. Each day2_native_issuer_cost_v1
 record has a sequence, the fixed limit, an outcome and fixed operation rows.
 Later connections disable diagnostic sampling and logging; the normal admission
 protocol and enrollment table continue unchanged. A partial/export failure is

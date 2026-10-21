@@ -7,6 +7,13 @@ const PREFIX: &str = "day2-native-issuer-cost ";
 const RECORD_LIMIT: u8 = 16;
 const RECORD_BYTES: usize = 4096;
 
+/// Keep bounded issuer records on the provisioner's private stderr. Startup
+/// and listener descriptors remain the birth protocol's separate stdin/stdout.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn issuer_stderr() -> std::process::Stdio {
+    std::process::Stdio::inherit()
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Operation {
@@ -290,6 +297,69 @@ pub(super) fn preserve_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const STDERR_PROBE: &str =
+        "security_epoch::native_enrollment::issuer_costs::tests::issuer_stderr_subprocess";
+    const STDERR_STAGE: &str = "DAY2_NATIVE_ISSUER_STDERR_TEST_STAGE";
+
+    fn stderr_probe(stage: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", STDERR_PROBE, "--ignored", "--nocapture"])
+            .env(STDERR_STAGE, stage)
+            .stdin(std::process::Stdio::null());
+        command
+    }
+
+    #[test]
+    fn issuer_record_reaches_captured_parent_stderr_through_production_stdio() {
+        let output = stderr_probe("relay").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!String::from_utf8(output.stdout).unwrap().contains(PREFIX));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.len() < RECORD_BYTES);
+        assert!(stderr.ends_with('\n'));
+        let lines: Vec<_> = stderr.lines().collect();
+        assert_eq!(lines.len(), 1, "{stderr}");
+        let record: serde_json::Value =
+            serde_json::from_str(lines[0].strip_prefix(PREFIX).unwrap()).unwrap();
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "format": "day2_native_issuer_cost_v1",
+                "sequence": 1,
+                "limit": 16,
+                "outcome": "completed",
+                "rows": [["hash_requester", [1, 17, 3, 3]]]
+            })
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for issuer stderr inheritance"]
+    fn issuer_stderr_subprocess() {
+        match std::env::var(STDERR_STAGE).unwrap().as_str() {
+            "relay" => {
+                let status = stderr_probe("record")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(issuer_stderr())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            "record" => {
+                let mut recorder = Recorder::new(std::io::stderr());
+                let costs = recorder.connection();
+                costs.record(
+                    Operation::HashRequester,
+                    Some(17),
+                    Some(Duration::from_micros(3)),
+                );
+                recorder.emit(&costs, Outcome::Completed).unwrap();
+            }
+            _ => panic!("unexpected issuer stderr fixture stage"),
+        }
+    }
 
     #[test]
     fn rewound_or_missing_diagnostic_samples_are_not_zero_duration() {

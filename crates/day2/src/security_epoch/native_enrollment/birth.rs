@@ -2,7 +2,7 @@
 //! nonce and listener itself and retains its actual Child. No CSR adoption.
 
 use crate::security_epoch::native_clock::NativeAcquisition;
-use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
+use crate::security_epoch::native_enrollment::issuer_costs::{HashCosts, issuer_stderr};
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
     policy::EnrollmentPolicy,
@@ -142,7 +142,7 @@ pub(super) fn start() -> Result<Provisioner> {
         .env_clear()
         .stdin(Stdio::from(child_channel))
         .stdout(Stdio::from(listener_child))
-        .stderr(Stdio::inherit())
+        .stderr(issuer_stderr())
         .spawn()
         .context("native_enrollment_child_spawn")?;
     let mut birth = IssuerBirthOwner {
