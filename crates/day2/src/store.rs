@@ -54,6 +54,10 @@ mod supply_tests;
 #[path = "delegation_capability_tests.rs"]
 mod delegation_capability_tests;
 
+#[cfg(test)]
+#[path = "delegation_status_tests.rs"]
+mod delegation_status_tests;
+
 // A closed test-only corruption of one reply from the ACTUAL compiled worker.
 // No hook or selector exists in a production build. This does not qualify a
 // malicious worker binary or replace artifact admission.

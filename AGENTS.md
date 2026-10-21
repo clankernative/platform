@@ -53,6 +53,8 @@ iterating. Do not edit covered sources during a full gate. Run
 SDK source folders are assembled through crates/day2/src/sdk.rs; keep that explicit
 catalog, app exports and reserved module names consistent. Do not infer published
 names by recursively copying basenames. Public imports stay pf.Query, pf.Tx, etc.
+An SDK combinator accepts only what its generated metadata and the host carry.
+Narrow the input type rather than accepting a variant that is later dropped.
 Use xtask fmt / fmt-check for authored Rust and Roc. Keep a blank line between
 associated methods with each signature adjacent to its implementation. Wrap Roc
 code at 120 columns, allowing unbreakable strings, URLs, comments and identifiers.
@@ -79,6 +81,10 @@ The host journals observations and effect results under pinned artifacts and
 rechecks current authority. Generated phase and commit boundaries are sealed.
 Provider idempotency is capability-specific; never retry an ambiguous write on a
 provider that lacks deduplication or reconciliation. See docs/COMMAND-RUNTIME.md.
+Every path that returns a stored command outcome (receipts, duplicate requests,
+cross-app status) goes through store::completed_outcome. A current operation
+grant is not enough: the captured policy and authority stamp must still match,
+and authority blocks only cover pending invocations.
 There is no app job SDK, job binding, job dispatcher or background configuration.
 The control plane uses its own private Temporal adapter for release workflows.
 Neither Temporal nor arbitrary I/O is an app capability.

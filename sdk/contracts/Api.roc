@@ -124,12 +124,6 @@ Api :: [].{
 		Delegated(delegated) => Some(delegated)
 	}
 
-	verification_delegation_metadata : VerificationPrincipal -> List({ actor : Str, application : Str })
-	verification_delegation_metadata = |principal| match verification_principal_delegation(principal) {
-		None => []
-		Some(delegation) => [delegation]
-	}
-
 	ErrorExample : {
 		operation : Target,
 		input : (Str, U64 -> Try(Str, Str)),
@@ -315,7 +309,7 @@ Api :: [].{
 		execution : Execution(input),
 		credential_access : CredentialAccess,
 		verification_setup : List(Str),
-		verification_principal : [None, Some(VerificationPrincipal)],
+		verification_delegation : [None, Some({ actor : Str, application : Str })],
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
 		observations : List(Str),
@@ -443,20 +437,19 @@ Api :: [].{
 
 		verification_delegation :
 			CommandDef(input, output, input_fields, output_fields) -> List({ actor : Str, application : Str })
-		verification_delegation = |definition| match definition.verification_principal {
+		verification_delegation = |definition| match definition.verification_delegation {
 			None => []
-			Some(principal) => verification_delegation_metadata(principal)
+			Some(delegation) => [delegation]
 		}
 
+		# Verify positives through a host-installed delegated fixture principal.
+		# Only delegation is carried into campaign metadata, so the combinator
+		# accepts nothing else; a direct actor would silently run as the default.
 		verify_as :
 			CommandDef(input, output, input_fields, output_fields),
-			VerificationPrincipal ->
+			{ actor : Str, application : Str } ->
 				CommandDef(input, output, input_fields, output_fields)
-		verify_as = |definition, principal| { ..definition, verification_principal: Some(principal) }
-
-		verification_principal :
-			CommandDef(input, output, input_fields, output_fields) -> [None, Some(VerificationPrincipal)]
-		verification_principal = |definition| definition.verification_principal
+		verify_as = |definition, delegation| { ..definition, verification_delegation: Some(delegation) }
 
 		verification : CommandDef(input, output, input_fields, output_fields) -> Verification(input, output)
 		verification = |definition| definition.verification
@@ -634,7 +627,7 @@ Api :: [].{
 			},
 			verification: definition.verification,
 			verification_setup: [],
-			verification_principal: None,
+			verification_delegation: None,
 			required_all_rows: [],
 			observations: [],
 			export_version: 0,

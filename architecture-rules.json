@@ -171,6 +171,7 @@
     "crates/day2/src/delegation.rs",
     "crates/day2/src/delegation_capability_tests.rs",
     "crates/day2/src/delegation_commands.rs",
+    "crates/day2/src/delegation_status_tests.rs",
     "crates/day2/src/delegation_wire.rs",
     "crates/day2/src/deployment.rs",
     "crates/day2/src/development.rs",
