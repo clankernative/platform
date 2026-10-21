@@ -129,6 +129,15 @@ pub(crate) struct CurrentServingPeerPhase<'peer> {
 }
 
 impl ShellServingConnection {
+    /// Wait only for transport DATA before the caller acquires its fresh role.
+    /// This lends no serving permission and preserves idle_ready's refusal latch.
+    pub(crate) fn wait_ready(&mut self) -> Result<()> {
+        while !self.idle_ready()? {
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
     pub(crate) fn connect(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
         let result = (|| {
             // One-way gate belongs to the actual role owner, not a temporary

@@ -137,6 +137,15 @@ pub(crate) struct AuthenticatedControllerFirstHolder<'file, 'role> {
 }
 
 impl InitialHolderConnection {
+    /// Wait only for transport DATA before the caller acquires its fresh role.
+    /// This lends no file or authority and preserves idle_ready's refusal latch.
+    pub(crate) fn wait_ready(&mut self) -> Result<()> {
+        while !self.idle_ready()? {
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
     /// Complete transport setup under THIS actual stage. No old acquisition
     /// survives the return, and the one-way owner gate closes before connect.
     pub(crate) fn connect(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
