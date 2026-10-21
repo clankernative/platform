@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:d9a6d2f9a4c996d0e2b8379bcc1d85a418074c99f84acbf4baa12e73afe1bf9a",
+      "fingerprint": "sha256:65c66dc3d0555e2a06972d0587594711c2169a0619c4bdf42ab858652f7bbe76",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -14,6 +14,24 @@
       "source": "crates/day2-control/src/release.rs",
       "scope": "const",
       "fingerprint": "sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+      "scope": "const",
+      "fingerprint": "sha256:7e60c2331d5dff6123a611ae53cd48f6498c95090f86f111a2ea07fd89bae773",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "scope": "const",
+      "fingerprint": "sha256:5722fc840604c24fc0bba2020f0c7c8b028266eba9e5e625d07eafb731f54736",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "scope": "const",
+      "fingerprint": "sha256:f909a61c61b47abf6f83e1d6e25dd174020790e0e30fa5e8f6f1d5524dc63ee0",
       "registration": null
     }
   ],
@@ -1891,7 +1909,8 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
-        "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_initial_phase (& mut self) -> Result < PendingPreparedFilePhase < '_ > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_physical_phase (& mut self) -> Result < PendingPhysicalFilePhase < '_ > >",
         "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >",
         "fn retain (original : PreparedInitialFile < '_ > , binding : SameEnrolledOwner) -> Self"
       ],
@@ -1908,11 +1927,15 @@
         },
         {
           "owner": "PreparedFileContinuity",
-          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
         },
         {
           "owner": "PreparedFileContinuity",
-          "signature": "pub (crate) fn check_initial (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_initial_phase (& mut self) -> Result < PendingPreparedFilePhase < '_ > >"
+        },
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_physical_phase (& mut self) -> Result < PendingPhysicalFilePhase < '_ > >"
         }
       ],
       "proof_uses": [],
@@ -2051,12 +2074,16 @@
       ],
       "factories": [
         {
-          "owner": "PreparedFileContinuity",
-          "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+          "owner": "PendingPhysicalFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PreparedFileContinuity",
-          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (crate) fn begin_initial_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -2193,12 +2220,12 @@
         "fn check_file (& mut self , file : & mut AppPreparedFile < '_ , '_ >) -> Result < () >",
         "pub (crate) fn finish < 'stage , 'role > (mut self , mut file : AppPreparedFile < 'stage , 'role >) -> Result < AuthenticatedAppFirstHolder < 'stage , 'role > >",
         "pub (crate) fn projection (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < PreparedFileProjection >",
-        "pub (crate) fn receive (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        "pub (crate) fn receive (mut connection : InitialHolderConnection , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
       ],
       "factories": [
         {
           "owner": "AuthenticatedInitialHolderOffer",
-          "signature": "pub (crate) fn receive (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+          "signature": "pub (crate) fn receive (mut connection : InitialHolderConnection , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -2243,7 +2270,7 @@
       ],
       "factories": [
         {
-          "owner": "InitialHolderListener",
+          "owner": "InitialHolderRendezvous",
           "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
         }
       ],
@@ -2317,8 +2344,8 @@
           "signature": "pub (in crate :: security_epoch) fn into_physical_checked (mut self) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         },
         {
-          "owner": "PreparedFileContinuity",
-          "signature": "pub (crate) fn begin_physical_phase < 'file , 'role > (& 'file mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "owner": "PendingPhysicalFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -2350,9 +2377,10 @@
       "type_name": "AppHolderPeerContinuity",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (crate) fn begin_current < 'peer > (& 'peer mut self , queued : QueuedAppCurrentPeer , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
         "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder",
         "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
+        "pub (crate) fn notify_current (& mut self) -> Result < PendingAppCurrentPeer < '_ > >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
@@ -2364,11 +2392,15 @@
       "material_uses": [
         {
           "owner": "AppHolderPeerContinuity",
-          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , queued : QueuedAppCurrentPeer , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
         },
         {
           "owner": "AppHolderPeerContinuity",
           "signature": "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection"
+        },
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn notify_current (& mut self) -> Result < PendingAppCurrentPeer < '_ > >"
         },
         {
           "owner": "AppHolderPeerContinuity",
@@ -2388,13 +2420,11 @@
       "type_name": "ControllerHolderPeerContinuity",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
-        "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >",
-        "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >",
         "pub (in crate :: security_epoch) fn check_retained_identity (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn first_holder (& self) -> & crate :: security_epoch :: kernel :: Holder",
         "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection",
         "pub (in crate :: security_epoch) fn pending (& mut self) -> Result < bool >",
+        "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < '_ > >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
@@ -2406,23 +2436,15 @@
       "material_uses": [
         {
           "owner": "ControllerHolderPeerContinuity",
-          "signature": "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
-        },
-        {
-          "owner": "ControllerHolderPeerContinuity",
-          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
-        },
-        {
-          "owner": "ControllerHolderPeerContinuity",
           "signature": "pub (crate) fn initial_projection (& self) -> & PreparedFileProjection"
         },
         {
           "owner": "ControllerHolderPeerContinuity",
-          "signature": "pub (crate) fn refuse (& mut self)"
+          "signature": "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < '_ > >"
         },
         {
           "owner": "ControllerHolderPeerContinuity",
-          "signature": "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+          "signature": "pub (crate) fn refuse (& mut self)"
         },
         {
           "owner": "ControllerHolderPeerContinuity",
@@ -2461,19 +2483,15 @@
       "factories": [
         {
           "owner": "AppHolderPeerContinuity",
-          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , queued : QueuedAppCurrentPeer , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
         },
         {
-          "owner": "ControllerHolderPeerContinuity",
-          "signature": "fn accept_selected_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
         },
         {
-          "owner": "ControllerHolderPeerContinuity",
-          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , expected : & StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
-        },
-        {
-          "owner": "ControllerHolderPeerContinuity",
-          "signature": "pub (in crate :: security_epoch) fn accept_serving_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+          "owner": "PendingAppCurrentPeer < 'peer >",
+          "signature": "pub (crate) fn begin_current (self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
         }
       ],
       "material_uses": [
@@ -2544,7 +2562,7 @@
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
         }
       ],
       "material_uses": [
@@ -2589,18 +2607,18 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
-        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >",
-        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
-        "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
-        "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome",
+        "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , mut stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome"
+          "signature": "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , mut stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome"
         }
       ],
       "material_uses": [
@@ -2614,15 +2632,15 @@
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , selection : & EpochStore , request : & Request) -> Result < CurrentStorageBootstrapPhase < 'storage , 'role > >"
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >"
         },
         {
           "owner": "InitialStorageContinuity",
@@ -2646,6 +2664,7 @@
         "pub (in crate :: security_epoch) fn begin_current < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentAppStoragePhase < 'storage > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
+        "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn retain (holder : AuthenticatedAppFirstHolder < '_ , '_ >) -> Result < Self >"
       ],
@@ -2675,6 +2694,10 @@
         {
           "owner": "AppInitialStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >"
+        },
+        {
+          "owner": "AppInitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -2796,6 +2819,7 @@
       ],
       "methods": [
         "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >",
+        "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
       ],
@@ -2813,6 +2837,10 @@
         {
           "owner": "ActiveAppStorageContinuity",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >"
         },
         {
           "owner": "ActiveAppStorageContinuity",
@@ -2846,7 +2874,7 @@
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < ServingObservation >",
-        "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
+        "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , mut stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
       ],
       "factories": [
         {
@@ -2869,7 +2897,7 @@
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
+          "signature": "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , mut stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
         }
       ],
       "proof_uses": [],
@@ -2898,6 +2926,7 @@
       "methods": [
         "pub (crate) fn advance (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >",
+        "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn retain (storage : super :: AppInitialStorageContinuity , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < Self >"
       ],
@@ -2919,6 +2948,10 @@
         {
           "owner": "AppStorageBootstrap",
           "signature": "pub (crate) fn into_active (self) -> std :: result :: Result < ActiveAppStorageContinuity , Box < Self > >"
+        },
+        {
+          "owner": "AppStorageBootstrap",
+          "signature": "pub (crate) fn prepare_current (& mut self) -> Result < () >"
         },
         {
           "owner": "AppStorageBootstrap",
@@ -3071,6 +3104,7 @@
       ],
       "methods": [
         "pub (crate) fn app (app : super :: ActiveAppStorageContinuity) -> Self",
+        "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (crate) fn shell (peer : super :: native_enrollment :: ShellServingPeer) -> Self"
       ],
@@ -3120,6 +3154,10 @@
         {
           "owner": null,
           "signature": "pub (crate) fn with_current_serving < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , intent : & FreshIntent , purpose : ServingUse , response : Option < & ResponseIdentity > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "ServingParticipant",
+          "signature": "pub (crate) fn prepare_current (& mut self) -> Result < () >"
         },
         {
           "owner": "ServingParticipant",
@@ -3185,11 +3223,11 @@
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         },
         {
-          "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_controller < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "owner": "PendingControllerStoragePhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         }
       ],
       "material_uses": [
@@ -3264,8 +3302,8 @@
       "type_name": "ControllerServingPeer",
       "owning_children": [],
       "methods": [
-        "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >",
         "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
+        "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingRendezvous < '_ > >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
@@ -3277,11 +3315,11 @@
       "material_uses": [
         {
           "owner": "ControllerServingPeer",
-          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
         },
         {
           "owner": "ControllerServingPeer",
-          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+          "signature": "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingRendezvous < '_ > >"
         },
         {
           "owner": "ControllerServingPeer",
@@ -3310,11 +3348,11 @@
       "factories": [
         {
           "owner": null,
-          "signature": "fn start_current < 'peer > (owner : & 'peer mut Retained , stage : & mut EnrolledRoleStage < '_ > , role : NativeRole , binding : Option < Digest >) -> Result < CurrentServingPeerPhase < 'peer > >"
+          "signature": "fn start_shell_current < 'peer > (owner : & 'peer mut Retained , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >"
         },
         {
-          "owner": "ControllerServingPeer",
-          "signature": "pub (crate) fn accept_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+          "owner": "ControllerServingRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
         },
         {
           "owner": "ShellServingPeer",
@@ -3371,19 +3409,23 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >",
-        "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)"
       ],
       "factories": [
         {
-          "owner": "ShellServingPeer",
-          "signature": "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+          "owner": "ShellServingConnection",
+          "signature": "pub (crate) fn receive (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ShellServingPeer >"
         }
       ],
       "material_uses": [
         {
           "owner": "ShellServingPeer",
           "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest) -> Result < CurrentServingPeerPhase < 'peer > >"
+        },
+        {
+          "owner": "ShellServingPeer",
+          "signature": "pub (crate) fn prepare_current (& mut self) -> Result < () >"
         },
         {
           "owner": "ShellServingPeer",
@@ -3455,7 +3497,7 @@
       "methods": [
         "pub (crate) fn bind (mut phase : CurrentPreparedFilePhase < '_ , '_ >) -> Result < Self >",
         "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
-        "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+        "pub (crate) fn prepare (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < InitialHolderRendezvous >"
       ],
       "factories": [
         {
@@ -3470,7 +3512,7 @@
         },
         {
           "owner": "InitialHolderListener",
-          "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+          "signature": "pub (crate) fn prepare (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < InitialHolderRendezvous >"
         }
       ],
       "proof_uses": [],
@@ -3532,6 +3574,254 @@
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "ControllerServingRendezvous",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerServingPeer",
+          "signature": "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerServingRendezvous < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerServingRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ >) -> Result < CurrentServingPeerPhase < 'peer > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/serving_peer.rs",
+      "type_name": "ShellServingConnection",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
+        "pub (crate) fn receive (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ShellServingPeer >"
+      ],
+      "factories": [
+        {
+          "owner": "ShellServingConnection",
+          "signature": "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ShellServingConnection",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "ShellServingConnection",
+          "signature": "pub (crate) fn receive (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ShellServingPeer >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+      "type_name": "InitialHolderConnection",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+      ],
+      "factories": [
+        {
+          "owner": "InitialHolderConnection",
+          "signature": "pub (crate) fn connect (stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AuthenticatedInitialHolderOffer",
+          "signature": "pub (crate) fn receive (mut connection : InitialHolderConnection , stage : & mut EnrolledRoleStage < '_ >) -> Result < Self >"
+        },
+        {
+          "owner": "InitialHolderConnection",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+      "type_name": "InitialHolderRendezvous",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer.rs",
+            "module": "continuation"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "InitialHolderListener",
+          "signature": "pub (crate) fn prepare (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < InitialHolderRendezvous >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "InitialHolderRendezvous",
+          "signature": "pub (crate) fn start < 'file , 'role > (mut self , mut phase : CurrentPreparedFilePhase < 'file , 'role >) -> Result < InitialHolderServer < 'file , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+      "type_name": "ControllerCurrentRendezvous",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+      ],
+      "factories": [
+        {
+          "owner": "ControllerHolderPeerContinuity",
+          "signature": "pub (crate) fn prepare_current (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < ControllerCurrentRendezvous < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ControllerCurrentRendezvous < 'peer >",
+          "signature": "pub (crate) fn accept_current (self , stage : & mut EnrolledRoleStage < '_ > , expected : Option < & StoragePeerRequest >) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/storage_peer/continuation.rs",
+      "type_name": "PendingAppCurrentPeer",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn begin_current (self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >",
+        "pub (crate) fn idle_ready (& mut self) -> Result < bool >",
+        "pub (crate) fn wait (mut self) -> Result < QueuedAppCurrentPeer >"
+      ],
+      "factories": [
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn begin_current < 'peer > (& 'peer mut self , queued : QueuedAppCurrentPeer , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "AppHolderPeerContinuity",
+          "signature": "pub (crate) fn notify_current (& mut self) -> Result < PendingAppCurrentPeer < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingAppCurrentPeer < 'peer >",
+          "signature": "pub (crate) fn begin_current (self , stage : & mut EnrolledRoleStage < '_ > , request : StoragePeerRequest) -> Result < CurrentStoragePeerPhase < 'peer > >"
+        },
+        {
+          "owner": "PendingAppCurrentPeer < 'peer >",
+          "signature": "pub (crate) fn idle_ready (& mut self) -> Result < bool >"
+        },
+        {
+          "owner": "PendingAppCurrentPeer < 'peer >",
+          "signature": "pub (crate) fn wait (mut self) -> Result < QueuedAppCurrentPeer >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/initial.rs",
+      "type_name": "PendingControllerStoragePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "InitialStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingControllerStoragePhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "PendingPhysicalFilePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_physical_phase (& mut self) -> Result < PendingPhysicalFilePhase < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingPhysicalFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
+      "type_name": "PendingPreparedFilePhase",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+      ],
+      "factories": [
+        {
+          "owner": "PreparedFileContinuity",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_initial_phase (& mut self) -> Result < PendingPreparedFilePhase < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         }
       ],
       "proof_uses": [],
