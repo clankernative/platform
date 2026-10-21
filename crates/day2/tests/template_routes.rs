@@ -149,6 +149,7 @@ fn routes() -> Result<routing::Catalog> {
         output_type: String::new(),
         live: false,
         live_refresh_ms: 0,
+        failure_page: String::new(),
     })
     .collect();
     routing::Catalog::compile(&pages, &operations, &schema)

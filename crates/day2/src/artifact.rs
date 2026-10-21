@@ -39,6 +39,10 @@ pub struct Page {
     pub live: bool,
     #[serde(default)]
     pub live_refresh_ms: u64,
+    /// Optional registered page path rendered with this page's input when it
+    /// fails on the server. See `crate::routing::Route::failure_page`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure_page: String,
 }
 
 /// A declared schedule. The artifact records what the author wrote; the occurrence
@@ -769,7 +773,9 @@ impl LoadedArtifact {
             ensure!(page.defaults.len() < 65_536, "page defaults budget");
             if contract.format < 7 {
                 ensure!(
-                    page.path.is_empty() && page.input_type.is_empty(),
+                    page.path.is_empty()
+                        && page.input_type.is_empty()
+                        && page.failure_page.is_empty(),
                     "legacy page has route metadata"
                 );
                 contract.schema.inputs[&query.input_type]

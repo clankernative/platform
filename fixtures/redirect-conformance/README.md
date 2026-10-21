@@ -13,6 +13,9 @@ small model of GoLinks' exact-then-wildcard resolution.
   form; the bare route retains the platform error page as a compatibility check.
 - `pages/Routes.roc` declares page routes at `/` and `/about`, which keep
   precedence over the redirect routes even when a link named `about` exists.
+  The `/` directory uses `on_failure` to render the registered `/unavailable`
+  page, whose query reads no links, when it fails on the server; `/about`
+  retains the platform error page as the control.
 - `commands/visit/VisitLink.roc` resolves an active exact name, otherwise the
   active `name/%s` wildcard for all but the last segment, encodes the captured
   segment into the destination and counts the visit.
@@ -26,7 +29,10 @@ refused destinations, page and platform precedence, the command's own authority
 grant, the mandatory audit, prefetch and non-navigation refusal, and admission
 of malformed declarations. It also checks fallback-query authority, decoded
 and escaped form values, unchanged API failures and creation via a signed POST
-without JavaScript. Full verification builds the fixture and passes it as
+without JavaScript. With the link table taken away under the running server, it
+checks the directory's failure page: its 500 status, the redacted body, the
+decoded input, the unchanged API error and the platform page when the fallback
+query is not granted. Full verification builds the fixture and passes it as
 `DAY2_TEST_REDIRECT_ARTIFACT`; to run it alone:
 
 ```text

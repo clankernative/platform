@@ -1261,10 +1261,7 @@ impl Host {
                 // Page routes take precedence. A redirect route answers only a
                 // path no page route claims, even one a page route would refuse.
                 match route {
-                    Ok(Some((name, input))) => {
-                        let content = self.page(&name, &input, session, at, None, None)?;
-                        self.app_response(StatusCode::OK, &name, &input, session, content)
-                    }
+                    Ok(Some((name, input))) => self.routed_page(&name, &input, session, at),
                     Ok(None) => self.redirect_route(
                         path,
                         headers,
@@ -1491,6 +1488,48 @@ impl Host {
             .headers_mut()
             .insert("x-day2-invocation", id.parse()?);
         Ok(response)
+    }
+
+    /// Render a routed page, or its app-owned failure page when it fails on the
+    /// server.
+    ///
+    /// The fallback answers with the original failure's status, after that
+    /// failure is logged exactly as the platform error page would log it. It
+    /// receives the same decoded input and nothing about the failure, and its
+    /// query runs under its own grant and audit. Client, authority, conflict and
+    /// declared application failures keep their platform pages. If the fallback
+    /// fails too, the person sees the platform page for the original failure.
+    fn routed_page(
+        &self,
+        name: &str,
+        input: &Value,
+        session: &Session,
+        at: i64,
+    ) -> Result<Response> {
+        let error = match self
+            .page(name, input, session, at, None, None)
+            .and_then(|content| self.app_response(StatusCode::OK, name, input, session, content))
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let fallback = self
+            .routes
+            .as_ref()
+            .and_then(|routes| routes.route(name).ok())
+            .and_then(|route| route.failure_page.as_deref());
+        let Some(fallback) = fallback.filter(|_| serves_failure_page(&error)) else {
+            return Err(error);
+        };
+        crate::web_api::record_failure(&error);
+        let (status, _, message) = crate::web_api::failure_details(&error);
+        Ok(self
+            .page(fallback, input, session, at, None, None)
+            .and_then(|content| self.app_response(status, fallback, input, session, content))
+            .unwrap_or_else(|fallback_error| {
+                crate::web_api::record_failure(&fallback_error);
+                error_page(status, message)
+            }))
     }
 
     fn login(&self, method: &Method, uri: &Uri, body: &[u8], at: i64) -> Result<Response> {
@@ -2257,6 +2296,19 @@ fn failure(error: &anyhow::Error) -> Response {
     error_page(status, message)
 }
 
+/// Whether a page failure is the server's, so an app-owned failure page may
+/// answer it. Declared application rejections carry their own public message;
+/// authentication, authority, input, conflict and not-found failures must keep
+/// the platform's answer rather than look like an outage.
+fn serves_failure_page(error: &anyhow::Error) -> bool {
+    use crate::error::Category;
+    error.downcast_ref::<PageOutcomeFailure>().is_none()
+        && matches!(
+            crate::error::classify(error).category(),
+            Category::Internal | Category::Timeout | Category::Unavailable
+        )
+}
+
 #[derive(Debug)]
 struct PageOutcomeFailure {
     status: StatusCode,
@@ -2403,6 +2455,40 @@ mod page_failure_tests {
         let body = String::from_utf8(body.to_vec()).expect("HTML is UTF-8");
         assert!(!body.contains("database connection details"));
         assert!(body.contains("Retry commands with the same idempotency key."));
+    }
+
+    #[test]
+    fn only_server_failures_render_an_app_failure_page() {
+        use crate::error::Failure;
+        let busy = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+        .context("page query");
+        for error in [
+            anyhow::anyhow!("no such table: links"),
+            busy,
+            anyhow::Error::new(Failure::Internal),
+            anyhow::Error::new(Failure::WorkerCrashed),
+            anyhow::Error::new(Failure::WorkerTimeout),
+            anyhow::Error::new(Failure::StorageBusy),
+        ] {
+            assert!(serves_failure_page(&error), "{error}");
+        }
+        for error in [
+            anyhow::Error::new(PageOutcomeFailure {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                message: "Declared by the application.".into(),
+            }),
+            anyhow::Error::new(Failure::SignInRequired),
+            anyhow::Error::new(Failure::Forbidden),
+            anyhow::Error::new(Failure::AuthorityPolicyChanged),
+            anyhow::Error::new(Failure::InvalidPageInput),
+            anyhow::Error::new(Failure::PreparationConflict),
+            anyhow::Error::new(Failure::UnknownPage),
+        ] {
+            assert!(!serves_failure_page(&error), "{error}");
+        }
     }
 
     #[test]

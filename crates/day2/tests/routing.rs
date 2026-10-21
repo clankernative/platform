@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use day2::{
     artifact::{Operation, Page},
     routing::Catalog,
@@ -754,6 +754,97 @@ fn page_routes_claim_their_shape_even_when_they_refuse_the_value() -> Result<()>
         "links/7",
     ] {
         assert!(!routes.claims(unclaimed), "{unclaimed}");
+    }
+    Ok(())
+}
+
+/// A failure page is bound by path to another registered page that takes the same
+/// input, is not live and does not fall back again. Anything else is refused at
+/// admission rather than discovered during an outage.
+#[test]
+fn failure_pages_are_registered_terminal_pages_with_the_same_input() -> Result<()> {
+    let input = |field: &str| Record {
+        identity: None,
+        fields: BTreeMap::from([(field.into(), Kind::Text)]),
+        roc_type: None,
+    };
+    let schema = Schema {
+        domains: BTreeMap::new(),
+        models: BTreeMap::new(),
+        inputs: BTreeMap::from([
+            ("list".into(), input("term")),
+            ("other".into(), input("name")),
+        ]),
+        foreign_keys: vec![],
+        rollups: Vec::new(),
+        indexes: vec![],
+    };
+    let query = |name: &str, input_type: &str| Operation {
+        name: name.into(),
+        kind: "query".into(),
+        input_type: input_type.into(),
+        output_type: "view".into(),
+    };
+    let operations = vec![
+        query("items.list", "list"),
+        query("items.unavailable", "list"),
+        query("items.other", "other"),
+    ];
+    let page = |name: &str, path: &str, operation: &str, input_type: &str| -> Result<Page> {
+        Ok(serde_json::from_value(json!({
+            "name":name, "title":name, "path":path, "operation":operation, "defaults":"{}",
+            "template":"pages/directory.html", "input_type":input_type, "output_type":"view"
+        }))?)
+    };
+    let mut items = page("items", "/", "items.list", "list")?;
+    // The root route must be constructible from its defaults.
+    items.defaults = r#"{"term":""}"#.into();
+    items.failure_page = "/unavailable".into();
+    let unavailable = page("unavailable", "/unavailable", "items.unavailable", "list")?;
+    let other = page("other", "/other", "items.other", "other")?;
+    let pages = vec![items.clone(), unavailable.clone(), other.clone()];
+    // The positive control: the binding resolves to the registered page's name.
+    let routes = Catalog::compile(&pages, &operations, &schema)?;
+    assert_eq!(
+        routes.route("items")?.failure_page.as_deref(),
+        Some("unavailable")
+    );
+    assert_eq!(routes.route("unavailable")?.failure_page, None);
+    type Change = Box<dyn Fn(&mut [Page])>;
+    let cases: Vec<(&str, &str, Change)> = vec![
+        (
+            "an unregistered page",
+            "must be registered",
+            Box::new(|pages| pages[0].failure_page = "/absent".into()),
+        ),
+        (
+            "the page itself",
+            "its own failure page",
+            Box::new(|pages| pages[0].failure_page = "/".into()),
+        ),
+        (
+            "a page with a different input",
+            "input differs",
+            Box::new(|pages| pages[0].failure_page = "/other".into()),
+        ),
+        (
+            "a live page",
+            "must not be live",
+            Box::new(|pages| pages[1].live = true),
+        ),
+        (
+            "a page that falls back again",
+            "cannot declare its own failure page",
+            Box::new(|pages| pages[1].failure_page = "/".into()),
+        ),
+    ];
+    for (case, message, change) in cases {
+        let mut changed = pages.clone();
+        change(&mut changed);
+        let error = Catalog::compile(&changed, &operations, &schema)
+            .err()
+            .with_context(|| format!("admitted a failure page naming {case}"))?;
+        assert!(error.to_string().contains(message), "{case}: {error}");
     }
     Ok(())
 }

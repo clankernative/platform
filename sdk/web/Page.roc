@@ -40,6 +40,17 @@ Page(a) :: { binding : PageBinding, complete : a -> PageBinding }.{
 		binding: PageBinding.live_refresh_every(page.binding, milliseconds),
 	}
 
+	# Render an app-owned page with the same decoded input when this page fails on
+	# the server, such as a storage or worker failure. The page must also be
+	# registered in App.definition.pages. The host keeps the 5xx status, logs the
+	# original failure and checks the fallback query's ordinary authority; nothing
+	# about the failure reaches the fallback.
+	on_failure : Page(a), Page(a) -> Page(a)
+	on_failure = |page, fallback| {
+		..page,
+		binding: PageBinding.with_failure_page(page.binding, fallback.register()),
+	}
+
 	register : Page(a) -> PageBinding
 	register = |page| page.binding
 }
