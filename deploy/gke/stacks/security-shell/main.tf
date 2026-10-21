@@ -101,16 +101,16 @@ resource "kubernetes_deployment_v1" "shell" {
         automount_service_account_token  = false
         enable_service_links             = false
         host_network                     = false
-        host_pid                         = local.native_enabled
+        host_pid                         = var.native_enrollment_placement != null
         host_ipc                         = false
         node_selector                    = merge(var.node_selector, local.native_node_selector)
         termination_grace_period_seconds = local.resources.shutdown_seconds + 5
         dynamic "toleration" {
-          for_each = local.native_enabled ? [true] : []
+          for_each = var.native_enrollment_placement == null ? [] : [var.native_enrollment_placement]
           content {
             key      = "day2.dev/native-enrollment"
             operator = "Equal"
-            value    = var.native_node_profile
+            value    = toleration.value.profile
             effect   = "NoSchedule"
           }
         }
@@ -212,7 +212,7 @@ resource "kubernetes_deployment_v1" "shell" {
           }
         }
         dynamic "volume" {
-          for_each = local.native_enabled ? [true] : []
+          for_each = var.native_enrollment_placement == null ? [] : [true]
           content {
             name = "native-enrollment"
             host_path {

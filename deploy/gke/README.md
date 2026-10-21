@@ -247,10 +247,12 @@ version; native exact-version selection does not narrow that IAM permission.
 mode. There is no deployment flag that grants a native owner. For a selected
 App, or the Shell's one selected native OAuth scope, supply
 `native_enrollment_json` with the matching public enrollment policy and
-`native_node_profile` with the existing protected pool label/taint value. Keep
+`native_enrollment_placement = { pool_name = "...", profile = "..." }` with the
+existing dedicated pool and protected label/taint profile. Placement alone grants
+no native role; it can mount the read-only issuer socket before bootstrap selection. Keep
 the root key non-exportable: these inputs contain public selections, never a
-private key or bearer credential. Missing, ambiguous, foreign or unused native
-inputs are refused. The native launcher still performs the complete closed-schema,
+private key or bearer credential. Missing, ambiguous, foreign or unused enrollment
+inputs and contradictory node selectors are refused. The native launcher still performs the complete closed-schema,
 artifact, code, role and current-provider admission.
 
 The namespace, KSA and workload must already be registered. The roots read their

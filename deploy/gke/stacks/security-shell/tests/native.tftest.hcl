@@ -2,9 +2,9 @@
 mock_provider "kubernetes" {}
 
 variables {
-  namespace           = "day2-security"
-  image               = "registry.example.com/day2/shell@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  native_node_profile = "native-fixture"
+  namespace                   = "day2-security"
+  image                       = "registry.example.com/day2/shell@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  native_enrollment_placement = { pool_name = "native-pool", profile = "native-fixture" }
   instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
     control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
       security_bootstraps = { native = jsondecode(file("tests/native-bootstrap.fixture.json")) }
@@ -50,6 +50,7 @@ run "native_shell_is_unprivileged_and_has_no_api_subject_or_database_mount" {
     condition = (
       kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].host_pid &&
       !kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].host_network &&
+      kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-pool" &&
       !kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].automount_service_account_token &&
       kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "native-node" &&
       !kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
@@ -78,9 +79,9 @@ run "native_shell_refuses_missing_enrollment" {
   expect_failures = [terraform_data.native_admission]
 }
 
-run "native_shell_refuses_missing_native_node_profile" {
+run "native_shell_refuses_missing_native_placement" {
   command = plan
-  variables { native_node_profile = null }
+  variables { native_enrollment_placement = null }
   expect_failures = [terraform_data.native_admission]
 }
 
@@ -159,5 +160,17 @@ run "native_shell_refuses_other_runtime_architecture" {
       runtime   = { architecture = "arm64", node_name = "native-node", node_uid = "native-node-uid" }
     })
   }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_shell_refuses_contradictory_pool_selector" {
+  command = plan
+  variables { node_selector = { "iam.gke.io/gke-metadata-server-enabled" = "true", "cloud.google.com/gke-nodepool" = "other-pool" } }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_shell_refuses_contradictory_profile_selector" {
+  command = plan
+  variables { node_selector = { "iam.gke.io/gke-metadata-server-enabled" = "true", "day2.dev.node-restriction.kubernetes.io/enrollment" = "other-profile" } }
   expect_failures = [terraform_data.native_admission]
 }

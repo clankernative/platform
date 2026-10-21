@@ -241,17 +241,17 @@ resource "kubernetes_stateful_set_v1" "day2" {
         enable_service_links             = false
         termination_grace_period_seconds = var.runtime_resources.shutdown_seconds + 15
 
-        host_pid      = local.native_enabled
+        host_pid      = var.native_enrollment_placement != null
         host_network  = false
         host_ipc      = false
         node_selector = merge(var.node_selector, local.native_node_selector)
 
         dynamic "toleration" {
-          for_each = local.native_enabled ? [true] : []
+          for_each = var.native_enrollment_placement == null ? [] : [var.native_enrollment_placement]
           content {
             key      = "day2.dev/native-enrollment"
             operator = "Equal"
-            value    = var.native_node_profile
+            value    = toleration.value.profile
             effect   = "NoSchedule"
           }
         }
@@ -651,16 +651,6 @@ resource "kubernetes_stateful_set_v1" "day2" {
             config_map {
               name         = kubernetes_config_map_v1.native_policy[0].metadata[0].name
               default_mode = "0444"
-            }
-          }
-        }
-        dynamic "volume" {
-          for_each = local.native_enabled ? [true] : []
-          content {
-            name = "native-enrollment"
-            host_path {
-              path = "/run/day2-native-enrollment"
-              type = "Directory"
             }
           }
         }

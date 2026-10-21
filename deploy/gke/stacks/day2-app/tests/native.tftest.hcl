@@ -3,23 +3,23 @@
 mock_provider "kubernetes" {}
 
 variables {
-  app_id                  = "example_app"
-  namespace               = "app-example"
-  image                   = "registry.example.com/day2/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  artifact_id             = "9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
-  installation            = "exampleco"
-  environment             = "production"
-  hosted_domain           = "example.com"
-  edge_origin             = "https://example.test.example.com"
-  runtime_resources       = { memory_mib = 512, cpu_millis = 1000, process_limit = 1024, http_concurrency = 4, shutdown_seconds = 30 }
-  pod_pids_limit          = 1024
-  backup_bucket           = "example-tools-example-backups"
-  readers                 = ["qa@example.com"]
-  writers                 = ["qa@example.com"]
-  authority               = jsondecode(file("tests/oauth-instance.json")).apps.example_app.authority
-  security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
-  node_selector           = { "iam.gke.io/gke-metadata-server-enabled" = "true" }
-  native_node_profile     = "native-fixture"
+  app_id                      = "example_app"
+  namespace                   = "app-example"
+  image                       = "registry.example.com/day2/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  artifact_id                 = "9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+  installation                = "exampleco"
+  environment                 = "production"
+  hosted_domain               = "example.com"
+  edge_origin                 = "https://example.test.example.com"
+  runtime_resources           = { memory_mib = 512, cpu_millis = 1000, process_limit = 1024, http_concurrency = 4, shutdown_seconds = 30 }
+  pod_pids_limit              = 1024
+  backup_bucket               = "example-tools-example-backups"
+  readers                     = ["qa@example.com"]
+  writers                     = ["qa@example.com"]
+  authority                   = jsondecode(file("tests/oauth-instance.json")).apps.example_app.authority
+  security_shell_contract     = { namespace = "day2-security", name = "security-shell-contract" }
+  node_selector               = { "iam.gke.io/gke-metadata-server-enabled" = "true" }
+  native_enrollment_placement = { pool_name = "native-pool", profile = "native-fixture" }
   oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), {
     control = merge(jsondecode(file("tests/oauth-instance.json")).control, {
       security_bootstraps = { native = jsondecode(file("tests/native-bootstrap.fixture.json")) }
@@ -83,6 +83,7 @@ run "native_app_preserves_uid_and_uses_unprivileged_same_volume_attachment" {
     condition = (
       kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_pid &&
       !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_network &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-pool" &&
       !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].automount_service_account_token &&
       kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "native-node" &&
       kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "native-fixture" &&
@@ -119,9 +120,9 @@ run "native_app_refuses_missing_enrollment" {
   expect_failures = [terraform_data.native_admission]
 }
 
-run "native_app_refuses_missing_native_node_profile" {
+run "native_app_refuses_missing_native_placement" {
   command = plan
-  variables { native_node_profile = null }
+  variables { native_enrollment_placement = null }
   expect_failures = [terraform_data.native_admission]
 }
 
@@ -197,5 +198,17 @@ run "native_app_refuses_other_runtime_architecture" {
       runtime   = { architecture = "arm64", node_name = "native-node", node_uid = "native-node-uid" }
     })
   }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_app_refuses_contradictory_pool_selector" {
+  command = plan
+  variables { node_selector = { "iam.gke.io/gke-metadata-server-enabled" = "true", "cloud.google.com/gke-nodepool" = "other-pool" } }
+  expect_failures = [terraform_data.native_admission]
+}
+
+run "native_app_refuses_contradictory_profile_selector" {
+  command = plan
+  variables { node_selector = { "iam.gke.io/gke-metadata-server-enabled" = "true", "day2.dev.node-restriction.kubernetes.io/enrollment" = "other-profile" } }
   expect_failures = [terraform_data.native_admission]
 }
