@@ -32,7 +32,7 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
       tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001 &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 8 &&
-      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 10 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 11 &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "fixture-node"
     )
     error_message = "The trusted privileged Controller must retain its distinct existing identity and exact native node placement."
@@ -50,6 +50,35 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
       mount.read_only || contains(["/state", "/run/day2-native-enrollment/storage", "/tmp"], mount.mount_path)
     ])
     error_message = "Only the actual selected state volume, provisioner-owned private peer child and pod-local worker scratch are writable."
+  }
+}
+
+run "activated_controller_reference_matches_existing_enrollment_volume" {
+  command = plan
+  assert {
+    condition = (
+      length([
+        for volume in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume : volume
+        if try(volume.name == "enrollment" && volume.host_path[0].path == "/run/day2-native-enrollment" &&
+        volume.host_path[0].type == "Directory", false)
+      ]) == 1 &&
+      length([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount : mount
+        if try(mount.name == "enrollment" && mount.mount_path == "/run/day2-native-enrollment" &&
+        mount.read_only && mount.sub_path == null, false)
+      ]) == 1 &&
+      length([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount : mount
+        if try(mount.name == "enrollment" && mount.mount_path == "/run/day2-native-enrollment-reference" &&
+        mount.read_only && mount.sub_path == null, false)
+      ]) == 1 &&
+      length([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount : mount
+        if try(mount.name == "storage-peer" && mount.mount_path == "/run/day2-native-enrollment/storage" &&
+        !mount.read_only && mount.sub_path == null, false)
+      ]) == 1
+    )
+    error_message = "The active Controller must reuse the existing enrollment volume for both read-only roots while retaining only the canonical private storage child as writable."
   }
 }
 
@@ -72,7 +101,12 @@ run "read_only_observation_selects_closed_command_before_process_start" {
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 8 &&
-      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 10
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 11 &&
+      length([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount : mount
+        if try(mount.name == "enrollment" && mount.mount_path == "/run/day2-native-enrollment-reference" &&
+        mount.read_only && mount.sub_path == null, false)
+      ]) == 1
     )
     error_message = "Observation must select the closed diagnostic command before startup, retain normal native identity/mount guards, omit restart probes, and retain failing readiness because the diagnostic opens no health listener."
   }

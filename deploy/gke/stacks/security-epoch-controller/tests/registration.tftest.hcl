@@ -28,6 +28,10 @@ run "registration_needs_only_identity_and_qualified_image" {
     condition = (
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 0 &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 0 &&
+      alltrue([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount :
+        mount.mount_path != "/run/day2-native-enrollment-reference"
+      ]) &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].node_selector) == 0 &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].toleration) == 0 &&
       !contains(keys(kubernetes_deployment_v1.controller.spec[0].template[0].metadata[0].annotations), "day2.dev/native-inputs") &&

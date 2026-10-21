@@ -181,8 +181,19 @@ resource "kubernetes_deployment_v1" "controller" {
           dynamic "volume_mount" {
             for_each = var.activate ? [1] : []
             content {
+              # Retain an unoverlaid view of the same provisioner-owned child
+              # for strict path/identity checks beside the writable bind below.
+              name       = "enrollment"
+              mount_path = "/run/day2-native-enrollment-reference"
+              read_only  = true
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
               name       = "storage-peer"
               mount_path = "/run/day2-native-enrollment/storage"
+              read_only  = false
             }
           }
           dynamic "volume_mount" {
