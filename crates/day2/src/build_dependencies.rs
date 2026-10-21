@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(lock["schemaVersion"], 2);
         assert_eq!(
             lock["package"]["digest"],
-            "sha256:8f90ff7a2da0a1e476d57ae26c5a6dad9acf67bd86b7625e98c0a097c42e7325"
+            "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde"
         );
         assert_eq!(lock["package"]["inputs"][0]["bytes"], 27);
         assert_eq!(
@@ -679,7 +679,7 @@ mod tests {
         fs::create_dir_all(bundle.join("legal")).unwrap();
 
         let mut entries = Vec::new();
-        for index in 0..455 {
+        for index in 0..461 {
             let path = format!("files/input-{index:03}.txt");
             fs::write(package.join(&path), b"x").unwrap();
             entries.push(json!({"path":path,"bytes":1,"digest":format!("sha256:{}",sha(b"x"))}));
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(installed.identity()["manifestDigest"], manifest_digest);
         assert_eq!(
             installed.identity()["package"]["digest"],
-            "sha256:8f90ff7a2da0a1e476d57ae26c5a6dad9acf67bd86b7625e98c0a097c42e7325"
+            "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde"
         );
 
         let changed = tempfile::tempdir().unwrap();

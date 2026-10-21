@@ -718,18 +718,22 @@ and content-addressed as app source. Assembly runs in that private snapshot, the
 the host independently admits the returned templates/resources.
 Installation builds capture and materialize the same complete
 verified dependency into their offline job, binding its identity to the builder
-and evidence. The v0.1.1 bundle also retains and verifies the chart worker,
+and evidence. The v0.2.0 bundle (vanilla 0.8.0) also retains and verifies the chart worker,
 its presentation ABI 1 contract and legal closure. This does not authorize worker
 execution or add chart runtime support: matching host support and separate
 operator approval are still required. GoLinks does not request that worker.
+Vanilla 0.8.0 adds the `number` contract and opt-in Metric value motion; both
+remain `adapter-required` upstream. Their live roll animation also depends on the
+host dispatching `cui:before-patch` for reactive query forms; without that host
+support, values still update but snap.
 The assembly provider is never loaded while serving pages. App models,
 commands, routes and authorization remain app-owned; normal form, resource, CSP
 and runtime checks still apply.
 
 Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the released
-[protocol](https://github.com/clankernative/clanker-ui/blob/v0.1.1/docs/native-assembly-protocol.md)
+[protocol](https://github.com/clankernative/clanker-ui/blob/v0.2.0/docs/native-assembly-protocol.md)
 for the envelope and generic `ui_*` helpers. The distribution-approved executable is
-trusted operator tooling, not a hostile-code sandbox. The upstream v0.1.1 assets
+trusted operator tooling, not a hostile-code sandbox. The upstream v0.2.0 assets
 are unsigned; reviewed hashes identify exact bytes, not a claim of upstream
 signature verification. A Platform upgrade does not silently update app UI locks.
 
