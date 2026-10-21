@@ -189,9 +189,9 @@ including partial failed attempts, rather than selected length multiplied by
 an inferred pass count. Other rows use null for bytes. Missing, rewound or
 overflowing measurements remain null, never a synthetic zero. Hash subjects
 distinguish issuer self, requester, containerd, and parent checks before and
-after serving the request. Each original peer check still performs both full
-hashes. There is no digest cache, executable-join optimization, changed clock
-origin or extended deadline in this diagnostic.
+after serving the request. Counts describe actual complete or partial reads,
+including the fresh single-pass peer checks described below. There is no digest
+cache, changed clock origin or extended deadline.
 
 Hash timings include the original read/checksum/bounds and clock-check work,
 not just checksum CPU time. Identity-body rows include their nested hashes and
@@ -221,3 +221,39 @@ reliable completion or proof that an ambiguous send had no effect. Actual issuer
 and Controller measurements require source/image/profile-bound deployment by
 the operator. The existing read-only one-observation/ownerless-hold procedure and
 retained failed originals remain separate evidence.
+
+## Fresh executable joins in current peer checks
+
+The actual issuer baseline on 21 October measured 16 requester hash reads
+(334,095,744 bytes, 1,204,417 microseconds) and seven containerd hash reads
+(306,038,040 bytes, 1,163,431 microseconds) in the Controller exchange.
+The containerd RPC group took 16,695 microseconds and the Kubernetes group
+294,956 microseconds; those groups and runtime totals are inclusive and must
+not be added to their nested hash rows. This is a particular observed exchange,
+not a latency or availability bound.
+
+Each retained peer check now hashes all freshly opened selected executable
+bytes once instead of hashing two joined descriptors of the same file. The
+initial observation still hashes the selected executable independently. Every
+later check also performs a new complete read; there is no digest, path, inode
+or cross-stage authorization cache. Diagnostic hash counters still report the
+actual read attempts and bytes, including a failing partial read.
+
+Before and after that read, held and current descriptors must agree on device,
+inode, regular-file size, modification time and change time. The existing
+512 MiB ceiling, 64 KiB bounded reads and original-clock checks remain. After
+the remaining process/namespace checks, the caller reopens the actual procfs
+executable path and joins all three descriptors to the earlier stamp. The
+original pidfd liveness/original-clock check remains the final native guard;
+diagnostic sampling finishes before it. Any refusal still latches the peer and
+the same acquisition. No role lifetime, signed ceiling or native deadline is
+extended or reset.
+
+These joins operate under the existing trusted executable/node profile.
+Metadata fields are observations, not an atomic snapshot or immutable content
+version. In particular, ctime adds mutation detection without proving that every
+arbitrarily timed write has a distinct timestamp. This does not claim strict
+behavioral equivalence for hostile concurrent mutation of executable files or
+containment from actors that can replace the trusted native code. A source-bound
+issuer/Controller rebuild and another real-node observation must establish any
+actual performance gain; portable tests alone do not qualify preparation.

@@ -1,7 +1,7 @@
 //! Retained identity, not a renewable permission. Only the private kernel packet
 //! and fixed runtime adapters construct it; certificate rows cannot adopt it.
 
-use super::issuer_costs::HashCosts;
+use super::{executable_bytes, issuer_costs::HashCosts};
 use crate::security_epoch::native_enrollment::protocol::ProcessData;
 use crate::security_epoch::{
     namespace_protocol, native_clock::NativeAcquisition, native_namespace as ns,
@@ -13,14 +13,7 @@ use rustix::{
     fs::{Mode, OFlags},
     net::{KernelPidVisibility, ReceivedPidfdPacket},
 };
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    marker::PhantomData,
-    rc::Rc,
-    thread::ThreadId,
-};
+use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::ThreadId};
 
 const NAMESPACES: [&str; 6] = ["time", "time_for_children", "pid", "mnt", "user", "cgroup"];
 
@@ -154,7 +147,7 @@ impl MessageProcess {
             let proc = ns::open_root(acquisition)?;
             let process = open_process(&proc, pid, acquisition)?;
             let mut executable = executable(&process, acquisition)?;
-            let code = hash(&mut executable, acquisition, costs)?;
+            let code = executable_bytes::hash(&mut executable, acquisition, costs)?;
             ensure!(code == *expected_code, "native_enrollment_code_mismatch");
             let mut namespaces = BTreeMap::new();
             let mut identities = BTreeMap::new();
@@ -236,15 +229,13 @@ impl MessageProcess {
                 "native_enrollment_boot_changed"
             );
             let mut current_executable = executable(&current, acquisition)?;
-            ensure!(
-                file_identity(&current_executable)? == file_identity(&self.executable)?,
-                "native_enrollment_executable_replaced"
-            );
-            ensure!(
-                hash(&mut self.executable, acquisition, costs)? == self.data.code
-                    && hash(&mut current_executable, acquisition, costs)? == self.data.code,
-                "native_enrollment_executable_changed"
-            );
+            let executable_stamp = executable_bytes::begin_check(
+                &self.executable,
+                &mut current_executable,
+                &self.data.code,
+                acquisition,
+                costs,
+            )?;
             for name in NAMESPACES {
                 let current = ns::open_namespace(&current, name, acquisition)?;
                 for fd in [&current, &self.namespaces[name]] {
@@ -261,7 +252,18 @@ impl MessageProcess {
                 1024,
                 acquisition,
             )?)?)?;
-            // Diagnostic sampling finishes before the original final guard.
+            // Reopen the actual process path after the remaining namespace work.
+            // Earlier descriptors alone cannot observe a later exec/path change.
+            let final_executable = executable(&current, acquisition)?;
+            executable_bytes::finish_check(
+                &self.executable,
+                &current_executable,
+                &final_executable,
+                &executable_stamp,
+                acquisition,
+            )?;
+            // Diagnostic sampling finishes before the final pidfd/original-clock
+            // guard. Held executable FDs survive process exit.
             costs.finish_identity(&mut timing);
             live(&self.pidfd, acquisition)?;
             Ok(())
@@ -316,42 +318,6 @@ fn executable(process: &File, acquisition: &mut NativeAcquisition) -> Result<Fil
     )?);
     acquisition.remaining()?;
     Ok(fd)
-}
-
-fn file_identity(file: &File) -> Result<(u64, u64, u64, i64, i64)> {
-    use std::os::unix::fs::MetadataExt;
-    let m = file.metadata()?;
-    ensure!(
-        m.is_file() && m.len() > 0 && m.len() <= 512 * 1024 * 1024,
-        "native_enrollment_executable_bound"
-    );
-    Ok((m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
-}
-
-fn hash(file: &mut File, acquisition: &mut NativeAcquisition, costs: &HashCosts) -> Result<Digest> {
-    costs.hash(|read_bytes| {
-        let identity = file_identity(file)?;
-        file.seek(SeekFrom::Start(0))?;
-        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
-        let mut buffer = [0_u8; 65_536];
-        let mut total = 0_u64;
-        loop {
-            acquisition.remaining()?;
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            total += count as u64;
-            *read_bytes = total;
-            ensure!(total <= identity.2, "native_enrollment_executable_changed");
-            hasher.update(&buffer[..count]);
-        }
-        ensure!(
-            total == identity.2 && file_identity(file)? == identity,
-            "native_enrollment_executable_changed"
-        );
-        format!("sha256:{}", crate::hex(hasher.finish().as_ref())).try_into()
-    })
 }
 
 fn start(process: &File, pid: u32, acquisition: &mut NativeAcquisition) -> Result<u64> {
