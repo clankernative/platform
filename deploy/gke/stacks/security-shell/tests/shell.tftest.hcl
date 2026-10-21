@@ -66,6 +66,25 @@ run "dedicated_stateless_guarded_workload" {
   }
 }
 
+run "native_placement_mounts_only_issuer_socket_and_selects_dedicated_pool" {
+  command = plan
+  variables {
+    native_enrollment_placement = { pool_name = "native-enrollment", profile = "calendar" }
+  }
+  assert {
+    condition = (
+      kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].host_pid &&
+      !kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].host_network &&
+      kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-enrollment" &&
+      kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "calendar" &&
+      kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].toleration[0].value == "calendar" &&
+      length([for volume in kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].volume : volume if length(volume.host_path) > 0 && volume.host_path[0].path == "/run/day2-native-enrollment"]) == 1 &&
+      length([for mount in kubernetes_deployment_v1.shell.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment" && mount.read_only]) == 1
+    )
+    error_message = "Enrolled Shell must select the dedicated tainted pool and mount only the read-only issuer socket, without runtime/KMS access."
+  }
+}
+
 run "refuses_other_workload_identity" {
   command = plan
   variables {

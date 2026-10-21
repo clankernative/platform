@@ -1,3 +1,15 @@
+variable "native_enrollment_placement" {
+  description = "Explicit native enrollment placement: hostPID and the read-only issuer socket directory. Desired configuration, not a role proof."
+  type        = object({ pool_name = string, profile = string })
+  default     = null
+  validation {
+    condition = var.native_enrollment_placement == null || try(
+      can(regex("^[a-z][a-z0-9-]{0,38}[a-z0-9]$", var.native_enrollment_placement.pool_name)) &&
+    can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.native_enrollment_placement.profile)), false)
+    error_message = "Native enrollment requires an exact node pool and profile label."
+  }
+}
+
 variable "kubeconfig_path" {
   type    = string
   default = ""

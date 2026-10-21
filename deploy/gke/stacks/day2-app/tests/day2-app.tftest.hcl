@@ -681,6 +681,24 @@ run "rejects_macos_security_requirements_for_gke" {
   expect_failures = [var.security_requirements]
 }
 
+run "native_placement_selects_dedicated_pool_and_only_read_only_issuer_socket" {
+  command = plan
+  variables {
+    native_enrollment_placement = { pool_name = "native-enrollment", profile = "calendar" }
+  }
+  assert {
+    condition = (
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].host_pid &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["cloud.google.com/gke-nodepool"] == "native-enrollment" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].node_selector["day2.dev.node-restriction.kubernetes.io/enrollment"] == "calendar" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].toleration[0].value == "calendar" &&
+      length([for volume in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].volume : volume if length(volume.host_path) > 0 && volume.host_path[0].path == "/run/day2-native-enrollment"]) == 1 &&
+      length([for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.mount_path == "/run/day2-native-enrollment" && mount.read_only]) == 1
+    )
+    error_message = "Enrolled App must select its dedicated pool and readonly issuer socket without runtime or root-key mounts."
+  }
+}
+
 run "renders_the_installation_shell_from_its_contract" {
   command = plan
   variables {
