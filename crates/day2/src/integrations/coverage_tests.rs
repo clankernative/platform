@@ -1176,7 +1176,6 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
         ));
     }
     Ok(())
-
 }
 
 fn check(

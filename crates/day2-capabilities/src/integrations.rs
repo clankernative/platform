@@ -99,7 +99,6 @@ pub enum LiveConnection {
     FreetoolExecutor {
         credential_ref: VersionRef,
         endpoint: String,
-
     },
 }
 

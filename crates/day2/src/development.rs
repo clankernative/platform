@@ -993,6 +993,37 @@ fn failure_verification_actor<'a>(
     }
 }
 
+fn local_model_grant(
+    command: bool,
+    model: &str,
+    record: &crate::schema::Record,
+    effects: &[crate::app_contract::Effect],
+) -> ModelGrant {
+    let declared: Vec<_> = effects
+        .iter()
+        .filter(|effect| effect.model == model)
+        .collect();
+    // Native soft deletion uses the existing model update authority. The app's
+    // execution contract still independently forbids undeclared field updates.
+    let deletion = command && declared.iter().any(|effect| effect.kind == "soft_delete");
+    ModelGrant {
+        read: true,
+        create: command && declared.iter().any(|effect| effect.kind == "create"),
+        update_fields: if deletion {
+            record.fields.keys().cloned().collect()
+        } else if command {
+            declared
+                .iter()
+                .filter(|effect| effect.kind == "update")
+                .flat_map(|effect| effect.fields.iter().cloned())
+                .collect()
+        } else {
+            BTreeSet::new()
+        },
+        rows: Rows::All,
+    }
+}
+
 pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy> {
     let mut operations = BTreeMap::new();
     let app_definition = artifact.contract().app_contract.as_ref();
@@ -1039,25 +1070,22 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
             "command" => Mode::CurrentState,
             _ => anyhow::bail!("unsupported operation kind"),
         };
+        let effects = artifact
+            .contract()
+            .app_contract
+            .as_ref()
+            .and_then(|definition| definition.operations.get(&operation.name))
+            .map(|definition| definition.execution.effects.as_slice())
+            .unwrap_or(&[]);
         let models = artifact
             .contract()
             .schema
             .models
             .iter()
             .map(|(name, model)| {
-                let write = operation.kind == "command";
                 (
                     name.clone(),
-                    ModelGrant {
-                        read: true,
-                        create: operation.kind == "command",
-                        update_fields: if write {
-                            model.fields.keys().cloned().collect()
-                        } else {
-                            BTreeSet::new()
-                        },
-                        rows: Rows::All,
-                    },
+                    local_model_grant(operation.kind == "command", name, model, effects),
                 )
             })
             .collect();
@@ -2290,6 +2318,48 @@ fn resource_fixture_for_artifact_with_imports(
 #[cfg(test)]
 mod people_resource_tests {
     use super::*;
+
+    #[test]
+    fn disposable_model_writes_follow_declared_effects_without_narrowing_reads() {
+        let record = crate::schema::Record {
+            identity: None,
+            fields: BTreeMap::from([
+                ("name".into(), crate::schema::Kind::Text),
+                ("owner".into(), crate::schema::Kind::Text),
+            ]),
+            roc_type: None,
+        };
+        let effect = |kind: &str, model: &str, fields: &[&str]| crate::app_contract::Effect {
+            command: String::new(),
+            kind: kind.into(),
+            model: model.into(),
+            fields: fields.iter().map(|field| (*field).into()).collect(),
+        };
+        let effects = [
+            effect("create", "history", &[]),
+            effect("update", "items", &["name"]),
+        ];
+        let target = local_model_grant(true, "items", &record, &effects);
+        assert!(target.read && !target.create && matches!(target.rows, Rows::All));
+        assert_eq!(target.update_fields, BTreeSet::from(["name".into()]));
+        let history = local_model_grant(true, "history", &record, &effects);
+        assert!(history.create && history.update_fields.is_empty());
+        for (command, name) in [(false, "items"), (true, "unrelated")] {
+            let grant = local_model_grant(command, name, &record, &effects);
+            assert!(grant.read && !grant.create && grant.update_fields.is_empty());
+        }
+        let deletion = local_model_grant(
+            true,
+            "items",
+            &record,
+            &[effect("soft_delete", "items", &[])],
+        );
+        assert!(!deletion.create);
+        assert_eq!(
+            deletion.update_fields,
+            BTreeSet::from(["name".into(), "owner".into()])
+        );
+    }
 
     #[test]
     fn verification_context_comes_from_the_dispatched_case_and_preserves_snapshot_bounds()
