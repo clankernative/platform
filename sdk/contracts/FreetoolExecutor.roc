@@ -19,7 +19,7 @@ FreetoolExecutor :: [].{
 
 	result_observation = Api.external("freetool.result_page.v1")
 
-	Run :: {
+	Run : {
 		resource_id : Str,
 		configuration_id : Str,
 		immutable_version : U64,
@@ -69,15 +69,17 @@ FreetoolExecutor :: [].{
 
 	bind : Context -> Observe(Executor)
 	bind = |context| Resource.bind(context, "freetool_executor").map(
-		|resource| {
-			resource
-		},
+		|resource| { resource: resource },
 	)
 
 	register : Executor, Run, Plan -> Effects(Receipt)
 	register = |executor, run, plan| Effects.capability(
 		"freetool.register.v1",
-		Json.to_str({ run, plan: encode_plan(plan), handle: Resource.token(executor.resource) }),
+		"{\"run\":${Json.to_str(run)},\"plan\":${encode_plan(plan)},\"handle\":${
+			Json.to_str(
+				Resource.token(executor.resource),
+			)
+		}}",
 	)
 		.and_then(
 			|raw| {
@@ -126,34 +128,41 @@ FreetoolExecutor :: [].{
 			},
 		)
 
-	encode_plan : Plan -> Json
+	# Encode each closed variant separately; only encoded JSON is interpolated.
+	encode_plan : Plan -> Str
 	encode_plan = |plan|
 		match plan {
-			Http(request) => {
+			Http(request) => Json.to_str({
 				kind: "http",
 				method: request.method,
 				url: request.url,
 				headers: List.map(request.headers, |header| [header.name, header.value]),
 				body: Str.to_utf8(request.body),
-			}
+			})
 			Postgres(query) => {
-				kind: "postgres",
-				resource_binding_id: query.resource_binding_id,
-				statement: query.statement,
-				parameters: List.map(query.parameters, encode_sql_value),
+				parameters = Str.join_with(List.map(query.parameters, encode_sql_value), ",")
+				"{\"kind\":\"postgres\",\"resource_binding_id\":${
+					Json.to_str(
+						query.resource_binding_id,
+					)
+				},\"statement\":${
+					Json.to_str(
+						query.statement,
+					)
+				},\"parameters\":[${parameters}]}"
 			}
 		}
 
-	encode_sql_value : SqlValue -> Json
+	encode_sql_value : SqlValue -> Str
 	encode_sql_value = |value|
 		match value {
-			Null => { type: "null" }
-			Boolean(boolean) => { type: "boolean", value: boolean }
-			Integer(integer) => { type: "integer", value: integer }
-			Decimal(decimal) => { type: "decimal", value: decimal }
-			Text(text) => { type: "text", value: text }
-			Bytes(bytes) => { type: "bytes", value: bytes }
-			Date(date) => { type: "date", value: date }
-			Timestamp(timestamp) => { type: "timestamp", value: timestamp }
+			Null => Json.to_str({ type: "null" })
+			Boolean(boolean) => Json.to_str({ type: "boolean", value: boolean })
+			Integer(integer) => Json.to_str({ type: "integer", value: integer })
+			Decimal(decimal) => Json.to_str({ type: "decimal", value: decimal })
+			Text(text) => Json.to_str({ type: "text", value: text })
+			Bytes(bytes) => Json.to_str({ type: "bytes", value: bytes })
+			Date(date) => Json.to_str({ type: "date", value: date })
+			Timestamp(timestamp) => Json.to_str({ type: "timestamp", value: timestamp })
 		}
 }

@@ -91,7 +91,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "FreetoolExecutor.roc",
         "",
-        "e98addfd2acccb633a430ae287f858ca3557979b41d6ec9d5c7f2b306079f729",
+        "14f6bea669cc8f00e668f7dc57f833cd43edc245f498d13ec776a30275fad4ca",
     ),
     (
         "SlackWebhook.roc",
