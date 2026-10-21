@@ -171,7 +171,7 @@ Roc campaign checks current stages, original-clock continuity and permanent
 wrong-role refusal. Its receipt is historical test DATA, never a native owner or
 production App/Shell lifecycle, human, storage, writer or OAuth permission.
 
-## Bounded issuer cost observations
+## Controller socket mount reference
 
 The Controller mounts the enrollment parent read-only and its `storage` child
 writable. It also requires a second, unoverlaid read-only mount of that SAME
@@ -184,6 +184,77 @@ same-filesystem child refuses; there is no fallback or arbitrary mount exception
 The privileged provisioner retains its separate direct-child `NO_XDEV` path.
 These are observed descriptor joins under the existing trusted node/mount TCB,
 not atomic mount-table snapshots or containment from that TCB.
+
+### Isolated Linux mount controls
+
+The seven `mounted_controller_*` tests in `storage_socket_directory.rs` are
+explicitly ignored unless run with their real Linux mount fixtures. They are
+currently operator-only; an existing checked-in verification recipe does not
+select them. Ordinary workspace CI must not be reported as their execution.
+These controls exercise the filesystem guard, not enrollment, first-holder,
+P3, a live Controller or a historical failure's exact inner cause.
+
+Build the actual library test executable from the selected source on Linux:
+
+```sh
+cargo test --locked -p day2 --lib --no-run --message-format=json > socket-test-build.jsonl
+jq -r 'select(.reason=="compiler-artifact" and .target.name=="day2" and .profile.test and .executable!=null) | .executable' socket-test-build.jsonl
+```
+
+Set `DAY2_SOCKET_LIB_TEST` to that exact executable, `DAY2_SOCKET_TEST_IMAGE` to
+its matching pinned Linux runtime image, and retain their identities and the
+current source/manifest-root provenance. Use two fresh local named volumes,
+`DAY2_SOCKET_FIXTURE` and `DAY2_SOCKET_FOREIGN`, exclusively for these controls.
+For each volume, initialize a root-owned 0755 parent and two distinct private
+0700 UID/GID10001 child directories using these explicit fixture commands:
+
+```sh
+docker volume create "$DAY2_SOCKET_FIXTURE"
+docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --mount type=volume,src="$DAY2_SOCKET_FIXTURE",dst=/fixture --entrypoint /usr/bin/install "$DAY2_SOCKET_TEST_IMAGE" -d -m 0755 -o 0 -g 0 /fixture
+docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --mount type=volume,src="$DAY2_SOCKET_FIXTURE",dst=/fixture --entrypoint /usr/bin/install "$DAY2_SOCKET_TEST_IMAGE" -d -m 0700 -o 10001 -g 10001 /fixture/storage /fixture/foreign
+```
+
+Repeat those same setup commands for `DAY2_SOCKET_FOREIGN`. For each row below,
+select the named test and apply the listed mount changes to this exact-case
+command. The default is the positive layout:
+
+```sh
+docker run --rm --network none --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=volume,src="$DAY2_SOCKET_FIXTURE",dst=/run/day2-native-enrollment,readonly \
+  --mount type=volume,src="$DAY2_SOCKET_FIXTURE",volume-subpath=storage,dst=/run/day2-native-enrollment/storage \
+  --mount type=volume,src="$DAY2_SOCKET_FIXTURE",dst=/run/day2-native-enrollment-reference,readonly \
+  --mount type=bind,src="$DAY2_SOCKET_LIB_TEST",dst=/socket-tests,readonly \
+  --entrypoint /socket-tests "$DAY2_SOCKET_TEST_IMAGE" \
+  --exact "security_epoch::native_enrollment::storage_socket_directory::tests::$DAY2_SOCKET_TEST" --ignored --nocapture
+```
+
+Each invocation must report exactly one passed test, zero failures and zero
+ignored tests. Preserve each command, fixture mount layout and result separately.
+
+| Layout change | `DAY2_SOCKET_TEST` |
+| --- | --- |
+| None: exact child RW; both views of parent RO | `mounted_controller_child_joins_strict_read_only_reference` |
+| Canonical child `volume-subpath=foreign`, same filesystem and private mode | `mounted_controller_refuses_another_same_filesystem_private_child` |
+| Reference source is `DAY2_SOCKET_FOREIGN` | `mounted_controller_refuses_another_reference_parent` |
+| Canonical parent lacks `readonly` | `mounted_controller_refuses_a_writable_parent_or_reference` |
+| Reference parent lacks `readonly` | `mounted_controller_refuses_a_writable_parent_or_reference` |
+| Canonical child also has `readonly` | `mounted_controller_refuses_a_read_only_child_mount` |
+| Extra RO bind of `volume-subpath=foreign` at `/run/day2-native-enrollment-reference/storage` | `mounted_controller_keeps_no_xdev_on_the_reference_child` |
+| Reference mount omitted and reference path absent in the image | `mounted_controller_has_no_missing_reference_fallback` |
+
+Run the three existing provisioner controls separately with no fixture volumes;
+they create their own private temporary directories. Use the same exact-case
+command's executable mount, `--user 0:0` and `--cap-drop ALL`. For
+`chown_only_provisioner_checks_existing_private_child_without_read_access`, add
+only `--cap-add CHOWN`. For
+`root_creates_and_retains_exact_controller_socket_directory` and
+`root_refuses_unsafe_parent_symlink_and_existing_child_owner`, additionally add
+`FOWNER` and `DAC_OVERRIDE` for the tests' deliberate negative owner/mode
+mutations. Those mutation-fixture capabilities are separate from the actual
+CHOWN-only provisioner control. Remove only these local fixture volumes after
+all test containers have closed; retain source/executable/image and log records.
+
+## Bounded issuer cost observations
 
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
 for its first sixteen accepted connections through the provisioner's inherited
