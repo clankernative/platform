@@ -70,7 +70,8 @@ resource "kubernetes_deployment_v1" "controller" {
       metadata {
         labels = local.labels
         annotations = var.activate ? {
-          "day2.dev/native-inputs" = sha256(jsonencode([var.instance_json, var.enrollment_json, var.storage_json]))
+          "day2.dev/native-inputs"   = sha256(jsonencode([var.instance_json, var.enrollment_json, var.storage_json]))
+          "day2.dev/controller-mode" = var.observe_preparation_read_only ? "preparation-read-only" : "initial"
         } : {}
       }
       spec {
@@ -110,7 +111,10 @@ resource "kubernetes_deployment_v1" "controller" {
           image             = var.image
           image_pull_policy = "IfNotPresent"
           command           = ["/usr/local/bin/day2-epoch-controller"]
-          args              = ["/srv/day2/instance.json", var.app]
+          args = concat(
+            var.observe_preparation_read_only ? ["--observe-preparation-read-only"] : [],
+            ["/srv/day2/instance.json", var.app],
+          )
           security_context {
             privileged                = true
             read_only_root_filesystem = true
@@ -214,7 +218,9 @@ resource "kubernetes_deployment_v1" "controller" {
             timeout_seconds   = 2
             failure_threshold = 3
           }
-          # No liveness restart loop: an uncertain original is never adopted.
+          # Neither mode has liveness/startup probes. The read-only diagnostic
+          # opens no health listener and remains unready; stop it before its
+          # fixed ownerless hold ends. Never infer once-across-restarts.
         }
         dynamic "volume" {
           for_each = var.activate ? [1] : []

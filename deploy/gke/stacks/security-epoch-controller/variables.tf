@@ -77,9 +77,20 @@ variable "host_state_path" {
 }
 
 variable "activate" {
-  description = "False registers no running executor. True only after exact workload UID, profiles, App mount and code have been qualified; no original-file adoption on restart."
+  description = "False registers no running executor. True starts the selected fixed initial or read-only observation command after complete exact workload/profile/image/mount selection; native admission remains mandatory and neither mode adopts an original on restart."
   type        = bool
   default     = false
+}
+
+variable "observe_preparation_read_only" {
+  description = "Operator-only preparation observation with no native directory/file creation. Requires a qualified image supporting the exact closed diagnostic command and its 300-second ownerless hold; stop before that hold expires. This is not native qualification or serving."
+  type        = bool
+  default     = false
+  nullable    = false
+  validation {
+    condition     = !var.observe_preparation_read_only || var.activate
+    error_message = "Read-only observation requires activated complete native selections; dormant registration starts no diagnostic."
+  }
 }
 
 variable "node_profile" {
