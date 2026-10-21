@@ -78,6 +78,19 @@ run "rejects_malformed_basic_identity_target" {
   expect_failures = [var.runtime_identity]
 }
 
+run "rejects_basic_identity_with_secret_access" {
+  command = plan
+  variables {
+    runtime_identity = {
+      service_account_id             = "example-runtime"
+      token_creator_service_accounts = []
+    }
+    runtime_secret_ids   = ["provider-secret"]
+    backend_service_name = ""
+  }
+  expect_failures = [var.runtime_identity]
+}
+
 run "rejects_basic_identity_with_app_calls" {
   command = plan
   variables {
