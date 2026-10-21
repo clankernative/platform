@@ -186,9 +186,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
         };
         let storage = match storage {
             AppStorage::ShellConnected(mut connection) => {
-                while !connection.idle_ready()? {
-                    std::thread::park_timeout(Duration::from_millis(5));
-                }
+                connection.wait_ready()?;
                 let mut stage = role.begin_current_stage()?;
                 stage.check_selection(&selection.policy, &selection.store, kind)?;
                 let peer = connection.receive(&mut stage)?;
@@ -269,10 +267,7 @@ pub(crate) fn prepare_initial_app_storage(
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             {
-                while !connection.idle_ready()? {
-                    // No role/file permission is live in this DATA-only wait.
-                    std::thread::park_timeout(Duration::from_millis(5));
-                }
+                connection.wait_ready()?;
                 let mut role = owners.role.try_borrow_mut()?;
                 let mut stage = role.begin_current_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
