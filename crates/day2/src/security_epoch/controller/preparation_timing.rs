@@ -33,11 +33,12 @@ pub(in crate::security_epoch) enum Operation {
     HolderRole,
     HolderListener,
     FirstRole,
+    FirstReady,
     FirstFile,
     FirstExchange,
 }
 
-const OPERATIONS: [Operation; 27] = [
+const OPERATIONS: [Operation; 28] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -63,6 +64,7 @@ const OPERATIONS: [Operation; 27] = [
     Operation::HolderRole,
     Operation::HolderListener,
     Operation::FirstRole,
+    Operation::FirstReady,
     Operation::FirstFile,
     Operation::FirstExchange,
 ];

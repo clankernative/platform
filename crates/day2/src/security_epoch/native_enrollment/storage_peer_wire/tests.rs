@@ -229,6 +229,7 @@ fn storage_messages_bind_original_stage_nonce_step_and_projection() {
         Body::Hello {
             app: Box::new(stage.clone()),
             nonce: Digest::new(b"app-nonce"),
+            controller_nonce: Digest::new(b"controller-ready-nonce"),
         },
     );
     hello.verify(&stage).unwrap();
@@ -267,6 +268,157 @@ fn storage_messages_bind_original_stage_nonce_step_and_projection() {
 }
 
 #[test]
+fn initial_ready_requires_a_controller_signature_and_closed_record_shape() {
+    let (_, controller, key) = fixture(NativeRole::EpochController);
+    let (_, app, _) = fixture(NativeRole::AppHost);
+    let ready = signed(
+        &controller,
+        &key,
+        Body::InitialReady {
+            controller: Box::new(controller.clone()),
+            nonce: Digest::new(b"one ready nonce"),
+        },
+    );
+    let encoded = serde_json::to_vec(&ready).unwrap();
+    decode(&encoded).unwrap().verify(&controller).unwrap();
+    assert!(decode(&encoded).unwrap().verify(&app).is_err());
+    let original = serde_json::to_value(&ready).unwrap();
+    for path in [
+        "/body/controller",
+        "/body/controller/stage",
+        "/body/controller/original",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    for replacement in [serde_json::Value::Null, serde_json::json!([])] {
+        let mut changed = original.clone();
+        changed["body"]["nonce"] = replacement;
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let mut changed = original.clone();
+    changed["body"].as_object_mut().unwrap().remove("nonce");
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    let mut changed = original.clone();
+    changed["body"]["unknown"] = serde_json::json!(true);
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    let mut changed = original;
+    changed["body"]["nonce"] = serde_json::to_value(Digest::new(b"tampered ready")).unwrap();
+    assert!(
+        decode(&serde_json::to_vec(&changed).unwrap())
+            .unwrap()
+            .verify(&controller)
+            .is_err()
+    );
+    let duplicate = String::from_utf8(encoded).unwrap().replace(
+        "\"step\":\"initial_ready\"",
+        &format!(
+            "\"step\":\"initial_ready\",\"nonce\":{}",
+            serde_json::to_string(&Digest::new(b"duplicate")).unwrap()
+        ),
+    );
+    assert!(decode(duplicate.as_bytes()).is_err());
+}
+
+#[test]
+fn initial_hello_must_echo_the_ready_nonce_even_with_a_valid_app_signature() {
+    let (_, app, key) = fixture(NativeRole::AppHost);
+    let nonce = Digest::new(b"controller ready");
+    let hello = signed(
+        &app,
+        &key,
+        Body::Hello {
+            app: Box::new(app.clone()),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: nonce.clone(),
+        },
+    );
+    let encoded = serde_json::to_vec(&hello).unwrap();
+    let decoded = decode(&encoded).unwrap();
+    decoded.verify(&app).unwrap();
+    let (selected, _) = decoded.initial_hello(&nonce).unwrap();
+    assert!(*selected == app);
+    assert!(
+        decoded
+            .initial_hello(&Digest::new(b"different ready"))
+            .is_err()
+    );
+    let wrong = signed(
+        &app,
+        &key,
+        Body::Hello {
+            app: Box::new(app.clone()),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: Digest::new(b"other controller ready"),
+        },
+    );
+    wrong.verify(&app).unwrap();
+    assert!(wrong.initial_hello(&nonce).is_err());
+    let mut missing = serde_json::to_value(&hello).unwrap();
+    missing["body"]
+        .as_object_mut()
+        .unwrap()
+        .remove("controller_nonce");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    let other = signed(
+        &app,
+        &key,
+        Body::Confirm {
+            exchange: Digest::new(b"not hello"),
+            projection: Digest::new(b"no projection"),
+        },
+    );
+    assert!(other.initial_hello(&nonce).is_err());
+}
+
+#[test]
+fn first_offer_cannot_replace_the_ready_stage_clock_or_nonce() {
+    let (_, ready, _, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    let nonce = Digest::new(b"controller ready nonce");
+    let exchange = Exchange {
+        app_stage: Digest::new(b"app stage"),
+        controller_stage: ready.digest().unwrap(),
+        app_nonce: Digest::new(b"app nonce"),
+        controller_nonce: nonce.clone(),
+        projection: Digest::new(b"initial image"),
+    };
+    exchange
+        .require_initial_ready(&ready, &nonce, &ready)
+        .unwrap();
+    let mut replacement = ready.clone();
+    replacement.stage.data.challenge = Digest::new(b"later issuer grant");
+    replacement.stage.signature = issuer.sign("role-stage", &replacement.stage.data).unwrap();
+    assert!(ready.same_enrollment(&replacement));
+    assert!(
+        exchange
+            .require_initial_ready(&ready, &nonce, &replacement)
+            .is_err()
+    );
+    let mut changed_clock = ready.clone();
+    changed_clock.original.origin_ns += 1;
+    assert!(
+        exchange
+            .require_initial_ready(&ready, &nonce, &changed_clock)
+            .is_err()
+    );
+    let mut changed = exchange.clone();
+    changed.controller_nonce = Digest::new(b"other ready nonce");
+    assert!(
+        changed
+            .require_initial_ready(&ready, &nonce, &ready)
+            .is_err()
+    );
+    let mut changed = exchange;
+    changed.controller_stage = replacement.digest().unwrap();
+    assert!(
+        changed
+            .require_initial_ready(&ready, &nonce, &ready)
+            .is_err()
+    );
+}
+
+#[test]
 fn transcript_changes_do_not_alias_another_exchange() {
     let exchange = Exchange {
         app_stage: Digest::new(b"app"),
@@ -298,6 +450,7 @@ fn storage_wire_refuses_duplicate_unknown_array_and_oversized_records() {
         Body::Hello {
             app: Box::new(stage.clone()),
             nonce: Digest::new(b"nonce"),
+            controller_nonce: Digest::new(b"controller-ready-nonce"),
         },
     );
     let encoded = serde_json::to_vec(&hello).unwrap();

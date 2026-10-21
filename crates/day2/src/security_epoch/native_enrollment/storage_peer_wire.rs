@@ -198,6 +198,23 @@ pub(in crate::security_epoch::native_enrollment) struct Exchange {
 }
 
 impl Exchange {
+    /// DATA-only continuity with the already authenticated readiness packet.
+    /// This neither authenticates a sender nor constructs a native owner.
+    pub(super) fn require_initial_ready(
+        &self,
+        ready: &StageStatement,
+        nonce: &Digest,
+        offered: &StageStatement,
+    ) -> Result<()> {
+        ensure!(
+            offered == ready
+                && self.controller_stage == ready.digest()?
+                && self.controller_nonce == *nonce,
+            "storage_peer_ready_stage_or_nonce_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-initial-holder-exchange-v1", self))
     }
@@ -233,9 +250,14 @@ impl CurrentExchange {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::security_epoch::native_enrollment) enum Body {
+    InitialReady {
+        controller: Box<StageStatement>,
+        nonce: Digest,
+    },
     Hello {
         app: Box<StageStatement>,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     Offer {
         controller: Box<StageStatement>,
@@ -307,7 +329,8 @@ impl Body {
             | Self::CurrentHello { .. }
             | Self::CurrentAck { .. }
             | Self::CurrentConsumed { .. } => NativeRole::AppHost,
-            Self::Offer { .. }
+            Self::InitialReady { .. }
+            | Self::Offer { .. }
             | Self::Complete { .. }
             | Self::CurrentOffer { .. }
             | Self::CurrentReady { .. }
@@ -326,6 +349,28 @@ pub(in crate::security_epoch::native_enrollment) struct Message {
 }
 
 impl Message {
+    /// Checked wire DATA only. The real receiver still authenticates the
+    /// signature, actual sender handles, current role and both native clocks.
+    pub(super) fn initial_hello(
+        &self,
+        expected_controller_nonce: &Digest,
+    ) -> Result<(&StageStatement, &Digest)> {
+        match &self.body {
+            Body::Hello {
+                app,
+                nonce,
+                controller_nonce,
+            } => {
+                ensure!(
+                    controller_nonce == expected_controller_nonce,
+                    "storage_peer_ready_nonce_changed"
+                );
+                Ok((app, nonce))
+            }
+            _ => anyhow::bail!("storage_peer_expected_hello"),
+        }
+    }
+
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
         ensure!(
             self.sender == statement.digest()?
@@ -356,6 +401,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         .pointer("/body/step")
         .and_then(serde_json::Value::as_str)
     {
+        Some("initial_ready") => require_stage_objects(&value, "/body/controller")?,
         Some("hello") => require_stage_objects(&value, "/body/app")?,
         Some("offer") => {
             require_stage_objects(&value, "/body/controller")?;

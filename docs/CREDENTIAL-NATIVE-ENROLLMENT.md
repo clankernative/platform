@@ -256,6 +256,33 @@ all test containers have closed; retain source/executable/image and log records.
 
 ## Bounded issuer cost observations
 
+Initial-holder transport setup and authenticated file admission are separate
+bounded operations. During App installation, its actual stage closes the
+once-only attempt before connecting, checks successful transport completion and
+returns only a same-owner socket. That old stage is not retained. The App
+consumes the connector before any readiness wait or later acquisition; there is
+no reconnect, Unstarted fallback or adoption from a descriptor or metadata.
+
+The Controller closes file continuity with a pending token before readiness
+entropy or I/O. Its fresh actual stage accepts the connection and sends a signed
+`initial_ready` statement before acquiring provider/file authority. Queued
+readiness is only DATA: it prompts the App to acquire a fresh stage whose
+original clock starts before its issuer RPC. The App then authenticates the
+actual readiness sender, signature, issuer, role and current original deadlines
+before sending Hello. Controller provider/file acquisition can run while that
+App RPC completes; issuer requests themselves still run serially.
+
+The Controller keeps the same actual stage and narrowed acquisition through
+readiness, file acquisition and the whole exchange. Hello echoes its readiness
+nonce; Offer must use exactly its readiness statement, original clock and nonce.
+The App retains the actual readiness sender handle with the later Offer and
+Complete handles. Dropped/failed pending file work remains refused; only the
+known successful full phase completion may reopen continuity. Neither the
+connector, queued packet nor signed readiness grants file opening, a holder,
+P3, a writer or final-consumer authority. The five-second bounds are unchanged.
+This rearranges avoidable serialization; actual node latency, reliability and
+the earlier live refusal still require measured native qualification.
+
 The Controller's private lifecycle records also include inclusive original
 preparation timings. `holder_role` is the later listener stage's actual role
 acquisition; `holder_listener` covers its fresh same-owner file phase and socket
@@ -277,9 +304,10 @@ transition checks. App/current physical serving operations keep their separate
 nine full-image checks make nine preads instead of 135, rereading the same
 bytes. That is a source count, not a measured latency or reliability result.
 
-The subsequent first-holder operation also caches three separate inclusive
+The subsequent first-holder operation also caches separate inclusive
 rows: `first_role` acquires its actual fresh Controller stage, `first_file`
-begins its current same-owner file phase, and `first_exchange` includes listener
+begins its current same-owner file phase, `first_ready` covers accept and signed
+readiness before file/provider acquisition, and `first_exchange` includes listener
 start, the unchanged exchange, durability checks and retained completion.
 Successful return or failure unwind precedes each ending measurement; rows are
 historical DATA, not renewed permission. A `first_holder` refusal now exports

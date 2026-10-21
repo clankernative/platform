@@ -55,6 +55,22 @@ pub(crate) struct CurrentPreparedFilePhase<'file, 'role> {
     disposition: FilePhaseDisposition<'file>,
 }
 
+/// Irreversibly closes this file's continuation before rendezvous I/O. It owns
+/// no role, provider acquisition or permission. Dropping it leaves the original
+/// file refused; only the eventual current phase's known completion settles it.
+pub(in crate::security_epoch::storage_authority) struct PendingPreparedFilePhase<'file> {
+    volume: &'file mut NativeVolumeContinuity,
+    selection: &'file ReviewedStorageSelection,
+    directory: &'file File,
+    anchor: &'file DirectoryIdentity,
+    file: &'file File,
+    identity: &'file FileIdentity,
+    layout: &'file ReviewedFileLayout,
+    process: u32,
+    thread: ThreadId,
+    disposition: FilePhaseDisposition<'file>,
+}
+
 /// A current physical-file phase after legitimate application writes. It is
 /// deliberately distinct from CurrentPreparedFilePhase: the initial exchange
 /// cannot accept it or reinterpret modified bytes as a prepared initial image.
@@ -203,10 +219,17 @@ impl PreparedFileContinuity {
         &'file mut self,
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.begin_pending_initial_phase()?.acquire(stage)
+    }
+
+    /// Close before a first-holder readiness exchange, without starting file
+    /// or provider I/O. The caller must still supply the actual original stage.
+    pub(in crate::security_epoch::storage_authority) fn begin_pending_initial_phase(
+        &mut self,
+    ) -> Result<PendingPreparedFilePhase<'_>> {
         let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
-        let phase = self.volume.begin_current(stage)?;
-        let mut current = CurrentPreparedFilePhase {
-            phase,
+        Ok(PendingPreparedFilePhase {
+            volume: &mut self.volume,
             selection: &self.selection,
             directory: &self.directory,
             anchor: &self.anchor,
@@ -216,9 +239,7 @@ impl PreparedFileContinuity {
             process: self.process,
             thread: self.thread,
             disposition,
-        };
-        current.check()?;
-        Ok(current)
+        })
     }
 
     /// Own a fresh provider/device/mount phase on the SAME original file.
@@ -253,6 +274,30 @@ impl PreparedFileContinuity {
     /// authority. Legitimate later writes need the serving transition.
     pub(crate) fn check_initial(&mut self, stage: EnrolledRoleStage<'_>) -> Result<()> {
         self.begin_initial_phase(stage)?.finish_checked()
+    }
+}
+
+impl<'file> PendingPreparedFilePhase<'file> {
+    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.disposition.check()?;
+        let phase = self.volume.begin_current(stage)?;
+        let mut current = CurrentPreparedFilePhase {
+            phase,
+            selection: self.selection,
+            directory: self.directory,
+            anchor: self.anchor,
+            file: self.file,
+            identity: self.identity,
+            layout: self.layout,
+            process: self.process,
+            thread: self.thread,
+            disposition: self.disposition,
+        };
+        current.check()?;
+        Ok(current)
     }
 }
 

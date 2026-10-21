@@ -116,7 +116,7 @@ impl ResponseBinding {
 // the actual App first holder on THIS executor. Refused variants retain that
 // same owner but cannot enter another bootstrap or consumer callback.
 enum AppStorage {
-    Unstarted,
+    Connected(Box<crate::security_epoch::native_enrollment::InitialHolderConnection>),
     Refused,
     Bootstrapping(Box<crate::security_epoch::AppStorageBootstrap>),
     Participant(Box<ServingParticipant>),
@@ -135,7 +135,7 @@ impl AppStorage {
                 storage.refuse();
                 Self::RefusedParticipant(storage)
             }
-            Self::Unstarted | Self::Refused => Self::Refused,
+            Self::Connected(_) | Self::Refused => Self::Refused,
         };
     }
 }
@@ -158,7 +158,11 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
             let mut stage = role.begin_current_stage()?;
             stage.check_selection(&selection.policy, &selection.store, kind)?;
             let storage = match kind {
-                NativeRole::AppHost => AppStorage::Unstarted,
+                NativeRole::AppHost => AppStorage::Connected(Box::new(
+                    crate::security_epoch::native_enrollment::InitialHolderConnection::connect(
+                        &mut stage,
+                    )?,
+                )),
                 NativeRole::SecurityShell => {
                     let peer = crate::security_epoch::native_enrollment::ShellServingPeer::connect(
                         &mut stage,
@@ -241,19 +245,23 @@ pub(crate) fn prepare_initial_app_storage(
             owners.selection.policy == *policy && owners.selection.store == *store,
             "native App selected policy changed"
         );
-        ensure!(
-            matches!(owners.storage, AppStorage::Unstarted),
-            "native App storage attempt already spent"
-        );
-        // Close before stage acquisition or the first channel operation. A
-        // failed/unknown exchange can never be retried from metadata or SQL.
-        owners.storage = AppStorage::Refused;
+        // Consume the completed connector before waiting or acquiring a new
+        // stage. A failed/unknown attempt cannot reconnect or adopt from DATA.
+        let AppStorage::Connected(mut connection) =
+            std::mem::replace(&mut owners.storage, AppStorage::Refused)
+        else {
+            anyhow::bail!("native App storage attempt already spent");
+        };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             {
+                while !connection.idle_ready()? {
+                    // No role/file permission is live in this DATA-only wait.
+                    std::thread::park_timeout(Duration::from_millis(5));
+                }
                 let mut role = owners.role.try_borrow_mut()?;
                 let mut stage = role.begin_current_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
-                let mut offer = AuthenticatedInitialHolderOffer::receive(&mut stage)?;
+                let mut offer = AuthenticatedInitialHolderOffer::receive(*connection, &mut stage)?;
                 let file = AppPreparedFile::observe_existing(
                     &mut stage, metadata, policy, store, &mut offer,
                 )?;

@@ -86,15 +86,21 @@ impl InitialStorageContinuity {
     pub(in crate::security_epoch) fn establish(
         mut file: PreparedFileContinuity,
         listener: InitialHolderListener,
-        stage: EnrolledRoleStage<'_>,
+        mut stage: EnrolledRoleStage<'_>,
         timings: &Timings,
     ) -> InitialStorageOutcome {
         let result = (|| {
+            let pending = file.begin_pending_initial_phase()?;
+            // The file is already closed to any other phase. Readiness opens
+            // no file and grants no P3; the SAME actual stage remains live.
+            let rendezvous = timings
+                .measure(Operation::FirstReady, || listener.prepare(&mut stage))
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstReady, error))?;
             let phase = timings
-                .measure(Operation::FirstFile, || file.begin_initial_phase(stage))
+                .measure(Operation::FirstFile, || pending.acquire(stage))
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstFile, error))?;
             timings.measure(Operation::FirstExchange, || {
-                let server = listener
+                let server = rendezvous
                     .start(phase)
                     .map_err(|error| PreparationFailure::at(PreparationStep::FirstStart, error))?;
                 let mut holder = server.exchange().map_err(|error| {

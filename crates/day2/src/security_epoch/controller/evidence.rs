@@ -119,6 +119,7 @@ pub(in crate::security_epoch) enum PreparationStep {
     HolderTransport,
     HolderFinalCheck,
     FirstRole,
+    FirstReady,
     FirstFile,
     FirstStart,
     FirstExchange,
