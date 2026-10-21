@@ -13,6 +13,7 @@ mod slack_webhook;
 mod snowflake;
 mod transport;
 
+pub(crate) use freetool_executor::CredentialAction as FreetoolCredentialAction;
 pub use transport::LocalSecret;
 pub(crate) use transport::{
     Authorization, CredentialResolver, Credentials, HttpTransport, Method, Transport,
@@ -25,6 +26,15 @@ pub(crate) fn freetool_executor_request(
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
     freetool_executor::send(endpoint, credential, body)
+}
+
+pub(crate) fn freetool_credential_request(
+    endpoint: &str,
+    credential: &Credentials,
+    action: freetool_executor::CredentialAction,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    freetool_executor::send_credential(endpoint, credential, action, body)
 }
 
 use day2_capabilities::{

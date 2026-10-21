@@ -856,6 +856,7 @@ mod narrowing {
             ResourceKind::FreetoolExecutorResource => ResourceTarget::FreetoolExecutor {
                 service_id: "freetool_local".into(),
                 allowed_resources: BTreeSet::from(["resource_test".into()]),
+                credential_managers: BTreeSet::new(),
             },
         }
     }

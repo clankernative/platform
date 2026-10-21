@@ -29,6 +29,8 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::Semaphore};
 
+#[path = "web_freetool_credentials.rs"]
+mod freetool_credentials;
 #[path = "web_live.rs"]
 pub(crate) mod live;
 
@@ -691,6 +693,8 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let maximum_body = if parts.uri.path().starts_with(crate::ingress::ROUTE_PREFIX) {
         1_048_576
+    } else if parts.uri.path().starts_with(freetool_credentials::PREFIX) {
+        16_384
     } else {
         65_536
     };
@@ -724,6 +728,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
                 "audit_read"
             }
             "/_live" => "live_read",
+            path if path.starts_with(freetool_credentials::PREFIX) => "credential_management",
             path if path.starts_with(crate::ingress::ROUTE_PREFIX) => "ingress",
             path if path.starts_with("/assets/") => "asset",
             crate::mcp::PATH => "mcp",
@@ -1183,6 +1188,9 @@ impl Host {
                 ));
             }
         };
+        if uri.path().starts_with(freetool_credentials::PREFIX) {
+            return self.freetool_credentials(method, uri, body, session, at);
+        }
         if uri.path() == "/_live" {
             ensure!(
                 method == Method::GET,
