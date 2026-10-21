@@ -195,11 +195,15 @@ mod tests {
             &run(&["app", "describe", "reports", "--agent"], Some(&path)),
             0,
         );
-        assert_eq!(described["result"]["operation_count"], 4);
+        assert_eq!(described["result"]["operation_count"], 5);
         let operations = described["result"]["operations"].as_array().unwrap();
         assert!(operations.iter().all(|operation| matches!(
             operation["name"].as_str().unwrap(),
-            "reports.submit" | "reports.revise" | "reports.list" | "reports.detail"
+            "reports.submit"
+                | "reports.revise"
+                | "reports.list"
+                | "reports.detail"
+                | "reports.search"
         )));
         assert!(
             operations

@@ -229,7 +229,7 @@ fn private_commands_and_cross_actor_receipts_are_not_public_rpc() -> Result<()> 
     );
     let catalog =
         day2::operation_catalog::Catalog::from_artifact(world.runtime.artifact().contract())?;
-    assert_eq!(catalog.endpoints.len(), 4);
+    assert_eq!(catalog.endpoints.len(), 5);
     assert!(invocations::status(&world.runtime, "private", "bob").is_err());
     let receipt = invocations::status(&world.runtime, "private", "alice")?;
     assert_eq!(receipt.children.len(), 1);

@@ -21,6 +21,73 @@ pin, ports, limits and failure behavior.
 [Chart Live verification](../examples/chart-live/VERIFICATION.md) separates
 deterministic simulations, real adapters, builds and remaining browser/full gates.
 
+## Checked reactive GET forms
+
+A non-live page may opt a registered query form into the host's latest-read
+coordinator. The declaration is inert metadata: it accepts no app callback or
+executable expression, and the app needs no JavaScript for it. This is additive;
+existing app presentation scripts and templates are unaffected:
+
+```html
+<form id="report-search" data-page="search" data-query-on="input"
+      data-query-results="report-search-results" data-query-status="report-search-status"
+      data-query-debounce="150">
+  <label for="term">Title contains</label>
+  <input id="term" name="term" type="text" value="{{ search.term }}">
+  <button type="submit">Search</button>
+  <section id="report-search-results"><!-- Server-rendered results --></section>
+  <p id="report-search-status" role="status"></p>
+</form>
+```
+
+The existing route/input contract supplies native GET action/method and remains
+usable without JavaScript. This initial reactive port admits uniquely named
+text/search/hidden inputs and textareas, not choice controls or native resets.
+Ordinary query forms retain their existing control support. External form
+controls and submitter transport overrides are not admitted.
+
+`data-query-results` references 1–8 owned, disjoint `div`/`section` containers
+with unique stable IDs. They may contain reviewed CUI presentation, including
+Number, but may not be component roots or contain editable controls, nested
+forms/regions or the status node. The status is an owned accessible
+`p`/`div`/`span`/`output`. Live/timed-live page updates cannot share this writer.
+
+Input edits invalidate old replies immediately; requests share one 0–1000ms
+debounce, cancellation and timeout. All region identities and any echoed U64
+revision validate before synchronous publication. Focused drafts remain intact;
+Roc/server HTML supplies accepted field values and all formatted labels. Failures
+retain and explicitly mark old results stale. Teardown stops pending work.
+`data-query-revision` names an unsigned hidden echo field; optional
+`data-query-commit-field` names a hidden Boolean, and `data-query-commit-input`
+selects the text input whose blur sets it. These are transport metadata, not
+business parsing or financial calculations.
+
+An unnamed native range may declare `data-query-input` and `data-query-labels`
+for an editable text/search target and owned datalist. Literal JS-safe integer
+bounds/step, at most 2048 reachable steps/options and coverage of every reachable native step
+are checked. Labels come from option `label` or text; the host does not format
+money. Optional preset buttons use checked `data-query-input`, `data-query-value`
+and `data-query-label`. Native selection/progress geometry is presentation only.
+
+[Reports search](../examples/reports/ui/pages/search.html) is a second independent
+consumer alongside Equity. Deterministic DOM/HTTP substitutes test coordination;
+they are not browser, visual, CSP or animation qualification.
+
+Before replacing each result region's children, the coordinator dispatches a
+bubbling `cui:before-patch` event on the current region with
+`detail: {current, incoming}`. This is the bridge contract documented by Clanker
+UI: its reviewed Number installer may move an owned node with a matching stable
+`id` into `incoming`, copying only Number presentation attributes, so a value
+can animate after the synchronous replacement. Platform does not interpret the
+event, add selectors or parse values. To animate a formatted value inside a
+result region, declare `<cui-number id="…" value="{{ … }}" motion="roll" />` or
+`<cui-metric … value-motion="roll" value-id="…" />` with a literal id that is
+unique in the page; without a stable id the value is replaced statically. These
+declarations need a reviewed Platform release whose
+`build-dependencies/clanker-ui.json` pins a CUI package containing the `number`
+contract; release 0.1.1 / vanilla 0.7.1 does not. CUI keeps Number and Metric
+motion `adapter-required` until a real host build and browser review qualify them.
+
 ## Live queries over SSE
 
 SSE is the platform transport for live frontend updates. A live page subscribes

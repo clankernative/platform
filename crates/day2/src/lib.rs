@@ -93,6 +93,7 @@ mod web_api;
 mod web_assets;
 mod web_forms;
 mod web_html;
+mod web_query_bindings;
 pub mod web_resources;
 mod web_security;
 pub mod web_templates;

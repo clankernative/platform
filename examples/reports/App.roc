@@ -1,6 +1,7 @@
 import SubmitReport
 import ReviseReport
 import ListReports
+import SearchReports
 import GetReport
 import AnalyzeReport
 import NotifyReady
@@ -20,10 +21,15 @@ App :: [].{
 			notify: NotifyReady.definition,
 			sweep: SweepReports.definition,
 			list: ListReports.definition,
+			search: SearchReports.definition,
 			detail: GetReport.definition,
 		},
 		schedules: { sweep: Schedules.sweep.register() },
-		pages: { reports: Routes.directory.register(), report: Routes.details.register() },
+		pages: {
+			reports: Routes.directory.register(),
+			report: Routes.details.register(),
+			search: Routes.search.register(),
+		},
 		properties: { reports: ReportInvariants.reports },
 		errors: {},
 		examples: [Demo.definition],

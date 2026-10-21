@@ -1714,13 +1714,13 @@ pub fn validate_bindings(
         None,
         presentation_catalog(catalog)?,
     )?;
-    validate_forms(&analysis, &variants, operations, schema)
+    validate_forms(&analysis, &variants, operations, schema, None)
 }
 
 pub fn validate_routed_bindings(
     directory: &Path,
     catalog: &Catalog,
-    path: &str,
+    page: &crate::artifact::Page,
     context: &Type,
     assets: &assets::Catalog,
     routes: &crate::routing::Catalog,
@@ -1729,13 +1729,19 @@ pub fn validate_routed_bindings(
     let sources = sources(directory, catalog)?;
     let (analysis, variants) = analyze_with_presentations(
         &sources,
-        path,
+        &page.template,
         context,
         assets,
         Some(routes),
         presentation_catalog(catalog)?,
     )?;
-    validate_forms(&analysis, &variants, &artifact.operations, &artifact.schema)
+    validate_forms(
+        &analysis,
+        &variants,
+        &artifact.operations,
+        &artifact.schema,
+        Some(page),
+    )
 }
 
 fn validate_forms(
@@ -1743,6 +1749,7 @@ fn validate_forms(
     variants: &[String],
     operations: &[crate::artifact::Operation],
     schema: &crate::schema::Schema,
+    appearance: Option<&crate::artifact::Page>,
 ) -> Result<()> {
     let forms = Selector::parse("form").expect("static selector");
     for markup in variants {
@@ -1762,6 +1769,21 @@ fn validate_forms(
                 let routes = analysis
                     .routes
                     .context("template_page_form_requires_registered_routes")?;
+                if form.value().attr("data-query-on").is_some() {
+                    let appearance = appearance.context("reactive_query_page_metadata_required")?;
+                    crate::web_query_bindings::validate_page_appearance(
+                        appearance.live,
+                        appearance.live_refresh_ms,
+                    )?;
+                    for (name, value) in form.value().attrs() {
+                        if name == "id" || name.starts_with("data-query-") {
+                            ensure!(
+                                !analysis.dynamic.keys().any(|marker| value.contains(marker)),
+                                "template_query_binding_requires_literal: {name}"
+                            );
+                        }
+                    }
+                }
                 crate::web_forms::validate_query_form_source(form, routes, page)?;
                 continue;
             }
@@ -2495,6 +2517,99 @@ mod tests {
         let assets = assets::Catalog::new();
         let (analysis, variants) = analyze(&sources, "pages/live.html", &context, &assets, None)?;
         validate_live_variants(&analysis, &variants)
+    }
+
+    #[test]
+    fn reactive_query_source_admission_owns_page_appearance_and_literal_configuration() -> Result<()>
+    {
+        let page = crate::artifact::Page {
+            name: "search".into(),
+            title: "Search".into(),
+            operation: "search".into(),
+            defaults: r#"{"term":""}"#.into(),
+            path: "/".into(),
+            template: "pages/search.html".into(),
+            input_type: "Search".into(),
+            output_type: "Search".into(),
+            live: false,
+            live_refresh_ms: 0,
+        };
+        let operations = vec![crate::artifact::Operation {
+            name: "search".into(),
+            kind: "query".into(),
+            input_type: "Search".into(),
+            output_type: "Search".into(),
+        }];
+        let schema = crate::schema::Schema {
+            models: BTreeMap::new(),
+            inputs: BTreeMap::from([(
+                "Search".into(),
+                crate::schema::Record {
+                    fields: BTreeMap::from([("term".into(), crate::schema::Kind::Text)]),
+                    roc_type: None,
+                    identity: None,
+                },
+            )]),
+            foreign_keys: vec![],
+            indexes: vec![],
+            rollups: vec![],
+            domains: BTreeMap::new(),
+        };
+        let routes =
+            crate::routing::Catalog::compile(std::slice::from_ref(&page), &operations, &schema)?;
+        let markup = r#"<form id="search" data-page="search" data-query-on="input" data-query-results="results" data-query-status="status"><input type="search" name="term" value="{{ term }}"><section id="results"></section><p id="status" role="status"></p></form>"#;
+        let context = Type::Record(BTreeMap::from([("term".into(), Type::String)]));
+        let assets = assets::Catalog::new();
+        for (live, interval, dynamic) in [
+            (false, 0, false),
+            (true, 0, false),
+            (true, 5_000, false),
+            (false, 0, true),
+        ] {
+            let mut appearance = page.clone();
+            appearance.live = live;
+            appearance.live_refresh_ms = interval;
+            let source = if dynamic {
+                markup.replace(
+                    "data-query-status=\"status\"",
+                    "data-query-status=\"{{ term }}\"",
+                )
+            } else {
+                markup.into()
+            };
+            let sources = BTreeMap::from([(page.template.clone(), source)]);
+            let (analysis, variants) = analyze_with_presentations(
+                &sources,
+                &page.template,
+                &context,
+                &assets,
+                Some(&routes),
+                BTreeMap::new(),
+            )?;
+            let result = validate_forms(
+                &analysis,
+                &variants,
+                &operations,
+                &schema,
+                Some(&appearance),
+            );
+            match (live, dynamic) {
+                (true, _) => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("reactive_query_live_page_unsupported")
+                ),
+                (_, true) => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("template_query_binding_requires_literal")
+                ),
+                _ => result?,
+            }
+        }
+        Ok(())
     }
 
     #[test]

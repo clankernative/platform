@@ -454,6 +454,7 @@ fn validate_query_form_impl(
         required.is_subset(&fields.keys().map(String::as_str).collect()),
         "template_incomplete_query_form: {page}"
     );
+    crate::web_query_bindings::validate_form(form, routes, page, source_projection)?;
     Ok(())
 }
 
@@ -649,6 +650,14 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
             }
             let routes =
                 crate::routing::Catalog::from_artifact(view.runtime.artifact().contract())?;
+            if form.value().attr("data-query-on").is_some() {
+                let definition = view.runtime.artifact().page(&page)?;
+                crate::web_query_bindings::validate_page_appearance(
+                    definition.live,
+                    definition.live_refresh_ms,
+                )?;
+            }
+            crate::web_query_bindings::validate_document(&document, form)?;
             bind_query_transport(&mut document, form_id, &routes, &page)?;
             continue;
         }
@@ -916,6 +925,10 @@ mod query_form_tests {
     use super::*;
 
     fn routes(path_parameter: bool) -> crate::routing::Catalog {
+        routes_with_commit(path_parameter, false)
+    }
+
+    fn routes_with_commit(path_parameter: bool, with_commit: bool) -> crate::routing::Catalog {
         let root = crate::artifact::Page {
             name: "home".into(),
             title: "Home".into(),
@@ -948,11 +961,18 @@ mod query_form_tests {
                 "/search",
             )
         };
+        let mut fields = fields;
+        let mut defaults: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(defaults).unwrap();
+        if with_commit && !path_parameter {
+            fields.insert("committed".into(), Kind::Boolean);
+            defaults.insert("committed".into(), serde_json::Value::Bool(false));
+        }
         let page = crate::artifact::Page {
             name: "target".into(),
             title: "Target".into(),
             operation: "target".into(),
-            defaults: defaults.into(),
+            defaults: serde_json::to_string(&defaults).unwrap(),
             path: path.into(),
             template: String::new(),
             input_type: "Target".into(),
@@ -1043,6 +1063,293 @@ mod query_form_tests {
         ] {
             assert!(materialize_control_flags(&mut Html::parse_fragment(bad)).is_err());
         }
+    }
+
+    #[test]
+    fn reactive_query_form_admits_closed_config_and_rejects_unsafe_boundaries() {
+        let catalog = routes_with_commit(false, true);
+        let valid = r#"<form id="search" data-page="target" data-query-on="input" data-query-results="results values" data-query-status="status" data-query-commit-field="committed" data-query-commit-input="term"><input name="term" type="text"><input name="archived" type="hidden" value="false"><input name="page" type="hidden" value="1"><input name="committed" type="hidden" value="false"><div id="results"></div><section id="values"></section><p id="status" role="status"></p></form>"#;
+        let document = Html::parse_fragment(valid);
+        validate_query_form(
+            document.select(&selector("form")).next().unwrap(),
+            &catalog,
+            "target",
+        )
+        .unwrap();
+        for bad in [
+            valid.replace(
+                "name=\"archived\" type=\"hidden\" value=\"false\"",
+                "name=\"archived\" type=\"checkbox\" value=\"true\"",
+            ),
+            valid.replace("type=\"text\"", "type=\"radio\" value=\"a\""),
+            valid.replace(
+                "<input name=\"term\" type=\"text\">",
+                "<select name=\"term\"><option value=\"one\">One</option></select>",
+            ),
+            valid.replace("</form>", "<button type=\"reset\">Reset</button></form>"),
+            valid.replace(
+                "</form>",
+                "<button type=\"submit\" formaction=\"/other\">Other</button></form>",
+            ),
+            valid.replace("data-query-on=\"input\"", "data-query-on=\"change\""),
+            valid.replace("role=\"status\"", ""),
+            valid.replace(
+                "id=\"results\"></div>",
+                "id=\"results\"><input name=\"term\"></div>",
+            ),
+            valid.replace(
+                "data-query-results=\"results values\"",
+                "data-query-results=\"missing values\"",
+            ),
+            valid.replace("data-query-on=\"input\"", "data-query-other=\"x\""),
+            valid.replace(
+                "data-query-results=\"results values\"",
+                "data-query-results=\"results results\"",
+            ),
+            valid
+                .replace(
+                    "data-query-results=\"results values\"",
+                    "data-query-results=\"results\"",
+                )
+                .replace("id=\"values\"", "id=\"results\""),
+            valid.replace(
+                "id=\"results\"></div>",
+                "id=\"results\" data-cui-component=widget></div>",
+            ),
+            valid.replace(
+                "data-query-results=\"results values\"",
+                "data-query-results=\"status values\"",
+            ),
+            valid.replace(
+                "data-query-results=\"results values\"",
+                "data-query-results=\" results values\"",
+            ),
+            valid.replace(
+                "data-query-results=\"results values\"",
+                "data-query-results=\"results  values\"",
+            ),
+            valid.replace(
+                "id=\"results\"></div>",
+                "id=\"results\" contenteditable=\"true\"></div>",
+            ),
+            valid.replace(
+                "id=\"status\" role=\"status\"",
+                "id=\"status\" role=\"status\" contenteditable=\"true\"",
+            ),
+            valid.replace(
+                "<p id=\"status\" role=\"status\"></p>",
+                "<button id=\"status\" role=\"status\"></button>",
+            ),
+            valid.replace(
+                "<div id=\"results\"></div>",
+                "<div id=\"results\"><p id=\"status\" role=\"status\"></p></div>",
+            ),
+        ] {
+            let document = Html::parse_fragment(&bad);
+            assert!(
+                validate_query_form(
+                    document.select(&selector("form")).next().unwrap(),
+                    &catalog,
+                    "target"
+                )
+                .is_err(),
+                "accepted {bad}"
+            );
+        }
+        let widget_child = valid.replace(
+            "<div id=\"results\"></div>",
+            "<div id=\"results\"><div data-cui-component=\"Number\"></div></div>",
+        );
+        let document = Html::parse_fragment(&widget_child);
+        validate_query_form(
+            document.select(&selector("form")).next().unwrap(),
+            &catalog,
+            "target",
+        )
+        .unwrap();
+        let widget_root = valid.replace(
+            "<div id=\"results\"></div>",
+            "<div id=\"results\" data-cui-component=\"Number\"></div>",
+        );
+        let document = Html::parse_fragment(&widget_root);
+        assert!(
+            validate_query_form(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn concrete_query_binding_checks_each_result_id_for_document_uniqueness() {
+        let catalog = routes_with_commit(false, true);
+        let markup = r#"<form id="search" data-page="target" data-query-on="input" data-query-results="results values" data-query-status="status" data-query-commit-field="committed" data-query-commit-input="term"><input name="term" type="text"><input name="archived" type="hidden" value="false"><input name="page" type="hidden" value="1"><input name="committed" type="hidden" value="false"><div id="results"></div><section id="values"></section><p id="status" role="status"></p></form>"#;
+        let document = Html::parse_fragment(markup);
+        let form = document.select(&selector("form")).next().unwrap();
+        validate_query_form(form, &catalog, "target").unwrap();
+        crate::web_query_bindings::validate_document(&document, form).unwrap();
+
+        for extra in [
+            "<aside id=\"values\"></aside>",
+            "<input form=\"search\" name=\"term\" value=\"outside\">",
+        ] {
+            let duplicate = Html::parse_fragment(&format!("{markup}{extra}"));
+            let form = duplicate.select(&selector("form")).next().unwrap();
+            assert!(crate::web_query_bindings::validate_document(&duplicate, form).is_err());
+        }
+    }
+
+    #[test]
+    fn query_presets_require_an_editable_text_target_even_without_a_range() {
+        let catalog = routes(false);
+        let markup = r#"<form id="choices" data-page="target" data-query-on="input" data-query-results="results" data-query-status="status"><input name="term" type="text"><button id="preset" type="button" data-query-input="term" data-query-value="literal" data-query-label="Literal">Literal</button><div id="results"></div><p id="status" role="status"></p></form>"#;
+        for (field, valid) in [
+            ("type=\"text\"", true),
+            ("type=\"hidden\"", false),
+            ("type=\"text\" readonly", false),
+        ] {
+            let source = markup.replace("type=\"text\"", field);
+            let document = Html::parse_fragment(&source);
+            let form = document.select(&selector("form")).next().unwrap();
+            assert_eq!(
+                validate_query_form(form, &catalog, "target").is_ok(),
+                valid,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn reactive_query_forms_reject_live_and_timed_page_appearances() {
+        assert!(crate::web_query_bindings::validate_page_appearance(false, 0).is_ok());
+        assert!(crate::web_query_bindings::validate_page_appearance(true, 0).is_err());
+        assert!(crate::web_query_bindings::validate_page_appearance(false, 5_000).is_err());
+    }
+
+    #[test]
+    fn query_range_choice_bound_admits_equity_slider_and_rejects_larger_ranges() {
+        let catalog = routes(false);
+        let form = |step: i64, maximum: i64| {
+            let mut options = String::new();
+            let mut value = 500_000_000_i64;
+            while value <= maximum {
+                options.push_str(&format!(
+                    "<option value=\"{value}\" label=\"V{value}\"></option>"
+                ));
+                value += step;
+            }
+            format!(
+                "<form id=\"lookup\" data-page=\"target\" data-query-on=\"input\" data-query-results=\"results\" data-query-status=\"status\"><input id=\"term\" name=\"term\" type=\"search\"><input id=\"mirror\" type=\"range\" data-query-input=\"term\" data-query-labels=\"choices\" min=\"500000000\" max=\"{maximum}\" step=\"{step}\" value=\"500000000\"><datalist id=\"choices\">{options}</datalist><section id=\"results\"></section><p id=\"status\" aria-live=\"polite\"></p></form>"
+            )
+        };
+        let check = |markup: String| {
+            let document = Html::parse_fragment(&markup);
+            validate_query_form(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target",
+            )
+        };
+        // 1,191 reachable $50M steps from $500M to $60B.
+        check(form(50_000_000, 60_000_000_000)).unwrap();
+        let limit = crate::web_query_bindings::MAX_RANGE_CHOICES;
+        check(form(1, 500_000_000 + limit - 1)).unwrap();
+        assert!(check(form(1, 500_000_000 + limit)).is_err());
+    }
+
+    #[test]
+    fn query_range_accepts_large_label_attribute_lookup_and_validates_reachable_steps() {
+        let catalog = routes(false);
+        let mut options = String::new();
+        for index in 0..596 {
+            let value = 500_000_000_i64 + index * 100_000_000;
+            options.push_str(&format!(
+                "<option value=\"{value}\" label=\"Market cap {index}\"></option>"
+            ));
+        }
+        options
+            .push_str("<option value=\"550000000\" label=\"Initial off-step scenario\"></option>");
+        let markup = format!(
+            "<form id=\"lookup\" data-page=\"target\" data-query-on=\"input\" data-query-results=\"results\" data-query-status=\"status\"><input id=\"term\" name=\"term\" type=\"search\"><input id=\"mirror\" type=\"range\" data-query-input=\"term\" data-query-labels=\"choices\" min=\"500000000\" max=\"60000000000\" step=\"100000000\" value=\"550000000\"><datalist id=\"choices\">{options}</datalist><button id=\"preset\" type=\"button\" data-query-input=\"term\" data-query-value=\"550000000\" data-query-label=\"Mid-market\">Mid</button><section id=\"results\"><div data-cui-component=\"Number\"></div></section><p id=\"status\" aria-live=\"polite\"></p></form>"
+        );
+        let document = Html::parse_fragment(&markup);
+        validate_query_form(
+            document.select(&selector("form")).next().unwrap(),
+            &catalog,
+            "target",
+        )
+        .unwrap();
+
+        let dynamic = markup.replacen(
+            "value=\"550000000\"",
+            "value=\"day2templatevalue000000end\"",
+            1,
+        );
+        let document = Html::parse_fragment(&dynamic);
+        validate_query_form_source(
+            document.select(&selector("form")).next().unwrap(),
+            &catalog,
+            "target",
+        )
+        .unwrap();
+        let dynamic_id =
+            dynamic.replace("id=\"mirror\"", "id=\"mirror-day2templatevalue000000end\"");
+        let document = Html::parse_fragment(&dynamic_id);
+        assert!(
+            validate_query_form_source(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target"
+            )
+            .is_err()
+        );
+        let duplicate =
+            Html::parse_fragment(&format!("{markup}<datalist id=\"choices\"></datalist>"));
+        assert!(
+            crate::web_query_bindings::validate_document(
+                &duplicate,
+                duplicate.select(&selector("form")).next().unwrap()
+            )
+            .is_err()
+        );
+        let out_of_bounds = markup.replace("Initial off-step scenario\"></option>", "Initial off-step scenario\"></option><option value=\"60000000001\" label=\"Outside\"></option>");
+        let document = Html::parse_fragment(&out_of_bounds);
+        assert!(
+            validate_query_form(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target"
+            )
+            .is_err()
+        );
+        let incomplete = markup.replace(
+            "value=\"60000000000\" label=\"Market cap 595\"",
+            "value=\"59999000000\" label=\"Market cap 595\"",
+        );
+        let document = Html::parse_fragment(&incomplete);
+        assert!(
+            validate_query_form(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target",
+            )
+            .is_err()
+        );
+        let bad_preset = markup.replace(
+            "data-query-value=\"550000000\"",
+            "data-query-value=\"555125000\"",
+        );
+        let document = Html::parse_fragment(&bad_preset);
+        assert!(
+            validate_query_form(
+                document.select(&selector("form")).next().unwrap(),
+                &catalog,
+                "target",
+            )
+            .is_err()
+        );
     }
 
     #[test]

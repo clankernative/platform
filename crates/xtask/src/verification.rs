@@ -373,8 +373,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 )?;
                 run_with_budget(
                     root,
-                    Command::new("node")
-                        .args(["--test", "crates/day2/tests/chart_live_navigation.test.mjs"]),
+                    Command::new("node").args([
+                        "--test",
+                        "crates/day2/tests/chart_live_navigation.test.mjs",
+                        "crates/day2/tests/reactive_queries.test.mjs",
+                        "crates/day2/tests/reactive_query_forms.test.mjs",
+                    ]),
                     Duration::from_secs(60),
                 )?;
                 "browser-navigation".into()
@@ -1756,6 +1760,9 @@ mod tests {
             "examples/chart-live/App.roc",
             "examples/chart-live/ui/app.js",
             "crates/day2/tests/navigation.test.mjs",
+            "crates/day2/tests/reactive_queries.test.mjs",
+            "crates/day2/tests/reactive_query_forms.test.mjs",
+            "assets/reactive-queries.js",
         ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap())?;
