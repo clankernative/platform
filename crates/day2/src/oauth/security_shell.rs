@@ -13,7 +13,6 @@ use crate::{artifact::Instance, iap, managed_credentials::browser as credentials
 use crate::{managed_credentials::crypto::KeyLease, store::open, web_security};
 use anyhow::{Context, Result, ensure};
 use axum::{
-    Router,
     body::to_bytes,
     extract::Request,
     http::{HeaderMap, Method, StatusCode, header},
@@ -34,10 +33,9 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore},
-};
+#[cfg(test)]
+use tokio::sync::Semaphore;
+use tokio::{net::TcpListener, sync::OwnedSemaphorePermit};
 
 const COOKIE: &str = "__Host-day2_security_shell";
 const PREFIX: &str = "/oauth/approvals/";
@@ -288,6 +286,7 @@ pub(crate) struct SecurityShell {
     canaries: Option<Arc<registration::shell::Canaries>>,
     guard: Option<Arc<dyn ShellGuard>>,
     management: Option<Arc<super::management::shell::Shell>>,
+    native_scopes: Vec<day2_capabilities::security_epoch::AuthorityScope>,
 }
 
 pub(crate) struct RegistrationShell {
@@ -487,6 +486,9 @@ impl SecurityShell {
         )?;
         Arc::get_mut(&mut shell)
             .context("security shell already shared")?
+            .native_scopes = super::native_management::selected_scopes(&instance, None)?;
+        Arc::get_mut(&mut shell)
+            .context("security shell already shared")?
             .management = Some(Arc::new(super::management::shell::Shell::new(
             origin.trim_end_matches('/').into(),
             approvals.clone(),
@@ -536,6 +538,7 @@ impl SecurityShell {
             canaries: None,
             guard: None,
             management: None,
+            native_scopes: Vec::new(),
         }))
     }
 
@@ -579,6 +582,10 @@ impl SecurityShell {
         Ok(self)
     }
 
+    pub(super) fn native_scopes(&self) -> &[day2_capabilities::security_epoch::AuthorityScope] {
+        &self.native_scopes
+    }
+
     pub(crate) async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         self.serve_bounded(
             listener,
@@ -600,53 +607,14 @@ impl SecurityShell {
             (1..=32).contains(&concurrency),
             "invalid security shell concurrency"
         );
-        let capacity = Arc::new(Semaphore::new(concurrency));
-        let router_capacity = capacity.clone();
-        // Axum spawns connection/request tasks outside this future's poll.
-        // Capture BOTH ambient tracks before that boundary. A selected registry
-        // still supplies its inner context in handle; absent inner hooks leave
-        // these serving hooks active rather than silently selecting native I/O.
-        let request_effects = crate::managed_credentials::effects::capture();
-        let router = Router::new().fallback(move |request: Request| {
-            let shell = self.clone();
-            let admission = admission.clone();
-            let capacity = router_capacity.clone();
-            let captured = request_effects.clone();
-            async move {
-                captured
-                    .run_async(async move {
-                        let path = request.uri().path();
-                        if matches!(path, "/health/live" | "/health/ready") {
-                            let status = if request.method() != Method::GET
-                                || request.uri().query().is_some()
-                            {
-                                StatusCode::BAD_REQUEST
-                            } else if path == "/health/ready" && !admission.load(Ordering::Acquire)
-                            {
-                                StatusCode::SERVICE_UNAVAILABLE
-                            } else {
-                                StatusCode::OK
-                            };
-                            return protected(status.into_response());
-                        }
-                        if !admission.load(Ordering::Acquire) {
-                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                        }
-                        let Ok(permit) = capacity.try_acquire_owned() else {
-                            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
-                        };
-                        shell.handle(request, permit, admission).await
-                    })
-                    .await
-            }
-        });
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await?;
-        // Detached HTTP requests may have an unabortable native operation. Its
-        // permit remains held through completion, including browser disconnect.
-        let _drained = capacity.acquire_many(concurrency.try_into()?).await?;
-        Ok(())
+        super::native_http::serve(
+            super::native_http::Endpoint::Shell(self),
+            listener,
+            concurrency,
+            admission,
+            shutdown,
+        )
+        .await
     }
 
     /// The native launcher supplies live shell-qualified targets and a private
@@ -665,6 +633,7 @@ impl SecurityShell {
         Ok(self)
     }
 
+    #[cfg(test)]
     async fn handle(
         self: Arc<Self>,
         request: Request,
@@ -678,14 +647,44 @@ impl SecurityShell {
                 registry.effects()
             });
         captured
-            .run_async(self.handle_scoped(request, permit, admission))
+            .run_async(self.handle_scoped(request, Some(permit), admission))
+            .await
+    }
+
+    pub(super) async fn handle_native(
+        self: Arc<Self>,
+        request: Request,
+        admission: Arc<AtomicBool>,
+    ) -> Response {
+        let path = request.uri().path();
+        if matches!(path, "/health/live" | "/health/ready") {
+            let status = if request.method() != Method::GET || request.uri().query().is_some() {
+                StatusCode::BAD_REQUEST
+            } else if path == "/health/ready" && !admission.load(Ordering::Acquire) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::OK
+            };
+            return protected(status.into_response());
+        }
+        if !admission.load(Ordering::Acquire) {
+            return protected(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        }
+        let captured = self
+            .credentials
+            .as_ref()
+            .map_or_else(crate::managed_credentials::effects::capture, |registry| {
+                registry.effects()
+            });
+        captured
+            .run_async(self.handle_scoped(request, None, admission))
             .await
     }
 
     async fn handle_scoped(
         self: Arc<Self>,
         request: Request,
-        permit: OwnedSemaphorePermit,
+        permit: Option<OwnedSemaphorePermit>,
         admission: Arc<AtomicBool>,
     ) -> Response {
         let (parts, body) = request.into_parts();
@@ -702,14 +701,13 @@ impl SecurityShell {
         let path = parts.uri.path().to_owned();
         let query = parts.uri.query().map(str::to_owned);
         let headers = parts.headers;
-        let response = crate::managed_credentials::effects::spawn_blocking(move || {
+        let response = (|| {
             // A disconnected browser cannot release capacity while its native
             // provider operation is still running and cannot be cancelled.
             let _permit = permit;
-            ensure!(
-                admission.load(Ordering::Acquire),
-                "security shell is draining"
-            );
+            if !admission.load(Ordering::Acquire) {
+                return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+            }
             match self.dispatch(&method, &path, query.as_deref(), &headers, &body, at) {
                 Ok(response) => Ok(response),
                 Err(error) => match shell_oidc::take_provider_observation(error) {
@@ -722,12 +720,10 @@ impl SecurityShell {
                     Err(error) => Err(error),
                 },
             }
-        })
-        .await;
+        })();
         protected(match response {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => qualification_failure_response(&error),
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Ok(response) => response,
+            Err(error) => qualification_failure_response(&error),
         })
     }
 
@@ -1926,7 +1922,7 @@ mod tests {
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(capacity.available_permits(), 1);
             assert!(world.requests().is_empty());
             Ok(())
@@ -1949,9 +1945,14 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr()?);
         let admission = Arc::new(AtomicBool::new(true));
         let (stop, shutdown) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission.clone(), async {
-            let _ = shutdown.await;
-        }));
+        let server = tokio::spawn(shell.clone().serve_bounded(
+            listener,
+            1,
+            admission.clone(),
+            async {
+                let _ = shutdown.await;
+            },
+        ));
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -1966,6 +1967,12 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        let health = client
+            .get(format!("{endpoint}/health/ready"))
+            .send()
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
         let browser = tokio::spawn({
             let client = client.clone();
             let endpoint = endpoint.clone();
@@ -1979,23 +1986,44 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(3), guard.entered.notified()).await?;
         browser.abort();
-        assert_eq!(
-            client
-                .get(format!("{endpoint}/oauth/approvals/attempt"))
-                .header(header::HOST, "security.example.com")
-                .send()
-                .await?
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
+        let _ = browser.await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                client
+                    .get(format!("{endpoint}/oauth/approvals/attempt"))
+                    .header(header::HOST, "security.example.com")
+                    .send()
+            )
+            .await
+            .is_err()
         );
-        let health = client
-            .get(format!("{endpoint}/health/ready"))
-            .send()
-            .await?;
-        assert_eq!(health.status(), StatusCode::OK);
-        assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                client.get(format!("{endpoint}/health/ready")).send()
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
         admission.store(false, Ordering::Release);
+        let _ = stop.send(());
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        *guard.released.lock().unwrap() = true;
+        guard.release.notify_all();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+
+        // A blocked owner cannot poll another request. Exercise disabled
+        // readiness on a fresh idle server, preserving the same refusal oracle.
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(shell.serve_bounded(listener, 1, admission, async {
+            let _ = shutdown.await;
+        }));
         assert_eq!(
             client
                 .get(format!("{endpoint}/health/ready"))
@@ -2014,11 +2042,8 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         let _ = stop.send(());
-        tokio::task::yield_now().await;
-        assert!(!server.is_finished());
-        *guard.released.lock().unwrap() = true;
-        guard.release.notify_all();
         tokio::time::timeout(Duration::from_secs(3), server).await???;
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

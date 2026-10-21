@@ -32,7 +32,7 @@ fn layout() -> (
     )
     .unwrap();
     let mut interval = acquisition();
-    let plan = ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).unwrap();
+    let plan = ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval).unwrap();
     (directory, selection, plan, interval)
 }
 
@@ -73,7 +73,186 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
     )
     .unwrap();
     let mut interval = acquisition();
-    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).is_err());
+    assert!(ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval).is_err());
+    assert!(interval.remaining().is_err());
+}
+
+#[test]
+fn failed_layout_artifact_admission_refuses_the_original_acquisition() {
+    let (directory, selection, _plan, _interval) = layout();
+    let mut interval = acquisition();
+    assert!(
+        ReviewedFileLayout::prepare(
+            &directory.path().join("instance.json"),
+            &selection,
+            &mut interval
+        )
+        .is_err()
+    );
+    assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
+}
+
+#[test]
+fn prepared_projection_is_closed_selection_data_without_an_owner_constructor() {
+    let (_directory, selection, plan, _interval) = layout();
+    // These are deliberately synthetic projection DATA. They cannot construct
+    // PreparedInitialFile or an app holder, even when every field matches.
+    let projection = PreparedFileProjection {
+        core: plan.proposal.core.clone(),
+        marker: plan.proposal.marker.clone(),
+        image: plan.proposal.image.clone(),
+        length: plan.proposal.length.try_into().unwrap(),
+        identity: FileIdentity {
+            device_major: 8,
+            device_minor: 1,
+            inode: 42,
+            mount: 71,
+            uid: 10001,
+        },
+    };
+    projection
+        .validate_selection(selection.policy(), selection.store())
+        .unwrap();
+    assert_eq!(projection.scope(), &selection.store().scope);
+    let bytes = serde_json::to_vec(&projection).unwrap();
+    let roundtrip: PreparedFileProjection = crate::json::decode(&bytes).unwrap();
+    assert!(roundtrip == projection);
+    assert_eq!(roundtrip.digest().unwrap(), projection.digest().unwrap());
+    for field in ["core", "marker", "identity"] {
+        let mut value = serde_json::to_value(&projection).unwrap();
+        value[field]["unexpected"] = serde_json::json!(true);
+        assert!(
+            crate::json::decode::<PreparedFileProjection>(&serde_json::to_vec(&value).unwrap())
+                .is_err()
+        );
+    }
+    let mut wrong = projection.clone();
+    wrong.marker.seed = Digest::new(b"foreign seed");
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+    let mut wrong = projection.clone();
+    wrong.core.provider_volume_uid = "foreign-volume".into();
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+    let mut wrong = projection.clone();
+    wrong.length = MAX_IMAGE_BYTES as u64 + 1;
+    assert!(
+        wrong
+            .validate_selection(selection.policy(), selection.store())
+            .is_err()
+    );
+}
+
+#[test]
+fn app_admits_the_exact_creator_image_without_reinitializing_random_authority() {
+    use crate::security_epoch::preparation_image::ObservedInitialImage;
+    let (_directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let first = InitialPreparationImage::prepare(
+        &runtime,
+        &policy,
+        &store,
+        image_fixture::incarnations(),
+        &mut acquisition(),
+    )
+    .unwrap();
+    let digest = Digest::new(first.bytes());
+    let observed = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        first.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .unwrap();
+    assert!(observed.bytes() == first.bytes());
+    let decoded = observed
+        .decode_exact_readback(first.bytes(), &mut acquisition())
+        .unwrap();
+    // Verify the actual write boundary, rather than the underlying memory
+    // connection's sqlite3_db_readonly reflection of its original open mode.
+    let write_error = decoded
+        .execute("DELETE FROM day2_initial_security_seed", [])
+        .unwrap_err();
+    assert!(
+        matches!(write_error, rusqlite::Error::SqliteFailure(ref error, _)
+        if error.code == rusqlite::ErrorCode::ReadOnly)
+    );
+    // Valid SQLite initialized independently has a different genuine authority
+    // lineage. It cannot replace the creator's exact projected image.
+    let second = InitialPreparationImage::prepare(
+        &runtime,
+        &policy,
+        &store,
+        image_fixture::incarnations(),
+        &mut acquisition(),
+    )
+    .unwrap();
+    let changed_creator = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        second.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .err()
+    .expect("independent authority replaced exact creator bytes");
+    assert_eq!(
+        changed_creator.to_string(),
+        "epoch_preparation_creator_image_mismatch"
+    );
+    let mut foreign_incarnations = first.core().incarnations.clone();
+    foreign_incarnations.record = Digest::new(b"foreign-record");
+    let foreign_core = OriginalSeedCore::new(&policy, &store, foreign_incarnations).unwrap();
+    let wrong_seed = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        foreign_core,
+        first.bytes(),
+        &digest,
+        &mut acquisition(),
+    )
+    .err()
+    .expect("a different valid seed replaced the creator seed");
+    assert_eq!(
+        wrong_seed.to_string(),
+        "epoch_preparation_seed_marker_readback_mismatch"
+    );
+    let mut trailing = first.bytes().to_vec();
+    trailing.extend_from_slice(&[0; 4096]);
+    let extra_pages = ObservedInitialImage::admit(
+        &runtime,
+        &policy,
+        &store,
+        first.core().clone(),
+        &trailing,
+        &Digest::new(&trailing),
+        &mut acquisition(),
+    )
+    .err()
+    .expect("trailing bytes were admitted as the complete SQLite image");
+    assert_eq!(extra_pages.to_string(), "epoch_preparation_image_length");
+    let mut changed = first.bytes().to_vec();
+    *changed.last_mut().unwrap() ^= 1;
+    let mut interval = acquisition();
+    assert!(
+        observed
+            .decode_exact_readback(&changed, &mut interval)
+            .is_err()
+    );
     assert!(interval.remaining().is_err());
 }
 
@@ -89,13 +268,90 @@ mod linux {
         directory: &tempfile::TempDir,
         selection: ReviewedStorageSelection,
         interval: &mut NativeAcquisition,
-    ) -> NativeStorageCreationAuthority {
+    ) -> NativeStorageCreationAuthority<'static> {
         NativeStorageCreationAuthority::filesystem_fixture(
             selection,
             File::open(directory.path()).unwrap(),
             interval,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn prepared_owner_keeps_original_interval_and_refuses_restored_file_after_tamper() {
+        for wrong_interval in [false, true] {
+            let (directory, selected, plan, mut interval) = layout();
+            let auth = authority(&directory, selected, &mut interval);
+            let NativeOriginalPreparationOutcome::Prepared(creator) =
+                prepare_original_file(auth, &plan, &mut interval)
+            else {
+                panic!("unqualified file fixture did not prepare");
+            };
+            let expected = creator.file.as_raw_fd();
+            if wrong_interval {
+                interval = NativeAcquisition::fixture(
+                    Digest::new(b"replacement interval"),
+                    std::process::id(),
+                    Duration::from_secs(100),
+                    Duration::from_secs(5),
+                );
+            }
+            let mut owner = PreparedInitialFile::retain_original(creator, plan, interval);
+            if wrong_interval {
+                assert!(owner.projection().is_err());
+            } else {
+                let projection = owner.projection().unwrap();
+                assert!(projection.identity == owner.creator.identity);
+                assert_eq!(
+                    projection.length,
+                    owner.creator.file.metadata().unwrap().len()
+                );
+                owner.creator.file.write_all_at(b"X", 0).unwrap();
+                assert!(owner.projection().is_err());
+                owner
+                    .creator
+                    .file
+                    .write_all_at(&owner.layout.image.bytes()[..1], 0)
+                    .unwrap();
+                // Restoration cannot clear the original refusal.
+                assert!(owner.check_original().is_err());
+            }
+            assert_eq!(owner.creator.file.as_raw_fd(), expected);
+            assert!(owner.creator.file.metadata().is_ok());
+            assert!(owner.acquisition.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn local_preparation_cannot_be_promoted_without_a_real_enrolled_controller() {
+        let (directory, selected, plan, mut interval) = layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(creator) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("fixture did not prepare");
+        };
+        let fd = creator.file.as_raw_fd();
+        let original = PreparedInitialFile::retain_original(creator, plan, interval);
+        let PreparedRetentionOutcome::Refused {
+            mut original,
+            error,
+        } = original.retain_for_current_phases()
+        else {
+            panic!("a filesystem fixture became native continuity");
+        };
+        assert_eq!(
+            error.to_string(),
+            "storage_native_retention_requires_enrolled_controller"
+        );
+        assert_eq!(original.creator.file.as_raw_fd(), fd);
+        assert!(original.creator.file.metadata().is_ok());
+        assert!(original.acquisition.remaining().is_err());
+        assert!(original.check_original().is_err());
+        assert!(matches!(
+            original.retain_for_current_phases(),
+            PreparedRetentionOutcome::Refused { .. }
+        ));
     }
 
     #[test]
@@ -478,4 +734,38 @@ mod linux {
         );
         assert!(owner.file.metadata().is_ok());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_identity_allows_growth_between_observations_but_initial_length_and_shape_stay_exact() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = File::open(temporary.path()).unwrap();
+    let anchor = super::super::directory_identity(&directory).unwrap();
+    let path = temporary.path().join("retained.sqlite");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.set_len(4096).unwrap();
+    let original = observe_anchored_file(&directory, &anchor, &file, 4096).unwrap();
+    // Model the actual interleaving: metadata observes the old length, then
+    // another legitimate SQLite writer grows the same retained inode.
+    let earlier_length = usize::try_from(file.metadata().unwrap().len()).unwrap();
+    file.set_len(8192).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).unwrap() == original);
+    assert!(observe_anchored_file(&directory, &anchor, &file, earlier_length).is_err());
+    file.set_len(4096).unwrap();
+    assert!(observe_anchored_file(&directory, &anchor, &file, 4096).unwrap() == original);
+    // Dropping the length constraint does not relax nlink or mode constraints.
+    let alias = temporary.path().join("alias.sqlite");
+    std::fs::hard_link(&path, &alias).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).is_err());
+    std::fs::remove_file(alias).unwrap();
+    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o644)).unwrap();
+    assert!(observe_current_anchored_file(&directory, &anchor, &file).is_err());
 }

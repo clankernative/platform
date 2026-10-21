@@ -86,7 +86,9 @@ pub(super) fn policy(store: &EpochStore) -> InitialBootstrapPolicy {
             "namespace":{"name":"native","uid":"namespace-uid"},
             "kubernetes_service_account":{"name":name,"uid":format!("{name}-ksa-uid")},
             "google_service_account":account,"workload_kind":if name=="app" { "stateful_set_v1" } else { "deployment_v1" },
-            "workload":{"name":name,"uid":format!("{name}-workload-uid")},"token_review_audience":"https://kubernetes.default.svc"
+        "workload":{"name":name,"uid":format!("{name}-workload-uid")},
+        "container":{"name":name,"image":Digest::new(format!("{name}-image").as_bytes())},
+        "token_review_audience":"https://kubernetes.default.svc"
         })
     };
     serde_json::from_value(json!({
@@ -94,8 +96,9 @@ pub(super) fn policy(store: &EpochStore) -> InitialBootstrapPolicy {
         "cluster":{"project":"project-seven","location":"us-central1","name":"native","uid":"cluster-uid","api_origin":"https://10.0.0.1:443","certificate_authority":Digest::new(b"ca")},
         "controller":role(json!({"kind":"gke_workload_identity_v1","service_account":"controller@project-seven.iam.gserviceaccount.com","service_account_uid":"200000000000000000007"}),"controller"),
         "app":role(serde_json::to_value(app).unwrap(),"app"),
+        "shell":role(json!({"kind":"gke_workload_identity_v1","service_account":"shell@project-seven.iam.gserviceaccount.com","service_account_uid":"300000000000000000007"}),"shell"),
         "control_store":{"kind":"firestore_authority_database_v1","epoch_store":epoch},
-        "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":Digest::new(b"profile"),"controller_code":Digest::new(b"code"),"app_artifact":Digest::new(b"artifact")},
+        "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":Digest::new(b"profile"),"controller_code":Digest::new(b"code"),"app_host_code":Digest::new(b"app-host-code"),"security_shell_code":Digest::new(b"shell-code"),"app_artifact":Digest::new(b"artifact")},
         "fresh_storage":{"provider_volume_uid":"provider-volume-uid","mount_binding":Digest::new(b"mount"),"schema_contract":Digest::new(b"schema"),"marker_format":"initial-v1"}
     })).unwrap()
 }
@@ -926,6 +929,9 @@ struct SharedPort {
     claim_reply: ClaimReply,
     slot_posts: usize,
     counter_posts: usize,
+    retained_counter_owner: Option<std::rc::Weak<()>>,
+    expire_after_counter_commit: bool,
+    lose_counter_reply: bool,
 }
 
 impl SharedPort {
@@ -936,6 +942,9 @@ impl SharedPort {
             claim_reply: ClaimReply::Known,
             slot_posts: 0,
             counter_posts: 0,
+            retained_counter_owner: None,
+            expire_after_counter_commit: false,
+            lose_counter_reply: false,
         }
     }
 
@@ -947,7 +956,7 @@ impl SharedPort {
     ) -> (
         firestore::EpochObservation,
         guarded::SlotObservation,
-        CurrentBootstrapExecution,
+        CurrentBootstrapExecution<'static, 'static>,
     ) {
         let counter = self.counter.observe(&core.counter).unwrap();
         let context = CurrentBootstrapExecution::fixture(
@@ -1053,8 +1062,87 @@ impl Port for SharedPort {
         }
         if url.ends_with(":commit") {
             self.counter_posts += 1;
+            if let Some(owner) = &self.retained_counter_owner {
+                ensure!(
+                    owner.upgrade().is_some(),
+                    "counter execution owner dropped before transport"
+                );
+            }
         }
-        self.counter.post(url, body, timeout, max_bytes)
+        let reply = self.counter.post(url, body, timeout, max_bytes)?;
+        if url.ends_with(":commit") {
+            if self.expire_after_counter_commit {
+                self.counter.set_slot_fixture_time(Duration::from_secs(105));
+            }
+            ensure!(!self.lose_counter_reply, "counter reply lost after commit");
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn counter_send_keeps_the_known_claim_owner_through_transport_and_releases_on_every_result() {
+    let (selection, create) = fixture();
+    let complete = completion(&create);
+    for core in [&create, &complete] {
+        for outcome in ["known", "expired", "lost"] {
+            let mut port = SharedPort::new();
+            if core.stage == Stage::Complete {
+                port.pending(&selection, &create);
+            }
+            let baseline = port.counter_posts;
+            let (counter, slot, context) = port.evidence(&selection, core, Purpose::Dispatch);
+            guarded::accept(&selection, core.clone(), counter, slot, context, &mut port)
+                .unwrap()
+                .send(&selection, &mut port)
+                .unwrap();
+            let (counter, slot, mut context) = port.evidence(&selection, core, Purpose::Dispatch);
+            let retained = context.observe_fixture_lifetime();
+            port.retained_counter_owner = Some(retained.clone());
+            let before = codec::decode(
+                &selection,
+                core,
+                &port.slots.read(&codec::name(&selection, core).unwrap()),
+            )
+            .unwrap();
+            let claim = guarded::claim(
+                &selection,
+                core.clone(),
+                counter,
+                slot,
+                context,
+                attempt(
+                    core,
+                    before.version,
+                    AttemptOrdinal::first(),
+                    b"retained-owner",
+                ),
+                &mut port,
+            )
+            .unwrap()
+            .send(&selection, &mut port)
+            .unwrap();
+            assert!(retained.upgrade().is_some());
+            port.expire_after_counter_commit = outcome == "expired";
+            port.lose_counter_reply = outcome == "lost";
+            let result = claim.send(&selection, &mut port);
+            assert_eq!(result.is_ok(), outcome == "known", "{outcome}");
+            assert_eq!(port.counter_posts, baseline + 1);
+            assert!(retained.upgrade().is_none());
+            let stored = codec::decode(
+                &selection,
+                core,
+                &port.slots.read(&codec::name(&selection, core).unwrap()),
+            )
+            .unwrap();
+            assert!(matches!(
+                stored.slot.state,
+                SlotState::MayHaveBeenSent { .. }
+            ));
+            // A lost/expired reply does not free the permanent slot or turn
+            // its stored state into another local send permission.
+            replay_provider(&port.slots.replay());
+        }
     }
 }
 

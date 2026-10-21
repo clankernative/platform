@@ -104,7 +104,11 @@ fn activation(create: &Request, pending: &Snapshot) -> Request {
     }
 }
 
-fn context(request: &Request, snapshot: &Snapshot, purpose: Purpose) -> CurrentBootstrapExecution {
+fn context(
+    request: &Request,
+    snapshot: &Snapshot,
+    purpose: Purpose,
+) -> CurrentBootstrapExecution<'static, 'static> {
     CurrentBootstrapExecution::fixture(
         &selection(),
         request,

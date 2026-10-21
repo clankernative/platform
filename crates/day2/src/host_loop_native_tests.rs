@@ -41,6 +41,45 @@ struct SqliteWork {
     stop_observed: tokio::sync::Notify,
 }
 
+#[tokio::test(start_paused = true)]
+async fn selected_native_pump_commits_on_its_owner_thread_and_drains() -> Result<()> {
+    struct Owned {
+        work: Arc<SqliteWork>,
+        owner: std::thread::ThreadId,
+        admitting: Arc<AtomicBool>,
+    }
+    impl Work for Owned {
+        fn execute(&self, pump: Pump) -> Completion {
+            assert_eq!(std::thread::current().id(), self.owner);
+            let result = self.work.execute(pump);
+            self.admitting.store(false, Ordering::Release);
+            result
+        }
+        fn observe(&self, event: Event, state: &State) {
+            self.work.observe(event, state);
+        }
+    }
+    let (work, _observed, cleanup, stopped) = fixture(false);
+    for release in &cleanup.release {
+        release.send(()).unwrap();
+    }
+    drive_mode(
+        Arc::new(Owned {
+            work: work.clone(),
+            owner: std::thread::current().id(),
+            admitting: cleanup.admitting.clone(),
+        }),
+        Arc::new(TokioTicks),
+        cleanup.admitting.clone(),
+        stopped,
+        false,
+        Execution::OwnerThread,
+    )
+    .await?;
+    assert_eq!(commits(&work), [1, 0, 0]);
+    Ok(())
+}
+
 impl Work for SqliteWork {
     fn execute(&self, pump: Pump) -> Completion {
         self.entered.send(pump).unwrap();

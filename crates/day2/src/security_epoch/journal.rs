@@ -1,6 +1,7 @@
 //! Opaque initial execution context and consuming counter-dispatch boundary.
 //! Production dispatch requires a shared-slot known claim. The local SQLite
 //! journal is retained solely as a controlled test fixture.
+use super::CurrentStorageBootstrapPhase;
 #[cfg(test)]
 use super::{firestore, kernel::Outcome};
 use super::{
@@ -11,7 +12,7 @@ use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::EpochStore};
 #[cfg(test)]
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use std::{marker::PhantomData, rc::Rc, time::Duration};
+use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Duration};
 
 #[cfg(test)]
 const SCHEMA: &str = "CREATE TABLE external_epoch_operations (
@@ -62,12 +63,11 @@ pub(super) enum Purpose {
     Reconcile,
 }
 
-/// No production constructor exists. A future constructor must acquire the
-/// actual current role/code/process/governance/clock/holder/marker observations
-/// together, retain the original CreatorFD/P3 owner, and recheck it before every
-/// initial mutation. A token, desired policy, parsed snapshot, journal row or test fixture
-/// cannot construct this in a serving build. It is process and thread local.
-pub(crate) struct CurrentBootstrapExecution {
+/// A native context retains the SAME current Controller/file/peer phase and
+/// exact authenticated port identity through the consuming claim, send and
+/// response checks. The constructor accepts no DTO, flag or replacement clock.
+/// Controlled test contexts remain cfg(test) only. It is process/thread local.
+pub(crate) struct CurrentBootstrapExecution<'storage, 'role> {
     selection: Digest,
     request: Digest,
     snapshot: Digest,
@@ -77,10 +77,50 @@ pub(crate) struct CurrentBootstrapExecution {
     floor: Duration,
     deadline: Duration,
     valid: bool,
+    native: Option<Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>>,
     local: PhantomData<Rc<()>>,
+    #[cfg(test)]
+    retention: Option<Rc<()>>,
 }
 
-impl CurrentBootstrapExecution {
+impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
+    pub(super) fn native(
+        owner: Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
+        selection: &EpochStore,
+        request: &Request,
+        snapshot: &Snapshot,
+        purpose: Purpose,
+        port: &mut super::authenticated_reads::ControllerBorrow<'_, 'storage, 'role>,
+    ) -> Result<Self> {
+        let result = (|| {
+            owner.try_borrow_mut()?.check()?;
+            ensure!(
+                owner.try_borrow()?.request_digest()? == request.digest()?,
+                "security_epoch_native_request_changed"
+            );
+            let (sample, deadline) = port.context_interval(&owner, selection)?;
+            Ok(Self {
+                selection: Digest::of(selection)?,
+                request: request.digest()?,
+                snapshot: snapshot_digest(snapshot)?,
+                stage: stage(request),
+                purpose,
+                domain: sample.domain,
+                floor: sample.elapsed,
+                deadline,
+                valid: true,
+                native: Some(Rc::clone(&owner)),
+                local: PhantomData,
+                #[cfg(test)]
+                retention: None,
+            })
+        })();
+        if result.is_err() {
+            owner.try_borrow_mut()?.refuse();
+        }
+        result
+    }
+
     pub(super) fn check(
         &mut self,
         selection: &EpochStore,
@@ -104,6 +144,11 @@ impl CurrentBootstrapExecution {
         })();
         if result.is_err() {
             self.valid = false;
+            if let Some(owner) = &self.native
+                && let Ok(mut phase) = owner.try_borrow_mut()
+            {
+                phase.refuse();
+            }
         }
         result
     }
@@ -111,6 +156,9 @@ impl CurrentBootstrapExecution {
     fn sample(&mut self, port: &mut impl Port) -> Result<Sample> {
         ensure!(self.valid, "security_epoch_execution_context_refused");
         let result = (|| {
+            if let Some(owner) = &self.native {
+                owner.try_borrow_mut()?.check()?;
+            }
             let sample = port.sample()?;
             ensure!(
                 sample.domain == self.domain
@@ -123,6 +171,11 @@ impl CurrentBootstrapExecution {
         })();
         if result.is_err() {
             self.valid = false;
+            if let Some(owner) = &self.native
+                && let Ok(mut phase) = owner.try_borrow_mut()
+            {
+                phase.refuse();
+            }
         }
         result
     }
@@ -154,7 +207,9 @@ impl CurrentBootstrapExecution {
                 )))
                 .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
             valid: true,
+            native: None,
             local: PhantomData,
+            retention: None,
         })
     }
 
@@ -163,73 +218,157 @@ impl CurrentBootstrapExecution {
         // Controlled invalidation, not a producer or native file-loss proof.
         self.valid = false;
     }
-}
 
-#[cfg(test)]
-pub(super) struct InitialEpochCreatePermit {
-    request: Request,
-    context: CurrentBootstrapExecution,
-}
-
-#[cfg(test)]
-pub(super) struct InitialFirstHolderActivationPermit {
-    request: Request,
-    context: CurrentBootstrapExecution,
-}
-
-/// Serving builds accept only the shared known claim. The two local fixture
-/// variants exist exclusively in tests of the underlying counter kernel.
-pub(super) enum AuthorizedDispatch {
+    /// Only observes the lifetime of this controlled context. It does not stand
+    /// in for a native file, enrollment, provider or first-holder supplier.
     #[cfg(test)]
-    Create(InitialEpochCreatePermit),
-    #[cfg(test)]
-    Activate(InitialFirstHolderActivationPermit),
-    Shared(Box<super::control_slot_io::KnownClaim>),
-}
-
-impl AuthorizedDispatch {
-    pub(super) fn prepare(
-        self,
-        selection: &EpochStore,
-        port: &mut impl Port,
-    ) -> Result<(Request, Budget)> {
-        match self {
-            Self::Shared(claim) => (*claim).prepare(selection, port),
-            #[cfg(test)]
-            Self::Create(permit) => {
-                fixture_dispatch(permit.request, permit.context, selection, port)
-            }
-            #[cfg(test)]
-            Self::Activate(permit) => {
-                fixture_dispatch(permit.request, permit.context, selection, port)
-            }
-        }
+    pub(super) fn observe_fixture_lifetime(&mut self) -> std::rc::Weak<()> {
+        let owner = Rc::new(());
+        let observed = Rc::downgrade(&owner);
+        self.retention = Some(owner);
+        observed
     }
 }
 
 #[cfg(test)]
-fn fixture_dispatch(
+pub(super) struct InitialEpochCreatePermit<'storage, 'role> {
     request: Request,
-    mut context: CurrentBootstrapExecution,
-    selection: &EpochStore,
-    port: &mut impl Port,
-) -> Result<(Request, Budget)> {
-    ensure!(
-        context.selection == Digest::of(selection)?,
-        "security_epoch_execution_selection_changed"
-    );
-    Ok((request, context.budget(port)?))
+    context: CurrentBootstrapExecution<'storage, 'role>,
 }
 
 #[cfg(test)]
-impl InitialEpochCreatePermit {
+pub(super) struct InitialFirstHolderActivationPermit<'storage, 'role> {
+    request: Request,
+    context: CurrentBootstrapExecution<'storage, 'role>,
+}
+
+/// Serving builds accept only the shared known claim. The two local fixture
+/// variants exist exclusively in tests of the underlying counter kernel.
+pub(super) enum AuthorizedDispatch<'storage, 'role> {
+    #[cfg(test)]
+    Create(InitialEpochCreatePermit<'storage, 'role>),
+    #[cfg(test)]
+    Activate(InitialFirstHolderActivationPermit<'storage, 'role>),
+    Shared(Box<super::control_slot_io::KnownClaim<'storage, 'role>>),
+}
+
+/// Keep the consuming claim and all of its native owners through the actual
+/// request and response checks. A request/budget tuple would drop those owners
+/// before entering the transport.
+pub(crate) struct PreparedDispatch<'storage, 'role> {
+    owner: AuthorizedDispatch<'storage, 'role>,
+    request: Request,
+    budget: Budget,
+}
+
+/// The response still owns the exact execution context. Its native owners
+/// cannot be dropped before the fixed response parser and final current check.
+pub(crate) struct CounterResponse<'storage, 'role> {
+    dispatch: PreparedDispatch<'storage, 'role>,
+    bytes: Vec<u8>,
+}
+
+impl<'storage, 'role> AuthorizedDispatch<'storage, 'role> {
+    pub(super) fn prepare(
+        self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<PreparedDispatch<'storage, 'role>> {
+        let (owner, request, budget) = match self {
+            Self::Shared(claim) => {
+                let (claim, request, budget) = claim.prepare(selection, port)?;
+                (Self::Shared(Box::new(claim)), request, budget)
+            }
+            #[cfg(test)]
+            Self::Create(mut permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                let request = permit.request.clone();
+                let budget = permit.context.budget(port)?;
+                (Self::Create(permit), request, budget)
+            }
+            #[cfg(test)]
+            Self::Activate(mut permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                let request = permit.request.clone();
+                let budget = permit.context.budget(port)?;
+                (Self::Activate(permit), request, budget)
+            }
+        };
+        Ok(PreparedDispatch {
+            owner,
+            request,
+            budget,
+        })
+    }
+}
+
+impl<'storage, 'role> PreparedDispatch<'storage, 'role> {
+    pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        match &mut self.owner {
+            AuthorizedDispatch::Shared(claim) => claim.check(selection, port)?,
+            #[cfg(test)]
+            AuthorizedDispatch::Create(permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                permit.context.sample(port)?;
+            }
+            #[cfg(test)]
+            AuthorizedDispatch::Activate(permit) => {
+                ensure!(
+                    permit.context.selection == Digest::of(selection)?,
+                    "security_epoch_execution_selection_changed"
+                );
+                permit.context.sample(port)?;
+            }
+        }
+        self.budget.remaining(port)?;
+        Ok(())
+    }
+
+    pub(super) fn send(
+        mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<CounterResponse<'storage, 'role>> {
+        let names = super::firestore::Names::new(selection, self.request.bootstrap(), None)?;
+        let body = super::firestore::commit_body(selection, &self.request)?;
+        self.check(selection, port)?;
+        let bytes = self.budget.call(port, &names.endpoint("commit"), &body)?;
+        self.check(selection, port)?;
+        Ok(CounterResponse {
+            dispatch: self,
+            bytes,
+        })
+    }
+}
+
+impl<'storage, 'role> CounterResponse<'storage, 'role> {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(super) fn finish(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+        self.dispatch.check(selection, port)
+    }
+}
+
+#[cfg(test)]
+impl<'storage, 'role> InitialEpochCreatePermit<'storage, 'role> {
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         firestore::commit(port, selection, AuthorizedDispatch::Create(self))
     }
 }
 
 #[cfg(test)]
-impl InitialFirstHolderActivationPermit {
+impl<'storage, 'role> InitialFirstHolderActivationPermit<'storage, 'role> {
     pub(super) fn send(self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
         firestore::commit(port, selection, AuthorizedDispatch::Activate(self))
     }
@@ -309,14 +448,14 @@ impl<'a> Journal<'a> {
         Ok(())
     }
 
-    pub(super) fn authorize_create(
+    pub(super) fn authorize_create<'storage, 'role>(
         &mut self,
         selection: &EpochStore,
         request: &Request,
         snapshot: &Snapshot,
-        mut context: CurrentBootstrapExecution,
+        mut context: CurrentBootstrapExecution<'storage, 'role>,
         port: &mut impl Port,
-    ) -> Result<InitialEpochCreatePermit> {
+    ) -> Result<InitialEpochCreatePermit<'storage, 'role>> {
         ensure!(
             matches!(request, Request::CreateInitialAuthority { .. }),
             "security_epoch_wrong_stage"
@@ -333,14 +472,14 @@ impl<'a> Journal<'a> {
         })
     }
 
-    pub(super) fn authorize_activate(
+    pub(super) fn authorize_activate<'storage, 'role>(
         &mut self,
         selection: &EpochStore,
         request: &Request,
         snapshot: &Snapshot,
-        mut context: CurrentBootstrapExecution,
+        mut context: CurrentBootstrapExecution<'storage, 'role>,
         port: &mut impl Port,
-    ) -> Result<InitialFirstHolderActivationPermit> {
+    ) -> Result<InitialFirstHolderActivationPermit<'storage, 'role>> {
         ensure!(
             matches!(request, Request::CompleteInitialFirstActivation { .. }),
             "security_epoch_wrong_stage"
@@ -360,12 +499,12 @@ impl<'a> Journal<'a> {
     /// Reconciliation preserves the permanently occupied authority/stage slot.
     /// NotApplied only arms the SAME request for a separately authorized send;
     /// neither a lost reply nor a fenced/refused holder permits a new candidate.
-    pub(super) fn reconcile_attempt(
+    pub(super) fn reconcile_attempt<'storage, 'role>(
         &mut self,
         selection: &EpochStore,
         request: &Request,
         snapshot: &Snapshot,
-        mut context: CurrentBootstrapExecution,
+        mut context: CurrentBootstrapExecution<'storage, 'role>,
         port: &mut impl Port,
     ) -> Result<Outcome> {
         context.check(selection, request, snapshot, Purpose::Reconcile, port)?;

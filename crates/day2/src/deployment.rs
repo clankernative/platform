@@ -8,6 +8,10 @@ use std::{
     fs::{self, File, OpenOptions},
     num::NonZeroU16,
     path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -17,6 +21,63 @@ const PROC_BUDGET: u64 = 1_048_576;
 /// callback URLs, never readiness and never client or custody secret bytes.
 pub fn oauth_setup(instance_path: &Path) -> Result<serde_json::Value> {
     crate::oauth::admission::live::setup(instance_path)
+}
+
+/// Full admitted framework/app SQLite schema DATA, derived in fresh memory.
+/// This never loads a Runtime or creates/opens an installation database.
+pub fn native_storage_metadata(instance: &Path, app: &str) -> Result<serde_json::Value> {
+    crate::security_epoch::native_schema_metadata(instance, app)
+}
+
+/// Digest exact operator-reviewed static profile document bytes. This neither
+/// validates/qualifies its claims nor turns historical evidence into authority.
+pub fn native_profile_manifest(path: &Path) -> Result<serde_json::Value> {
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(i32::try_from(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits(),
+        )?)
+        .open(path)?;
+    let before = file.metadata()?;
+    ensure!(
+        before.is_file() && before.len() > 0 && before.len() <= MAX_BYTES,
+        "profile_manifest_regular_bound"
+    );
+    let mut bytes = Vec::new();
+    (&file).take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    let stamp = |m: &std::fs::Metadata| {
+        (
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        )
+    };
+    ensure!(
+        stamp(&before) == stamp(&after)
+            && u64::try_from(bytes.len())? == before.len()
+            && bytes.len() <= usize::try_from(MAX_BYTES)?,
+        "profile_manifest_changed_or_bound"
+    );
+    ensure!(
+        !std::str::from_utf8(&bytes)?.trim().is_empty(),
+        "profile_manifest_text_required"
+    );
+    Ok(serde_json::json!({
+        "mode":"operator_profile_document_digest_only",
+        "digest_convention":"sha256_raw_file_bytes",
+        "manifest_bytes":bytes.len(),
+        "runtime_profile":{"manifest":day2_capabilities::Digest::new(&bytes)}
+    }))
 }
 
 const SHELL_RUNNER: &str = "/usr/local/lib/day2/day2-workflows";
@@ -492,6 +553,84 @@ pub(crate) async fn serve_with_oauth(
     serve_configured(instance_path, app, access, providers, Ok).await
 }
 
+/// Closed selected-App startup, consumed only on its final HTTP owner. Runtime
+/// and instance selections are DATA until that owner enrolls; no initialized
+/// storage owner or borrowed role crosses the launch boundary.
+pub(crate) struct NativeAppStartup {
+    runtime: Runtime,
+    declared: Instance,
+    providers: Option<crate::oauth::host::Providers>,
+    configure: Box<dyn FnOnce(Runtime) -> Result<Runtime> + Send>,
+    listener: tokio::net::TcpListener,
+    concurrency: usize,
+    replicas: u8,
+}
+
+impl NativeAppStartup {
+    pub(crate) fn scopes(&self) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+        crate::oauth::native_management::selected_scopes(&self.declared, Some(self.runtime.app()))
+    }
+
+    pub(crate) fn prepare(
+        self,
+        admission: Arc<AtomicBool>,
+    ) -> Result<(Arc<crate::web::Host>, tokio::net::TcpListener)> {
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        for scope in self.scopes()? {
+            crate::oauth::native_management::with_current_app_role(
+                &scope,
+                crate::oauth::native_management::RuntimePhase::InitialStorage,
+                |stage| stage.check(),
+            )?;
+        }
+        // S3's InitialStorage consumer runs within Runtime::initialize here,
+        // after enrollment and before ordinary schema initialization/serving.
+        let security = admit_store(&self.runtime)?;
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        if let Some(requirements) = &security {
+            requirements.require_runtime()?;
+        }
+        let runtime = (self.configure)(self.runtime)?;
+        let providers = match self.providers {
+            Some(providers) => providers,
+            None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
+        };
+        let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
+        ensure!(
+            admission.load(Ordering::Acquire),
+            "native App startup admission closed"
+        );
+        let (identity, edge) = self.declared.edge(runtime.app())?;
+        let verifier = crate::iap::Verifier::new(
+            &edge.iap_audience,
+            &identity.hosted_domain,
+            Box::new(crate::iap::GoogleKeys),
+        )?;
+        let mut server = LocalServer::bind_edge_listener(
+            runtime,
+            self.listener,
+            edge,
+            verifier,
+            self.concurrency,
+        )?;
+        server.mount_oauth(receiver)?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode":"edge", "scheme":identity.scheme,
+                "origin":server.origin, "replicas":self.replicas
+            })
+        );
+        server.into_native_parts(admission)
+    }
+}
+
 async fn serve_configured(
     instance_path: &Path,
     app: &str,
@@ -537,32 +676,65 @@ async fn serve_configured(
             == Some(day2_assets::hash_part(runtime.artifact().id())?),
         "active deployment artifact address mismatch"
     );
-    let security = admit_store(&runtime)?;
+    let security = if oauth { None } else { admit_store(&runtime)? };
     if let Ok(expected) = std::env::var("DAY2_EXPECTED_ARTIFACT") {
         ensure!(
             expected == runtime.artifact().id(),
             "deployment_artifact_changed"
         );
     }
+    if oauth {
+        let concurrency = usize::from(profile.resources().http_concurrency());
+        let startup = NativeAppStartup {
+            runtime,
+            declared,
+            providers,
+            configure: Box::new(configure),
+            listener: tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 8080))
+                .await?,
+            concurrency,
+            replicas: profile.replicas(),
+        };
+        let admission = Arc::new(AtomicBool::new(true));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let mut http = tokio::spawn(crate::oauth::native_http::serve_app(
+            startup,
+            admission.clone(),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+        let mut http_finished = false;
+        let cause = tokio::select! {
+            signal = termination() => signal,
+            result = &mut http => {
+                http_finished = true;
+                result.context("HTTP supervisor failed").and_then(|result| result)
+                    .and_then(|()| anyhow::bail!("HTTP server stopped unexpectedly"))
+            },
+        };
+        admission.store(false, Ordering::Release);
+        let _ = shutdown_tx.send(());
+        let drain = async {
+            if !http_finished {
+                (&mut http).await.context("HTTP drain failed")?
+            } else {
+                Ok(())
+            }
+        };
+        tokio::time::timeout(
+            Duration::from_secs(u64::from(profile.resources().shutdown_seconds())),
+            drain,
+        )
+        .await
+        .context("shutdown grace exceeded; pending work remains recoverable")??;
+        return cause;
+    }
     if let Some(requirements) = &security {
         requirements.require_runtime()?;
     }
     let runtime = tokio::task::spawn_blocking(move || configure(runtime)).await??;
     let concurrency = usize::from(profile.resources().http_concurrency());
-    let (runtime, receiver) = if oauth {
-        tokio::task::spawn_blocking(move || {
-            let providers = match providers {
-                Some(providers) => providers,
-                None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
-            };
-            let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
-            Ok::<_, anyhow::Error>((runtime, Some(receiver)))
-        })
-        .await
-        .context("OAuth host startup failed")??
-    } else {
-        (runtime, None)
-    };
     let server = match access {
         Access::Development {
             actor,
@@ -581,10 +753,7 @@ async fn serve_configured(
         }
         Access::Edge => {
             let (identity, edge) = declared.edge(app)?;
-            let mut server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
-            if let Some(receiver) = receiver {
-                server.mount_oauth(receiver)?;
-            }
+            let server = LocalServer::bind_edge(runtime, identity, edge, concurrency).await?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -632,10 +801,89 @@ async fn serve_configured(
     cause
 }
 
+/// Closed native enrollment service entrypoint. Operator-selected boot/profile
+/// configuration is read by the service; applications cannot choose a signer,
+/// runtime endpoint or process to enroll.
+pub fn run_native_enrollment(issuer: bool) -> anyhow::Result<()> {
+    crate::security_epoch::native_enrollment::run(issuer)
+}
+
+/// Dedicated Controller on its final owning OS thread. No caller PID, URL,
+/// signing key, database path or callback selects operational authority.
+pub fn run_epoch_controller(instance: &Path, app: &str) -> Result<()> {
+    crate::security_epoch::controller::run(instance, app)
+}
+
+pub fn qualify_native_enrollment(role: &str) -> anyhow::Result<serde_json::Value> {
+    crate::security_epoch::native_enrollment::qualify(role)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn profile_manifest_digest_uses_exact_reviewed_bytes_without_qualification() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("reviewed-profile.txt");
+        let bytes = b"Static supported profile selections, reviewed separately.\n";
+        fs::write(&path, bytes)?;
+        let result = native_profile_manifest(&path)?;
+        ensure!(
+            result["runtime_profile"]["manifest"] == day2_capabilities::Digest::new(bytes).as_str()
+        );
+        ensure!(result["mode"] == "operator_profile_document_digest_only");
+        ensure!(result["digest_convention"] == "sha256_raw_file_bytes");
+        ensure!(result.get("qualified").is_none() && result.get("authority").is_none());
+        let changed = [bytes.as_slice(), b"\n"].concat();
+        fs::write(&path, &changed)?;
+        ensure!(
+            native_profile_manifest(&path)?["runtime_profile"]["manifest"]
+                != result["runtime_profile"]["manifest"]
+        );
+        ensure!(fs::read(&path)? == changed);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_manifest_refuses_nonregular_empty_nontext_and_oversized_inputs() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("profile.txt");
+        for bytes in [b"".as_slice(), b" \n\t", &[0xff, 0xfe]] {
+            fs::write(&path, bytes)?;
+            ensure!(native_profile_manifest(&path).is_err());
+        }
+        fs::write(&path, b"actual retained static document")?;
+        let link = directory.path().join("link");
+        symlink(&path, &link)?;
+        ensure!(native_profile_manifest(&link).is_err());
+        ensure!(native_profile_manifest(directory.path()).is_err());
+        File::options()
+            .write(true)
+            .open(&path)?
+            .set_len(1024 * 1024 + 1)?;
+        ensure!(native_profile_manifest(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn native_metadata_refuses_unadmitted_artifact_without_creating_state() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let instance = directory.path().join("instance.json");
+        fs::write(
+            &instance,
+            serde_json::to_vec(&json!({
+                "installation":"company", "environment":"canary",
+                "apps":{"calendar":{"artifact":"missing-artifact","readers":[],"writers":[]}}
+            }))?,
+        )?;
+        ensure!(native_storage_metadata(&instance, "calendar").is_err());
+        ensure!(!directory.path().join(".state").exists());
+        ensure!(fs::read_dir(directory.path())?.count() == 1);
+        Ok(())
+    }
 
     #[test]
     fn shell_layout_and_mount_guards_refuse_writable_app_storage_and_missing_bounds() -> Result<()>

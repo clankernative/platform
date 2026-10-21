@@ -70,6 +70,7 @@ thread_local! {
 
 #[cfg(test)]
 pub(crate) fn scope<T>(hooks: std::sync::Arc<dyn Hooks>, run: impl FnOnce() -> T) -> T {
+    let _originals = super::native_management::fixtures::scope(hooks.clone());
     struct Restore(Option<std::sync::Arc<dyn Hooks>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -78,6 +79,11 @@ pub(crate) fn scope<T>(hooks: std::sync::Arc<dyn Hooks>, run: impl FnOnce() -> T
     }
     let _restore = Restore(HOOKS.with(|slot| slot.replace(Some(hooks))));
     run()
+}
+
+#[cfg(test)]
+pub(super) fn current_domain() -> Option<u64> {
+    HOOKS.with(|slot| slot.borrow().as_ref().map(|hooks| hooks.domain()))
 }
 
 /// Native task capture is empty in serving binaries. Test captures retain the
@@ -251,7 +257,7 @@ pub(crate) async fn timeout<F: std::future::Future>(
     duration: Duration,
     future: F,
 ) -> Result<F::Output, tokio::time::error::Elapsed> {
-    tokio::time::timeout(duration, future).await
+    super::native_http::timer(|| tokio::time::timeout(duration, future)).await
 }
 
 #[cfg(test)]

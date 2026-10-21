@@ -16,7 +16,7 @@ const MAX_BEGINS: usize = 1024;
 /// Immutable local observations only. The actual native original-lifetime
 /// producer is separate and remains required for production acceptance.
 #[derive(Clone)]
-pub(super) struct Original {
+pub(super) struct OriginalData {
     pub(super) intent: FreshIntent,
     pub(super) owner: Digest,
     pub(super) started_at: i64,
@@ -40,7 +40,7 @@ enum Stage {
 }
 
 struct Entry {
-    original: Original,
+    original: OriginalData,
     stage: Stage,
 }
 
@@ -56,6 +56,7 @@ impl Begins {
     }
 
     pub(super) fn reserve(&self, intent: &FreshIntent, now: i64) -> Result<Flight<'_>> {
+        super::native_management::reserve_shell(intent, now)?;
         ensure!(
             now >= intent.created_at() && now < intent.deadline(),
             "original Google Begin expired"
@@ -73,7 +74,7 @@ impl Begins {
             let started = effects::Instant::now();
             let owner = Digest::new(effects::random()?.as_bytes());
             slot.insert(Entry {
-                original: Original {
+                original: OriginalData {
                     intent: intent.clone(),
                     owner,
                     started_at: now,
@@ -196,7 +197,7 @@ impl Begins {
 pub(super) struct Flight<'a> {
     begins: &'a Begins,
     key: Digest,
-    pub(super) original: Original,
+    pub(super) original: OriginalData,
     payload: Option<Payload>,
     armed: bool,
 }

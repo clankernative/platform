@@ -802,6 +802,7 @@ mod tests {
                 "google_service_account":{"kind":"gke_workload_identity_v1",
                     "service_account":format!("{name}@company-tools.iam.gserviceaccount.com"),"service_account_uid":uid},
                 "workload_kind":"deployment_v1","workload":{"name":name,"uid":format!("{name}-workload-uid")},
+                "container":{"name":name,"image":digest},
                 "token_review_audience":"https://kubernetes.default.svc"
             })
         };
@@ -810,8 +811,9 @@ mod tests {
             "cluster":{"project":"company-tools","location":"us-central1","name":"native","uid":"cluster-uid",
                 "api_origin":"https://10.0.0.1","certificate_authority":digest},
             "controller":role("controller","200000000000000000007"),"app":role("epochs","100000000000000000007"),
+            "shell":role("shell","300000000000000000007"),
             "control_store":{"kind":"firestore_authority_database_v1","epoch_store":selected_epoch},
-            "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":digest,"controller_code":digest,"app_artifact":digest},
+            "runtime_profile":{"kind":"gke_linux_trusted_native_v1","manifest":digest,"controller_code":digest,"app_host_code":digest,"security_shell_code":digest,"app_artifact":digest},
             "fresh_storage":{"provider_volume_uid":"volume-uid","mount_binding":digest,"schema_contract":digest,"marker_format":"initial-v1"}
         });
         let instance: Instance = serde_json::from_value(

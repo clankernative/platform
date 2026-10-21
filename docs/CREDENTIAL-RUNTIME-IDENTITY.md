@@ -18,6 +18,44 @@ Mappings are read completely within explicit byte, entry and path bounds. Mappin
 
 ## Selected container data
 
+The shared selection contract is
+`day2_capabilities::security_epoch::bootstrap`. `InitialBootstrapPolicy` requires
+separate `app`, `shell` and `controller` workloads. Every `GkeRoleSelection`
+requires `container: ContainerSelection { name, image }`; the image is an
+immutable digest. No separate caller-supplied container can replace it at the
+response codec. All three roles require distinct workload, KSA and GSA identities.
+The names may repeat across different namespaces; immutable UIDs must differ.
+
+`BootstrapRuntimeProfile` separately requires these executable and artifact pins:
+
+| Selection | Exact selected bytes |
+| --- | --- |
+| `app_host_code` | Native AppHost executable, observed through its retained executable descriptor |
+| `security_shell_code` | Native SecurityShell executable, observed through its retained executable descriptor |
+| `controller_code` | Native epoch-controller executable, observed through its retained executable descriptor |
+| `app_artifact` | Roc application artifact admitted by the AppHost |
+
+An artifact digest or image digest cannot substitute for a native executable
+digest. AppHost and SecurityShell may use the same native executable bytes, but
+still have separate selected workloads, containers and enrolled roles. Matching
+code alone cannot identify which role the process currently owns.
+
+`InitialBootstrapPolicy::native_role(NativeRole)` returns a borrowed
+`NativeRoleSelection { role, workload, code, profile }`. The only supported role
+labels are `AppHost` / `app_host`, `SecurityShell` / `security_shell` and
+`EpochController` / `epoch_controller`. `profile` is the exact
+`runtime_profile.manifest` digest under `gke_linux_trusted_native_v1`.
+Enrollment must join that profile and role to the selected workload/container
+and executable; it must not retain independent caller overrides for those
+selections. The enrollment root, issuer birth, runtime and node selections are
+additional required inputs of the native enrollment producer.
+
+All these selections and the borrowed view are DATA. They do not prove
+executable admission, enrollment, namespace/clock identity or a current role.
+The production AppHost and SecurityShell read producers continue to refuse
+until their actual native owners are available. No existing canary is migrated
+to this required shape: regenerate desired metadata and redeploy it.
+
 The response codec joins the selected container to the exact TokenReview Pod UID and existing role/lifecycle checks. It requires the supported containerd identifier and both configured image and current image status to match the selected immutable SHA256 image digest. A running container may be unready because readiness can depend on bootstrap completion.
 
 These joins remain response data. They cannot mint a role capability or reconstruct a native observation.

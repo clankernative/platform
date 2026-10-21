@@ -1,6 +1,6 @@
 # Private credential epoch read acquisition
 
-The native read adapter is a private controller implementation staged beneath
+The native read adapter is a private AppHost/controller implementation beneath
 `security_epoch`. It does not register an app capability or bootstrap command.
 `CurrentBootstrapExecution` still has no production factory. A read observation
 cannot authorize Create, Activate, restore or takeover.
@@ -34,7 +34,14 @@ may resolve Kubernetes' atomic writer; their path alone does not authenticate
 the caller or prove that its process belongs to the token's Pod. An actual
 deployment must supply and qualify these projections, executable/profile
 admission and process-to-Pod binding before a serving bootstrap factory exists.
-The app producer refuses until its own native executable selection exists.
+Acquisition now requires a borrowing real enrolled AppHost or EpochController
+stage matching the complete bootstrap/store selection. AppHost selects its
+native host executable independently of its Roc artifact. SecurityShell is not
+an epoch reader. The original stage remains borrowed through every request and
+local use, and its narrower I/O clock preserves the original domain, origin and
+earlier deadline. Code selections or parsed certificates cannot create that
+borrow. See
+[runtime identity selections](CREDENTIAL-RUNTIME-IDENTITY.md#selected-container-data).
 
 ## Authenticated response checks
 
