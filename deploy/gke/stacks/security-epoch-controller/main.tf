@@ -126,6 +126,15 @@ resource "kubernetes_deployment_v1" "controller" {
           dynamic "volume_mount" {
             for_each = var.activate ? [1] : []
             content {
+              # Artifact admission retains a private executable worker copy.
+              name       = "tmp"
+              mount_path = "/tmp"
+              read_only  = false
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
               name       = "inputs"
               mount_path = "/srv/day2/instance.json"
               sub_path   = "instance.json"
@@ -206,6 +215,16 @@ resource "kubernetes_deployment_v1" "controller" {
             failure_threshold = 3
           }
           # No liveness restart loop: an uncertain original is never adopted.
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "tmp"
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "64Mi"
+            }
+          }
         }
         dynamic "volume" {
           for_each = var.activate ? [1] : []

@@ -91,3 +91,14 @@ S1's process/code/birth/namespace/workload checks do not compare supplemental
 groups, and this deployment change weakens no native check. Qualify actual
 process groups and device access on the selected node; mock plans verify only
 the declaration. Final apply and native/P3 qualification remain operator-owned.
+
+The activated Controller also mounts a pod-local memory `emptyDir`, limited to
+64Mi, at `/tmp`. Artifact admission copies its verified worker executable into a
+private temporary file before starting the worker, as App and Shell admission do.
+The root filesystem remains read-only; scratch is neither the selected state
+volume nor a host directory, and dormant registration declares no volume or
+mount. Its memory use counts against the Controller's existing memory limit.
+The operator must qualify writing and executing the admitted worker in the real
+Pod; a mock plan is not that evidence. This supplies the missing scratch path;
+it does not establish the exact errno of an earlier `image_admission/io` refusal
+or authorize retrying, adopting or resetting a refused original storage owner.

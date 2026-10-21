@@ -29,8 +29,8 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
       tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001 &&
-      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 7 &&
-      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 9 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 8 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 10 &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].node_selector["kubernetes.io/hostname"] == "fixture-node"
     )
     error_message = "The trusted privileged Controller must retain its distinct existing identity and exact native node placement."
@@ -45,9 +45,9 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
   assert {
     condition = alltrue([
       for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount :
-      mount.read_only || contains(["/state", "/run/day2-native-enrollment/storage"], mount.mount_path)
+      mount.read_only || contains(["/state", "/run/day2-native-enrollment/storage", "/tmp"], mount.mount_path)
     ])
-    error_message = "Only the actual selected state volume and provisioner-owned private peer child are writable."
+    error_message = "Only the actual selected state volume, provisioner-owned private peer child and pod-local worker scratch are writable."
   }
 }
 
@@ -146,5 +146,27 @@ run "instance_selected_group_is_used_without_a_node_global_default" {
       ], 42)
     )
     error_message = "Use exactly the operator's explicit observed group; never substitute a global node/image assumption."
+  }
+}
+
+run "activated_controller_has_bounded_pod_local_worker_scratch" {
+  command = plan
+  assert {
+    condition = (
+      length([
+        for volume in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume : volume
+        if try(volume.name == "tmp" && length(volume.empty_dir) == 1 &&
+          volume.empty_dir[0].medium == "Memory" && volume.empty_dir[0].size_limit == "64Mi" &&
+        length(volume.host_path) == 0 && length(volume.persistent_volume_claim) == 0, false)
+      ]) == 1 &&
+      length([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount : mount
+        if try(mount.name == "tmp" && mount.mount_path == "/tmp" && !mount.read_only && mount.sub_path == null, false)
+      ]) == 1 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].fs_group == null &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].init_container) == 0
+    )
+    error_message = "Active artifact admission needs one writable 64Mi memory emptyDir at /tmp; keep the root read-only, scratch off host/persistent storage, and no ownership repair."
   }
 }
