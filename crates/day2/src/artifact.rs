@@ -42,7 +42,8 @@ pub struct Page {
 }
 
 /// A declared schedule. The artifact records what the author wrote; the occurrence
-/// source that will act on it is not built yet, so nothing here runs.
+/// source in `crate::schedules` acts on it. `anchor_hour` is the UTC hour a daily
+/// schedule fires at, or -1 for a schedule shorter than a day.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {

@@ -11,7 +11,7 @@ use crate::support::commands as support;
 use anyhow::{Context as _, Result};
 use day2::{
     invocations,
-    schedules::{Missed, Schedule},
+    schedules::Schedule,
     store::{Fault, replay},
 };
 use support::World;
@@ -36,17 +36,7 @@ fn sweep(world: &World) -> Result<(Schedule, String, serde_json::Value)> {
         .iter()
         .find(|schedule| schedule.name == "sweep")
         .context("reports declares a sweep schedule")?;
-    let schedule = Schedule {
-        app: contract.namespace.clone(),
-        name: declaration.name.clone(),
-        interval_ms: declaration.interval_ms as i64,
-        missed: match declaration.missed.as_str() {
-            "run_each" => Missed::RunEach {
-                bound: declaration.catch_up_bound as usize,
-            },
-            _ => Missed::Coalesce,
-        },
-    };
+    let schedule = day2::schedules::from_declaration(&contract.namespace, declaration)?;
     Ok((
         schedule,
         declaration.operation.clone(),

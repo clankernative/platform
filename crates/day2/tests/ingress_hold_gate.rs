@@ -284,6 +284,7 @@ fn a_scheduled_run_and_a_delivery_cannot_collide_in_the_identity_space() -> Resu
         app: "reports".into(),
         name: "sweep".into(),
         interval_ms: day2::schedules::MINIMUM_INTERVAL_MS,
+        anchor_hour: None,
         missed: day2::schedules::Missed::Coalesce,
     };
     assert_ne!(hostile, schedule.identity(1_758_067_200_000));
