@@ -146,9 +146,7 @@ impl MessageProcess {
             live(&pidfd, acquisition)?;
             let proc = ns::open_root(acquisition)?;
             let process = open_process(&proc, pid, acquisition)?;
-            let mut executable = executable(&process, acquisition)?;
-            let code = executable_bytes::hash(&mut executable, acquisition, costs)?;
-            ensure!(code == *expected_code, "native_enrollment_code_mismatch");
+            let executable = executable(&process, acquisition)?;
             let mut namespaces = BTreeMap::new();
             let mut identities = BTreeMap::new();
             for name in NAMESPACES {
@@ -172,7 +170,9 @@ impl MessageProcess {
                 data: ProcessData {
                     process: pid,
                     start_ticks,
-                    code,
+                    // Selected DATA until the closed capture below completes,
+                    // never an observed digest or a permission by assignment.
+                    code: expected_code.clone(),
                     boot,
                     namespaces: identities,
                 },
@@ -181,6 +181,11 @@ impl MessageProcess {
                 refused: false,
                 local: PhantomData,
             };
+            // This provisional value never escapes observe before validation.
+            // One full fresh current-executable read must match the selected
+            // pin and join ALL actual held/current/final-path descriptors,
+            // namespaces, proc identity and final live/original-clock guards.
+            // No protocol, provider, signature or owner publication intervenes.
             owner.check_identity(acquisition, costs)?;
             Ok(owner)
         })();
@@ -567,10 +572,54 @@ mod tests {
             .iter()
             .find(|r| r[0] == "hash_requester")
             .unwrap();
-        // Each NEW receipt still has its initial full hash plus fresh identity
-        // check. A matching executable digest never adopts another process.
-        assert_eq!(hash[1][0], 4);
-        assert_eq!(hash[1][1], 4 * length);
+        // Each NEW receipt gets its own closed, full fresh-byte observation.
+        // Matching executable bytes never adopt another process or skip it.
+        assert_eq!(hash[1][0], 2);
+        assert_eq!(hash[1][1], 2 * length);
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_selected_bytes_never_return_an_owner_or_revive_the_channel() -> Result<()> {
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let length = std::fs::metadata("/proc/self/exe")?.len();
+        let wrong = Digest::new(b"not-the-actual-sender-executable");
+        assert_ne!(wrong, code);
+        let mut a = NativeAcquisition::begin(5)?;
+        let (mut channel, sender) = Channel::pair(&mut a)?;
+        rustix::net::send(
+            &sender,
+            &serde_json::to_vec(&packet())?,
+            rustix::net::SendFlags::DONTWAIT | rustix::net::SendFlags::NOSIGNAL,
+        )?;
+        let mut output = Vec::new();
+        {
+            let mut recorder = Recorder::new(&mut output);
+            let costs = recorder.connection();
+            let error = match channel.receive(&wrong, &mut a, &costs.hashes(Subject::Requester)) {
+                Err(error) => error,
+                Ok(_) => panic!("a wrong selected digest must not return a native owner"),
+            };
+            assert_eq!(error.to_string(), "native_enrollment_executable_changed");
+            assert!(a.remaining().is_err());
+            let mut later = NativeAcquisition::begin(5)?;
+            let error = match channel.receive(&code, &mut later, &HashCosts::disabled()) {
+                Err(error) => error,
+                Ok(_) => panic!("a later correct pin must not revive the refused channel"),
+            };
+            assert_eq!(error.to_string(), "native_enrollment_channel_refused");
+            assert!(later.remaining().is_err());
+            recorder.emit(&costs, Outcome::RequestError)?;
+        }
+        let record = recorded(output)?;
+        let hash = record["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r[0] == "hash_requester")
+            .unwrap();
+        assert_eq!(hash[1][0], 1);
+        assert_eq!(hash[1][1], length);
         Ok(())
     }
 

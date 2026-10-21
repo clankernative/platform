@@ -430,8 +430,16 @@ Every actual pidfd must be live before the reads and at the final guard.
 Different actors refuse even when their selected executable bytes match.
 
 That observation hashes all freshly opened selected executable bytes once.
-Each new message-process observation still hashes its executable independently;
-later identity observations also perform a new complete read. Nothing checked
+Each new message-process capture performs its own complete fresh read before
+returning an owner. Its selected digest is only DATA while the private capture
+retains the actual kernel pidfd, proc, executable and namespace descriptors.
+The existing current identity check hashes the freshly reopened executable,
+joins all retained/current/final-path descriptors and ends with the original
+liveness/clock guards before that provisional value can escape. There is no
+intervening protocol, provider, signature or publication that needs a separate
+earlier hash. A wrong selected digest refuses without returning an owner.
+
+Later identity observations also perform a new complete read. Nothing checked
 is returned for reuse, and no observation may span intervening I/O, signatures
 or stage boundaries. The issuer uses this primitive for its adjacent Hello and
 Bind sender checks before signing. It retains both actual sender owners and all
