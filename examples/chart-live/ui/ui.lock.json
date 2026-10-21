@@ -1,6 +1,6 @@
 {
   "package": {
-    "digest": "sha256:8f90ff7a2da0a1e476d57ae26c5a6dad9acf67bd86b7625e98c0a097c42e7325",
+    "digest": "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde",
     "inputs": [
       {
         "bytes": 4975,
@@ -1063,8 +1063,8 @@
         "path": "components/filter-bar/styles.css"
       },
       {
-        "bytes": 8260,
-        "digest": "sha256:48e9c8f59e65e96b92ed28e9c4ab5ad776442918aa402f9457b9d0fc034e801f",
+        "bytes": 8436,
+        "digest": "sha256:13219f43a9dfc95fa311c39cd4e9f2678c21cd6161857309c8b6cd25a3f4353a",
         "path": "components/form-field/component.json"
       },
       {
@@ -1243,8 +1243,8 @@
         "path": "components/layer/styles.css"
       },
       {
-        "bytes": 6064,
-        "digest": "sha256:ea73c44e38acda493d40b8ec561acd0bee1a59cf57e479978f9ce704245f2817",
+        "bytes": 6364,
+        "digest": "sha256:16131e1537ed5922c21e202378bde7e0a5a45c53fad7dfe810baeeba424cc38b",
         "path": "components/metric/component.json"
       },
       {
@@ -1336,6 +1336,36 @@
         "bytes": 2866,
         "digest": "sha256:8e73567a10005d097b25bdd26ba58845fe43cb888085086c67d9eacfdb7f2dbe",
         "path": "components/modal/styles.css"
+      },
+      {
+        "bytes": 2788,
+        "digest": "sha256:7d11d611487c2258a1ed93e83dc7f94e6dd45113284baae23843353d6874ca78",
+        "path": "components/number/component.json"
+      },
+      {
+        "bytes": 312,
+        "digest": "sha256:fdd71635ba9d52ad7afb60ce12dad14cf9c7b0cb898d95ba6e3b248de6d1cf73",
+        "path": "components/number/fixtures/roll.json"
+      },
+      {
+        "bytes": 294,
+        "digest": "sha256:349d7705b845066249d17a68f21cc41a88039ee2c55bd99dd7e99bdfe1bcdb04",
+        "path": "components/number/fixtures/static.json"
+      },
+      {
+        "bytes": 11,
+        "digest": "sha256:4be6c24ba709ebae2602bfb5ca5b05c51d5806562e717e240bdbd5f0f131d17b",
+        "path": "components/number/fragment.html"
+      },
+      {
+        "bytes": 9026,
+        "digest": "sha256:2629deac2a3364cf2aca3539f52e8d97d897a3fac53ce335f16f829d7cdd6949",
+        "path": "components/number/interaction.js"
+      },
+      {
+        "bytes": 521,
+        "digest": "sha256:5b725424af5bb1626a0b49a6b80a023cc92b1d441587797bcaf401bcc81870bc",
+        "path": "components/number/styles.css"
       },
       {
         "bytes": 4570,
@@ -2248,8 +2278,8 @@
         "path": "icons.json"
       },
       {
-        "bytes": 233518,
-        "digest": "sha256:6f16244b1ea5ae04fd96ed53c26fa58de426a155a0bd90215dd2e88c114bf82b",
+        "bytes": 237772,
+        "digest": "sha256:225548d9f47190ebba471ee9a59a2165bfd6e09a62ebf4133c3c6664b58c4be0",
         "path": "property-catalog.json"
       },
       {
@@ -2274,12 +2304,12 @@
       },
       {
         "bytes": 1557,
-        "digest": "sha256:b9d8d54b6c887356da276464bc5454151916cca79dcdad1b70033af545e38750",
+        "digest": "sha256:8c69d207e701a19e72a3af6396ca9a786d367b790980f470abc70de32ccdd25d",
         "path": "ui-package.json"
       }
     ],
     "name": "@clanker/vanilla",
-    "version": "0.7.1"
+    "version": "0.8.0"
   },
   "provider": "clanker-ui.native",
   "schemaVersion": 2
