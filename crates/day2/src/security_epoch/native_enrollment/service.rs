@@ -4,7 +4,7 @@ use crate::security_epoch::native_enrollment::{
     birth::IssuerOwner,
     channel::Channel,
     policy::decode_key,
-    process::SelfSnapshot,
+    process::{MessageProcess, SelfSnapshot},
     protocol::{self, Packet, ProcessData, SignedStage, StageData},
     runtime::{self, RuntimeBinding},
 };
@@ -192,7 +192,7 @@ fn serve(
             .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))
     })?;
     issuer.certificate.verify(&issuer.policy)?;
-    super::process::MessageProcess::check_same_actor(
+    MessageProcess::check_same_actor(
         &mut [&mut peer, &mut bound],
         acquisition,
         &costs.hashes(Subject::Requester),
