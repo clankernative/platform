@@ -3,7 +3,6 @@ import pf.Cursor
 import pf.PageSize
 import ListReportsTypes
 import GetReportTypes
-import SearchReportsTypes
 import Reads
 import Templates
 
@@ -17,8 +16,4 @@ Routes :: [].{
 	details : Page(GetReportTypes.Input)
 	details = Page.route({ title: "Report", path: "/reports/{report_id}", template: Templates.details }, Reads.detail)
 		.live_refresh_every(1000.U64)
-
-	search : Page(SearchReportsTypes.Input)
-	search = Page.route({ title: "Search reports", path: "/search", template: Templates.search }, Reads.search)
-		.with_defaults({ term: "" })
 }

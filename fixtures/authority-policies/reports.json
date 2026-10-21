@@ -82,27 +82,6 @@
         }
       }
     },
-    "reports.search": {
-      "actors": [
-        "developer",
-        "alice",
-        "bob",
-        "admin",
-        "viewer"
-      ],
-      "mode": {
-        "kind": "read"
-      },
-      "models": {
-        "reports": {
-          "read": true,
-          "rows": {
-            "kind": "owner_or_admin",
-            "field": "owner"
-          }
-        }
-      }
-    },
     "reports.detail": {
       "actors": [
         "developer",

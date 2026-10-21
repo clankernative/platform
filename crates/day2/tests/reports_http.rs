@@ -119,7 +119,7 @@ fn http_durable_acceptance_exposes_actor_scoped_status_and_resumes_without_a_job
 }
 #[test]
 fn checked_report_search_uses_native_get_and_preserves_owner_scoped_reads() -> Result<()> {
-    let world = crate::support::commands::World::new()?;
+    let world = crate::support::commands::World::search()?;
     for (actor, title) in [("alice", "Quarterly Alice"), ("bob", "Quarterly Bob")] {
         let outcome = world.runtime.invoke(
             "reports.submit",
@@ -363,7 +363,7 @@ fn mcp_and_http_share_report_contracts_authority_and_durable_command_receipts() 
     );
     let listing = mcp_result(mcp_request(&server, &client, "tools/list", json!({})))?;
     let tools = listing["tools"].as_array().context("MCP tools")?;
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 4);
     assert_eq!(
         runtime
             .artifact()
@@ -375,7 +375,7 @@ fn mcp_and_http_share_report_contracts_authority_and_durable_command_receipts() 
             .values()
             .filter(|definition| !definition.execution.internal)
             .count(),
-        5
+        4
     );
     assert!(runtime.artifact().contract().operation_metadata.is_empty());
     let spec: Value = serde_json::from_str(
@@ -681,7 +681,7 @@ fn mcp_and_http_share_report_contracts_authority_and_durable_command_receipts() 
             .as_array()
             .unwrap()
             .len(),
-        4
+        3
     );
     assert_eq!(
         write(submit.clone()).send()?.status(),
@@ -715,7 +715,7 @@ fn mcp_and_http_share_report_contracts_authority_and_durable_command_receipts() 
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     let denied = mcp_result(mcp_request(
         &viewer,
@@ -801,7 +801,7 @@ fn real_http_datastar_form_command_scheduler_html_and_audit_survive_restart() ->
             .values()
             .filter(|definition| !definition.execution.internal)
             .count(),
-        5
+        4
     );
     assert!(runtime.artifact().contract().api_docs.is_empty());
     let schema_for = |operation: &str, method: &str| -> &Value {

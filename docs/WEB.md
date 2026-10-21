@@ -69,8 +69,9 @@ are checked. Labels come from option `label` or text; the host does not format
 money. Optional preset buttons use checked `data-query-input`, `data-query-value`
 and `data-query-label`. Native selection/progress geometry is presentation only.
 
-[Reports search](../examples/reports/ui/pages/search.html) is a second independent
-consumer alongside Equity. Deterministic DOM/HTTP substitutes test coordination;
+[Reactive query search](../fixtures/reactive-query-search/ui/pages/search.html), a
+source overlay on a staged copy of Reports, is a second independent consumer
+alongside Equity. Deterministic DOM/HTTP substitutes test coordination;
 they are not browser, visual, CSP or animation qualification.
 
 Before replacing each result region's children, the coordinator dispatches a

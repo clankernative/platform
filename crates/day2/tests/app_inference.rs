@@ -255,7 +255,7 @@ fn ordinary_reports_requires_its_complete_root_in_both_profiles() -> Result<()> 
     );
     assert_eq!(
         catalog.queries.keys().collect::<Vec<_>>(),
-        ["detail", "list", "search"]
+        ["detail", "list"]
     );
     assert!(serde_json::to_value(&catalog)?.get("jobs").is_none());
     assert!(

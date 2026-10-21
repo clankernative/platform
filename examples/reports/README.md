@@ -22,8 +22,7 @@ Read these files in order:
    run, and says so.
 6. [GetReport](queries/detail/GetReport.roc) prepares the notification status and
    projects it with the report. [ListReports](queries/list/ListReports.roc) is a
-   simple local query. [SearchReports](queries/search/SearchReports.roc) is a
-   separate, read-driven title search route that leaves directory paging intact.
+   simple local query.
 7. [ReportInvariants](verification/ReportInvariants.roc) checks business state
    across those phases. Each operation also owns its contract and verification.
 
@@ -69,14 +68,6 @@ Command forms also have stable, unique literal IDs: command responses refresh on
 the acknowledgement and, after success, the submitted form. The stream updates the
 live regions. A rejected edit keeps the original draft and revision; submitting a
 stale revision never silently rebases it onto someone else's changes.
-The `/search` route binds its raw `term` input to `SearchReports`; title matching is
-literal and case-sensitive. An empty term matches every visible report. Like the
-other Reports reads it uses one bounded page: it filters the first 100 visible
-reports and returns `searched_all` so the page says when more reports exist.
-Its template uses the checked `search` page binding and inert `data-query-*` metadata;
-the platform host owns query requests and result replacement. The standard submit
-button remains available when progressive query behavior is unavailable.
-
 Use `.live_refresh_every(milliseconds)` with a value from 1000 to 60000 for queries
 whose external reads or time-dependent output can change without a business write.
 The app declares this policy explicitly; `.live()` alone follows local business

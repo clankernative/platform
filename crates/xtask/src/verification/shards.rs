@@ -2118,7 +2118,7 @@ mod tests {
             &sample_identity(),
         )?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 24);
+        assert_eq!(complete.fixtures.len(), 25);
         for fixture in [
             "lifecycle",
             "verification-actors",
@@ -2576,9 +2576,10 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            24
+            25
         );
         assert!(steps.contains("build-lifecycle"));
+        assert!(steps.contains("build-reports-search"));
         assert!(steps.contains("build-verification-actors"));
         assert!(steps.contains("build-verification-setup"));
         assert!(!steps.contains("test-workspace-runtime"));

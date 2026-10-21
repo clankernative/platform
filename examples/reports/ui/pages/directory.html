@@ -1,5 +1,5 @@
 <div id="reports-app">
-  <header class="app-header"><a class="brand" href="{{ routes.reports() }}"><img src="{{ asset('report') }}" width="24" height="24" alt="">Reports</a><span>{{ company.name }}</span><a href="{{ routes.search() }}">Search reports</a><a href="{{ platform.audit() }}">Audit log</a></header>
+  <header class="app-header"><a class="brand" href="{{ routes.reports() }}"><img src="{{ asset('report') }}" width="24" height="24" alt="">Reports</a><span>{{ company.name }}</span><a href="{{ platform.audit() }}">Audit log</a></header>
   <main class="workspace">
     <div id="reports-heading" data-live class="page-heading"><h1>Document reports</h1><span>{{ reports.items | length }} on this page</span></div>
     <div class="workspace-grid">
