@@ -1,0 +1,429 @@
+# Native initial storage and epoch ownership
+
+The counter and control-slot protocol share the selected Firestore Native
+database. The epoch controller is its sole protocol mutator. AppHost uses the
+separately selected reader identity; SecurityShell does not acquire a counter
+writer. Selecting an account or checking a decoded reply does not establish
+exclusive IAM, P3 or current writer authority.
+
+## T6 decision
+
+Use the existing Calendar Firestore database and controller GSA from the
+instance's applied authority selection. Preserve the physical database UID,
+project number and immutable service-account UID. Do not create another database,
+governor or permit journal. The existing permanent Create and Complete control
+slots remain the only dispatch barriers. A lost send stays unresolved; elapsed
+time, a matching stored request or process restart cannot recreate its permit.
+
+Use the existing GKE Persistent Disk mounted at `/state`. Bind its PVC UID, PV
+UID, CSI driver and volume handle to the immutable Compute disk ID. The current
+provider readback is selection input, not an observation of the calling
+process's mount. Actual admission must also join that disk to the retained
+directory and current process mount under the original native acquisition.
+
+The selected controller profile is a trusted privileged native executor on the
+dedicated enrollment pool, with host PID visibility and a read-only host
+`/dev/disk/by-id` directory. Its fixed adapter opens only the selected block
+device read-only and compares its actual device number with the retained mount;
+the provider attachment and immutable disk ID must also match. This explicitly
+adds the controller and node runtime to the TCB. The current S1 profile also
+requires AppHost and SecurityShell to run with hostPID=true for initial PID
+namespace identity. Both remain UID/GID10001, unprivileged, drop all additional
+capabilities and use RuntimeDefault, with immutable subPath policy and read-only
+enrollment sockets. They receive no device, containerd, KMS or ptrace grant.
+Host process visibility is part of this trusted native profile; no hostile-code
+containment claim follows. Deployment of this profile requires the instance's normal
+review/apply; it has not been applied by this change.
+
+The Controller entrypoint is
+`/usr/local/bin/day2-epoch-controller`, a dedicated process owning both storage
+and the fixed peer. Its source and runtime-image packaging are included; actual
+image/native-code pins must come from the qualified built image.
+AppHost and SecurityShell remain `/usr/local/bin/day2-host`; the controller must
+not be admitted under that path as a substitute. An explicit read-only native
+enrollment path allowlist may name the future controller, but a missing binary
+or missing current identity still refuses enrollment.
+
+The controller uses the same selected filesystem UID as the AppHost for the
+private initial-file directory and mode-0600 file. Provider and filesystem
+identity checks still apply; a configured UID alone is not enrollment or P3.
+
+The controller exclusively creates its private `/state/day2-native` directory
+and `day2-initial.sqlite` beneath that anchor. An existing directory or file is
+a refusal, including after a controller crash; startup cannot adopt it.
+The original creator retains the file and directory, admitted image, private
+selection and original acquisition. File sync, directory sync, complete readback
+and seed/schema admission are necessary local steps. They become a provider P3
+acknowledgement only in the qualified provider/runtime composition; local sync
+or a receipt alone does not supply that composition.
+
+The first holder is the actual enrolled AppHost process and its retained
+ephemeral key. Bind it through the fixed native storage exchange, using actual
+per-message process handles and current role/key possession. A holder row,
+public key, Pod UID or signed certificate cannot reconstruct the native owner.
+The controller remains distinct from AppHost, and an AppHost cannot create the
+file or acquire the controller's mutation identity.
+
+The fixed exchange endpoint is `/run/day2-native-enrollment/storage/peer.sock`.
+The closed exchange is Hello, Offer, Confirm, Complete and Accepted. Both role
+statements, both fresh nonces, the original intervals and the exact seed,
+marker, file identity and image are bound into the signed transcript. The
+controller retains its own original interval and CreatorFD; an App observation
+retains its own descriptor and original role interval. Linux mount IDs are namespace-local;
+their numeric equality across controller and App namespaces is not a volume
+join. No arbitrary signing, pathname, descriptor adoption or generic callback
+belongs in this interface.
+
+The Controller authenticates the unprivileged App through each actual received
+SCM_PIDFD and its executable/process/namespace checks. The App retains the
+Controller's actual received kernel handle and verifies the same live issuer's
+signed Controller grant plus fresh key possession. This grants the App no additional ptrace capability or containerd access and
+claims no independent privileged-process inspection.
+The original CLOEXEC seqpacket socket must remain connected around each message
+and final admission. HUP, including a buffered final reply after peer closure,
+refuses. The kernel handle alone would not detect an exec of a still-live peer.
+
+The App authenticates Offer before opening or parsing the projected file.
+`AppPreparedFile::observe_existing` requires that actual offer rather than raw
+projection DATA. Its received Complete and own final file checks precede
+Accepted; a Controller send alone is not the App receipt. The actual sender
+handles, channel, file and original clocks remain owned after the exchange.
+An App enrollment can attempt initial participation only once. The Controller's
+file continuation was already pessimistically closed before the exchange, so
+drop, error, expiry or unknown disposition cannot restart either side with a
+fresh stage. These owners still grant neither P3 nor current serving authority.
+
+Known initial completion may consume the authenticated holders into peer
+continuity. The App also consumes its original checked file into
+`AppFileContinuity`; the Controller finishes its known initial file phase so
+its caller can retain the same `PreparedFileContinuity`. The original channel,
+sender handles, transcript and enrollment identity remain retained. The actual
+key stays with the original enrollment owner; losing that owner refuses every
+future phase. Nothing recreates a key or descriptor from a projection.
+
+A later peer phase performs CurrentHello, CurrentOffer, CurrentAck and
+CurrentReady on that same connected socket. Both participants must supply new
+issuer-signed stages. The exchange binds the initial transcript, checked
+nonwrapping sequence, closed purpose, exact request digest and both fresh
+nonces. Original identity/liveness checks do not renew the historical grant.
+The returned current-peer phase retains the actual narrowed acquisition and
+fresh signed statement. Every check and known completion borrows the same
+stage again and verifies its owner, acquisition domain/origin/deadline and exact
+statement. It does not hold a long mutable stage borrow that would prevent the
+physical/provider owner's own postchecks.
+
+Beginning a phase closes the local socket disposition before fallible work.
+Drop, uncertainty and expiry cannot reopen it. A late completion cannot settle
+a different paused sequence. Terminal refusal remains possible after known
+completion without a live stage, clock or request. `finish_checked` releases
+the peer scope only after all physical/provider/original/consumer postchecks;
+it is distinct from recording a consumer's known result. This in-memory socket
+disposition is neither another distributed permit journal nor storage authority.
+Current peer identity alone still supplies no P3, active epoch or writer.
+
+## Retained boundaries
+
+`PreparedInitialFile` packages the original creator, admitted layout and the
+same original acquisition. `check_original` checks unchanged initial bytes and
+identity. Failure remains latched even after restoration. A replacement interval
+cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
+there is no inverse projection-to-owner constructor.
+
+Fresh image preparation takes `InitialStoreMetadata`, not `Runtime::load`.
+The metadata loader admits the desired Instance and artifact, checks schedule
+and ingress bindings, and retains the exact selected Instance digest. It has no
+serving database path and does not create, open or inspect `.state`. The same
+framework initializer operates only on the caller's fresh memory transaction;
+a changed Instance selection or an already initialized database refuses. The
+ordinary Runtime retains its existing active-database selection behavior. This
+separation is schema admission only: the authenticated first-holder and current
+serving factories must still supply their actual native owners before file use.
+
+### Operator desired metadata
+
+Use the `day2` binary from the same source, dependencies and toolchain as the
+Controller whose image will be admitted:
+
+```sh
+umask 077
+day2 native-storage-metadata /path/to/instance.json calendar > native-schema-metadata.json
+day2 native-profile-manifest /path/to/reviewed-static-runtime-profile.txt > native-profile-metadata.json
+```
+
+`native-storage-metadata` admits the actual selected artifact and instance via
+`InitialStoreMetadata::load`. It runs the exact framework/app initializer and
+the shared `day2_initial_security_seed` table definition on fresh memory-only
+SQLite with memory-only temporary storage, hashes the complete schema, then
+rolls back and drops it. Read `.fresh_storage.schema_contract` from its output;
+do not hash this output JSON. The `artifact` and `scope` identify its admitted
+inputs. No Runtime, serving database pathname, native file, seed/marker row,
+creator, enrollment or authority is constructed or adopted. An already-present
+installation database is not inspected or repaired. A base desired Instance
+without a native bootstrap selection can supply these schema inputs; the final
+full desired native policy must still pass ordinary strict validation and all
+actual native checks. Unknown/old Instance shapes are not normalized.
+
+`runtime_profile.manifest` is currently an opaque operator-selected profile
+document identity, not a built-in value derived from the Roc artifact alone.
+S1 supplies no canonical manifest document format or semantic document loader.
+The second command commits the exact nonempty UTF-8 document bytes using raw
+SHA-256 (`Digest::new`), including whitespace and final newline, and returns
+`.runtime_profile.manifest`. This is **not** `Digest::of` over a parsed value.
+It reads only an explicit regular, bounded one-MiB document through a final
+NOFOLLOW/nonblocking open and refuses observed changes; no all-ancestor or
+hostile-administrator containment guarantee is implied. The mode is
+`operator_profile_document_digest_only`: it does not validate the truth of the
+document or qualify the selected producers.
+
+The operator must retain and review a real static document covering actual
+immutable native code/dependency/image and app-artifact selections, runtime/node
+selectors, required namespace and continuous-clock assumptions, supported
+storage/channel choices and the accepted initialization/debug/governance TCB.
+Keep current boot/process/namespace observations, generated incarnations,
+request IDs, holders, clocks, receipts and qualified outcomes as separate
+evidence. Do not hash a supplier fixture label, an artifact digest, a historical
+node-facts/receipt record, or a policy containing its own manifest digest as a
+substitute for that reviewed document. No metadata output grants enrollment,
+storage/P3, writer, serving or fresh-human authority.
+
+The App reads the controller's exact initial bytes through its own existing
+read-only descriptor. It matches the creator projection's digest and validates
+the complete bounded read-only SQLite image, selected schema, canonical store,
+seed and marker. It does not independently initialize another database: fresh
+runtime initialization generates a new random authority lineage. The distinct
+`ObservedInitialImage` is readback DATA and cannot enter the original creation
+layout. Authenticating that projection through the real enrolled controller
+peer is still mandatory before holder participation or activation; this decoder
+supplies neither permission.
+
+Only a successfully checked preparation may consume the original creator into
+`PreparedFileContinuity`. That transition captures the real `SameEnrolledOwner`
+while the original preparation still passes, then moves the same file, directory
+and block-device descriptors without reopening them. Failure retains the
+original owner in a refused outcome. Filesystem fixtures cannot take this
+transition. The original preparation stage and its spent clock are dropped;
+a later current operation must supply a fresh bounded stage from the same
+still-live enrolled owner and reobserve the actual selected provider attachment.
+This is physical continuity, not a renewed preparation, first-holder or writer
+grant. All initial-image changes still refuse; serving after legitimate SQLite
+writes requires its own qualified activation transition.
+
+`begin_initial_phase` borrows that same retained file and owns a fresh actual
+Controller stage. Provider checks, exact unchanged-image checks and the closed
+first-holder exchange all spend this phase's original deadline, including work
+already done before the exchange. This does not restart preparation. The typed
+phase lends only its same stage to the fixed peer and rechecks the file before
+and after peer work. App scheduling need not fit inside an already completed
+preparation's interval.
+
+Phase entry pessimistically closes the parent continuation gate. Dropping or
+abandoning the phase needs no destructor to keep it refused. Error or unknown
+handshake outcome cannot restore that gate or begin a replacement phase. Only
+the fixed operation's known success and final current checks may call
+`finish_checked`; this method alone creates no authenticated peer, first holder,
+P3 or writer authority. The peer factory must still retain actual identities,
+keys, channel and original handshake disposition, and authenticate the offer
+before any App SQLite parsing.
+
+The initial controller qualification budget is a 250m CPU / 256Mi memory request
+and a 1 CPU / 512Mi memory limit, in one process that also owns the fixed storage
+peer. There is no additional storage sidecar. These are unmeasured starting
+limits; peak admitted-runtime initialization and headroom must be measured before
+qualifying the deployment.
+
+The proposed controller KSA and Deployment live in the provisioner's separate
+enrollment namespace, with the selected existing controller GSA. That namespace
+cannot reference the App namespace's PVC. The proposed controller `/state` mount
+is the selected same-node CSI global mount with private propagation; its exact
+workload path and privileged profile still require review and native admission.
+Names and a host path cannot replace the provider/device/mount joins. AppHost
+and SecurityShell retain their separate unprivileged workload profiles.
+
+The optional `deploy/integrations/gke-security-epoch-access` root supplies the
+missing API metadata and TokenReview prerequisites. Each GSA gets self-token
+mint only, and only the controller gets selected disk/instance and PVC/PV/Node
+reads. It grants no Firestore mutation or cross-account impersonation. The
+instance owns the actual selections and separate state prefix. This source plan
+is unapplied and is not evidence of exclusive effective IAM, qualified storage,
+current serving or available controller capacity.
+
+An authorized counter dispatch retains the known claim through the fixed
+request, response parser and final current check. The prepared dispatch is
+consumed at send, and the response still owns its execution context. It cannot
+be used for a second send or an arbitrary URL/body. A malformed, lost or expired
+reply cannot reconstruct send authority or clear the permanent slot.
+
+## Remaining production composition
+
+`InitialStorageContinuity::establish` now consumes the actual prepared-file
+continuation and a new enrolled Controller stage. Its fixed operation performs
+the authenticated initial App exchange, checks the joined disk/attachment and
+live ext4 profile, synchronizes the same file and private directory, and reads
+back the unchanged admitted image. Failure returns the refused original file
+owner; no success flag or projection can reconstruct the owning result.
+
+The selected durability fault model trusts Persistent Disk and the admitted
+Linux/ext4/CSI/node/Controller stack. Google documents stable-media completion
+for a successful Persistent Disk write command. The native checks join that
+provider to the actual retained descriptors; a local sync in an unrelated
+filesystem is insufficient. The live ext4 options must report ordered data and
+enabled barriers, and the selected block device must have a healthy internal
+journal. Unsupported/ambiguous kernel metadata refuses. Provider/kernel bugs,
+administrative deletion or rollback and permanent zonal loss are outside this
+conditional model; this is not a regional availability guarantee.
+[Compute Engine Persistent Disk FAQ](https://docs.cloud.google.com/compute/docs/faq#persistent_disk),
+[Linux ext4 documentation](https://cdn.kernel.org/doc/html/latest/admin-guide/ext4.html).
+
+Known establishment retains the SAME file, volume, channel and authenticated
+first holder. Each `CurrentStorageBootstrapPhase` owns a fresh physical phase
+and new peer handshake, bound to the exact original seed and request. Completion
+must select the same actual first App participant's Pod, process incarnation and
+ephemeral key. The enclosing continuation closes before fallible work, and only
+known completion after all final checks releases it. Errors, unknown outcomes,
+drop and a failure after the peer's local completion leave the enclosing owner
+closed. The new private owner types reject cloning, serialization and thread
+transfer. These types supply neither effective IAM nor active epoch/writer or
+Shell serving authority on their own. The fixed native bootstrap dispatcher now
+retains this phase through the consuming counter claim, send, response and final
+provider/file checks; the Controller lifecycle and live qualification remain owed.
+
+The App counterpart, `AppInitialStorageContinuity`, consumes its genuine
+authenticated first holder and retains the SAME read-only file and peer in one
+private owner. Each `CurrentAppStorageBootstrapPhase` checks that file around
+the fresh handshake and through final completion on the same actual App stage.
+It cannot receive a Controller stage, mutation credential or reconstructed file
+owner. The Controller rechecks its joined durability operation within each new
+bootstrap stage before advertising that phase. Neither side reuses the original
+grant or treats the historical durability completion as a configuration lease.
+
+The native creation factory consumes the actual enrolled controller stage and
+performs authenticated provider reads and native block-device/mount checks. It
+has not been qualified on the live GKE profile. Bind the first-holder peer, current serving transition and production
+bootstrap-execution factory under the accepted governance contract below. Recheck these
+owners through known local admission commits, provider/body sends and final
+settlement. Keep unknown outcomes retained. Do not treat a completed response
+object as a completed human or provider exposure.
+
+The normal app database open and initialization must consume that qualified
+prepared/active storage path; an ordinary runtime must not silently adopt or
+create a replacement file. Initial role enrollment precedes epoch creation.
+Current serving authority must not require unchanged initial image bytes after
+legitimate application writes, and an earlier successful bootstrap receipt is
+not current serving authority.
+
+Until that composition and its native qualification exist, the production
+fresh-human refusal remains in place. No fixture, desired configuration, IAM
+audit report, local readback or prior verification receipt may replace it.
+
+## Accepted governance contract
+
+The user selected trust option B on 2026-10-20. The Google-managed Firebase
+Rules service agent `service-79211883381@firebase-rules.iam.gserviceaccount.com`
+and its existing writer/actAs paths are accepted provider TCB for Firebase Rules
+system operation. No IAM changes are made; the earlier exclusion/custom-role
+proposal is superseded and unapplied. The Controller is the sole application
+protocol mutator, subject to those trusted provider and governance paths, not
+the only principal able to change documents under effective IAM.
+
+The confirmed governance roots are `chander@wonderly.com`,
+`sebastian@wonderly.com` and the infrastructure deployment account
+`internal-tools-infra@wonderly-internal-tools.iam.gserviceaccount.com`.
+Their administration/delegation and the selected GKE/Compute identity mechanisms
+are trusted. Include `csm-ops-deploy@wonderly-idp-sso.iam.gserviceaccount.com` as
+an ancillary, tag-conditional organization-policy administrator: it can affect
+the enforcement environment. Its exported organization-policy role does not
+grant IAM mutation, Firestore writes or actAs, and the export does not establish
+a current tag match. It is not a direct counter writer.
+
+This is a conditional native trust model. A saved allow-policy export neither
+exhausts all deny/key/delegation/pool paths nor constructs current permission.
+Accepted administrative/provider malice, rollback/deletion and permanent zonal
+loss are outside the selected model. No hostile-administrator or global IAM
+exclusivity claim follows. Actual same-stage storage, holder, counter and
+serving checks remain required; this decision alone enables no native factory.
+
+The fixed initial lifecycle has six steps: reserve, dispatch and settle the
+create request, then reserve, dispatch and settle the first activation. Every
+step acquires a fresh real enrolled stage and uses the SAME retained file and
+App peer. The shared permanent slot is the existing control journal. A stored
+MayHaveBeenSent state cannot supply a known local claim, and this lifecycle
+contains no retry, rearm, adoption or alternate-candidate route. Errors stop it.
+
+The Controller's signed current-result packet only unblocks the App's own
+coherent provider read. The App checks the SAME original file and actual stage
+and acknowledges consumption; the Controller completes its final checks and
+releases that exact transcript. Only the final activation switches the
+Controller's remaining file check to physical identity, so a legitimate App
+write cannot race an obsolete initial-byte comparison after release. The App
+cannot construct its active owner before all six checked native steps finish.
+Active observations retain the complete four-document provider-version binding,
+not just receipt values. The new owners remain private and cannot be cloned,
+serialized or transferred to another thread. Native deployment qualification remains separate owed work.
+
+
+## Current App serving and existing-file Runtime admission
+
+An active App participant now supplies the sealed serving borrow from its real
+retained initial file and Controller channel. Every operation uses a fresh role
+stage, fresh signed peer transcript, and coherent four-document observation
+matching the original activation, including provider version tokens. Controller
+release follows the App consumption acknowledgement and a fresh provider read.
+Unknown outcomes close the same retained continuation; a later stage cannot
+reopen it. The Controller path has no consumer callback.
+
+The actual response connection reserves its identity before its first poll.
+Connection clones share that identity; another connection cannot complete or
+refuse a paused winner. Terminal refusal requires an existing exact hold and
+performs no role, clock or provider acquisition. These connection records are
+ownership DATA and cannot manufacture a serving scope.
+
+Native Runtime admission is separate from ordinary loading. It requires the
+actual active App participant and same current serving stage before opening
+`/state/day2-native/day2-initial.sqlite`. The fixed existing-file SQLite open
+omits CREATE and enables NOFOLLOW; it cannot initialize, adopt, repair or
+select an activated artifact path. Current metadata, explicit bootstrap policy,
+original seed/schema, activated artifact and storage binding must all match
+inside the retained scope. SQLite recovery is considered an attempted effect,
+so the scope is armed before open. Ordinary startup fences and final Product
+startup integration are composed separately.
+
+The Shell supplier now retains the actual separately enrolled Shell/Controller
+channel. Its current phase waits for the Controller's signed known result, then
+keeps the same channel and original role interval through consumer settlement
+and original postchecks. Only that known completion acknowledges consumption;
+the Controller rereads the fixed epoch and checks actual physical/P3 continuity
+before releasing the same transcript. A forgotten/dropped phase leaves its
+parent busy; there is no replacement/reconnect or expiry regrant. The Shell has
+no Runtime admission or App database identity.
+
+`day2-epoch-controller INSTANCE APP` runs the fixed preparation, first-holder,
+create/activation and dispatch lifecycle on its final owning OS thread. Actual
+App work and Shell work acquire fresh stages only after idle readiness DATA.
+Every failure stops processing and preserves the original protocol's refusal;
+no timer clears slots or adopts an existing initial file. The optional
+`deploy/gke/stacks/security-epoch-controller` source selects that actual binary,
+existing separate KSA, artifact-bearing image and same observed App CSI volume.
+The default dormant registration is not an executor or native permission.
+
+Ordinary Runtime load and initialization refuse an explicit native profile
+before state opening/creation. Absent native profile remains the separately
+refusing prerequisite-only configuration; epoch catalog DATA alone does not
+select native mode. Native Runtime connection opens retain existing-file and
+NOFOLLOW semantics and never chmod/initialize the original.
+
+No local filesystem test, mock deployment plan, static proof inventory or
+earlier CI receipt establishes actual native P3, serving or end-to-end OAuth
+success. Live provider/kernel/deployment qualification remains separate.
+
+
+Initial listener binding is a separate known atomic operation. It finishes its
+actual current initial-file phase before returning a private listener containing
+only the same enrolled-owner identity, exact unchanged file projection and
+original socket. No role stage, signed grant or acquisition is retained as
+current while waiting for Kubernetes startup. Zero-timeout readiness consumes no
+packet and supplies no App, P3 or serving permission. Once actual work is
+pending, the Controller consumes that listener exactly once into a fresh
+SAME-owner CurrentPreparedFilePhase, checks the exact projection before accept,
+and produces the fresh statement from that stage. The exchange's original
+five-second budget, per-message handles and strict HUP/CLOEXEC checks remain.
+Unknown or abandoned exchange state cannot reopen, rebind or adopt the listener.

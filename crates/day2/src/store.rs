@@ -567,10 +567,313 @@ pub struct Runtime {
     inputs: crate::host_inputs::Inputs,
 }
 
+/// Admitted desired schema inputs for a fresh memory-only image. This has no
+/// database pathname, Runtime, writer permission or native holder authority.
+/// Loading it never inspects or creates the installation's serving state.
+pub(crate) struct InitialStoreMetadata {
+    instance_path: PathBuf,
+    instance_digest: day2_capabilities::Digest,
+    app: String,
+    scope: String,
+    artifact: LoadedArtifact,
+    host: crate::host::System,
+}
+
+impl InitialStoreMetadata {
+    /// Desired configuration checks only, inside an already genuine native
+    /// scope. Neither this metadata nor the returned Instance grants authority.
+    pub(crate) fn require_native_selection(
+        &self,
+        selected: &day2_capabilities::security_epoch::EpochStore,
+        artifact: &day2_capabilities::Digest,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    ) -> Result<Instance> {
+        let instance = Instance::load(&self.instance_path)?;
+        ensure!(
+            day2_capabilities::Digest::of(&instance)? == self.instance_digest,
+            crate::error::Failure::InstallationChanged
+        );
+        ensure!(
+            self.app == selected.scope.app.as_str()
+                && self.scope
+                    == format!(
+                        "{}/{}/{}",
+                        selected.scope.installation.as_str(),
+                        selected.scope.environment.as_str(),
+                        selected.scope.app.as_str()
+                    )
+                && self.artifact.id() == artifact.as_str(),
+            "native_runtime_metadata_selection_changed"
+        );
+        let control = instance
+            .control
+            .as_ref()
+            .context("native_runtime_epoch_catalog_missing")?;
+        let mut policies = control
+            .security_bootstraps
+            .values()
+            .filter(|policy| policy.scope.app.as_str() == self.app);
+        ensure!(
+            policies.next() == Some(policy) && policies.next().is_none(),
+            "native_runtime_bootstrap_selection_missing_or_changed"
+        );
+        let mut stores = control
+            .security_epochs
+            .values()
+            .filter(|store| store.scope.app.as_str() == self.app);
+        ensure!(
+            stores.next() == Some(selected) && stores.next().is_none(),
+            "native_runtime_epoch_selection_changed"
+        );
+        Ok(instance)
+    }
+
+    pub(crate) fn load(instance_path: &Path, app: &str) -> Result<Self> {
+        let instance_path = instance_path.canonicalize()?;
+        let instance = Instance::load(&instance_path)?;
+        let binding = instance.apps.get(app).context("app_not_installed")?;
+        let parent = instance_path.parent().context("instance directory")?;
+        let artifact = LoadedArtifact::load(&parent.join(&binding.artifact))?;
+        Self::admit(instance_path, app, instance, artifact)
+    }
+
+    fn admit(
+        instance_path: PathBuf,
+        app: &str,
+        instance: Instance,
+        artifact: LoadedArtifact,
+    ) -> Result<Self> {
+        artifact.require_current_api()?;
+        validate_artifact_binding(&instance, app, &artifact)?;
+        Ok(Self {
+            scope: instance.scope(app)?,
+            instance_digest: day2_capabilities::Digest::of(&instance)?,
+            instance_path,
+            app: app.to_owned(),
+            artifact,
+            host: crate::host::System(crate::host_inputs::Inputs::default()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_artifact_for_tests(
+        instance_path: PathBuf,
+        app: &str,
+        artifact: LoadedArtifact,
+    ) -> Result<Self> {
+        let instance = Instance::load(&instance_path)?;
+        Self::admit(instance_path, app, instance, artifact)
+    }
+
+    pub(crate) fn app(&self) -> &str {
+        &self.app
+    }
+
+    pub(crate) fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    pub(crate) fn artifact(&self) -> &LoadedArtifact {
+        &self.artifact
+    }
+
+    /// The caller owns the fresh in-memory transaction and original native
+    /// phase. Metadata admission grants neither persistent storage nor serving.
+    pub(crate) fn initialize_in_transaction(&self, tx: &Transaction<'_>) -> Result<()> {
+        SchemaInitialization {
+            instance_path: &self.instance_path,
+            app: &self.app,
+            scope: &self.scope,
+            artifact: &self.artifact,
+            host: &self.host,
+            fresh_selection: Some(&self.instance_digest),
+        }
+        .initialize_in_transaction(tx)
+    }
+}
+
+fn validate_artifact_binding(
+    instance: &Instance,
+    app: &str,
+    artifact: &LoadedArtifact,
+) -> Result<()> {
+    let binding = instance.apps.get(app).context("app_not_installed")?;
+    // A binding for a schedule this artifact does not declare would silently do
+    // nothing -- which is exactly how a renamed schedule stops running without
+    // anyone noticing. Refuse it here, where the operator can still see why.
+    for name in binding.schedules.keys() {
+        ensure!(
+            artifact
+                .contract()
+                .schedules
+                .iter()
+                .any(|schedule| &schedule.name == name),
+            "schedule_binding_names_no_declared_schedule: {name}"
+        );
+    }
+    for (name, schedule) in &binding.schedules {
+        ensure!(
+            !schedule.actor.trim().is_empty(),
+            "schedule_binding_requires_an_actor: {name}"
+        );
+    }
+    // The same rule for endpoints: a binding naming an endpoint this artifact
+    // does not declare would accept deliveries for nothing, or silently stop
+    // accepting them when an endpoint is renamed.
+    for (name, endpoint) in &binding.ingress {
+        ensure!(
+            artifact
+                .contract()
+                .ingress
+                .iter()
+                .any(|declared| &declared.name == name),
+            "endpoint_binding_names_no_declared_endpoint: {name}"
+        );
+        ensure!(
+            !endpoint.actor.trim().is_empty(),
+            "endpoint_binding_requires_an_actor: {name}"
+        );
+        ensure!(
+            endpoint.connection.revision > 0 && !endpoint.connection.id.trim().is_empty(),
+            "endpoint_binding_requires_a_connection: {name}"
+        );
+        if !endpoint.disabled {
+            let declared = artifact
+                .contract()
+                .ingress
+                .iter()
+                .find(|declared| &declared.name == name)
+                .context("endpoint declaration missing")?;
+            let live = instance
+                .resources
+                .as_ref()
+                .and_then(|catalog| catalog.connections.get(&endpoint.connection.id))
+                .filter(|definition| definition.revision == endpoint.connection.revision)
+                .and_then(|definition| definition.live.as_ref())
+                .with_context(|| format!("endpoint_connection_missing_or_stale: {name}"))?;
+            crate::ingress::validate_connection(&declared.provider, live)
+                .with_context(|| format!("invalid_endpoint_connection: {name}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// The same initializer serves an ordinary admitted Runtime and fresh-image
+/// metadata, without constructing a Runtime or opening a database for the latter.
+struct SchemaInitialization<'a> {
+    instance_path: &'a Path,
+    app: &'a str,
+    scope: &'a str,
+    artifact: &'a LoadedArtifact,
+    host: &'a dyn crate::host::Host,
+    fresh_selection: Option<&'a day2_capabilities::Digest>,
+}
+
+impl SchemaInitialization<'_> {
+    fn artifact(&self) -> &LoadedArtifact {
+        self.artifact
+    }
+
+    fn check_binding(&self, connection: &Connection) -> Result<()> {
+        check_storage_binding(connection, self.artifact, self.scope)
+    }
+
+    pub(crate) fn initialize_in_transaction(&self, tx: &Transaction<'_>) -> Result<()> {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='day2_meta')",
+            [],
+            |row| row.get(0),
+        )?;
+        if exists {
+            ensure!(
+                self.fresh_selection.is_none(),
+                "initial_schema_requires_empty_database"
+            );
+            self.check_binding(tx)?;
+            ensure!(
+                crate::authority_state::exists(tx)?,
+                "authority_migration_required: explicitly activate current authority"
+            );
+        } else {
+            self.artifact.require_current_api()?;
+            tx.execute_batch(PLATFORM_DDL)?;
+            for statement in self.artifact.contract().schema.ddl()? {
+                tx.execute_batch(&statement)?;
+            }
+            for (key, value) in [
+                ("scope", self.scope.to_owned()),
+                ("schema", self.artifact.contract().schema_digest.clone()),
+                (
+                    "schema_json",
+                    serde_json::to_string(&self.artifact.contract().schema)?,
+                ),
+            ] {
+                tx.execute("INSERT INTO day2_meta VALUES(?1,?2)", (key, value))?;
+            }
+            let desired = Instance::load(self.instance_path)?;
+            if let Some(expected) = self.fresh_selection {
+                ensure!(
+                    &day2_capabilities::Digest::of(&desired)? == expected,
+                    crate::error::Failure::InstallationChanged
+                );
+            }
+            ensure!(
+                desired.scope(self.app)? == self.scope,
+                crate::error::Failure::InstallationChanged
+            );
+            crate::authority_state::initialize_new(
+                tx,
+                self.scope,
+                self.app,
+                self.artifact,
+                self.host,
+                &desired,
+            )?;
+        }
+        crate::audit::upgrade(tx)?;
+        crate::delegation::upgrade_origin(tx)?;
+        crate::delegation_commands::upgrade(tx)?;
+        crate::invocations::upgrade(tx)?;
+        crate::resources::upgrade(tx)?;
+        crate::budget::upgrade(tx)?;
+        crate::preparation::upgrade(tx)?;
+        crate::execution::upgrade(tx)?;
+        upgrade_selection_cursors(tx)?;
+        crate::authority_state::upgrade(tx)?;
+        crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
+            // GoLinks' persisted links are the one data migration AGENTS.md
+            // allows; this replaces only an empty version-1 credential unit.
+            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
+            crate::managed_credentials::store::install_schema(db)?;
+            crate::managed_credentials::issuance::install(db)?;
+            // Admit the fresh-owner unit on the actual runtime connection,
+            // under the same cumulative budget as the credential schema.
+            crate::oauth::fresh_owner::install(db)?;
+            if !self
+                .artifact()
+                .contract()
+                .connection_declarations
+                .is_empty()
+            {
+                crate::oauth::usage::install(db)?;
+            }
+            // Newly installed peers are admitted under the same cumulative
+            // counter before the writer may publish their initialized shape.
+            crate::managed_credentials::store::install_schema(db)
+        })?;
+        Ok(())
+    }
+}
+
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
-    let connection = Connection::open(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let connection = if native_storage::is_native_database(path) {
+        native_storage::open_existing(path)?
+    } else {
+        let connection = Connection::open(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        connection
+    };
     configure_connection(&connection)?;
     Ok(connection)
 }
@@ -592,6 +895,8 @@ pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
     )?;
     Ok(())
 }
+
+mod native_storage;
 
 impl Runtime {
     pub(crate) fn credential_authority(
@@ -708,6 +1013,10 @@ impl Runtime {
     pub fn load(instance_path: &Path, app: &str) -> Result<Self> {
         let instance_path = instance_path.canonicalize()?;
         let instance = Instance::load(&instance_path)?;
+        ensure!(
+            instance.native_bootstrap_for(app)?.is_none(),
+            "native_runtime_current_serving_required"
+        );
         let binding = instance.apps.get(app).context("app_not_installed")?;
         let parent = instance_path.parent().context("instance directory")?;
         let directory = parent.join(".state");
@@ -754,63 +1063,7 @@ impl Runtime {
                 "active_artifact_digest_mismatch"
             );
         }
-        // A binding for a schedule this artifact does not declare would silently do
-        // nothing -- which is exactly how a renamed schedule stops running without
-        // anyone noticing. Refuse it here, where the operator can still see why.
-        for name in binding.schedules.keys() {
-            ensure!(
-                artifact
-                    .contract()
-                    .schedules
-                    .iter()
-                    .any(|schedule| &schedule.name == name),
-                "schedule_binding_names_no_declared_schedule: {name}"
-            );
-        }
-        for (name, schedule) in &binding.schedules {
-            ensure!(
-                !schedule.actor.trim().is_empty(),
-                "schedule_binding_requires_an_actor: {name}"
-            );
-        }
-        // The same rule for endpoints: a binding naming an endpoint this artifact
-        // does not declare would accept deliveries for nothing, or silently stop
-        // accepting them when an endpoint is renamed.
-        for (name, endpoint) in &binding.ingress {
-            ensure!(
-                artifact
-                    .contract()
-                    .ingress
-                    .iter()
-                    .any(|declared| &declared.name == name),
-                "endpoint_binding_names_no_declared_endpoint: {name}"
-            );
-            ensure!(
-                !endpoint.actor.trim().is_empty(),
-                "endpoint_binding_requires_an_actor: {name}"
-            );
-            ensure!(
-                endpoint.connection.revision > 0 && !endpoint.connection.id.trim().is_empty(),
-                "endpoint_binding_requires_a_connection: {name}"
-            );
-            if !endpoint.disabled {
-                let declared = artifact
-                    .contract()
-                    .ingress
-                    .iter()
-                    .find(|declared| &declared.name == name)
-                    .context("endpoint declaration missing")?;
-                let live = instance
-                    .resources
-                    .as_ref()
-                    .and_then(|catalog| catalog.connections.get(&endpoint.connection.id))
-                    .filter(|definition| definition.revision == endpoint.connection.revision)
-                    .and_then(|definition| definition.live.as_ref())
-                    .with_context(|| format!("endpoint_connection_missing_or_stale: {name}"))?;
-                crate::ingress::validate_connection(&declared.provider, live)
-                    .with_context(|| format!("invalid_endpoint_connection: {name}"))?;
-            }
-        }
+        validate_artifact_binding(&instance, app, &artifact)?;
         let inputs = crate::host_inputs::Inputs::default();
         let runtime = Self {
             integrations: Arc::new(crate::integration_host::Host::local(&instance_path)?),
@@ -829,6 +1082,12 @@ impl Runtime {
         Ok(runtime)
     }
     pub fn initialize(&self) -> Result<()> {
+        ensure!(
+            Instance::load(&self.instance_path)?
+                .native_bootstrap_for(&self.app)?
+                .is_none(),
+            "native_runtime_initializer_forbidden"
+        );
         let mut connection = open(&self.db)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let tx = crate::write_queue::immediate(&mut connection)?;
@@ -842,72 +1101,15 @@ impl Runtime {
     /// marker before the same commit. This helper does not open or create the
     /// database file and does not authorize an external credential epoch mutation.
     pub(crate) fn initialize_in_transaction(&self, tx: &Transaction<'_>) -> Result<()> {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='day2_meta')",
-            [],
-            |row| row.get(0),
-        )?;
-        if exists {
-            self.check_binding(tx)?;
-            ensure!(
-                crate::authority_state::exists(tx)?,
-                "authority_migration_required: explicitly activate current authority"
-            );
-        } else {
-            self.artifact.require_current_api()?;
-            tx.execute_batch(PLATFORM_DDL)?;
-            for statement in self.artifact.contract().schema.ddl()? {
-                tx.execute_batch(&statement)?;
-            }
-            for (key, value) in [
-                ("scope", self.scope.clone()),
-                ("schema", self.artifact.contract().schema_digest.clone()),
-                (
-                    "schema_json",
-                    serde_json::to_string(&self.artifact.contract().schema)?,
-                ),
-            ] {
-                tx.execute("INSERT INTO day2_meta VALUES(?1,?2)", (key, value))?;
-            }
-            let desired = Instance::load(&self.instance_path)?;
-            ensure!(
-                desired.scope(&self.app)? == self.scope,
-                crate::error::Failure::InstallationChanged
-            );
-            crate::authority_state::initialize_new(tx, self, &desired)?;
+        SchemaInitialization {
+            instance_path: &self.instance_path,
+            app: &self.app,
+            scope: &self.scope,
+            artifact: &self.artifact,
+            host: self.host(),
+            fresh_selection: None,
         }
-        crate::audit::upgrade(tx)?;
-        crate::delegation::upgrade_origin(tx)?;
-        crate::delegation_commands::upgrade(tx)?;
-        crate::invocations::upgrade(tx)?;
-        crate::resources::upgrade(tx)?;
-        crate::budget::upgrade(tx)?;
-        crate::preparation::upgrade(tx)?;
-        crate::execution::upgrade(tx)?;
-        upgrade_selection_cursors(tx)?;
-        crate::authority_state::upgrade(tx)?;
-        crate::oauth::schema::admit_with_runtime_hook(tx, |db| {
-            // GoLinks' persisted links are the one data migration AGENTS.md
-            // allows; this replaces only an empty version-1 credential unit.
-            crate::managed_credentials::store::replace_empty_version_1_unit(db)?;
-            crate::managed_credentials::store::install_schema(db)?;
-            crate::managed_credentials::issuance::install(db)?;
-            // Admit the fresh-owner unit on the actual runtime connection,
-            // under the same cumulative budget as the credential schema.
-            crate::oauth::fresh_owner::install(db)?;
-            if !self
-                .artifact()
-                .contract()
-                .connection_declarations
-                .is_empty()
-            {
-                crate::oauth::usage::install(db)?;
-            }
-            // Newly installed peers are admitted under the same cumulative
-            // counter before the writer may publish their initialized shape.
-            crate::managed_credentials::store::install_schema(db)
-        })?;
-        Ok(())
+        .initialize_in_transaction(tx)
     }
     pub(crate) fn check_binding(&self, connection: &Connection) -> Result<()> {
         check_storage_binding(connection, &self.artifact, &self.scope)

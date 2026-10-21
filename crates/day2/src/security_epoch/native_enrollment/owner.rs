@@ -26,6 +26,9 @@ use std::{
     time::Duration,
 };
 
+mod serving;
+mod storage;
+
 struct OwnerIdentity;
 
 pub(crate) struct EnrolledProcessRoleOwner {
@@ -38,6 +41,10 @@ pub(crate) struct EnrolledProcessRoleOwner {
     process: u32,
     thread: ThreadId,
     refused: bool,
+    // One-way refusal gate, never a holder permission or restored DATA flag.
+    // Even a later fresh stage cannot restart an unknown initial exchange.
+    initial_holder_attempted: bool,
+    serving_attempted: bool,
     #[cfg(target_os = "linux")]
     issuer: IssuerReceipt,
     #[cfg(target_os = "linux")]
@@ -59,6 +66,8 @@ pub(crate) struct EnrolledRoleStage<'a> {
     grant_peer: IssuerReceipt,
     #[cfg(target_os = "linux")]
     channel: Channel,
+    #[cfg(target_os = "linux")]
+    current_grant: SignedStage,
 }
 
 /// Captured at the actual creator entry, before any entropy or I/O. This owns
@@ -86,6 +95,12 @@ pub(crate) struct SameEnrolledOwner {
 }
 
 impl EnrolledProcessRoleOwner {
+    /// Historical DATA from the successful enrollment, not a current check or
+    /// grant. The private Controller evidence exporter cannot restore an owner.
+    pub(in crate::security_epoch) fn historical_incarnation_data(&self) -> Digest {
+        self.incarnation.clone()
+    }
+
     /// Only operator-selected fixed configuration and the real native exchange
     /// can install a role. Call inside the executor's final owning OS thread.
     pub(crate) fn enroll_current_thread(scope: &AuthorityScope, role: NativeRole) -> Result<Self> {
@@ -120,6 +135,8 @@ impl EnrolledProcessRoleOwner {
                 process: std::process::id(),
                 thread: std::thread::current().id(),
                 refused: false,
+                initial_holder_attempted: false,
+                serving_attempted: false,
                 issuer,
                 binding: grant.data.runtime,
                 self_data: grant.data.process,
@@ -188,6 +205,7 @@ impl EnrolledProcessRoleOwner {
                     nonce_peer,
                     grant_peer,
                     channel,
+                    current_grant: grant,
                 };
                 stage.check()?;
                 Ok(stage)
@@ -286,6 +304,12 @@ impl EnrolledRoleStage<'_> {
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
         self.check_for(&policy.scope, role)
+    }
+
+    /// DATA from this actual checked executor, never a current grant factory.
+    pub(in crate::security_epoch) fn incarnation_data(&mut self) -> Result<Digest> {
+        self.check()?;
+        Ok(self.owner.incarnation.clone())
     }
 
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {

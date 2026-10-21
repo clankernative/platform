@@ -79,7 +79,7 @@ pub(super) struct Holder {
 }
 
 impl Holder {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(
             self.pod_uid.len() == 36
                 && self.pod_uid.bytes().enumerate().all(|(index, byte)| {

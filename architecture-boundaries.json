@@ -598,6 +598,13 @@
           "kind": [
             "bin"
           ],
+          "name": "day2-epoch-controller",
+          "source": "crates/day2/src/bin/day2-epoch-controller.rs"
+        },
+        {
+          "kind": [
+            "bin"
+          ],
           "name": "day2-health",
           "source": "crates/day2/src/bin/day2-health.rs"
         },

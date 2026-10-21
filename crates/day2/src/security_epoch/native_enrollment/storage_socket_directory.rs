@@ -15,6 +15,21 @@ pub(super) struct StorageSocketDirectory {
 }
 
 impl StorageSocketDirectory {
+    /// Observe only the provisioner's existing selected directory. A client or
+    /// controller cannot create, repair or adopt an incorrectly owned child.
+    pub(super) fn observe(root: &File) -> Result<Self> {
+        let root_identity = root_identity(root)?;
+        let directory = open_child(root)?;
+        let identity = child_identity(&directory)?;
+        let owner = Self {
+            directory,
+            identity,
+            root_identity,
+        };
+        owner.check(root)?;
+        Ok(owner)
+    }
+
     pub(super) fn prepare(root: &File) -> Result<Self> {
         let root_identity = root_identity(root)?;
         let created = match rustix::fs::mkdirat(root, CHILD, Mode::RWXU) {

@@ -27,8 +27,35 @@ mod runtime;
 mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
+mod serving_peer;
+#[cfg(target_os = "linux")]
+mod serving_peer_native;
+mod serving_peer_wire;
+mod storage_peer;
+#[cfg(target_os = "linux")]
+mod storage_peer_native;
+mod storage_peer_wire;
 #[cfg(target_os = "linux")]
 mod storage_socket_directory;
+
+pub(crate) use serving_peer::{
+    ControllerServingListener, ControllerServingPeer, CurrentServingPeerPhase, ShellServingPeer,
+};
+pub(crate) use storage_peer::{
+    AppHolderPeerContinuity, AuthenticatedAppFirstHolder, AuthenticatedControllerFirstHolder,
+    AuthenticatedInitialHolderOffer, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
+    InitialHolderListener, InitialHolderServer,
+};
+pub(crate) use storage_peer_wire::StoragePeerRequest;
+
+/// Closed current-peer request DATA, never storage or serving permission.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoragePeerPurpose {
+    BootstrapCreate,
+    BootstrapComplete,
+    CurrentServing,
+}
 
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{

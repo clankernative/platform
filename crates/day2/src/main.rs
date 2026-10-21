@@ -20,6 +20,12 @@ fn main() -> Result<()> {
         .as_slice()
     {
         ["oauth-setup", instance] => day2::deployment::oauth_setup(Path::new(instance))?,
+        ["native-storage-metadata", instance, app] => {
+            day2::deployment::native_storage_metadata(Path::new(instance), app)?
+        }
+        ["native-profile-manifest", document] => {
+            day2::deployment::native_profile_manifest(Path::new(document))?
+        }
         ["docs-preview", artifact, port] => {
             let artifact = LoadedArtifact::load(Path::new(artifact))?;
             tokio::runtime::Builder::new_multi_thread()
@@ -173,7 +179,7 @@ fn main() -> Result<()> {
             )?
         }
         _ => bail!(
-            "usage: day2 init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | replay-verification ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
+            "usage: day2 native-storage-metadata INSTANCE APP | native-profile-manifest REVIEWED_STATIC_PROFILE_DOCUMENT | init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | replay-verification ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
         ),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

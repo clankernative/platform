@@ -1,0 +1,43 @@
+{
+  "bootstrap": {
+    "scope": {
+      "installation": "fixture",
+      "environment": "test",
+      "app": "calendar"
+    },
+    "epoch_store": {
+      "id": "authority"
+    },
+    "controller": {
+      "namespace": {
+        "name": "day2-native-enrollment"
+      },
+      "kubernetes_service_account": {
+        "name": "calendar-epoch-controller"
+      },
+      "workload": {
+        "name": "calendar-epoch-controller"
+      },
+      "workload_kind": "deployment_v1",
+      "container": {
+        "name": "epoch-controller",
+        "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "token_review_audience": "native-test"
+    },
+    "fresh_storage": {
+      "provider_volume_uid": "123456"
+    }
+  },
+  "store": {
+    "scope": {
+      "installation": "fixture",
+      "environment": "test",
+      "app": "calendar"
+    }
+  },
+  "runtime": {
+    "node_name": "fixture-node",
+    "node_uid": "fixture-node-uid"
+  }
+}

@@ -16,7 +16,7 @@ RUN ["target/debug/xtask", "cli"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
 
 FROM tooling AS runtime-build
-RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-health", "--bin", "day2-inspect", "--bin", "day2-security-shell", "--bin", "day2-native-enrollment", "-p", "day2-control", "--bin", "day2-serve", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
+RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-health", "--bin", "day2-inspect", "--bin", "day2-security-shell", "--bin", "day2-native-enrollment", "--bin", "day2-epoch-controller", "-p", "day2-control", "--bin", "day2-serve", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/runtime-state"]
 
 # Distroless Debian 13: the same glibc release family as the tooling image (a
@@ -39,6 +39,7 @@ COPY --from=runtime-build /workspace/platform/dependency-inventory.json /usr/sha
 COPY --from=runtime-build /workspace/platform/target/release/day2-serve /usr/local/bin/day2-serve
 COPY --from=runtime-build /workspace/platform/target/release/day2-security-shell /usr/local/bin/day2-security-shell
 COPY --from=runtime-build /workspace/platform/target/release/day2-native-enrollment /usr/local/bin/day2-native-enrollment
+COPY --from=runtime-build /workspace/platform/target/release/day2-epoch-controller /usr/local/bin/day2-epoch-controller
 COPY --from=runtime-build /workspace/platform/target/debug/day2-workflows /usr/local/lib/day2/day2-workflows
 COPY --from=runtime-build /workspace/platform/target/debug/day2-workflows.json /usr/local/lib/day2/day2-workflows.json
 COPY --from=runtime-build /workspace/platform/target/release/day2-health /usr/local/bin/day2-health

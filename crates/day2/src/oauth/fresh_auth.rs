@@ -93,8 +93,21 @@ pub(crate) struct FreshIntent {
 }
 
 impl FreshIntent {
-    pub(super) fn commitment(&self) -> Result<Digest> {
+    pub(crate) fn commitment(&self) -> Result<Digest> {
         Digest::of(&("original-native-fresh-intent-v1", self))
+    }
+
+    /// Purpose DATA only. This never supplies authentication, a current role,
+    /// an original lifetime, storage authority or execution permission.
+    pub(crate) fn require_oauth_management(&self) -> Result<()> {
+        ensure!(
+            matches!(
+                self.purpose(),
+                FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
+            ),
+            "OAuth management original purpose required"
+        );
+        Ok(())
     }
 
     pub(super) fn human(&self) -> &str {
@@ -351,13 +364,7 @@ impl VerifiedAuthTime {
     }
 
     pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {
-        ensure!(
-            matches!(
-                self.purpose(),
-                FreshPurpose::OAuthConnect | FreshPurpose::OAuthDisconnect
-            ),
-            "OAuth management original purpose required"
-        );
+        self.google.intent().require_oauth_management()?;
         self.google.require_post_pending_authentication()
     }
 
@@ -445,3 +452,57 @@ const _: () = {
     assert_not_impl!(VerifiedAuthTime, std::borrow::Borrow<str>);
     assert_not_impl!(VerifiedAuthTime, std::borrow::Borrow<[u8]>);
 };
+
+#[cfg(test)]
+mod purpose_tests {
+    use super::*;
+
+    #[test]
+    fn matching_actor_attempt_and_challenge_cannot_admit_approval_or_credential_purposes()
+    -> Result<()> {
+        let mut intent = FreshIntent::fixture_oauth(
+            &iap::Verified {
+                email: "alice@example.com".into(),
+                subject: "alice".into(),
+            },
+            "same-original-attempt",
+            &Digest::new(b"same-original-challenge"),
+            "https://security.example.com",
+            5,
+            305,
+        )?;
+        assert!(intent.require_oauth_management().is_err());
+        let approval = intent.commitment()?;
+        intent.context = Context::Credential {
+            scope: "example/development/app".into(),
+            app: "app".into(),
+            artifact: Digest::new(b"artifact").as_str().to_owned(),
+            app_origin: "https://app.example.com".into(),
+            shell_origin: "https://security.example.com".into(),
+            expires_at: 305,
+        };
+        assert!(intent.require_oauth_management().is_err());
+        assert_ne!(intent.commitment()?, approval);
+        let mut connect = None;
+        for action in [
+            super::super::management::Action::Connect,
+            super::super::management::Action::Disconnect,
+        ] {
+            intent.context = Context::Management {
+                app: "app".into(),
+                action,
+                view: Digest::new(b"same-view"),
+                shell_origin: "https://security.example.com".into(),
+                expires_at: 305,
+            };
+            intent.require_oauth_management()?;
+            let commitment = intent.commitment()?;
+            if let Some(connect) = connect.as_ref() {
+                assert_ne!(&commitment, connect);
+            } else {
+                connect = Some(commitment);
+            }
+        }
+        Ok(())
+    }
+}

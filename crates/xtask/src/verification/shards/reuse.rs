@@ -32,6 +32,7 @@ const REQUIRED: &[&str] = &[
     "infrastructure (app-edge)",
     "infrastructure (security-shell-edge)",
     "infrastructure (security-shell)",
+    "infrastructure (security-epoch-controller)",
     "infrastructure (day2-app)",
     "infrastructure (qualification-runner)",
 ];

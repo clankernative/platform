@@ -929,6 +929,9 @@ struct SharedPort {
     claim_reply: ClaimReply,
     slot_posts: usize,
     counter_posts: usize,
+    retained_counter_owner: Option<std::rc::Weak<()>>,
+    expire_after_counter_commit: bool,
+    lose_counter_reply: bool,
 }
 
 impl SharedPort {
@@ -939,6 +942,9 @@ impl SharedPort {
             claim_reply: ClaimReply::Known,
             slot_posts: 0,
             counter_posts: 0,
+            retained_counter_owner: None,
+            expire_after_counter_commit: false,
+            lose_counter_reply: false,
         }
     }
 
@@ -950,7 +956,7 @@ impl SharedPort {
     ) -> (
         firestore::EpochObservation,
         guarded::SlotObservation,
-        CurrentBootstrapExecution,
+        CurrentBootstrapExecution<'static, 'static>,
     ) {
         let counter = self.counter.observe(&core.counter).unwrap();
         let context = CurrentBootstrapExecution::fixture(
@@ -1056,8 +1062,87 @@ impl Port for SharedPort {
         }
         if url.ends_with(":commit") {
             self.counter_posts += 1;
+            if let Some(owner) = &self.retained_counter_owner {
+                ensure!(
+                    owner.upgrade().is_some(),
+                    "counter execution owner dropped before transport"
+                );
+            }
         }
-        self.counter.post(url, body, timeout, max_bytes)
+        let reply = self.counter.post(url, body, timeout, max_bytes)?;
+        if url.ends_with(":commit") {
+            if self.expire_after_counter_commit {
+                self.counter.set_slot_fixture_time(Duration::from_secs(105));
+            }
+            ensure!(!self.lose_counter_reply, "counter reply lost after commit");
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn counter_send_keeps_the_known_claim_owner_through_transport_and_releases_on_every_result() {
+    let (selection, create) = fixture();
+    let complete = completion(&create);
+    for core in [&create, &complete] {
+        for outcome in ["known", "expired", "lost"] {
+            let mut port = SharedPort::new();
+            if core.stage == Stage::Complete {
+                port.pending(&selection, &create);
+            }
+            let baseline = port.counter_posts;
+            let (counter, slot, context) = port.evidence(&selection, core, Purpose::Dispatch);
+            guarded::accept(&selection, core.clone(), counter, slot, context, &mut port)
+                .unwrap()
+                .send(&selection, &mut port)
+                .unwrap();
+            let (counter, slot, mut context) = port.evidence(&selection, core, Purpose::Dispatch);
+            let retained = context.observe_fixture_lifetime();
+            port.retained_counter_owner = Some(retained.clone());
+            let before = codec::decode(
+                &selection,
+                core,
+                &port.slots.read(&codec::name(&selection, core).unwrap()),
+            )
+            .unwrap();
+            let claim = guarded::claim(
+                &selection,
+                core.clone(),
+                counter,
+                slot,
+                context,
+                attempt(
+                    core,
+                    before.version,
+                    AttemptOrdinal::first(),
+                    b"retained-owner",
+                ),
+                &mut port,
+            )
+            .unwrap()
+            .send(&selection, &mut port)
+            .unwrap();
+            assert!(retained.upgrade().is_some());
+            port.expire_after_counter_commit = outcome == "expired";
+            port.lose_counter_reply = outcome == "lost";
+            let result = claim.send(&selection, &mut port);
+            assert_eq!(result.is_ok(), outcome == "known", "{outcome}");
+            assert_eq!(port.counter_posts, baseline + 1);
+            assert!(retained.upgrade().is_none());
+            let stored = codec::decode(
+                &selection,
+                core,
+                &port.slots.read(&codec::name(&selection, core).unwrap()),
+            )
+            .unwrap();
+            assert!(matches!(
+                stored.slot.state,
+                SlotState::MayHaveBeenSent { .. }
+            ));
+            // A lost/expired reply does not free the permanent slot or turn
+            // its stored state into another local send permission.
+            replay_provider(&port.slots.replay());
+        }
     }
 }
 

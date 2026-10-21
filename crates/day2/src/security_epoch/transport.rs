@@ -19,6 +19,10 @@ pub(super) enum Route<'a> {
     Namespace(&'a str),
     ServiceAccount { namespace: &'a str, name: &'a str },
     Pod { namespace: &'a str, name: &'a str },
+    PersistentVolumeClaim { namespace: &'a str, name: &'a str },
+    PersistentVolume(&'a str),
+    ComputeDisk { zone: &'a str, name: &'a str },
+    ComputeInstance { zone: &'a str, name: &'a str },
     Node(&'a str),
     ReplicaSet { namespace: &'a str, name: &'a str },
     Deployment { namespace: &'a str, name: &'a str },
@@ -30,6 +34,7 @@ pub(super) enum Route<'a> {
     Database,
     EpochRead,
     EpochRollback,
+    EpochCommit,
 }
 
 pub(super) struct NativeHttp {
@@ -156,6 +161,35 @@ impl NativeHttp {
                 Method::GET,
                 true,
             ),
+            Route::PersistentVolumeClaim { namespace, name } => (
+                kube(&[
+                    "api",
+                    "v1",
+                    "namespaces",
+                    namespace,
+                    "persistentvolumeclaims",
+                    name,
+                ])?,
+                Method::GET,
+                true,
+            ),
+            Route::PersistentVolume(name) => (
+                kube(&["api", "v1", "persistentvolumes", name])?,
+                Method::GET,
+                true,
+            ),
+            Route::ComputeDisk { zone, name } | Route::ComputeInstance { zone, name } => {
+                let collection = match route {
+                    Route::ComputeDisk { .. } => "disks",
+                    _ => "instances",
+                };
+                let mut url = Url::parse("https://compute.googleapis.com/compute/v1/")?;
+                url.path_segments_mut()
+                    .map_err(|_| anyhow::anyhow!("storage_provider_origin"))?
+                    .pop_if_empty()
+                    .extend(["projects", project, "zones", zone, collection, name]);
+                (url, Method::GET, false)
+            }
             Route::Node(name) => (kube(&["api", "v1", "nodes", name])?, Method::GET, true),
             Route::ReplicaSet { namespace, name } => (
                 kube(&[
@@ -243,10 +277,11 @@ impl NativeHttp {
                 Method::GET,
                 false,
             ),
-            Route::EpochRead | Route::EpochRollback => {
+            Route::EpochRead | Route::EpochRollback | Route::EpochCommit => {
                 let operation = match route {
                     Route::EpochRead => "batchGet",
-                    _ => "rollback",
+                    Route::EpochRollback => "rollback",
+                    _ => "commit",
                 };
                 (
                     Url::parse(&format!(
