@@ -22,6 +22,8 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
   assert {
     condition = (
       tonumber(kubernetes_deployment_v1.controller.spec[0].replicas) == 1 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].args == tolist(["/srv/day2/instance.json", "calendar"]) &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].metadata[0].annotations["day2.dev/controller-mode"] == "initial" &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].service_account_name == "calendar-epoch-controller" &&
       !kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].automount_service_account_token &&
       kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].host_pid &&
@@ -49,6 +51,47 @@ run "activated_trusted_controller_keeps_exact_separate_identity_and_mounts" {
     ])
     error_message = "Only the actual selected state volume, provisioner-owned private peer child and pod-local worker scratch are writable."
   }
+}
+
+run "read_only_observation_selects_closed_command_before_process_start" {
+  command = plan
+  variables { observe_preparation_read_only = true }
+  assert {
+    condition = (
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].command == tolist(["/usr/local/bin/day2-epoch-controller"]) &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].args == tolist(["--observe-preparation-read-only", "/srv/day2/instance.json", "calendar"]) &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].metadata[0].annotations["day2.dev/controller-mode"] == "preparation-read-only" &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].liveness_probe) == 0 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].startup_probe) == 0 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].readiness_probe[0].http_get[0].path == "/health/ready" &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].readiness_probe[0].http_get[0].port == "health" &&
+      !kubernetes_deployment_v1.controller.wait_for_rollout &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].host_pid &&
+      !kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].automount_service_account_token &&
+      tonumber(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].run_as_user) == 10001 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].privileged &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].security_context[0].read_only_root_filesystem &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 8 &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 10
+    )
+    error_message = "Observation must select the closed diagnostic command before startup, retain normal native identity/mount guards, omit restart probes, and retain failing readiness because the diagnostic opens no health listener."
+  }
+}
+
+run "dormant_registration_cannot_start_observation" {
+  command = plan
+  variables {
+    activate                      = false
+    observe_preparation_read_only = true
+    bootstrap_alias               = null
+    instance_json                 = null
+    enrollment_json               = null
+    storage_json                  = null
+    host_state_path               = null
+    node_profile                  = null
+    disk_device_group_id          = null
+  }
+  expect_failures = [var.observe_preparation_read_only]
 }
 
 run "different_image_is_refused" {

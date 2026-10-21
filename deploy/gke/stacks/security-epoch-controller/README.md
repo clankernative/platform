@@ -102,3 +102,29 @@ The operator must qualify writing and executing the admitted worker in the real
 Pod; a mock plan is not that evidence. This supplies the missing scratch path;
 it does not establish the exact errno of an earlier `image_admission/io` refusal
 or authorize retrying, adopting or resetting a refused original storage owner.
+
+## Bounded preparation observation
+
+For an operator-only observation, set `activate=true` with the same complete
+native selections and `observe_preparation_read_only=true`. The manifest selects
+exactly `day2-epoch-controller --observe-preparation-read-only INSTANCE APP`
+before starting any process; applying the normal command first and patching it
+after startup can already attempt an original and is not this procedure.
+There is no arbitrary command, argument or callback input.
+
+Select a qualified diagnostic image whose command returns before every seed,
+private-directory, file, first-holder and serving factory. Its one observation
+must drop all native owners on both outcomes before the fixed 300-second
+ownerless hold. Retain the first observation/refusal and stop/scale to zero
+before the hold ends. Neither startup nor liveness probes are installed;
+readiness keeps probing the fixed health endpoint, which this diagnostic never
+opens, so it remains unready. Forced replacement, timeout or an operator delay
+can restart the Deployment and invalidate a single-attempt claim. No permanent
+marker or once-across-restarts guarantee is introduced.
+
+The trusted Controller's normal identity, mounts and device grants remain.
+Read-only describes this fixed executable path's effects, not read-only DAC or
+hostile-code containment. Never open/adopt/reset the failed native SQLite file
+or change provider/control records. Timing is observation DATA and establishes
+no storage owner, P3, writer, serving, readiness or OAuth qualification. Normal
+initial activation still requires its separately selected fresh original.
