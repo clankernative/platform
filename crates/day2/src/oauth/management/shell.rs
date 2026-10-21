@@ -47,7 +47,7 @@ enum Stage {
 
 struct Session {
     view: View,
-    proof: Arc<VerifiedAuthTime>,
+    proof: VerifiedAuthTime,
     csrf: String,
     digest: Digest,
     stage: Stage,
@@ -110,29 +110,38 @@ impl Shell {
         proof.require_intent(&FreshIntent::management(&view, identity)?, identity)?;
         proof.require_current(now)?;
         proof.require_management_authentication()?;
-        let token = effects::random()?;
-        let digest = Digest::new(token.as_bytes());
-        let session = Session {
-            view: view.clone(),
-            proof: Arc::new(proof),
-            csrf: effects::random()?,
-            digest: digest.clone(),
-            stage: Stage::Confirm,
-        };
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("OAuth management session unavailable"))?;
-        sessions.retain(|_, s| now < s.view.expires_at);
-        ensure!(
-            sessions.len() < 1024,
-            "OAuth management session capacity reached"
-        );
-        sessions.insert(digest.as_str().into(), session);
-        with_cookie(
-            redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
-            &token,
-            view.expires_at - now,
+        let intent = FreshIntent::management(&view, identity)?;
+        crate::oauth::native_management::with_current_original(
+            &intent,
+            crate::oauth::native_management::Phase::Session,
+            now,
+            |role, original| {
+                let token = effects::random()?;
+                let digest = Digest::new(token.as_bytes());
+                let session = Session {
+                    view: view.clone(),
+                    proof,
+                    csrf: effects::random()?,
+                    digest: digest.clone(),
+                    stage: Stage::Confirm,
+                };
+                let mut sessions = self
+                    .sessions
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("OAuth management session unavailable"))?;
+                sessions.retain(|_, s| now < s.view.expires_at);
+                ensure!(
+                    sessions.len() < 1024,
+                    "OAuth management session capacity reached"
+                );
+                original.check(role)?;
+                sessions.insert(digest.as_str().into(), session);
+                with_cookie(
+                    redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
+                    &token,
+                    view.expires_at - now,
+                )
+            },
         )
     }
 
@@ -275,7 +284,7 @@ impl Shell {
         };
         let proof = self.signer.attest_management(
             &view,
-            session.proof.as_ref(),
+            &session.proof,
             identity,
             session.digest.clone(),
             now,
@@ -610,20 +619,19 @@ mod tests {
             let manager = crate::oauth::management::app::Manager::new(runtime, authority);
             let view = manager.capture("calendar", Action::Connect, &identity, 102)?;
             // Fixture times stay within the original pending interval.
-            let proof = Arc::new(VerifiedAuthTime::from_google(
-                crate::oauth::shell_oidc::Reauthenticated::fixture(
+            let proof =
+                VerifiedAuthTime::from_google(crate::oauth::shell_oidc::Reauthenticated::fixture(
                     FreshIntent::management(&view, &identity)?,
                     identity.email.clone(),
                     identity.subject.clone(),
                     103,
-                ),
-            ));
+                ));
             let state = format!("product.{}.{}", view.id, "r".repeat(43));
             let token = "t".repeat(43);
             let digest = Digest::new(token.as_bytes());
             let session = Session {
                 view: view.clone(),
-                proof: proof.clone(),
+                proof,
                 csrf: "csrf".into(),
                 digest: digest.clone(),
                 stage: Stage::Provider {
@@ -635,6 +643,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(digest.as_str().into(), session);
+            let proof_address = {
+                let sessions = shell.sessions.lock().unwrap();
+                &sessions.get(digest.as_str()).unwrap().proof as *const VerifiedAuthTime as usize
+            };
             let mut headers = HeaderMap::new();
             headers.insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
             headers.insert(
@@ -703,7 +715,10 @@ mod tests {
                     assert_eq!(retained.view, view);
                     assert_eq!(retained.digest, digest);
                     assert_eq!(retained.csrf, "csrf");
-                    assert!(Arc::ptr_eq(&retained.proof, &proof));
+                    assert_eq!(
+                        &retained.proof as *const VerifiedAuthTime as usize,
+                        proof_address
+                    );
                     assert!(
                         retained.stage
                             == Stage::Provider {

@@ -7,7 +7,6 @@ use crate::oauth::effects::{self, Client, Instant};
 use crate::{artifact::Instance, iap};
 use anyhow::{Context, Result, ensure};
 use axum::{
-    Router,
     body::to_bytes,
     extract::Request,
     http::{HeaderMap, Method, StatusCode, header},
@@ -416,7 +415,7 @@ impl AppApprovalReceiver {
             Ok(Err(_)) => return protected(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
             Err(_) => return protected(StatusCode::REQUEST_TIMEOUT.into_response()),
         };
-        let result = effects::spawn_blocking(move || {
+        let result = (|| {
             // Keep host capacity until authentication and local settlement
             // finish, including when the HTTP caller disconnects.
             let _permit = permit;
@@ -428,23 +427,24 @@ impl AppApprovalReceiver {
                 &body,
                 now()?,
             )
-        })
-        .await;
+        })();
         let response = match result {
-            Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
-            Ok(Err(_)) => StatusCode::FORBIDDEN.into_response(),
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
+            Err(_) => StatusCode::FORBIDDEN.into_response(),
         };
         protected(response)
     }
 
     pub(crate) async fn serve(self: Arc<Self>, listener: tokio::net::TcpListener) -> Result<()> {
-        axum::serve(
-            listener,
-            Router::new().fallback(move |request| self.clone().handle(request)),
-        )
-        .await?;
-        Ok(())
+        super::native_http::serve_receiver(self, listener).await
+    }
+
+    pub(crate) fn native_scopes(
+        &self,
+    ) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+        self.management
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), |manager| manager.native_scopes())
     }
 
     fn dispatch(

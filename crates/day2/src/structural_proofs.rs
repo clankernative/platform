@@ -32,6 +32,33 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::oauth::native_management::AppCreator<'static>);
+    assert_not_impl!(crate::oauth::native_management::AppCreator<'static>, Send);
+    assert_not_impl!(crate::oauth::native_management::AppCreator<'static>, Sync);
+    assert_consuming!(crate::oauth::management::app::CaptureStart);
+    assert_not_impl!(crate::oauth::management::app::CaptureStart, Send);
+    assert_not_impl!(crate::oauth::management::app::CaptureStart, Sync);
+    assert_consuming!(crate::oauth::management::app::CommittedCapture<'static>);
+    assert_not_impl!(
+        crate::oauth::management::app::CommittedCapture<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::management::app::CommittedCapture<'static>,
+        Sync
+    );
+    assert_consuming!(crate::oauth::native_management::OriginalPhase<'static>);
+    assert_not_impl!(
+        crate::oauth::native_management::OriginalPhase<'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::OriginalPhase<'static>,
+        Sync
+    );
+    assert_consuming!(crate::oauth::native_management::RoleStage<'static>);
+    assert_not_impl!(crate::oauth::native_management::RoleStage<'static>, Send);
+    assert_not_impl!(crate::oauth::native_management::RoleStage<'static>, Sync);
     assert_consuming!(crate::security_epoch::native_enrollment::SameEnrolledOwner);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::SameEnrolledOwner,

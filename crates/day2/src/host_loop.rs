@@ -233,8 +233,51 @@ pub(crate) async fn run(
     admitting: Arc<AtomicBool>,
     stopped: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    run_mode(
+        runtime,
+        clock,
+        ticks,
+        admitting,
+        stopped,
+        Execution::BlockingPool,
+    )
+    .await
+}
+
+pub(crate) async fn run_on_owner(
+    runtime: Runtime,
+    clock: Arc<dyn Clock>,
+    ticks: Arc<dyn LiveTicks>,
+    admitting: Arc<AtomicBool>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    run_mode(
+        runtime,
+        clock,
+        ticks,
+        admitting,
+        stopped,
+        Execution::OwnerThread,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Execution {
+    BlockingPool,
+    OwnerThread,
+}
+
+async fn run_mode(
+    runtime: Runtime,
+    clock: Arc<dyn Clock>,
+    ticks: Arc<dyn LiveTicks>,
+    admitting: Arc<AtomicBool>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+    execution: Execution,
+) -> Result<()> {
     let declared = !runtime.artifact().contract().schedules.is_empty();
-    drive(
+    drive_mode(
         Arc::new(NativeWork {
             runtime,
             clock,
@@ -244,24 +287,30 @@ pub(crate) async fn run(
         admitting,
         stopped,
         declared,
+        execution,
     )
     .await
 }
 
-async fn drive(
+async fn drive_mode(
     work: Arc<dyn Work>,
     ticks: Arc<dyn LiveTicks>,
     admitting: Arc<AtomicBool>,
     mut stopped: tokio::sync::watch::Receiver<bool>,
     declared: bool,
+    execution: Execution,
 ) -> Result<()> {
     let mut state = State::new(declared);
-    let mut commands = ticks.start(COMMAND_TICK);
-    let mut schedules = declared.then(|| ticks.start(SCHEDULE_TICK));
-    let mut journal = ticks.start(JOURNAL_TICK);
+    let mut commands = crate::oauth::native_http::timer(|| ticks.start(COMMAND_TICK));
+    let mut schedules =
+        declared.then(|| crate::oauth::native_http::timer(|| ticks.start(SCHEDULE_TICK)));
+    let mut journal = crate::oauth::native_http::timer(|| ticks.start(JOURNAL_TICK));
     let mut jobs = tokio::task::JoinSet::new();
     let mut running = std::collections::HashMap::new();
     loop {
+        if execution == Execution::OwnerThread {
+            crate::oauth::native_http::cooperate().await;
+        }
         if *stopped.borrow() || !admitting.load(Ordering::Acquire) {
             admitting.store(false, Ordering::Release);
             state.apply(Event::Stop).map_err(anyhow::Error::msg)?;
@@ -293,10 +342,10 @@ async fn drive(
                 let pump = running.remove(&id).expect("unknown host pump completion");
                 Event::Complete(pump, completion)
             }
-            _ = commands.next(), if state.poll(Pump::Commands) => Event::Wake(Pump::Commands),
-            _ = async { schedules.as_mut().expect("undeclared schedule polled").next().await },
+            _ = crate::oauth::native_http::readiness(commands.next()), if state.poll(Pump::Commands) => Event::Wake(Pump::Commands),
+            _ = async { crate::oauth::native_http::readiness(schedules.as_mut().expect("undeclared schedule polled").next()).await },
                 if state.poll(Pump::Schedules) => Event::Wake(Pump::Schedules),
-            _ = journal.next(), if state.poll(Pump::Journal) => Event::Wake(Pump::Journal),
+            _ = crate::oauth::native_http::readiness(journal.next()), if state.poll(Pump::Journal) => Event::Wake(Pump::Journal),
         };
         if event == Event::Stop {
             admitting.store(false, Ordering::Release);
@@ -311,6 +360,18 @@ async fn drive(
             work.observe(dispatch, &state);
             if state.stopping {
                 break;
+            }
+            if execution == Execution::OwnerThread {
+                let completion = if accepts_work(false, admitting.load(Ordering::Acquire)) {
+                    work.execute(pump)
+                } else {
+                    Completion::Refused
+                };
+                let completion = Event::Complete(pump, completion);
+                state.apply(completion).map_err(anyhow::Error::msg)?;
+                #[cfg(test)]
+                work.observe(completion, &state);
+                continue;
             }
             let work = work.clone();
             let admitting = admitting.clone();
@@ -328,6 +389,25 @@ async fn drive(
             running.insert(task.id(), pump);
         }
     }
+}
+
+#[cfg(test)]
+async fn drive(
+    work: Arc<dyn Work>,
+    ticks: Arc<dyn LiveTicks>,
+    admitting: Arc<AtomicBool>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+    declared: bool,
+) -> Result<()> {
+    drive_mode(
+        work,
+        ticks,
+        admitting,
+        stopped,
+        declared,
+        Execution::BlockingPool,
+    )
+    .await
 }
 
 #[cfg(test)]
