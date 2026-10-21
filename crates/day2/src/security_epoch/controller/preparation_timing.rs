@@ -30,9 +30,11 @@ pub(in crate::security_epoch) enum Operation {
     Node,
     Disk,
     Instance,
+    HolderRole,
+    HolderListener,
 }
 
-const OPERATIONS: [Operation; 22] = [
+const OPERATIONS: [Operation; 24] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -55,6 +57,8 @@ const OPERATIONS: [Operation; 22] = [
     Operation::Node,
     Operation::Disk,
     Operation::Instance,
+    Operation::HolderRole,
+    Operation::HolderListener,
 ];
 
 /// [call count, inclusive total microseconds, maximum call microseconds].
@@ -76,14 +80,17 @@ impl Measurement {
 #[derive(Clone, Debug, Serialize)]
 pub(in crate::security_epoch) struct Summary(Vec<(Operation, Measurement)>);
 
-/// One explicitly scoped collector. Current/serving phases use disabled(),
-/// with no allocation, clock reads, inherited observations or permission.
+/// One explicitly scoped collector for original preparation and listener setup.
+/// Other current/serving phases use disabled(), with no allocation, clock
+/// reads, inherited observations or permission.
 #[derive(Clone)]
-pub(in crate::security_epoch) struct Timings(Option<Rc<RefCell<[Measurement; 22]>>>);
+pub(in crate::security_epoch) struct Timings(Option<Rc<RefCell<[Measurement; OPERATIONS.len()]>>>);
 
 impl Timings {
     pub(in crate::security_epoch) fn new() -> Self {
-        Self(Some(Rc::new(RefCell::new([Measurement::EMPTY; 22]))))
+        Self(Some(Rc::new(RefCell::new(
+            [Measurement::EMPTY; OPERATIONS.len()],
+        ))))
     }
 
     pub(in crate::security_epoch) fn disabled() -> Self {
@@ -213,5 +220,31 @@ mod tests {
             19
         );
         assert_eq!(serde_json::to_string(&timings.summary()).unwrap(), "[]");
+    }
+
+    #[test]
+    fn holder_role_and_listener_keep_distinct_failed_and_completed_measurements() {
+        let timings = Timings::new();
+        for (operation, result, micros) in [
+            (Operation::HolderRole, Ok(()), 17),
+            (
+                Operation::HolderListener,
+                Err("original final check refused"),
+                29,
+            ),
+        ] {
+            let mut clock = [Duration::ZERO, Duration::from_micros(micros)].into_iter();
+            assert_eq!(
+                timings.measure_with(operation, || result, || clock.next()),
+                result
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(timings.summary()).unwrap(),
+            serde_json::json!([
+                ["holder_role", [1, 17, 17]],
+                ["holder_listener", [1, 29, 29]],
+            ])
+        );
     }
 }

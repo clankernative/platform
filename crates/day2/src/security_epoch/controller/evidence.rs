@@ -1078,6 +1078,12 @@ mod tests {
                 "holder_file_phase",
                 "clock_expired_or_rewound",
             ),
+            (
+                anyhow::anyhow!("epoch_native_acquisition_expired"),
+                PreparationStep::HolderFinalCheck,
+                "holder_final_check",
+                "clock_expired_or_rewound",
+            ),
         ] {
             let error = PreparationFailure::at(step, cause);
             let error = PreparationFailure::at(PreparationStep::HolderListenerBind, error);
@@ -1100,6 +1106,10 @@ mod tests {
             assert_eq!(rows[1]["observation"]["preparation"]["step"], name);
             assert_eq!(rows[1]["observation"]["preparation"]["category"], category);
             assert!(rows[1]["observation"]["timing"].is_array());
+            let timing = rows[1]["observation"]["timing"].as_array().unwrap();
+            for name in ["holder_role", "holder_listener"] {
+                assert!(timing.iter().any(|row| row[0] == name));
+            }
             for line in recorder
                 .output
                 .split(|b| *b == b'\n')

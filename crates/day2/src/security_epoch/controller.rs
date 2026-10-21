@@ -118,18 +118,27 @@ fn run_inner(
             )
         });
     // Cache only DATA; no logging while the original phase remains live. A
-    // later first-holder/refusal record includes this fixed completed summary.
+    // later first-holder/refusal record includes completed diagnostic rows.
     evidence.preparation_timings(timings.summary());
     let mut file = result?;
     evidence.enter(FailurePhase::HolderListener);
-    let stage = role
-        .begin_current_stage()
-        .map_err(|error| PreparationFailure::at(PreparationStep::HolderRoleStage, error))?;
-    let phase = file
-        .begin_initial_phase(stage)
-        .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
-    let mut holder_listener = InitialHolderListener::bind(phase)
-        .map_err(|error| PreparationFailure::at(PreparationStep::HolderListenerBind, error))?;
+    let result = timings
+        .measure(Operation::HolderRole, || role.begin_current_stage())
+        .map_err(|error| PreparationFailure::at(PreparationStep::HolderRoleStage, error))
+        .and_then(|stage| {
+            timings.measure(Operation::HolderListener, || {
+                let phase = file.begin_initial_phase(stage).map_err(|error| {
+                    PreparationFailure::at(PreparationStep::HolderFilePhase, error)
+                })?;
+                InitialHolderListener::bind(phase).map_err(|error| {
+                    PreparationFailure::at(PreparationStep::HolderListenerBind, error)
+                })
+            })
+        });
+    // The file phase has completed/unwound before the ending measurement.
+    // Cache both outcomes without logging or returning a permission here.
+    evidence.preparation_timings(timings.summary());
+    let mut holder_listener = result?;
     while !holder_listener.idle_ready()? {
         // No role/file permission remains live while waiting for Kubernetes
         // startup. Start a fresh same-owner phase only after actual pending DATA.

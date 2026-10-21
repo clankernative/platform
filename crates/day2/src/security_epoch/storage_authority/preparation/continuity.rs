@@ -276,46 +276,16 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
             }
             #[cfg(target_os = "linux")]
             {
-                let mut bytes = vec![0_u8; self.layout.proposal.length];
-                let mut offset = 0;
-                while offset < bytes.len() {
+                check_retained_initial_bytes(self.file, self.layout.image.bytes(), || {
                     check_identity(
                         &mut self.phase,
                         self.directory,
                         self.anchor,
                         self.file,
                         self.identity,
-                        Some(bytes.len()),
-                    )?;
-                    let end = (offset + super::IO_CHUNK_BYTES).min(bytes.len());
-                    let read =
-                        rustix::io::pread(self.file, &mut bytes[offset..end], offset as u64)?;
-                    ensure!(
-                        read > 0 && read <= end - offset,
-                        "retained_initial_read_progress"
-                    );
-                    offset += read;
-                    check_identity(
-                        &mut self.phase,
-                        self.directory,
-                        self.anchor,
-                        self.file,
-                        self.identity,
-                        Some(bytes.len()),
-                    )?;
-                }
-                ensure!(
-                    bytes == self.layout.image.bytes(),
-                    "retained_initial_bytes_changed"
-                );
-                check_identity(
-                    &mut self.phase,
-                    self.directory,
-                    self.anchor,
-                    self.file,
-                    self.identity,
-                    Some(bytes.len()),
-                )
+                        Some(self.layout.proposal.length),
+                    )
+                })
             }
         })();
         if result.is_err() {
@@ -470,6 +440,37 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
     }
 }
 
+/// Reread the complete retained INITIAL image on every call. This private
+/// atomic operation grants no native owner; production supplies the same
+/// identity/original-clock check before and after each actual pread and last.
+/// Later physical serving checks do not use this initial-image operation.
+#[cfg(any(target_os = "linux", test))]
+fn check_retained_initial_bytes(
+    file: &File,
+    expected: &[u8],
+    mut check_identity: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    ensure!(
+        !expected.is_empty() && expected.len() <= super::MAX_IMAGE_BYTES,
+        "retained_initial_image_bound"
+    );
+    let mut bytes = vec![0_u8; expected.len()];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        check_identity()?;
+        let end = (offset + super::INITIAL_IO_CHUNK_BYTES).min(bytes.len());
+        let read = rustix::io::pread(file, &mut bytes[offset..end], offset as u64)?;
+        ensure!(
+            read > 0 && read <= end - offset,
+            "retained_initial_read_progress"
+        );
+        offset += read;
+        check_identity()?;
+    }
+    ensure!(bytes == expected, "retained_initial_bytes_changed");
+    check_identity()
+}
+
 #[cfg(target_os = "linux")]
 fn check_identity(
     phase: &mut CurrentVolumePhase<'_, '_>,
@@ -504,6 +505,100 @@ fn check_identity(
     );
     phase.acquisition().remaining()?;
     phase.check_directory(directory, anchor)
+}
+
+#[cfg(test)]
+mod retained_initial_read_tests {
+    use super::check_retained_initial_bytes;
+    use anyhow::{Result, bail};
+    use std::{cell::Cell, fs::File, io::Write};
+
+    fn image_file(bytes: &[u8]) -> Result<File> {
+        let mut file = tempfile::tempfile()?;
+        file.write_all(bytes)?;
+        Ok(file)
+    }
+
+    #[test]
+    fn multi_batch_complete_reread_keeps_every_syscall_guard_and_last_check() -> Result<()> {
+        let bytes: Vec<u8> = (0..super::super::INITIAL_IO_CHUNK_BYTES + 17)
+            .map(|n| (n % 251) as u8)
+            .collect();
+        let file = image_file(&bytes)?;
+        let mut checks = 0;
+        check_retained_initial_bytes(&file, &bytes, || {
+            checks += 1;
+            Ok(())
+        })?;
+        assert_eq!(checks, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn same_length_changed_bytes_are_reread_without_a_cached_positive() -> Result<()> {
+        let bytes = vec![7; super::super::INITIAL_IO_CHUNK_BYTES + 17];
+        let file = image_file(&bytes)?;
+        check_retained_initial_bytes(&file, &bytes, || Ok(()))?;
+        // Change the second batch, with the original file length retained.
+        rustix::io::pwrite(&file, &[8], super::super::INITIAL_IO_CHUNK_BYTES as u64)?;
+        let error = check_retained_initial_bytes(&file, &bytes, || Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "retained_initial_bytes_changed");
+        Ok(())
+    }
+
+    #[test]
+    fn zero_progress_after_truncation_is_refused() -> Result<()> {
+        let file = image_file(&[7; 17])?;
+        let error = check_retained_initial_bytes(&file, &[7; 17], || {
+            file.set_len(0)?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "retained_initial_read_progress");
+        Ok(())
+    }
+
+    #[test]
+    fn pre_read_refusal_prevents_the_syscall_and_preserves_its_cause() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = File::open(directory.path())?;
+        let error =
+            check_retained_initial_bytes(&file, &[7], || bail!("pre_read_refused")).unwrap_err();
+        assert_eq!(error.to_string(), "pre_read_refused");
+        Ok(())
+    }
+
+    #[test]
+    fn post_read_and_final_refusals_cannot_become_success() -> Result<()> {
+        let file = image_file(&[7; 17])?;
+        for refused_check in [2, 3] {
+            let checks = Cell::new(0);
+            let error = check_retained_initial_bytes(&file, &[7; 17], || {
+                checks.set(checks.get() + 1);
+                if checks.get() == refused_check {
+                    bail!("original_guard_refused");
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "original_guard_refused");
+            assert_eq!(checks.get(), refused_check);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_image_lengths_refuse_before_read_or_guard() -> Result<()> {
+        let file = image_file(&[7])?;
+        for bytes in [vec![], vec![7; super::super::MAX_IMAGE_BYTES + 1]] {
+            let error = check_retained_initial_bytes(&file, &bytes, || {
+                panic!("unbounded image must not reach a native guard")
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "retained_initial_image_bound");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -256,6 +256,27 @@ all test containers have closed; retain source/executable/image and log records.
 
 ## Bounded issuer cost observations
 
+The Controller's private lifecycle records also include inclusive original
+preparation timings. `holder_role` is the later listener stage's actual role
+acquisition; `holder_listener` covers its fresh same-owner file phase and socket
+bind through the original final check. Both completed and failed outcomes are
+cached as DATA after the measured operation returns; no record is emitted while
+the file phase is live. Earlier preparation rows do not measure this later
+stage. Diagnostic clocks do not supply, reset or extend a native interval, and
+missing/rewound/overflowed timings remain null. These rows do not separate each
+internal check or prove which individual call consumed the interval.
+
+Every retained initial-image check rereads and compares the complete image. It
+uses the same bounded 1 MiB requests as original initialization, with unchanged
+native identity/original-clock checks before and after every actual pread and
+one last check after the byte comparison. Short reads cause another guarded
+read; zero progress or any changed byte refuses continuity. This applies only
+to the retained initial image, including its durability and pre-physical
+transition checks. App/current physical serving operations keep their separate
+64 KiB batch. With a 946176-byte image and full read returns, listener setup's
+nine full-image checks make nine preads instead of 135, rereading the same
+bytes. That is a source count, not a measured latency or reliability result.
+
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
 for its first sixteen accepted connections through the provisioner's inherited
 stderr. Its startup channel and listener remain separate on stdin and stdout;
