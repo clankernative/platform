@@ -33,6 +33,13 @@ pub const MINIMUM_INTERVAL_MS: i64 = 60_000;
 /// schedule; nothing otherwise bounds declaring hundreds.
 pub const MAXIMUM_SCHEDULES: usize = 16;
 
+/// One hour, the unit a daily schedule's anchor is declared in.
+pub const HOUR_MS: i64 = 60 * 60_000;
+
+/// Schedules at least this long must be anchored to an hour of the UTC day, and
+/// shorter ones cannot be. Admission enforces the same rule on the declaration.
+pub const DAY_MS: i64 = 24 * HOUR_MS;
+
 /// What to do with occurrences that elapsed while nothing was running. There is no
 /// default: after an outage, running every missed occurrence and silently dropping
 /// them are both wrong, and which is correct is a property of the operation.
@@ -51,6 +58,11 @@ pub struct Schedule {
     pub app: String,
     pub name: String,
     pub interval_ms: i64,
+    /// The UTC hour a daily schedule fires at. Occurrences fall at
+    /// `k * interval_ms + anchor_hour * HOUR_MS` since the epoch, so a schedule
+    /// declared for 10:00 runs at 10:00 UTC rather than at midnight. `None` for
+    /// schedules shorter than a day, whose occurrences are multiples of the interval.
+    pub anchor_hour: Option<i64>,
     pub missed: Missed,
 }
 
@@ -79,14 +91,34 @@ impl Schedule {
         if let Missed::RunEach { bound } = self.missed {
             ensure!(bound > 0 && bound <= 64, "missed-occurrence bound");
         }
+        // The same rule admission applies to the declaration. An anchor is what
+        // keeps a daily occurrence at a stable instant; on a shorter schedule it
+        // would name an offset the interval cannot contain.
+        ensure!(
+            (self.interval_ms >= DAY_MS) == self.anchor_hour.is_some(),
+            "a daily schedule requires a UTC anchor hour, and a shorter one cannot take it"
+        );
+        if let Some(hour) = self.anchor_hour {
+            ensure!(
+                (0..24).contains(&hour),
+                "schedule anchor hour is outside the UTC day"
+            );
+        }
         Ok(())
     }
 
-    /// The occurrence covering an instant: the largest multiple of the interval at
-    /// or before it. A pure function of the clock, so every process agrees without
-    /// coordinating and a restart recomputes the same answer.
+    /// How far past each multiple of the interval an occurrence falls.
+    fn anchor_ms(&self) -> i64 {
+        self.anchor_hour.map_or(0, |hour| hour * HOUR_MS)
+    }
+
+    /// The occurrence covering an instant: the latest anchored multiple of the
+    /// interval at or before it, `k * interval_ms + anchor` since the epoch (UTC).
+    /// A pure function of the clock, so every process agrees without coordinating
+    /// and a restart recomputes the same answer.
     pub fn occurrence_at(&self, now_ms: i64) -> i64 {
-        now_ms.div_euclid(self.interval_ms) * self.interval_ms
+        let anchor = self.anchor_ms();
+        (now_ms - anchor).div_euclid(self.interval_ms) * self.interval_ms + anchor
     }
 
     /// The invocation identity for an occurrence. Derived, never generated: a
@@ -122,11 +154,20 @@ impl Schedule {
     /// caller supplies `last_offered` from durable state; `None` means the schedule
     /// has never run, in which case only the current occurrence is offered rather
     /// than every occurrence since the epoch.
+    ///
+    /// `last_offered` need not lie on this schedule's grid. A run recorded before
+    /// the anchor applied -- every daily schedule used to fire at 00:00 UTC -- or
+    /// under a different declared hour is read as the run of the anchored
+    /// occurrence that covers it. Each anchored occurrence therefore still runs at
+    /// most once and none after it is skipped: an installation whose last run was
+    /// at 00:00 does not run again until the next anchor hour, then continues on the
+    /// anchored grid rather than stepping on from the old one.
     pub fn due(&self, last_offered: Option<i64>, now_ms: i64) -> Result<Vec<i64>> {
         let current = self.occurrence_at(now_ms);
         let Some(last) = last_offered else {
             return Ok(vec![current]);
         };
+        let last = self.occurrence_at(last);
         // A clock that moved backwards yields nothing new. The occurrence already
         // ran, and re-offering it would be a no-op anyway, but returning nothing
         // keeps the caller from logging a spurious attempt.
@@ -307,39 +348,55 @@ pub fn tick(runtime: &crate::store::Runtime, now_ms: i64) -> Result<Vec<Tick>> {
             ticks.push(tick);
             continue;
         }
-        let connection = crate::store::open(runtime.db())?;
-        if let Some(since_ms) = in_flight(&connection, &schedule)? {
-            tick.skipped = Some(Skipped::InFlight { since_ms });
-            ticks.push(tick);
-            continue;
-        }
-        let last = last_offered(&connection, &schedule)?;
-        drop(connection);
-        let due = match schedule.due(last, now_ms) {
-            Ok(due) => due,
-            Err(error) => {
-                tick.skipped = Some(Skipped::Backlog(format!("{error:#}")));
-                ticks.push(tick);
-                continue;
-            }
-        };
-        if due.is_empty() {
-            tick.skipped = Some(Skipped::NotDue);
-        }
-        for occurrence in due {
-            let outcome = offer_occurrence(
-                runtime,
-                &schedule,
-                &binding.actor,
-                &declaration.operation,
-                &serde_json::from_str(&declaration.input)?,
-                occurrence,
-            )?;
-            tick.offered.push((occurrence, outcome));
-        }
-        ticks.push(tick);
+        ticks.push(advance(
+            runtime,
+            &schedule,
+            &binding.actor,
+            &declaration.operation,
+            &serde_json::from_str(&declaration.input)?,
+            now_ms,
+        )?);
     }
     Ok(ticks)
+}
+
+/// One tick of one bound, enabled schedule: refuse while a run is in flight,
+/// otherwise offer whatever the invocation table and the clock say is due.
+pub fn advance(
+    runtime: &crate::store::Runtime,
+    schedule: &Schedule,
+    actor: &str,
+    operation: &str,
+    input: &serde_json::Value,
+    now_ms: i64,
+) -> Result<Tick> {
+    let mut tick = Tick {
+        schedule: schedule.name.clone(),
+        offered: Vec::new(),
+        skipped: None,
+    };
+    let connection = crate::store::open(runtime.db())?;
+    if let Some(since_ms) = in_flight(&connection, schedule)? {
+        tick.skipped = Some(Skipped::InFlight { since_ms });
+        return Ok(tick);
+    }
+    let last = last_offered(&connection, schedule)?;
+    drop(connection);
+    let due = match schedule.due(last, now_ms) {
+        Ok(due) => due,
+        Err(error) => {
+            tick.skipped = Some(Skipped::Backlog(format!("{error:#}")));
+            return Ok(tick);
+        }
+    };
+    if due.is_empty() {
+        tick.skipped = Some(Skipped::NotDue);
+    }
+    for occurrence in due {
+        let outcome = offer_occurrence(runtime, schedule, actor, operation, input, occurrence)?;
+        tick.offered.push((occurrence, outcome));
+    }
+    Ok(tick)
 }
 
 /// The schedule an admitted declaration describes.
@@ -348,6 +405,7 @@ pub fn from_declaration(app: &str, declaration: &crate::artifact::Schedule) -> R
         app: app.to_owned(),
         name: declaration.name.clone(),
         interval_ms: i64::try_from(declaration.interval_ms)?,
+        anchor_hour: (declaration.anchor_hour >= 0).then_some(declaration.anchor_hour),
         missed: match declaration.missed.as_str() {
             "run_each" => Missed::RunEach {
                 bound: usize::try_from(declaration.catch_up_bound)?,
@@ -399,6 +457,7 @@ mod tests {
             app: "reports".into(),
             name: "sweep".into(),
             interval_ms: MINIMUM_INTERVAL_MS,
+            anchor_hour: None,
             missed: Missed::Coalesce,
         }
     }
@@ -554,6 +613,212 @@ mod tests {
             ..every_minute()
         };
         assert!(bad.validate().is_err());
+        Ok(())
+    }
+
+    /// 2025-09-17T00:00:00Z.
+    const MIDNIGHT: i64 = 1_758_067_200_000;
+
+    fn daily_at(hour: i64, missed: Missed) -> Schedule {
+        Schedule {
+            app: "equity".into(),
+            name: "vesting".into(),
+            interval_ms: DAY_MS,
+            anchor_hour: Some(hour),
+            missed,
+        }
+    }
+
+    #[test]
+    fn a_daily_schedule_fires_at_its_anchor_hour_in_utc() -> Result<()> {
+        let schedule = daily_at(10, Missed::Coalesce);
+        let ten = MIDNIGHT + 10 * HOUR_MS;
+        // Every instant from 10:00 until the next 10:00 belongs to today's 10:00
+        // occurrence -- not to midnight, which is where every daily schedule used
+        // to fire whatever hour it declared.
+        for at in [ten, ten + 1, ten + 13 * HOUR_MS, ten + DAY_MS - 1] {
+            assert_eq!(schedule.occurrence_at(at), ten, "at {at}");
+        }
+        // Midnight and the rest of the morning still belong to yesterday's.
+        for at in [MIDNIGHT, MIDNIGHT + 1, ten - 1] {
+            assert_eq!(schedule.occurrence_at(at), ten - DAY_MS, "at {at}");
+        }
+        assert_eq!(schedule.occurrence_at(ten + DAY_MS), ten + DAY_MS);
+        // The identity, and so Context.now inside the run, names 10:00.
+        assert_eq!(
+            schedule.identity(ten),
+            format!("schedule.equity.vesting.{ten:016}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_daily_schedule_is_due_at_its_anchor_and_not_a_millisecond_before() -> Result<()> {
+        let schedule = daily_at(10, Missed::Coalesce);
+        let yesterday = MIDNIGHT - 14 * HOUR_MS;
+        assert_eq!(yesterday, schedule.occurrence_at(yesterday));
+        let ten = MIDNIGHT + 10 * HOUR_MS;
+        for at in [MIDNIGHT, ten - 1] {
+            assert!(schedule.due(Some(yesterday), at)?.is_empty(), "at {at}");
+        }
+        assert_eq!(schedule.due(Some(yesterday), ten)?, vec![ten]);
+        assert_eq!(schedule.due(Some(yesterday), ten + 1)?, vec![ten]);
+        // Once it ran, the rest of the day is not due.
+        assert!(schedule.due(Some(ten), ten + DAY_MS - 1)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_anchor_hour_of_zero_still_fires_at_midnight() -> Result<()> {
+        let schedule = daily_at(0, Missed::Coalesce);
+        assert_eq!(schedule.occurrence_at(MIDNIGHT + 23 * HOUR_MS), MIDNIGHT);
+        assert_eq!(schedule.occurrence_at(MIDNIGHT - 1), MIDNIGHT - DAY_MS);
+        Ok(())
+    }
+
+    #[test]
+    fn a_multi_day_schedule_keeps_its_anchor_hour() -> Result<()> {
+        let schedule = Schedule {
+            interval_ms: 2 * DAY_MS,
+            ..daily_at(3, Missed::Coalesce)
+        };
+        let occurrence = schedule.occurrence_at(MIDNIGHT);
+        assert_eq!(occurrence.rem_euclid(DAY_MS), 3 * HOUR_MS);
+        assert_eq!((occurrence - 3 * HOUR_MS).rem_euclid(2 * DAY_MS), 0);
+        assert!(occurrence <= MIDNIGHT && MIDNIGHT < occurrence + 2 * DAY_MS);
+        Ok(())
+    }
+
+    #[test]
+    fn a_first_daily_run_offers_only_the_current_anchored_occurrence() -> Result<()> {
+        let schedule = daily_at(10, Missed::RunEach { bound: 3 });
+        // Installed at 05:00: the current occurrence is yesterday's 10:00, not
+        // today's midnight and not a backfill from the epoch.
+        assert_eq!(
+            schedule.due(None, MIDNIGHT + 5 * HOUR_MS)?,
+            vec![MIDNIGHT - 14 * HOUR_MS]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_daily_outage_backlog_stays_on_the_anchor() -> Result<()> {
+        let ten = MIDNIGHT + 10 * HOUR_MS;
+        // Down from just after today's run until 15:00 three days later.
+        let now = ten + 3 * DAY_MS + 5 * HOUR_MS;
+        let coalesce = daily_at(10, Missed::Coalesce);
+        assert_eq!(coalesce.due(Some(ten), now)?, vec![ten + 3 * DAY_MS]);
+        let each = daily_at(10, Missed::RunEach { bound: 3 });
+        assert_eq!(
+            each.due(Some(ten), now)?,
+            vec![ten + DAY_MS, ten + 2 * DAY_MS, ten + 3 * DAY_MS]
+        );
+        // One more day than the bound fails closed, as for any schedule.
+        assert!(each.due(Some(ten), now + DAY_MS).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_recorded_before_the_anchor_applied_neither_repeats_nor_skips() -> Result<()> {
+        // Before anchors were honoured every daily schedule fired at 00:00 UTC, so
+        // an upgraded installation's last run is midnight. Midnight lies inside
+        // yesterday's 10:00 occurrence, which is the one it is taken to have run.
+        let legacy = MIDNIGHT;
+        let ten = MIDNIGHT + 10 * HOUR_MS;
+        for missed in [Missed::Coalesce, Missed::RunEach { bound: 3 }] {
+            let schedule = daily_at(10, missed);
+            // No second run on the morning of the upgrade.
+            for at in [legacy, legacy + 1, ten - 1] {
+                assert!(
+                    schedule.due(Some(legacy), at)?.is_empty(),
+                    "{missed:?} at {at}"
+                );
+            }
+            // Today's 10:00 is not skipped.
+            assert_eq!(schedule.due(Some(legacy), ten)?, vec![ten], "{missed:?}");
+        }
+        // A backlog that began before the upgrade is caught up on the anchored
+        // grid, never at the old midnight occurrences.
+        let each = daily_at(10, Missed::RunEach { bound: 3 });
+        assert_eq!(
+            each.due(Some(legacy), ten + 2 * DAY_MS)?,
+            vec![ten, ten + DAY_MS, ten + 2 * DAY_MS]
+        );
+        // The same holds when an application moves its declared hour.
+        let moved = daily_at(14, Missed::Coalesce);
+        assert!(
+            moved
+                .due(Some(ten), MIDNIGHT + 14 * HOUR_MS - 1)?
+                .is_empty()
+        );
+        assert_eq!(
+            moved.due(Some(ten), MIDNIGHT + 14 * HOUR_MS)?,
+            vec![MIDNIGHT + 14 * HOUR_MS]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unanchored_schedule_still_counts_from_the_epoch() -> Result<()> {
+        let hourly = Schedule {
+            interval_ms: HOUR_MS,
+            ..every_minute()
+        };
+        assert_eq!(
+            hourly.occurrence_at(MIDNIGHT + 10 * HOUR_MS + 1_800_000),
+            MIDNIGHT + 10 * HOUR_MS
+        );
+        assert_eq!(
+            hourly.due(Some(MIDNIGHT), MIDNIGHT + 3 * HOUR_MS + 1)?,
+            vec![MIDNIGHT + 3 * HOUR_MS]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_anchor_must_match_the_interval() -> Result<()> {
+        assert!(daily_at(10, Missed::Coalesce).validate().is_ok());
+        assert!(daily_at(23, Missed::Coalesce).validate().is_ok());
+        assert!(daily_at(24, Missed::Coalesce).validate().is_err());
+        assert!(daily_at(-1, Missed::Coalesce).validate().is_err());
+        let unanchored = Schedule {
+            anchor_hour: None,
+            ..daily_at(10, Missed::Coalesce)
+        };
+        assert!(unanchored.validate().is_err());
+        let anchored_minute = Schedule {
+            anchor_hour: Some(3),
+            ..every_minute()
+        };
+        assert!(anchored_minute.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_declaration_carries_its_anchor_into_the_schedule() -> Result<()> {
+        let declaration = crate::artifact::Schedule {
+            name: "vesting".into(),
+            operation: "equity.vest".into(),
+            input: "{}".into(),
+            input_type: "empty".into(),
+            interval_ms: DAY_MS as u64,
+            anchor_hour: 10,
+            missed: "coalesce".into(),
+            catch_up_bound: 0,
+        };
+        let schedule = from_declaration("equity", &declaration)?;
+        assert_eq!(schedule.anchor_hour, Some(10));
+        assert_eq!(
+            schedule.occurrence_at(MIDNIGHT + 11 * HOUR_MS),
+            MIDNIGHT + 10 * HOUR_MS
+        );
+        let sweep = crate::artifact::Schedule {
+            name: "sweep".into(),
+            interval_ms: 300_000,
+            anchor_hour: -1,
+            ..declaration
+        };
+        assert_eq!(from_declaration("equity", &sweep)?.anchor_hour, None);
         Ok(())
     }
 

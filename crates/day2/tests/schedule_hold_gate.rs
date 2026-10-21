@@ -24,6 +24,7 @@ fn sweep() -> Schedule {
         app: "reports".into(),
         name: "sweep".into(),
         interval_ms: day2::schedules::MINIMUM_INTERVAL_MS,
+        anchor_hour: None,
         missed: Missed::Coalesce,
     }
 }
