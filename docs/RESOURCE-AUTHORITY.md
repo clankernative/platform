@@ -2,9 +2,9 @@
 
 The resource contract is implemented in
 [`day2-capabilities::resources`](../crates/day2-capabilities/src/resources.rs).
-It currently covers the actor's local notification mailbox and an exact issuer
-in the explicitly seeded synthetic Carta reader. It does not connect any live
-SaaS provider. The broader [integration plan](RESOURCE-CAPABILITIES-PLAN.md) and
+It covers the actor's local notification mailbox, an exact Carta issuer read
+from explicitly seeded synthetic captures or captured live, and the live
+providers described in [live integrations](LIVE-INTEGRATIONS.md). The broader [integration plan](RESOURCE-CAPABILITIES-PLAN.md) and
 [inventory](RESOURCE-INTEGRATION-INVENTORY.md) describe future provider work.
 
 ## Desired definitions and active grants
@@ -54,11 +54,13 @@ enumerates topics, while `prefix` deliberately includes future topics under an
 approved prefix. The action facets distinguish recipient resolution, latest
 message reads and sends.
 
-`carta_issuer` pins an exact issuer identifier within the synthetic Carta provider.
-Snapshot and record reads are distinct facets. A seed file or guessed issuer ID
-does not grant authority. There are no network credentials in either resource
-definition. Each current local provider has one physical connection per catalog;
-aliases cannot manufacture independent physical connection budgets.
+`carta_issuer` pins an exact issuer identifier within the Carta provider and,
+optionally, `children: omit`. Snapshot and record reads are distinct facets. A
+seed file or guessed issuer ID does not grant authority. Without a live
+connection there are no network credentials; a live Carta connection mounts
+only its client secret, and its issuer must be numeric (see [Carta](CARTA.md)).
+Each local provider has one physical connection per catalog; aliases cannot
+manufacture independent physical connection budgets.
 
 The pure Roc SDK requires the opaque operation `Context` to ask the host for a
 named operation binding. Host-issued handles

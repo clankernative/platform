@@ -58,6 +58,9 @@ pub const LINEAR_WORK_WORLD: &str = world_of(Provider::LinearWork);
 pub const GITEA_ACTIONS_WORLD: &str = world_of(Provider::GiteaActions);
 pub const GITHUB_ACTIONS_WORLD: &str = world_of(Provider::GitHubActions);
 pub const DELEGATION_WORLD: &str = world_of(Provider::LocalDelegation);
+/// Shared with explicitly seeded synthetic captures: one provider, one world
+/// file. The wire world occupies its own `simulated_provider` table.
+pub const CARTA_WORLD: &str = world_of(Provider::Carta);
 
 const fn world_of(provider: Provider) -> &'static str {
     match provider.world() {
@@ -173,6 +176,21 @@ pub struct WorkspaceDirectoryWorld {
     pub customer_id: String,
     pub users: BTreeMap<String, Value>,
     pub hierarchy: Value,
+}
+
+/// Carta issuer API wire bodies committed by the offline provider. Pages are
+/// verbatim provider responses, so a simulated capture runs the live DTO parser,
+/// pagination, token validation and failure classification. A continuation
+/// token selects the page after the first page that returned it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CartaWireWorld {
+    pub issuer_id: String,
+    /// The token endpoint's response body. Page requests must present its
+    /// `access_token` as their bearer.
+    pub token: Value,
+    pub stakeholder_pages: Vec<Value>,
+    pub grant_pages: Vec<Value>,
 }
 
 /// One stored object, as the store reports it.
@@ -423,6 +441,10 @@ pub struct SimulatedFixture {
     pub snowflake: SnowflakeWorld,
     pub openai: OpenAiWorld,
     pub workspace_directory: WorkspaceDirectoryWorld,
+    /// Absent leaves the Carta world unseeded, so an explicitly synthetic
+    /// Carta store stays the only Carta state a campaign has.
+    #[serde(default)]
+    pub carta: Option<CartaWireWorld>,
 }
 
 /// What another application answers, for a campaign that is not running it.
@@ -620,6 +642,9 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
     seed_world(database, scope, SNOWFLAKE_WORLD, &fixture.snowflake)?;
     seed_world(database, scope, OPENAI_WORLD, &fixture.openai)?;
     seed_world(database, scope, DELEGATION_WORLD, &fixture.delegation)?;
+    if let Some(carta) = &fixture.carta {
+        seed_world(database, scope, CARTA_WORLD, carta)?;
+    }
     seed_world(
         database,
         scope,
@@ -894,6 +919,176 @@ pub(crate) fn workspace_directory_read(
             Ok(bytes)
         })())
     })?
+}
+
+/// Validate that a Carta wire world is seeded for this scope, without a request.
+pub(crate) fn carta_check(database: &Path, scope: &str) -> Result<()> {
+    let path = database.with_file_name(CARTA_WORLD);
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| anyhow::anyhow!("simulated_provider_unconfigured"))?;
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='simulated_provider')",
+            [],
+            |row| row.get(0),
+        )?;
+    ensure!(exists, "simulated_provider_unconfigured");
+    let _: World<CartaWireWorld> = read_world(&connection, scope)?;
+    Ok(())
+}
+
+pub const CARTA_TOKEN_ENDPOINT: &str = "carta.oauth.access_token";
+pub const CARTA_STAKEHOLDERS_ENDPOINT: &str = "carta.issuers.stakeholders";
+pub const CARTA_OPTION_GRANTS_ENDPOINT: &str = "carta.issuers.option_grants";
+
+pub(crate) enum CartaRead<'a> {
+    Token {
+        form: &'a str,
+    },
+    Page {
+        issuer_id: &'a str,
+        collection: crate::carta_live::Collection,
+        query: Option<&'a str>,
+        bearer: &'a str,
+    },
+}
+
+/// Serve one Carta exchange from the world, recording it and consuming a
+/// scheduled fault. Statuses are provider-shaped; the live pipeline classifies
+/// them. An unconfigured or broken world is an unreachable provider.
+pub(crate) fn carta_read(
+    database: &Path,
+    scope: &str,
+    read: CartaRead<'_>,
+    max: usize,
+) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::Failure> {
+    use crate::carta_live::{Collection, Failure, Reply};
+    let status = |status: u16| Reply {
+        status,
+        json: true,
+        body: json!({"error":"simulated"}).to_string().into_bytes(),
+        retry_after_seconds: None,
+    };
+    let path = database.with_file_name(CARTA_WORLD);
+    let served = with_world::<CartaWireWorld, _, _>(&path, scope, |state| {
+        ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+        let endpoint = match &read {
+            CartaRead::Token { .. } => CARTA_TOKEN_ENDPOINT,
+            CartaRead::Page {
+                collection: Collection::Stakeholders,
+                ..
+            } => CARTA_STAKEHOLDERS_ENDPOINT,
+            CartaRead::Page {
+                collection: Collection::OptionGrants,
+                ..
+            } => CARTA_OPTION_GRANTS_ENDPOINT,
+        };
+        state.calls.push(match &read {
+            CartaRead::Token { .. } => endpoint.to_owned(),
+            CartaRead::Page {
+                issuer_id, query, ..
+            } => format!("{endpoint}:{issuer_id}:{}", query.unwrap_or_default()),
+        });
+        if let Some(fault) = take_fault_named(state, endpoint) {
+            return Ok(match fault_response(fault, max as u64) {
+                None => Err(Failure::Unavailable),
+                Some(Err(_)) => Err(Failure::Unavailable),
+                Some(Ok(response)) => Ok(Reply {
+                    status: response.status,
+                    json: response.json_content_type,
+                    body: response.body,
+                    retry_after_seconds: (fault == SimulatedFault::RateLimited).then_some(30),
+                }),
+            });
+        }
+        let reply = match read {
+            CartaRead::Token { form } => {
+                if form != crate::carta_live::token_form() {
+                    status(400)
+                } else {
+                    Reply {
+                        status: 200,
+                        json: true,
+                        body: serde_json::to_vec(&state.world.token)?,
+                        retry_after_seconds: None,
+                    }
+                }
+            }
+            CartaRead::Page {
+                issuer_id,
+                collection,
+                query,
+                bearer,
+            } => {
+                let pages = match collection {
+                    Collection::Stakeholders => &state.world.stakeholder_pages,
+                    Collection::OptionGrants => &state.world.grant_pages,
+                };
+                let token = query.map(|query| {
+                    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect();
+                    match pairs.as_slice() {
+                        [(name, token)] if name == "pageToken" => Some(token.clone()),
+                        _ => None,
+                    }
+                });
+                if state
+                    .world
+                    .token
+                    .get("access_token")
+                    .and_then(Value::as_str)
+                    != Some(bearer)
+                {
+                    status(401)
+                } else if issuer_id != state.world.issuer_id {
+                    status(404)
+                } else {
+                    let index = match token {
+                        None => Some(0),
+                        Some(None) => None,
+                        Some(Some(token)) => pages
+                            .iter()
+                            .position(|page| {
+                                page.get("nextPageToken").and_then(Value::as_str)
+                                    == Some(token.as_str())
+                            })
+                            .map(|index| index + 1),
+                    };
+                    match index.and_then(|index| pages.get(index)) {
+                        Some(page) => Reply {
+                            status: 200,
+                            json: true,
+                            body: serde_json::to_vec(page)?,
+                            retry_after_seconds: None,
+                        },
+                        None => status(400),
+                    }
+                }
+            }
+        };
+        Ok(Ok(reply))
+    });
+    match served {
+        Ok(reply) => {
+            let mut reply = reply?;
+            // The wire never delivers more than the reader asked for plus the
+            // probe byte that makes an oversized response observable.
+            reply.body.truncate(max.saturating_add(1));
+            Ok(reply)
+        }
+        Err(_) => Err(crate::carta_live::Failure::Unavailable),
+    }
+}
+
+/// Scenario changes affect later Carta requests through the same world.
+pub fn update_carta<T>(
+    database: &Path,
+    scope: &str,
+    act: impl FnOnce(&mut World<CartaWireWorld>) -> Result<T>,
+) -> Result<T> {
+    with_world(&database.with_file_name(CARTA_WORLD), scope, act)
 }
 
 /// Scenario changes affect later requests through the same provider world.

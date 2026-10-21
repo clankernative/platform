@@ -72,8 +72,14 @@ pub enum ResourceTarget {
     NotificationMailbox {
         topics: TopicScope,
     },
+    /// One Carta issuer. `children` selects whether a live capture publishes
+    /// each grant's vesting events and exercises; omitted records are neither
+    /// decoded nor stored. Include is the default and is not serialized, so a
+    /// target written before the field existed keeps its exact bytes.
     CartaIssuer {
         issuer_id: String,
+        #[serde(default, skip_serializing_if = "CartaChildren::is_include")]
+        children: CartaChildren,
     },
     GoogleDirectory {
         customer_id: String,
@@ -154,6 +160,67 @@ pub enum ResourceTarget {
     },
 }
 
+/// Whether a live Carta capture publishes grant child records.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CartaChildren {
+    #[default]
+    Include,
+    Omit,
+}
+
+impl CartaChildren {
+    pub fn is_include(&self) -> bool {
+        *self == Self::Include
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Include => "include",
+            Self::Omit => "omit",
+        }
+    }
+}
+
+/// Live Carta issuer identifiers are numeric path segments. Anything else is
+/// refused before it can be interpolated into a provider route.
+pub fn validate_carta_live_issuer(issuer_id: &str) -> Result<()> {
+    ensure!(
+        (1..=20).contains(&issuer_id.len()) && issuer_id.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid_carta_live_issuer"
+    );
+    Ok(())
+}
+
+/// A Carta target's constraints that depend on its connection. Synthetic
+/// captures are seeded verbatim, so omitting child records is a live-only
+/// choice; a live issuer must be a numeric provider identifier.
+fn validate_carta_binding(
+    live: Option<&crate::integrations::LiveConnection>,
+    target: &ResourceTarget,
+) -> Result<()> {
+    let ResourceTarget::CartaIssuer {
+        issuer_id,
+        children,
+    } = target
+    else {
+        return Ok(());
+    };
+    match live {
+        Some(crate::integrations::LiveConnection::Carta { .. }) => {
+            validate_carta_live_issuer(issuer_id)
+        }
+        None => {
+            ensure!(
+                children.is_include(),
+                "carta_children_require_live_connection"
+            );
+            Ok(())
+        }
+        Some(_) => anyhow::bail!("resource_connection_configuration_mismatch"),
+    }
+}
+
 impl ResourceTarget {
     pub fn kind(&self) -> ResourceKind {
         match self {
@@ -219,7 +286,7 @@ impl ResourceTarget {
             Self::SnowflakeView { query } => query.validate(),
             Self::OpenAiText { profile } => profile.validate(),
             Self::NotificationMailbox { topics } => topics.validate(),
-            Self::CartaIssuer { issuer_id } => bounded_text(issuer_id, 256),
+            Self::CartaIssuer { issuer_id, .. } => bounded_text(issuer_id, 256),
             Self::ObjectBucket { bucket, key_prefix } => {
                 bucket_name(bucket)?;
                 object_key(key_prefix, true)
@@ -325,9 +392,16 @@ impl ResourceTarget {
                 Self::NotificationMailbox { topics },
                 Self::NotificationMailbox { topics: parent },
             ) => topics.is_subset_of(parent),
-            (Self::CartaIssuer { issuer_id }, Self::CartaIssuer { issuer_id: parent }) => {
-                issuer_id == parent
-            }
+            (
+                Self::CartaIssuer {
+                    issuer_id,
+                    children,
+                },
+                Self::CartaIssuer {
+                    issuer_id: parent,
+                    children: parent_children,
+                },
+            ) => issuer_id == parent && children == parent_children,
             (
                 Self::WorkspaceDirectory { customer_id },
                 Self::WorkspaceDirectory {
@@ -768,6 +842,7 @@ fn validate_connection(
         | (Provider::GitHubActions, Some(value @ LiveConnection::GitHubActions { .. }))
         | (Provider::GiteaActions, Some(value @ LiveConnection::GiteaActions { .. }))
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
+        | (Provider::Carta, Some(value @ LiveConnection::Carta { .. }))
         | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. })) => value.validate(),
         (
             Provider::LocalNotifications
@@ -775,7 +850,9 @@ fn validate_connection(
             // there is no endpoint and no credential. A connection here would be
             // a claim that something outside is being reached.
             | Provider::LocalDelegation
-            | Provider::SyntheticCarta
+            // Without a live connection Carta reads only explicitly seeded
+            // synthetic captures.
+            | Provider::Carta
             | Provider::SyntheticGoogleDirectory
             | Provider::SyntheticLinear
             | Provider::SyntheticOperatorAlerts,
@@ -825,6 +902,7 @@ impl Catalog {
                 provider_matches(connection.provider, resource.target.kind()),
                 "resource_provider_kind_mismatch"
             );
+            validate_carta_binding(connection.live.as_ref(), &resource.target)?;
         }
         for (id, budget) in &self.budgets {
             name(id)?;
@@ -1070,6 +1148,7 @@ impl ResolvedResources {
                         && !grant.actors.is_empty(),
                     "invalid_resolved_resource_grant"
                 );
+                validate_carta_binding(grant.live.as_ref(), &grant.target)?;
                 for actor in &grant.actors {
                     bounded_text(actor, 256)?;
                 }

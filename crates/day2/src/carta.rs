@@ -1,8 +1,10 @@
-//! A typed, read-only Carta transport with explicitly seeded synthetic captures.
-//! This is not a live Carta client. Operators and verification hosts may install
-//! immutable captures; applications can only read their runtime's scoped capture.
-//! The adapter preserves provider records and duplicates. Import decisions,
-//! employee mapping, publication and financial calculations remain application code.
+//! A typed, read-only Carta transport. Its records and envelopes are shared by
+//! both sources: explicitly seeded synthetic captures, read here, and live
+//! captures collected by [`crate::carta_live`]. Operators and verification hosts
+//! may install synthetic captures; applications can only read their runtime's
+//! scoped capture. The adapter preserves provider records and duplicates. Import
+//! decisions, employee mapping, publication and financial calculations remain
+//! application code.
 use crate::{protocol::Instruction, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -12,7 +14,7 @@ use std::path::Path;
 
 pub const MAX_RECORDS: usize = 10_000;
 pub const MAX_RECORD_BYTES: usize = 12_288;
-const MAX_CAPTURE_BYTES: usize = 32 * 1_048_576;
+pub(crate) const MAX_CAPTURE_BYTES: usize = 32 * 1_048_576;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OptionalText {
@@ -122,7 +124,7 @@ pub enum Record {
 }
 
 impl Record {
-    fn envelope(&self) -> Result<String> {
+    pub(crate) fn envelope(&self) -> Result<String> {
         let record = serde_json::to_value(self)?;
         let data = serde_json::to_string(&record["data"])?;
         ensure!(data.len() <= MAX_RECORD_BYTES, "carta_record_byte_budget");
@@ -193,20 +195,11 @@ pub(crate) fn authorized(
             })
         }
         "carta.record.v1" => {
-            let next: Next = crate::json::decode(instruction.data.as_bytes())?;
-            ensure!(
-                next.snapshot_id.len() == 70
-                    && next.snapshot_id.starts_with("carta_")
-                    && next.snapshot_id[6..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    && next.cursor <= MAX_RECORDS as u64,
-                "invalid_carta_cursor"
-            );
+            let (snapshot_id, cursor) = decode_next(instruction)?;
             Ok(Read::Next {
                 scope: runtime.scope().into(),
-                snapshot_id: next.snapshot_id,
-                cursor: next.cursor,
+                snapshot_id,
+                cursor,
                 issuer_id: issuer_id.into(),
             })
         }
@@ -214,7 +207,23 @@ pub(crate) fn authorized(
     }
 }
 
-fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
+/// A `carta.record.v1` request's snapshot identity and cursor, shared by the
+/// synthetic and live stores. Both issue `carta_<sha256 hex>` identities.
+pub(crate) fn decode_next(instruction: &Instruction) -> Result<(String, u64)> {
+    let next: Next = crate::json::decode(instruction.data.as_bytes())?;
+    ensure!(
+        next.snapshot_id.len() == 70
+            && next.snapshot_id.starts_with("carta_")
+            && next.snapshot_id[6..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && next.cursor <= MAX_RECORDS as u64,
+        "invalid_carta_cursor"
+    );
+    Ok((next.snapshot_id, next.cursor))
+}
+
+pub(crate) fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
     let count = |index| {
         let value = row.get::<_, i64>(index)?;
         u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))

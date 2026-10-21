@@ -1490,3 +1490,472 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
     );
     Ok(())
 }
+
+/// Live Carta through the admitted capability path: resource authorization,
+/// reservation, capture-in-observation against the simulated wire world,
+/// known settlement, local record reads and replay validation.
+mod carta_live {
+    use super::*;
+    use crate::integrations::simulated::{
+        CARTA_OPTION_GRANTS_ENDPOINT, CARTA_WORLD, CartaWireWorld, ScheduledFault, SimulatedFault,
+        schedule_faults, update_carta,
+    };
+
+    const ACTOR: &str = "equity-refresh@example.test";
+    const ISSUER: &str = "4242";
+    const SCOPE: &str = "cartaco/test/app";
+    const NOW: i64 = 1_700_000_001;
+
+    struct Setup {
+        simulated: bool,
+        children: &'static str,
+        max_request_bytes: u64,
+        budget_bytes: u64,
+    }
+
+    impl Default for Setup {
+        fn default() -> Self {
+            Self {
+                simulated: true,
+                children: "omit",
+                max_request_bytes: crate::carta_live::MAX_CAPTURE_REQUEST_BYTES,
+                budget_bytes: 1_000_000_000,
+            }
+        }
+    }
+
+    fn world() -> CartaWireWorld {
+        let holder = |id: &str| {
+            json!({"id":id,"issuerId":ISSUER,"fullName":id,"email":format!("{id}@example.test"),
+                "relationship":"EMPLOYEE","entityType":"INDIVIDUAL"})
+        };
+        let wrapped = |value: &str| json!({ "value": value });
+        CartaWireWorld {
+            issuer_id: ISSUER.into(),
+            token: json!({"access_token":"simulated-token","token_type":"Bearer","expires_in":3600,
+                "scope":"read_issuer_stakeholders read_issuer_securities"}),
+            stakeholder_pages: vec![
+                json!({"stakeholders":[holder("holder-1")],"nextPageToken":"page-2"}),
+                json!({"stakeholders":[holder("holder-2")]}),
+            ],
+            grant_pages: vec![json!({"optionGrants":[{"id":"grant-1","issuerId":ISSUER,
+                "stakeholderId":"holder-1","equityIncentivePlanName":"Plan","issueDate":wrapped("2024-01-01"),
+                "vestingStartDate":wrapped("2024-01-01"),"boardApprovalDate":wrapped("2023-12-01"),
+                "grantExpirationDate":wrapped("2034-01-01"),"isoNsoSplit":false,"stockOptionType":"ISO",
+                "quantity":wrapped("100"),"outstandingQuantity":wrapped("100"),"vestedQuantity":wrapped("25"),
+                "exercisedQuantity":wrapped("0"),
+                "exercisePrice":{"currencyCode":wrapped("USD"),"amount":wrapped("1.00")},
+                "securityLabel":"ES-1","earlyExercisable":false,
+                "vestingEvents":[{"id":"v1","vestDate":wrapped("2025-01-01"),"quantity":wrapped("25"),
+                    "isoQuantity":wrapped("25"),"nsoQuantity":wrapped("0"),"performanceCondition":false,
+                    "vested":true,"maxQuantity":wrapped("25"),"targetQuantity":wrapped("25")}],
+                "vestingSchedule":{"name":"4y","lastModifiedDate":wrapped("2024-01-01"),
+                    "startDate":wrapped("2024-01-01"),"endDate":wrapped("2028-01-01")},
+                "lastModifiedDatetime":wrapped("2026-01-01T00:00:00Z")}]})],
+        }
+    }
+
+    fn carta_runtime(setup: Setup) -> Result<(tempfile::TempDir, Runtime)> {
+        let directory = tempfile::tempdir()?;
+        let instance_path = directory.path().join("instance.json");
+        let state = directory.path().join(".state");
+        fs::create_dir_all(&state)?;
+        let artifact_directory = directory.path().join("carta-live-contract");
+        fs::create_dir(&artifact_directory)?;
+        let live = json!({"provider":"carta","credential_ref":{"id":"carta-secret","revision":1},
+            "client_id":"playground-client","environment":"playground","max_pages_per_collection":3});
+        let policy = json!({"version":1,"admins":[],"operations":{
+            "capture":{"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":["carta.snapshot.v1"],"effects":[]},
+            "advance":{"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":["carta.record.v1"],"effects":[]}}});
+        let catalog = json!({"version":1,
+            "connections":{"carta":{"revision":1,"provider":"carta","live":live}},
+            "resources":{"issuer":{"revision":1,"connection":{"id":"carta","revision":1},
+                "target":{"kind":"carta_issuer","issuer_id":ISSUER,"children":setup.children}}},
+            "policies":{
+                "carta_capture":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
+                    "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],
+                        "actions":["carta_snapshot"],"limits":{"max_request_bytes":setup.max_request_bytes,
+                            "max_response_bytes":4_194_304,"max_calls_per_invocation":7},
+                        "budgets":[{"id":"carta_daily","revision":1}]}}},
+                "carta_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
+                    "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],
+                        "actions":["carta_record"],"limits":{"max_request_bytes":1024,
+                            "max_response_bytes":32_768,"max_calls_per_invocation":1},"budgets":[]}}}},
+            "budgets":{"carta_daily":{"revision":1,"scope":"connection","period_seconds":86_400,
+                "limits":{"calls":100,"bytes":setup.budget_bytes,"concurrency":1}}}});
+        let instance = json!({"installation":"cartaco","environment":"test","resources":catalog,
+            "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
+                "resource_policies":[
+                    {"policy":{"id":"carta_capture","revision":1},"operation":"capture","bindings":{"carta":{"id":"issuer","revision":1}}},
+                    {"policy":{"id":"carta_read","revision":1},"operation":"advance","bindings":{"carta":{"id":"issuer","revision":1}}}]}}});
+        fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
+        let contract = serde_json::from_value(json!({
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "roc_version":"carta-live-test","worker_digest":"carta-live-test","schema_digest":"carta-live-test",
+            "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "operations":[{"name":"capture","kind":"query","input_type":"input","output_type":"output"},
+                {"name":"advance","kind":"query","input_type":"input","output_type":"output"}],
+            "sources":{},"admission":"local-spike-only"}))?;
+        let inputs = crate::host_inputs::Inputs {
+            clock: Arc::new(crate::host_inputs::simulation::VirtualClock(
+                std::sync::Mutex::new((
+                    std::time::Duration::from_secs(NOW as u64),
+                    std::time::Duration::ZERO,
+                )),
+            )),
+            ..Default::default()
+        };
+        let runtime = Runtime {
+            integrations: Arc::new(integration_host::Host::local(&instance_path)?),
+            app_calls: None,
+            credentials: None,
+            connections: None,
+            instance_path,
+            app: "app".into(),
+            db: state.join("app.sqlite"),
+            scope: SCOPE.into(),
+            hosted_domain: None,
+            artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
+                "carta-live-test".into(),
+                artifact_directory,
+                contract,
+            )),
+            host: Arc::new(crate::host::System(inputs.clone())),
+            inputs,
+        };
+        let runtime = if setup.simulated {
+            runtime.with_integrations(integration_host::Host::simulated_providers_with_app_calls(
+                &state.join("app.sqlite"),
+                SCOPE,
+            ))
+        } else {
+            runtime
+        };
+        runtime.initialize()?;
+        crate::integrations::simulated::seed(
+            runtime.db(),
+            SCOPE,
+            &crate::integrations::simulated::SimulatedFixture {
+                slack: crate::integrations::simulated::SlackWorld {
+                    workspace_id: "TCARTA".into(),
+                    ..Default::default()
+                },
+                snowflake: crate::integrations::simulated::SnowflakeWorld {
+                    account: "carta-test".into(),
+                    ..Default::default()
+                },
+                openai: crate::integrations::simulated::OpenAiWorld {
+                    project_id: "proj_carta".into(),
+                    model: "model-carta".into(),
+                    max_input_tokens: 100_000,
+                    ..Default::default()
+                },
+                carta: Some(world()),
+                ..Default::default()
+            },
+        )?;
+        Ok((directory, runtime))
+    }
+
+    struct Admitted {
+        request: Request,
+        observation: Observation,
+        usage: crate::resources::ProviderUsage,
+        correlation: Vec<crate::integrations::ExchangeCorrelation>,
+    }
+
+    /// One observation through the same steps preparation takes.
+    fn admitted(
+        runtime: &Runtime,
+        operation: &str,
+        invocation: &str,
+        data: impl FnOnce(&str) -> Value,
+    ) -> Result<Admitted> {
+        runtime.accept(operation, ACTOR, invocation, &json!({}), NOW)?;
+        let mut connection = open(runtime.db())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request = Request {
+            operation: operation.into(),
+            input: "{}".into(),
+            context: crate::store::invocation_context(&tx, invocation)?,
+            observations: vec![],
+        };
+        let bound = crate::resources::host_operation(
+            &tx,
+            runtime,
+            &request,
+            &Instruction {
+                kind: "observe".into(),
+                model: crate::resources::BIND.into(),
+                data: json!({"binding":"carta","invocation":invocation}).to_string(),
+                ..Default::default()
+            },
+        )?
+        .context("carta resource binding")?;
+        let handle = serde_json::from_str::<Value>(&bound)?["token"]
+            .as_str()
+            .context("opaque carta handle")?
+            .to_owned();
+        let instruction = Instruction {
+            kind: "observe".into(),
+            model: if operation == "capture" {
+                "carta.snapshot.v1"
+            } else {
+                "carta.record.v1"
+            }
+            .into(),
+            data: data(&handle).to_string(),
+            ..Default::default()
+        };
+        let active = authority_state::current(&tx)?;
+        let capability = crate::capabilities::authorized(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            active.policy()?,
+            "ob_carta_live",
+        )?;
+        let resource = capability.resource().clone();
+        crate::resources::record_use(&tx, invocation, &resource)?;
+        let reservation = crate::resources::reserve_in(
+            &tx,
+            runtime,
+            &request,
+            &instruction,
+            invocation,
+            &resource,
+            capability.quote(),
+        )?;
+        tx.commit()?;
+        let outcome = crate::capabilities::observe(runtime, capability, invocation);
+        let result = outcome.result.and_then(|result| {
+            crate::resources::validate_result(&resource, &result)?;
+            Ok(result)
+        });
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::resources::record_correlation_in(&tx, invocation, &outcome.correlation)?;
+        crate::resources::settle_in(&tx, &reservation, outcome.usage)?;
+        tx.commit()?;
+        let observation = match result {
+            Ok(result) => Observation {
+                instruction,
+                result,
+                error: String::new(),
+            },
+            Err(error) => Observation {
+                instruction,
+                result: String::new(),
+                error: crate::error::observation_code(&error),
+            },
+        };
+        Ok(Admitted {
+            request,
+            observation,
+            usage: outcome.usage,
+            correlation: outcome.correlation,
+        })
+    }
+
+    fn capture(runtime: &Runtime, invocation: &str) -> Result<Admitted> {
+        admitted(
+            runtime,
+            "capture",
+            invocation,
+            |handle| json!({ "handle": handle }),
+        )
+    }
+
+    fn record(
+        runtime: &Runtime,
+        invocation: &str,
+        snapshot: &str,
+        cursor: u64,
+    ) -> Result<Admitted> {
+        admitted(
+            runtime,
+            "advance",
+            invocation,
+            |handle| json!({"handle":handle,"snapshot_id":snapshot,"cursor":cursor}),
+        )
+    }
+
+    fn calls(runtime: &Runtime) -> Result<usize> {
+        update_carta(runtime.db(), SCOPE, |state| Ok(state.calls.len()))
+    }
+
+    /// Replayed bytes are revalidated against current authority and never
+    /// reach the provider again, whether the observation succeeded or failed.
+    fn replay(runtime: &Runtime, admitted: &Admitted) -> Result<()> {
+        let before = calls(runtime)?;
+        let mut connection = open(runtime.db())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::resources::validate_cached(&tx, runtime, &admitted.request, &admitted.observation)?;
+        tx.commit()?;
+        assert_eq!(calls(runtime)?, before, "replay reached the provider");
+        Ok(())
+    }
+
+    #[test]
+    fn capture_in_observation_publishes_then_reads_locally_and_replays_offline() -> Result<()> {
+        let (_directory, runtime) = carta_runtime(Setup::default())?;
+        let captured = capture(&runtime, "capture-1")?;
+        assert!(
+            captured.observation.error.is_empty(),
+            "{}",
+            captured.observation.error
+        );
+        let snapshot: crate::carta::Snapshot = serde_json::from_str(&captured.observation.result)?;
+        assert_eq!(snapshot.issuer_id, ISSUER);
+        assert_eq!(snapshot.source_profile, "carta_simulated");
+        assert_eq!(
+            (
+                snapshot.record_count,
+                snapshot.stakeholder_count,
+                snapshot.grant_count
+            ),
+            (3, 2, 1)
+        );
+        assert_eq!(snapshot.vesting_event_count, 0, "children are omitted");
+        assert_eq!(captured.usage.calls, 4);
+        assert!(captured.usage.known && captured.usage.dispatched);
+        assert_eq!(
+            captured.usage.request_bytes,
+            (crate::carta_live::token_form().len() + crate::carta_live::page_query("page-2").len())
+                as u64
+        );
+        assert!(captured.usage.response_bytes > 0);
+        assert!(captured.correlation.is_empty());
+        assert_eq!(calls(&runtime)?, 4);
+        replay(&runtime, &captured)?;
+
+        // An unchanged recapture is the same capture.
+        assert_eq!(
+            capture(&runtime, "capture-2")?.observation.result,
+            captured.observation.result
+        );
+
+        let mut kinds = Vec::new();
+        for cursor in 0..=snapshot.record_count {
+            let read = record(&runtime, &format!("advance-{cursor}"), &snapshot.id, cursor)?;
+            assert!(
+                read.observation.error.is_empty(),
+                "{}",
+                read.observation.error
+            );
+            assert_eq!(read.usage.calls, 0);
+            assert!(!read.usage.dispatched && read.usage.known);
+            assert_eq!(read.usage.request_bytes + read.usage.response_bytes, 0);
+            let envelope: Value = serde_json::from_str(&read.observation.result)?;
+            kinds.push(envelope["kind"].as_str().unwrap_or_default().to_owned());
+            replay(&runtime, &read)?;
+        }
+        assert_eq!(kinds, ["stakeholder", "stakeholder", "grant", "done"]);
+        assert_eq!(calls(&runtime)?, 8, "record reads never reach the provider");
+        let past_end = record(
+            &runtime,
+            "advance-past",
+            &snapshot.id,
+            snapshot.record_count + 1,
+        )?;
+        assert_eq!(past_end.observation.error, "invalid_carta_cursor");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_capture_journals_a_redacted_code_and_replays_without_the_provider() -> Result<()> {
+        let mut traces = Vec::new();
+        for _ in 0..2 {
+            let (_directory, runtime) = carta_runtime(Setup::default())?;
+            let published = capture(&runtime, "before-failure")?;
+            schedule_faults(
+                runtime.db(),
+                SCOPE,
+                CARTA_WORLD,
+                vec![ScheduledFault {
+                    endpoint: CARTA_OPTION_GRANTS_ENDPOINT.into(),
+                    remaining: 1,
+                    fault: SimulatedFault::Denied,
+                }],
+            )?;
+            let failed = capture(&runtime, "denied")?;
+            assert_eq!(failed.observation.error, "carta_scope_denied");
+            assert_eq!(failed.usage.calls, 4);
+            assert!(failed.usage.known && failed.usage.dispatched);
+            let correlation = serde_json::to_value(&failed.correlation)?;
+            assert_eq!(
+                correlation,
+                json!([{"phase":"carta_option_grants","http_status":403,"request_id":null,
+                    "statement_handle":null,"page":0}])
+            );
+            replay(&runtime, &failed)?;
+            // The previous capture stays selected and readable.
+            let snapshot: crate::carta::Snapshot =
+                serde_json::from_str(&published.observation.result)?;
+            assert!(
+                record(&runtime, "after-failure", &snapshot.id, 0)?
+                    .observation
+                    .error
+                    .is_empty()
+            );
+            let recovered = capture(&runtime, "recovered")?;
+            assert_eq!(recovered.observation.result, published.observation.result);
+            traces.push(json!({
+                "failed": failed.observation.error,
+                "correlation": correlation,
+                "world": update_carta(runtime.db(), SCOPE, |state| Ok(serde_json::to_value(&state.calls)?))?,
+            }));
+        }
+        assert_eq!(traces[0], traces[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn admission_reserves_the_whole_collection_and_refuses_short_grants() -> Result<()> {
+        let (_directory, runtime) = carta_runtime(Setup {
+            budget_bytes: 1_000_000,
+            ..Setup::default()
+        })?;
+        let error = capture(&runtime, "over-budget")
+            .err()
+            .context("budget must refuse")?;
+        assert!(
+            error.to_string().starts_with("budget_exhausted:")
+                && error.to_string().ends_with(":bytes"),
+            "{error}"
+        );
+        assert_eq!(
+            calls(&runtime)?,
+            0,
+            "an unreserved capture never dispatches"
+        );
+
+        let (_directory, runtime) = carta_runtime(Setup {
+            max_request_bytes: crate::carta_live::MAX_CAPTURE_REQUEST_BYTES - 1,
+            ..Setup::default()
+        })?;
+        assert_eq!(
+            capture(&runtime, "short-grant")
+                .err()
+                .context("short request allowance")?
+                .to_string(),
+            crate::error::Failure::ResourceForbidden.to_string()
+        );
+        assert_eq!(calls(&runtime)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_native_host_without_the_admitted_adapter_dispatches_nothing() -> Result<()> {
+        let (_directory, runtime) = carta_runtime(Setup {
+            simulated: false,
+            ..Setup::default()
+        })?;
+        let refused = capture(&runtime, "native")?;
+        assert_eq!(refused.observation.error, "carta_unavailable");
+        assert_eq!(refused.usage.calls, 0);
+        assert!(!refused.usage.dispatched);
+        assert_eq!(calls(&runtime)?, 0, "the simulated world is not a fallback");
+        Ok(())
+    }
+}

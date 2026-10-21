@@ -14,7 +14,7 @@ namespace to application code.
 | `data/pagination/` | Bounded collection results and opaque pagination inputs | [CollectionPage](data/pagination/CollectionPage.roc), [Cursor](data/pagination/Cursor.roc), [PageSize](data/pagination/PageSize.roc) |
 | `domain/` | Reusable validated values | [WebUrl](domain/WebUrl.roc) |
 | `contracts/Handler.roc`, `data/Observe.roc`, `contracts/Effects.roc` | Command/query phases and admitted capabilities | [Runtime contract](../docs/COMMAND-RUNTIME.md) |
-| `contracts/Notifications.roc`, `contracts/Carta.roc` | Typed provider packs with explicit host adapters | [Notifications](contracts/Notifications.roc), [Carta synthetic reads](../docs/CARTA.md) |
+| `contracts/Notifications.roc`, `contracts/Carta.roc` | Typed provider packs with explicit host adapters | [Notifications](contracts/Notifications.roc), [Carta reads](../docs/CARTA.md) |
 | `contracts/Schedule.roc` | Platform-owned recurring triggers for internal commands | [Schedule](contracts/Schedule.roc), [plan and current limits](../docs/SCHEDULES-PLAN.md) |
 | `web/` | Typed page registration, template references, assets and form fields | [Page](web/Page.roc), [PageBinding](web/PageBinding.roc), [Control](web/Control.roc) |
 | `web/markup/` | Existing pure HTML node helpers | [Html](web/markup/Html.roc); applications can use ordinary HTML templates instead |

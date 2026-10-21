@@ -1108,9 +1108,10 @@ pub fn local_resource_fixture(
             (
                 "carta",
                 ResourceKind::CartaIssuer,
-                Provider::SyntheticCarta,
+                Provider::Carta,
                 carta_issuer.map(|issuer_id| ResourceTarget::CartaIssuer {
                     issuer_id: issuer_id.into(),
+                    children: CartaChildren::Include,
                 }),
                 vec![Action::CartaSnapshot, Action::CartaRecord],
             ),
@@ -3292,6 +3293,8 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
                 {"orgUnitId":"root","name":"Root","orgUnitPath":"/","parentOrgUnitId":null,"parentOrgUnitPath":null},
                 {"orgUnitId":"engineering","name":"Engineering","orgUnitPath":"/Engineering","parentOrgUnitId":"root","parentOrgUnitPath":"/"}]}),
         },
+        // Disposable campaigns read the explicitly seeded synthetic Carta store.
+        carta: None,
     }
 }
 

@@ -2,8 +2,9 @@ import Observe
 import Resource
 import Context
 
-# Typed reads from an operator-provided Carta capture. The current host adapter
-# accepts explicit synthetic snapshots only; no live Carta connection is implied.
+# Typed reads from an immutable Carta capture: an explicitly seeded synthetic
+# snapshot, or a live capture the host collects completely when the bound resource
+# has a live connection. Record reads never reach the provider.
 # Provider arrays are transported as individual records, preserving their parent
 # external IDs. Applications own validation, import decisions and calculations.
 Carta :: [].{

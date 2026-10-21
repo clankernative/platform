@@ -325,9 +325,15 @@ fn narrower(child: &ResolvedGrant, parent: &ResolvedGrant) -> bool {
                 ResourceTarget::NotificationMailbox { topics: parent },
             ) => topic_subset(child, parent),
             (
-                ResourceTarget::CartaIssuer { issuer_id: child },
-                ResourceTarget::CartaIssuer { issuer_id: parent },
-            ) => child == parent,
+                ResourceTarget::CartaIssuer {
+                    issuer_id: child,
+                    children: child_children,
+                },
+                ResourceTarget::CartaIssuer {
+                    issuer_id: parent,
+                    children: parent_children,
+                },
+            ) => child == parent && child_children == parent_children,
             (child, parent) => child.is_subset_of(parent),
         }
 }
@@ -626,9 +632,14 @@ pub(crate) fn record_use(
         params![resource.handle,resource.grant.resource.id,resource.grant.policy.id],|row|row.get(0),
     )?;
     ensure!(
-        // A validated local cache plan consumes no provider calls. Local work
-        // remains bounded by the host's observation/transaction budgets.
-        (resource.planned_calls > 0 || resource.action == Action::WorkspaceDirectoryHierarchy)
+        // A validated local cache plan, or a record read from a published live
+        // Carta capture, consumes no provider calls. Local work remains bounded
+        // by the host's observation/transaction budgets.
+        (resource.planned_calls > 0
+            || matches!(
+                resource.action,
+                Action::WorkspaceDirectoryHierarchy | Action::CartaRecord
+            ))
             && u64::try_from(count)?
                 .checked_add(resource.planned_calls)
                 .is_some_and(|total| total <= resource.grant.limits.max_calls_per_invocation),
@@ -668,7 +679,7 @@ pub(crate) fn validate_result(resource: &ResourceUse, result: &str) -> Result<()
             Failure::ResourceForbidden
         );
     }
-    if let ResourceTarget::CartaIssuer { issuer_id } = &resource.grant.target
+    if let ResourceTarget::CartaIssuer { issuer_id, .. } = &resource.grant.target
         && resource.action == Action::CartaSnapshot
     {
         let snapshot: crate::carta::Snapshot = crate::json::decode(result.as_bytes())?;
@@ -787,6 +798,13 @@ pub(crate) fn reserve_in(
             service_account,
             ..
         }) => format!("workspace_directory/{service_account}"),
+        // One OAuth client in one deployment: Carta's rate limits follow the
+        // client, so every issuer read through it shares the pool.
+        Some(day2_capabilities::integrations::LiveConnection::Carta {
+            environment,
+            client_id,
+            ..
+        }) => format!("carta/{}/{client_id}", environment.name()),
         None => format!("{:?}", resource.grant.provider),
     };
     crate::budget::reserve_in(

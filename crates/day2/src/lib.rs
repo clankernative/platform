@@ -17,6 +17,7 @@ pub mod budget;
 pub mod build_dependencies;
 pub mod capabilities;
 pub mod carta;
+pub mod carta_live;
 pub mod compatibility;
 pub mod credential_authority;
 pub mod credential_codegen;
