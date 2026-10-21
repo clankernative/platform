@@ -320,9 +320,10 @@ fn wait(fd: &File, events: PollFlags, acquisition: &mut NativeAcquisition) -> Re
         let mut fds = [PollFd::new(fd, events)];
         match rustix::event::poll(&mut fds, Some(&timeout)) {
             Ok(count) => {
+                ensure!(count != 0, "native_enrollment_socket_poll_timeout");
                 ensure!(
                     count == 1 && fds[0].revents() == events,
-                    "native_enrollment_socket_closed_or_timeout"
+                    "native_enrollment_socket_unexpected_events"
                 );
                 break;
             }
@@ -439,7 +440,7 @@ mod tests {
         let error = wait(&channel.socket, PollFlags::IN, &mut acquisition).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "native_enrollment_socket_closed_or_timeout"
+            "native_enrollment_socket_unexpected_events"
         );
         let self_pidfd = rustix::process::pidfd_open(
             rustix::process::getpid(),
@@ -451,6 +452,22 @@ mod tests {
             &mut acquisition,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn no_packet_reports_poll_timeout_and_a_later_clock_cannot_revive_the_channel() {
+        let mut acquisition = NativeAcquisition::begin(5).unwrap();
+        let (mut channel, _sender) = Channel::pair(&mut acquisition).unwrap();
+        let code = Digest::new(b"no packet must reach executable admission");
+        let Err(error) = channel.receive(&code, &mut acquisition, &HashCosts::disabled()) else {
+            panic!("a quiet socket must not supply a packet")
+        };
+        assert_eq!(error.to_string(), "native_enrollment_socket_poll_timeout");
+        let mut later = NativeAcquisition::begin(5).unwrap();
+        let Err(error) = channel.receive(&code, &mut later, &HashCosts::disabled()) else {
+            panic!("a later clock must not revive the refused channel")
+        };
+        assert_eq!(error.to_string(), "native_enrollment_channel_refused");
     }
 
     #[test]
