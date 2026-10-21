@@ -340,6 +340,7 @@
     "crates/day2/src/security_epoch/native_enrollment/channel/serving/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/storage.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/storage/tests.rs",
+    "crates/day2/src/security_epoch/native_enrollment/issuer_costs.rs",
     "crates/day2/src/security_epoch/native_enrollment/issuer_peer.rs",
     "crates/day2/src/security_epoch/native_enrollment/issuer_peer/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/operations.rs",
@@ -505,8 +506,7 @@
     "crates/xtask/src/verification/shards.rs",
     "crates/xtask/src/verification/shards/mac.rs",
     "crates/xtask/src/verification/shards/reuse.rs",
-    "crates/xtask/src/workflows.rs",
-    "crates/day2/src/security_epoch/native_enrollment/issuer_costs.rs"
+    "crates/xtask/src/workflows.rs"
   ],
   "allowances": [
     {"source":"crates/day2/src/security_epoch/storage_authority/native_volume.rs","kind":"filesystem","target":"rustix::fs::mkdirat","context":"NativeVolumeObservation < 'role >::create_initial_directory","fingerprint":"b0e596c3f4ca783e584420acd699084b79b59ef3ae6e45b285f112acce94969c","count":1,"reason":"Owner: native initial storage holder. Create only the fixed private leaf under the retained selected volume directory with 0700. EEXIST/refusal never permits adoption; later exact openat2 BENEATH/NO_SYMLINKS/NO_MAGICLINKS/NO_XDEV and provider checks remain mandatory. Removal: retire with this closed native initial-holder/storage path."},
