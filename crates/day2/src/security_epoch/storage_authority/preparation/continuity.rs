@@ -10,7 +10,7 @@ use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
-    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
+    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
         DirectoryIdentity, ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
     },
@@ -440,6 +440,11 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
     pub(in crate::security_epoch) fn into_physical_checked(
         mut self,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        // An initial-handshake interval cannot mint a current physical phase,
+        // even if a future internal caller reaches this conversion directly.
+        self.phase
+            .controller_stage()?
+            .require_purpose(StagePurpose::CurrentRole)?;
         self.check()?;
         let mut physical = CurrentPhysicalFilePhase { inner: self };
         physical.check()?;
