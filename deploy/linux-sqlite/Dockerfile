@@ -16,6 +16,9 @@ RUN ["target/debug/xtask", "cli"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/srv/day2/.state"]
 
 FROM tooling AS runtime-build
+# Enrollment reads every executable byte at each observation. Remove linker
+# symbols before selecting Linux runtime digests; keep all fresh identity checks.
+ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 RUN ["cargo", "build", "--locked", "--release", "-p", "day2", "--bin", "day2-health", "--bin", "day2-inspect", "--bin", "day2-security-shell", "--bin", "day2-native-enrollment", "--bin", "day2-epoch-controller", "-p", "day2-control", "--bin", "day2-serve", "-p", "day2-sandbox", "--bin", "day2-sandbox", "--bin", "day2-sandbox-probe", "-p", "day2-ops", "--bin", "day2-backup", "--bin", "day2-provision-credentials"]
 RUN ["install", "-d", "-o", "10001", "-g", "10001", "-m", "0700", "/runtime-state"]
 
