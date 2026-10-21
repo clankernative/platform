@@ -175,9 +175,18 @@ classification as the native adapter, records each request, and consumes
 scheduled faults per endpoint (`carta.oauth.access_token`,
 `carta.issuers.stakeholders`, `carta.issuers.option_grants`). Its captures are
 labelled `carta_simulated`. A simulated host never falls through to HTTP: the
-source is frozen when the capability is authorized. The native HTTPS adapter
-is not yet admitted, so a native host refuses a live capture with
-`carta_unavailable` before any dispatch.
+source is frozen when the capability is authorized.
+
+On a native host the adapter resolves the connection's mounted client secret
+(`carta_credential_unavailable` when it is missing, retargeted or rotated),
+exchanges it at the environment's fixed token endpoint with HTTP Basic and reads
+the fixed issuer routes. Transport details, origins and the explicit
+`xtask carta-qualify` command are in [live integrations](LIVE-INTEGRATIONS.md#carta-issuer-captures).
+Loopback HTTP tests pin every request's method, path, query encoding, headers
+and body, refuse redirects, bound reads and check that refusals never echo the
+secret or token. The parity fixtures are reconstructions documented in
+[CARTA-PROVENANCE](../crates/day2/fixtures/provider-responses/CARTA-PROVENANCE.md)
+until a redacted playground recording replaces them.
 
 ## Native setup and verification
 

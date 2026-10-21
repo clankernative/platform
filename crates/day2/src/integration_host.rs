@@ -206,6 +206,12 @@ impl CredentialResolver for MountedCredentials {
     fn resolve(&self, live: &LiveConnection) -> std::result::Result<Credentials, AdapterError> {
         let result = (|| -> Result<Credentials> {
             live.validate()?;
+            // A Carta client secret is HTTP Basic material for one fixed token
+            // endpoint. It is never resolved as a transmittable bearer.
+            ensure!(
+                !matches!(live, LiveConnection::Carta { .. }),
+                "carta_secret_is_not_a_bearer"
+            );
             let metadata = fs::symlink_metadata(&self.database)?;
             ensure!(
                 metadata.is_file()
@@ -283,27 +289,50 @@ impl MountedCredentials {
         live: &LiveConnection,
         reference: &day2_capabilities::resources::VersionRef,
     ) -> Result<crate::integrations::LocalSecret, AdapterError> {
-        let result = (|| -> Result<crate::integrations::LocalSecret> {
-            live.validate()?;
-            let connection =
-                Connection::open_with_flags(&self.database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let (profile, path, fingerprint): (String, String, String) = connection.query_row(
-                "SELECT profile,path,fingerprint FROM mounts WHERE id=?1 AND revision=?2",
-                params![reference.id, i64::try_from(reference.revision)?],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            ensure!(
-                crate::json::decode::<LiveConnection>(profile.as_bytes())? == *live,
-                "credential_connection_changed"
-            );
-            let secret = read_secret(Path::new(&path))?;
-            ensure!(
-                crate::digest(secret.as_bytes()) == fingerprint,
-                "credential_version_changed"
-            );
-            Ok(crate::integrations::LocalSecret::new(secret)?)
-        })();
-        result.map_err(|_| AdapterError::CredentialUnavailable)
+        self.mounted_value(live, reference)
+            .and_then(|secret| Ok(crate::integrations::LocalSecret::new(secret)?))
+            .map_err(|_| AdapterError::CredentialUnavailable)
+    }
+
+    /// A Carta connection's OAuth client secret, under the same profile and
+    /// fingerprint checks as every other mount, as its own Basic-only type.
+    pub(crate) fn carta_client_secret(
+        &self,
+        live: &LiveConnection,
+    ) -> std::result::Result<crate::carta_http::CartaClientSecret, crate::carta_live::Failure> {
+        use crate::carta_live::Failure;
+        let LiveConnection::Carta { credential_ref, .. } = live else {
+            return Err(Failure::CredentialUnavailable);
+        };
+        let secret = self
+            .mounted_value(live, credential_ref)
+            .map_err(|_| Failure::CredentialUnavailable)?;
+        crate::carta_http::CartaClientSecret::new(secret)
+    }
+
+    fn mounted_value(
+        &self,
+        live: &LiveConnection,
+        reference: &day2_capabilities::resources::VersionRef,
+    ) -> Result<String> {
+        live.validate()?;
+        let connection =
+            Connection::open_with_flags(&self.database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let (profile, path, fingerprint): (String, String, String) = connection.query_row(
+            "SELECT profile,path,fingerprint FROM mounts WHERE id=?1 AND revision=?2",
+            params![reference.id, i64::try_from(reference.revision)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        ensure!(
+            crate::json::decode::<LiveConnection>(profile.as_bytes())? == *live,
+            "credential_connection_changed"
+        );
+        let secret = read_secret(Path::new(&path))?;
+        ensure!(
+            crate::digest(secret.as_bytes()) == fingerprint,
+            "credential_version_changed"
+        );
+        Ok(secret)
     }
 }
 

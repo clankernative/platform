@@ -568,7 +568,8 @@ impl CredentialResolver for SimulatedCredentials {
         connection
             .validate()
             .map_err(|_| AdapterError::InvalidProfile)?;
-        if !self.available {
+        // Carta's client secret is never a bearer, offline or live.
+        if !self.available || matches!(connection, LiveConnection::Carta { .. }) {
             return Err(AdapterError::CredentialUnavailable);
         }
         Credentials::bearer(
