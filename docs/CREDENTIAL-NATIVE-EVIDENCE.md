@@ -140,8 +140,13 @@ under that same original interval. It returns unconditionally before seed,
 private-directory, initial-file, first-holder, bootstrap or serving construction.
 It never opens the existing native SQLite file or writes provider/control state.
 Run it only with the actual source/image/profile bindings and preserve any first
-refusal. It is not permission to retry a failed original; arrange a single
-execution and stop the diagnostic workload afterwards.
+refusal. It is not permission to retry a failed original. After either outcome
+all role/storage owners have dropped and the command remains ownerless for a
+fixed five-minute hold, without another observation, provider call or listener.
+For this operator-only Deployment run, disable liveness/startup probes, keep
+readiness failing and stop/scale it to zero before that hold ends. There is no
+once-across-restarts or hard OS scheduling guarantee; forced replacement or
+letting the hold expire can cause Kubernetes to start another process.
 
 Its `preparation_read_only_observed` record contains `completed` and `timing`.
 Completion means the fixed read-only calls returned, not readiness or a current
