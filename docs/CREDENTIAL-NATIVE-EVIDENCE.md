@@ -86,13 +86,18 @@ settlement and end-to-end Google campaign remain separately required.
 
 ### Preparation refusal details
 
-A refusal at `preparation` additionally exports a closed `preparation` record:
+A refusal at `preparation` or `holder_listener` additionally exports a closed `preparation` record:
 `{"step":"claim_binding","category":"permission_denied"}` is an example.
 The step is the innermost annotated actual boundary, including its existing
 pre/post checks; it does not establish that a request was sent or a filesystem
 operation completed. It distinguishes the role-stage acquisition, selected
 profile/CA/credentials, fixed provider joins, block/mount checks, private-directory
 creation, memory-image admission and original-file preparation/retention.
+At `holder_listener`, fixed `holder_*` steps separately identify acquisition of
+the next role, current-file phase, owner capture, projection, interval narrowing,
+transport binding and final checks. An existing more specific inner boundary
+retains precedence. Thus a later listener failure does not relabel a completed
+original preparation, and a missing historical category must not be inferred.
 Desired instance/artifact admission runs before enrollment, so a preparation
 refusal there can have no Controller incarnation or preceding `enrolled` event.
 That admission is DATA only; no native acquisition, original seed or file owner

@@ -110,6 +110,14 @@ pub(in crate::security_epoch) enum PreparationStep {
     OriginalRetentionBefore,
     OriginalRetentionOwner,
     OriginalRetentionAfter,
+    HolderRoleStage,
+    HolderFilePhase,
+    HolderListenerBind,
+    HolderOwner,
+    HolderProjection,
+    HolderInterval,
+    HolderTransport,
+    HolderFinalCheck,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -511,7 +519,10 @@ impl<W: RecordOutput> Recorder<W> {
 
     pub(super) fn refuse(&mut self, error: Option<&anyhow::Error>) -> Result<()> {
         if !self.refused {
-            let preparation = if self.at == FailurePhase::Preparation {
+            let preparation = if matches!(
+                self.at,
+                FailurePhase::Preparation | FailurePhase::HolderListener
+            ) {
                 error.map(PreparationFailure::observe)
             } else {
                 None
@@ -1051,6 +1062,56 @@ mod tests {
         }
     }
     impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn holder_listener_refusal_keeps_inner_step_category_and_cached_preparation() {
+        for (cause, step, name, category) in [
+            (
+                anyhow::Error::new(rustix::io::Errno::XDEV),
+                PreparationStep::HolderTransport,
+                "holder_transport",
+                "path_resolution",
+            ),
+            (
+                anyhow::anyhow!("epoch_native_acquisition_expired"),
+                PreparationStep::HolderFilePhase,
+                "holder_file_phase",
+                "clock_expired_or_rewound",
+            ),
+        ] {
+            let error = PreparationFailure::at(step, cause);
+            let error = PreparationFailure::at(PreparationStep::HolderListenerBind, error);
+            assert_eq!(PreparationFailure::observe(&error).step, step);
+            if category == "path_resolution" {
+                assert_eq!(
+                    error.downcast_ref::<rustix::io::Errno>(),
+                    Some(&rustix::io::Errno::XDEV)
+                );
+            }
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::HolderListener);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(rows[1]["observation"]["at"], "holder_listener");
+            assert_eq!(rows[1]["observation"]["preparation"]["step"], name);
+            assert_eq!(rows[1]["observation"]["preparation"]["category"], category);
+            assert!(rows[1]["observation"]["timing"].is_array());
+            for line in recorder
+                .output
+                .split(|b| *b == b'\n')
+                .filter(|s| !s.is_empty())
+            {
+                assert!(line.len() < MAX_RECORD_BYTES);
+            }
+            let text = String::from_utf8(recorder.output).unwrap();
+            assert!(!text.contains("epoch_native_acquisition_expired"));
+            assert!(!text.contains("Cross-device"));
+        }
+    }
 
     #[test]
     fn preparation_refusal_is_bounded_fixed_data_and_never_formats_unknown_causes() {

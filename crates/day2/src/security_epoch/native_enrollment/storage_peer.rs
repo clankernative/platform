@@ -15,6 +15,8 @@ use super::{
     protocol,
 };
 #[cfg(target_os = "linux")]
+use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
+#[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::storage_peer_wire::Body;
 use crate::security_epoch::native_enrollment::storage_peer_wire::{Exchange, StageStatement};
 use crate::security_epoch::{
@@ -89,15 +91,33 @@ impl InitialHolderListener {
         }
         #[cfg(target_os = "linux")]
         {
-            phase.check()?;
-            let owner = phase.controller_stage()?.capture_same_owner()?;
-            let projection = phase.projection()?;
-            let mut acquisition = phase.controller_stage()?.narrow_io_acquisition(5)?;
-            let listener = StorageListener::bind(phase.controller_stage()?, &mut acquisition)?;
-            phase.check()?;
+            phase
+                .check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
+            let owner = phase
+                .controller_stage()
+                .and_then(|stage| stage.capture_same_owner())
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderOwner, error))?;
+            let projection = phase.projection().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderProjection, error)
+            })?;
+            let mut acquisition = phase
+                .controller_stage()
+                .and_then(|stage| stage.narrow_io_acquisition(5))
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderInterval, error))?;
+            let stage = phase
+                .controller_stage()
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
+            let listener = StorageListener::bind(stage, &mut acquisition)
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderTransport, error))?;
+            phase.check().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderFinalCheck, error)
+            })?;
             // Binding is a completed atomic operation, NOT a first-holder
             // exchange. No signed offer or durable activation has occurred.
-            phase.finish_checked()?;
+            phase.finish_checked().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderFinalCheck, error)
+            })?;
             Ok(Self {
                 owner,
                 projection,

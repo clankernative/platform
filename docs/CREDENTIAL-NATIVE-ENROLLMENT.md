@@ -173,6 +173,18 @@ production App/Shell lifecycle, human, storage, writer or OAuth permission.
 
 ## Bounded issuer cost observations
 
+The Controller mounts the enrollment parent read-only and its `storage` child
+writable. It also requires a second, unoverlaid read-only mount of that SAME
+parent at `/run/day2-native-enrollment-reference`. The directory guard uses
+`NO_XDEV` through the reference to select the actual original child, then joins
+the canonical writable child by native device/inode and exact UID/GID/mode.
+Both parents must be read-only; the actual child must be writable. All held and
+named identities are rechecked. A missing/foreign reference or different
+same-filesystem child refuses; there is no fallback or arbitrary mount exception.
+The privileged provisioner retains its separate direct-child `NO_XDEV` path.
+These are observed descriptor joins under the existing trusted node/mount TCB,
+not atomic mount-table snapshots or containment from that TCB.
+
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
 for its first sixteen accepted connections through the provisioner's inherited
 stderr. Its startup channel and listener remain separate on stdin and stdout;

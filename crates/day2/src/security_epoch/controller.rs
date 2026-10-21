@@ -122,8 +122,14 @@ fn run_inner(
     evidence.preparation_timings(timings.summary());
     let mut file = result?;
     evidence.enter(FailurePhase::HolderListener);
-    let mut holder_listener =
-        InitialHolderListener::bind(file.begin_initial_phase(role.begin_current_stage()?)?)?;
+    let stage = role
+        .begin_current_stage()
+        .map_err(|error| PreparationFailure::at(PreparationStep::HolderRoleStage, error))?;
+    let phase = file
+        .begin_initial_phase(stage)
+        .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
+    let mut holder_listener = InitialHolderListener::bind(phase)
+        .map_err(|error| PreparationFailure::at(PreparationStep::HolderListenerBind, error))?;
     while !holder_listener.idle_ready()? {
         // No role/file permission remains live while waiting for Kubernetes
         // startup. Start a fresh same-owner phase only after actual pending DATA.

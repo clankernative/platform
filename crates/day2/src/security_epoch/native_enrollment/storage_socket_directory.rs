@@ -2,29 +2,59 @@
 //! This filesystem owner grants no role, file preparation or storage authority.
 
 use anyhow::{Result, ensure};
-use rustix::fs::{Mode, OFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags, ResolveFlags, StatVfsMountFlags};
 use std::{fs::File, os::unix::fs::MetadataExt};
 
 const CHILD: &str = "storage";
 const CONTROLLER: u32 = 10001;
+const REFERENCE: &str = "/run/day2-native-enrollment-reference";
+
+enum Placement {
+    Provisioner,
+    Controller { root: File, child: File },
+}
 
 pub(super) struct StorageSocketDirectory {
     directory: File,
     identity: (u64, u64),
     root_identity: (u64, u64),
+    placement: Placement,
 }
 
 impl StorageSocketDirectory {
-    /// Observe only the provisioner's existing selected directory. A client or
-    /// controller cannot create, repair or adopt an incorrectly owned child.
+    /// The Controller has a read-only parent and a writable child bind mount.
+    /// Resolve the actual child strictly through a second unoverlaid, read-only
+    /// view of the SAME parent, then join the writable view to that descriptor.
+    /// Missing or foreign references refuse; there is no unrestricted fallback.
     pub(super) fn observe(root: &File) -> Result<Self> {
         let root_identity = root_identity(root)?;
-        let directory = open_child(root)?;
-        let identity = child_identity(&directory)?;
+        require_read_only(root)?;
+        let reference = File::from(rustix::fs::open(
+            REFERENCE,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?);
+        ensure!(
+            self::root_identity(&reference)? == root_identity,
+            "native_enrollment_storage_reference_changed"
+        );
+        require_read_only(&reference)?;
+        // NO_XDEV still forbids every crossing in the unoverlaid reference.
+        let child = open_child(&reference)?;
+        let identity = child_identity(&child)?;
+        let directory = open_mounted_child(root)?;
+        ensure!(
+            child_identity(&directory)? == identity,
+            "native_enrollment_storage_child_changed"
+        );
         let owner = Self {
             directory,
             identity,
             root_identity,
+            placement: Placement::Controller {
+                root: reference,
+                child,
+            },
         };
         owner.check(root)?;
         Ok(owner)
@@ -56,6 +86,7 @@ impl StorageSocketDirectory {
             directory,
             identity,
             root_identity,
+            placement: Placement::Provisioner,
         };
         owner.check(root)?;
         Ok(owner)
@@ -64,10 +95,30 @@ impl StorageSocketDirectory {
     pub(super) fn check(&self, root: &File) -> Result<()> {
         ensure!(
             root_identity(root)? == self.root_identity
-                && child_identity(&self.directory)? == self.identity
-                && child_identity(&open_child(root)?)? == self.identity,
+                && child_identity(&self.directory)? == self.identity,
             "native_enrollment_storage_socket_directory_changed"
         );
+        match &self.placement {
+            Placement::Provisioner => ensure!(
+                child_identity(&open_child(root)?)? == self.identity,
+                "native_enrollment_storage_socket_directory_changed"
+            ),
+            Placement::Controller {
+                root: reference,
+                child,
+            } => {
+                require_read_only(root)?;
+                require_read_only(reference)?;
+                require_writable(&self.directory)?;
+                ensure!(
+                    root_identity(reference)? == self.root_identity
+                        && child_identity(child)? == self.identity
+                        && child_identity(&open_child(reference)?)? == self.identity
+                        && child_identity(&open_mounted_child(root)?)? == self.identity,
+                    "native_enrollment_storage_socket_directory_changed"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -87,6 +138,40 @@ fn open_child(root: &File) -> Result<File> {
 
 fn open_initial_child(root: &File) -> Result<File> {
     open_with(root, OFlags::RDONLY)
+}
+
+fn require_read_only(file: &File) -> Result<()> {
+    ensure!(
+        rustix::fs::fstatvfs(file)?
+            .f_flag
+            .contains(StatVfsMountFlags::RDONLY),
+        "native_enrollment_storage_parent_writable"
+    );
+    Ok(())
+}
+
+fn require_writable(file: &File) -> Result<()> {
+    ensure!(
+        !rustix::fs::fstatvfs(file)?
+            .f_flag
+            .contains(StatVfsMountFlags::RDONLY),
+        "native_enrollment_storage_child_readonly"
+    );
+    Ok(())
+}
+
+/// Only the fixed child component may cross its explicitly joined bind mount.
+/// Callers must join its native identity to the strict reference before use.
+fn open_mounted_child(root: &File) -> Result<File> {
+    let directory = File::from(rustix::fs::openat2(
+        root,
+        CHILD,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )?);
+    require_writable(&directory)?;
+    Ok(directory)
 }
 
 fn open_with(root: &File, access: OFlags) -> Result<File> {
@@ -120,6 +205,88 @@ fn child_identity(directory: &File) -> Result<(u64, u64)> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn controller_root() -> File {
+        assert_eq!(rustix::process::geteuid().as_raw(), CONTROLLER);
+        File::open("/run/day2-native-enrollment").unwrap()
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, RO parent/reference and exact RW child bind"]
+    fn mounted_controller_child_joins_strict_read_only_reference() {
+        let root = controller_root();
+        let owner = StorageSocketDirectory::observe(&root).unwrap();
+        owner.check(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, foreign RW child under selected RO parent/reference"]
+    fn mounted_controller_refuses_another_same_filesystem_private_child() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "native_enrollment_storage_child_changed");
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, reference bound from a different RO parent"]
+    fn mounted_controller_refuses_another_reference_parent() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "native_enrollment_storage_reference_changed"
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, parent or reference mounted writable"]
+    fn mounted_controller_refuses_a_writable_parent_or_reference() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "native_enrollment_storage_parent_writable"
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, child mounted read-only under RO parent/reference"]
+    fn mounted_controller_refuses_a_read_only_child_mount() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "native_enrollment_storage_child_readonly"
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, reference child has an extra nested bind mount"]
+    fn mounted_controller_keeps_no_xdev_on_the_reference_child() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::XDEV)
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated Linux UID10001, no reference mount supplied"]
+    fn mounted_controller_has_no_missing_reference_fallback() {
+        let error = StorageSocketDirectory::observe(&controller_root())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::NOENT)
+        );
+    }
 
     #[test]
     #[ignore = "run isolated Linux UID0 with cap-drop ALL and only CHOWN"]
