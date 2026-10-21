@@ -245,15 +245,8 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (
-                    acquisition,
-                    mut authentication,
-                    current,
-                    grant,
-                    grant_peer,
-                    nonce_peer,
-                    channel,
-                ) = result?;
+                let (acquisition, authentication, current, grant, grant_peer, nonce_peer, channel) =
+                    result?;
                 let deadline = Duration::from_nanos(grant.data.deadline_ns);
                 let mut stage = EnrolledRoleStage {
                     owner: self,
@@ -269,7 +262,7 @@ impl EnrolledProcessRoleOwner {
                 stage.check()?;
                 // A ten-second peer interval never gives role authentication
                 // more than its original five-second acquisition. No reset.
-                if let Err(error) = authentication.remaining() {
+                if let Err(error) = stage.acquisition.complete_authentication(authentication) {
                     stage.owner.refused = true;
                     stage.acquisition.refuse();
                     return Err(error);

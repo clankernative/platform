@@ -132,6 +132,34 @@ impl NativeAcquisition {
         Ok((self.origin, self.deadline))
     }
 
+    /// Consume this actual successful authentication child, retaining its last
+    /// observation before the parent can continue. No scalar DATA can advance
+    /// this clock, replace its origin, widen a deadline or revive a refusal.
+    pub(super) fn complete_authentication(&mut self, mut child: Self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.valid
+                    && child.valid
+                    && child.domain == self.domain
+                    && child.process == self.process
+                    && child.origin == self.origin
+                    && child.deadline <= self.deadline
+                    && child.deadline > child.origin
+                    && child.deadline - child.origin <= MAX_ACQUISITION,
+                "epoch_native_authentication_clock_changed"
+            );
+            let sample = child.sample()?;
+            self.observe(sample.elapsed)?;
+            self.sample()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            child.refuse();
+            self.refuse();
+        }
+        result
+    }
+
     /// A narrower I/O clock derived from this actual owner, never from stored
     /// DATA. The original domain/origin and spent time are preserved. This
     /// grants no role or provider authority and cannot extend either deadline.
@@ -307,7 +335,8 @@ mod tests {
         assert_eq!(authentication.domain, original.domain);
         assert_eq!(authentication.origin, original.origin);
         authentication.fixture_time = Some(Duration::from_secs(102));
-        authentication.remaining().unwrap();
+        original.fixture_time = Some(Duration::from_secs(102));
+        original.complete_authentication(authentication).unwrap();
         // Model a successful authentication before spending the remaining
         // original peer interval; a refused child is never a fallback route.
         original.fixture_time = Some(Duration::from_millis(106_300));
@@ -358,6 +387,77 @@ mod tests {
         );
         assert!(original.narrow(61, Duration::from_secs(110)).is_err());
         assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn authentication_handoff_keeps_its_last_sample_and_refuses_an_intervening_rewind() {
+        for limit in [MAX_ACQUISITION, INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT] {
+            for (parent_now, accepted) in [(104_950, true), (104_800, false)] {
+                let mut original = NativeAcquisition::fixture(
+                    Digest::new(b"authentication-handoff"),
+                    std::process::id(),
+                    Duration::from_secs(100),
+                    limit,
+                );
+                let mut child = original.narrow(5, Duration::from_secs(110)).unwrap();
+                child.fixture_time = Some(Duration::from_millis(104_900));
+                original.fixture_time = Some(Duration::from_millis(parent_now));
+                assert_eq!(original.complete_authentication(child).is_ok(), accepted);
+                assert_eq!(original.deadline, Duration::from_secs(100) + limit);
+                if accepted {
+                    assert_eq!(original.latest, Duration::from_millis(parent_now));
+                    original.fixture_time = Some(Duration::from_millis(104_925));
+                    assert!(original.remaining().is_err());
+                }
+                assert!(original.remaining().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn failed_or_foreign_authentication_cannot_fall_back_to_a_live_parent() {
+        for refusal in [
+            "expired_child",
+            "expired_parent",
+            "refused_child",
+            "refused_parent",
+            "domain",
+            "origin",
+            "process",
+            "longer_child",
+            "parent_ahead",
+        ] {
+            let mut original = NativeAcquisition::fixture(
+                Digest::new(b"authentication-refusal"),
+                std::process::id(),
+                Duration::from_secs(100),
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+            );
+            let mut child = original.narrow(5, Duration::from_secs(110)).unwrap();
+            original.fixture_time = Some(Duration::from_secs(106));
+            child.fixture_time = Some(Duration::from_secs(104));
+            match refusal {
+                "expired_child" => child.fixture_time = Some(Duration::from_secs(105)),
+                "expired_parent" => original.fixture_time = Some(Duration::from_secs(110)),
+                "refused_child" => child.refuse(),
+                "refused_parent" => original.refuse(),
+                "domain" => child.domain = Digest::new(b"another-original"),
+                "origin" => child.origin += Duration::from_millis(1),
+                "process" => child.process = child.process.wrapping_add(1),
+                "longer_child" => child.deadline = Duration::from_secs(106),
+                "parent_ahead" => original.latest = Duration::from_millis(104_500),
+                _ => unreachable!(),
+            }
+            assert!(
+                original.complete_authentication(child).is_err(),
+                "{refusal}"
+            );
+            // Without the join this parent could remain live until 110. An
+            // expired/refused child cannot fall back to it or move time back.
+            assert!(original.remaining().is_err());
+            original.fixture_time = Some(Duration::from_secs(102));
+            assert!(original.remaining().is_err());
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
