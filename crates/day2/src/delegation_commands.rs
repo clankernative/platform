@@ -510,6 +510,13 @@ pub fn status(callee: &Runtime, verified: &VerifiedQuery) -> Result<String> {
         query.purpose == Purpose::Status && query.target.runtime_scope() == callee.scope(),
         "app_status_target_changed"
     );
+    crate::delegation::require_contract(
+        callee,
+        &query.operation,
+        &query.schema_digest,
+        query.contract_digest.as_deref(),
+        "command",
+    )?;
     let input: StatusInput = crate::json::decode(&serde_json::to_vec(&query.input)?)?;
     ensure!(
         input.id.len() == 68
@@ -520,23 +527,64 @@ pub fn status(callee: &Runtime, verified: &VerifiedQuery) -> Result<String> {
     let mut connection = store::open(callee.db())?;
     let tx = connection.transaction()?;
     callee.check_binding(&tx)?;
-    crate::authority_state::authorize_in(&tx, callee, &query.operation, &query.actor)?;
-    let row: Option<(String, String)> = tx.query_row("SELECT i.invocation,v.status FROM day2_app_inbox i JOIN day2_invocations v ON v.id=i.invocation WHERE i.id=?1 AND i.source=?2 AND i.actor=?3 AND i.operation=?4 AND i.contract=?5", params![input.id, query.source.runtime_scope(), query.actor, query.operation, query.contract_digest.as_deref().unwrap_or("")], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-    let state = if let Some((id, status)) = row {
+    let authority =
+        crate::authority_state::authorize_in(&tx, callee, &query.operation, &query.actor)?;
+    let row: Option<(String, String, Option<String>)> = tx.query_row("SELECT i.invocation,v.status,v.outcome FROM day2_app_inbox i JOIN day2_invocations v ON v.id=i.invocation WHERE i.id=?1 AND i.source=?2 AND i.actor=?3 AND i.operation=?4 AND i.contract=?5", params![input.id, query.source.runtime_scope(), query.actor, query.operation, query.contract_digest.as_deref().unwrap_or("")], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+    let (state, output) = if let Some((id, status, raw_outcome)) = row {
         if crate::authority_state::is_blocked(&tx, &id)? {
-            "blocked"
+            ("blocked", String::new())
         } else {
             match status.as_str() {
-                "success" => "success",
-                "failure" => "refused",
-                _ => "pending",
+                "success" => {
+                    let raw = raw_outcome
+                        .ok_or_else(|| anyhow::anyhow!("successful invocation outcome missing"))?;
+                    ensure!(
+                        raw.len() <= crate::output_schema::MAX_JSON_BYTES,
+                        "command result byte budget"
+                    );
+                    // The same captured-policy and authority-stamp checks as an
+                    // ordinary receipt: a result completed under authority that
+                    // has since changed is withheld, even after a regrant.
+                    match store::completed_outcome(&tx, &id, Some(&raw), authority.policy()?) {
+                        Ok(outcome) => {
+                            ensure!(
+                                outcome.status == "success",
+                                "command outcome status mismatch"
+                            );
+                            let result = callee
+                                .artifact()
+                                .decode_result(&query.operation, &outcome.result.to_string())?;
+                            let output = serde_json::to_string(&result)?;
+                            ensure!(
+                                output.len() <= crate::output_schema::MAX_JSON_BYTES,
+                                "command result byte budget"
+                            );
+                            ("success", output)
+                        }
+                        Err(error) if stale_receipt(&error) => ("blocked", String::new()),
+                        Err(error) => return Err(error),
+                    }
+                }
+                "failure" => ("refused", String::new()),
+                _ => ("pending", String::new()),
             }
         }
     } else {
-        "unknown"
+        ("unknown", String::new())
     };
     tx.commit()?;
-    Ok(json!({"id":input.id,"status":state}).to_string())
+    Ok(json!({"id":input.id,"status":state,"output":output}).to_string())
+}
+
+fn stale_receipt(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<crate::error::Failure>(),
+        Some(
+            crate::error::Failure::ReceiptPolicyChanged
+                | crate::error::Failure::ReceiptAuthorityUnavailable
+                | crate::error::Failure::AuthorityPolicyChanged
+        )
+    )
 }
 
 #[cfg(test)]

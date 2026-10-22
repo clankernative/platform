@@ -39,7 +39,7 @@ variable "oauth_instance_json" {
 }
 
 locals {
-  runtime_google_email        = var.app_calls == null && var.oauth_runtime == null ? "" : google_service_account.app_calls[0].email
+  runtime_google_email        = var.runtime_identity != null ? google_service_account.runtime_identity[0].email : (var.app_calls == null && var.oauth_runtime == null ? "" : google_service_account.app_calls[0].email)
   oauth_key_ids               = var.oauth_runtime == null ? toset([]) : setunion(var.oauth_runtime.custody_secret_ids, var.oauth_runtime.attestation_secret_ids)
   oauth_selection             = var.oauth_instance_json == null ? null : jsondecode(var.oauth_instance_json)
   oauth_connections           = try(local.oauth_selection.apps[var.app_id].oauth_connections, {})

@@ -221,6 +221,22 @@ variable "authority" {
   type        = any
 }
 
+variable "security_requirements" {
+  description = "Optional operator-reviewed native day2 security Requirements object for this exact artifact. Passed unchanged into app authority; native admission validates its evidence and executing runtime. Null preserves existing installations."
+  type        = any
+  default     = null
+
+  validation {
+    condition = var.security_requirements == null ? true : try(
+      var.security_requirements.version == 1 &&
+      var.security_requirements.artifact == "sha256:${var.artifact_id}" &&
+      var.security_requirements.containment.kind == "linux_qualified_v1",
+      false
+    )
+    error_message = "security_requirements must select version 1, this exact sha256 artifact, and the native linux_qualified_v1 containment profile."
+  }
+}
+
 variable "state_ownership_init_enabled" {
   description = "Run a root init container (CAP_CHOWN only) that makes the state volume's root directory 10001:10001 mode 0700. Day2 chmods .state itself and must own it; a fresh GCE PD root is root-owned."
   type        = bool

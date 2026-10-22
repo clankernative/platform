@@ -186,8 +186,21 @@ fn render(imports: &ImportedContracts, admission: bool) -> Result<String> {
                 _ => "input".into(),
             };
             let argument = if input == "{  }" { "_input" } else { "input" };
+            let output_shape = &shapes[&package.operation.output];
+            let wire_output = output_shape.wire_annotation();
+            let output = match output_shape {
+                crate::output_schema::Type::Record(fields) => format!(
+                    "{{ {} }}",
+                    fields
+                        .keys()
+                        .map(|field| format!("{field}: output_dto.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => "output_dto".into(),
+            };
             source.push_str(&format!(
-                "\t{prefix}Receipt := {{ id : Str }}\n\n\t{prefix}Status : [Pending, Success, Refused, Blocked, Unknown]\n\n\t{send} : {prefix}Input -> Effects({prefix}Receipt)\n\t{send} = |{argument}|\n\t\tEffects.{capability}(\n\t\t\t\"app.send.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Receipt, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.status == \"accepted\" => Ok({{ id: dto.id }})\n\t\t\t\t_ => Err(\"invalid_imported_receipt\")\n\t\t\t}}\n\t\t\tEffects.{from_host}(result)\n\t\t}})\n\n\t{status} : {prefix}Receipt -> Observe({prefix}Status)\n\t{status} = |receipt|\n\t\tObserve.{capability}(\n\t\t\t\"app.status.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({{ id: receipt.id }}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Status, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.id == receipt.id => match dto.status {{\n\t\t\t\t\t\"pending\" => Ok(Pending)\n\t\t\t\t\t\"success\" => Ok(Success)\n\t\t\t\t\t\"refused\" => Ok(Refused)\n\t\t\t\t\t\"blocked\" => Ok(Blocked)\n\t\t\t\t\t\"unknown\" => Ok(Unknown)\n\t\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t\t}}\n\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
+                "\t{prefix}Receipt := {{ id : Str }}\n\n\t{prefix}Status : [Pending, Success({prefix}Output), Refused, Blocked, Unknown]\n\n\t{send} : {prefix}Input -> Effects({prefix}Receipt)\n\t{send} = |{argument}|\n\t\tEffects.{capability}(\n\t\t\t\"app.send.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({input}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Receipt, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(dto) if dto.status == \"accepted\" => Ok({{ id: dto.id }})\n\t\t\t\t_ => Err(\"invalid_imported_receipt\")\n\t\t\t}}\n\t\t\tEffects.{from_host}(result)\n\t\t}})\n\n\t{status} : {prefix}Receipt -> Observe({prefix}Status)\n\t{status} = |receipt|\n\t\tObserve.{capability}(\n\t\t\t\"app.status.v1\",\n\t\t\tJson.to_str({{ contract: {{ operation: {operation}, digest: {digest} }}, input: Json.to_str({{ id: receipt.id }}) }}),\n\t\t).and_then(|raw| {{\n\t\t\tparsed : Try({{ id : Str, status : Str, output : Str }}, _)\n\t\t\tparsed = Json.parse(raw)\n\t\t\tresult : Try({prefix}Status, Str)\n\t\t\tresult = match parsed {{\n\t\t\t\tOk(status_dto) if status_dto.id == receipt.id => match status_dto.status {{\n\t\t\t\t\t\"pending\" if status_dto.output == \"\" => Ok(Pending)\n\t\t\t\t\t\"success\" if status_dto.output != \"\" => {{\n\t\t\t\t\t\tparsed_output : Try({wire_output}, _)\n\t\t\t\t\t\tparsed_output = Json.parse(status_dto.output)\n\t\t\t\t\t\tmatch parsed_output {{\n\t\t\t\t\t\t\tOk(output_dto) => Ok(Success({output}))\n\t\t\t\t\t\t\tErr(_) => Err(\"invalid_imported_status_output\")\n\t\t\t\t\t\t}}\n\t\t\t\t\t}}\n\t\t\t\t\t\"refused\" if status_dto.output == \"\" => Ok(Refused)\n\t\t\t\t\t\"blocked\" if status_dto.output == \"\" => Ok(Blocked)\n\t\t\t\t\t\"unknown\" if status_dto.output == \"\" => Ok(Unknown)\n\t\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t\t}}\n\t\t\t\t_ => Err(\"invalid_imported_status\")\n\t\t\t}}\n\t\t\tObserve.{from_host}(result)\n\t\t}})\n\n"
             ));
         }
     }
@@ -301,6 +314,13 @@ mod tests {
         assert!(source.contains(
             "directory_lookup_status : DirectoryLookupReceipt -> Observe(DirectoryLookupStatus)"
         ));
+        assert!(source.contains("DirectoryLookupStatus : [Pending, Success(DirectoryLookupOutput), Refused, Blocked, Unknown]"));
+        assert!(source.contains("parsed_output : Try({ name : Str }, _)"));
+        assert!(source.contains("Ok(output_dto) => Ok(Success({ name: output_dto.name }))"));
+        assert!(source.contains("\"success\" if status_dto.output != \"\""));
+        for status in ["pending", "refused", "blocked", "unknown"] {
+            assert!(source.contains(&format!("\"{status}\" if status_dto.output == \"\"")));
+        }
         assert!(
             admission_module(&imports)
                 .unwrap()

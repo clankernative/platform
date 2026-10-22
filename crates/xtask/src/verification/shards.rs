@@ -1304,8 +1304,13 @@ mod tests {
             &sample_identity(),
         )?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 23);
-        for fixture in ["lifecycle", "verification-actors", "chart-live"] {
+        assert_eq!(complete.fixtures.len(), 24);
+        for fixture in [
+            "lifecycle",
+            "verification-actors",
+            "verification-setup",
+            "chart-live",
+        ] {
             assert!(complete.fixtures.contains_key(fixture));
             let mut incomplete = sample_part("inputs")?;
             incomplete.fixtures.remove(fixture);
@@ -1757,10 +1762,11 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            23
+            24
         );
         assert!(steps.contains("build-lifecycle"));
         assert!(steps.contains("build-verification-actors"));
+        assert!(steps.contains("build-verification-setup"));
         assert!(!steps.contains("test-workspace-runtime"));
         assert!(!steps.contains("control-simulation"));
         assert!(steps.contains("test-binaries") && steps.contains("test-docs"));

@@ -83,6 +83,7 @@ locals {
           iap_audience = local.iap_audience
         }
         },
+        var.security_requirements == null ? {} : { security = var.security_requirements },
         length(var.resource_policies) == 0 ? {} : { resource_policies = var.resource_policies },
         length(var.schedules) == 0 ? {} : { schedules = var.schedules },
         length(var.ingress) == 0 ? {} : { ingress = var.ingress },
