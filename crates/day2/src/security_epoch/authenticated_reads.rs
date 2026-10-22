@@ -25,7 +25,11 @@ use zeroize::Zeroizing;
 
 mod retained;
 pub(in crate::security_epoch) use retained::ControllerBorrow;
-pub(crate) use retained::{ControllerPort, RetainedEpochReads};
+pub(in crate::security_epoch) use retained::RefusalGuard;
+pub(in crate::security_epoch) use retained::StorageMetadataRead;
+pub(crate) use retained::{
+    ControllerEpochReads, ControllerPort, ProviderEpochReads, RetainedEpochReads,
+};
 
 pub(crate) struct AuthenticatedReads<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,
@@ -34,6 +38,8 @@ pub(crate) struct AuthenticatedReads<'stage, 'role> {
     store: EpochStore,
     http: NativeHttp,
     credential: CredentialMaterial,
+    source: CredentialMaterial,
+    kubernetes: CredentialMaterial,
     acquisition: NativeAcquisition,
     process: NativeProcessObservation,
     selection: Digest,
@@ -271,6 +277,8 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             store: selection.clone(),
             http,
             credential,
+            source,
+            kubernetes: api,
             acquisition,
             process,
             selection: Digest::of(selection)?,

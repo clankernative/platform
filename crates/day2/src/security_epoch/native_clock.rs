@@ -163,6 +163,41 @@ impl NativeAcquisition {
         result
     }
 
+    /// Exchange the two ACTUAL current views. Both retain the shorter ceiling
+    /// and the exact last observed sample, never a maximum of timestamp DATA.
+    /// This permits a shorter legitimate lease without widening either side.
+    pub(super) fn exchange_current_views(&mut self, other: &mut Self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.valid
+                    && other.valid
+                    && self.domain == other.domain
+                    && self.process == other.process
+                    && self.origin == other.origin
+                    && self.deadline > self.origin
+                    && other.deadline > other.origin
+                    && self.deadline - self.origin <= MAX_ACQUISITION
+                    && other.deadline - other.origin <= MAX_ACQUISITION,
+                "epoch_native_current_read_clock_changed"
+            );
+            let ceiling = self.deadline.min(other.deadline);
+            self.deadline = ceiling;
+            other.deadline = ceiling;
+            let incoming = other.sample()?;
+            self.observe(incoming.elapsed)?;
+            let outgoing = self.sample()?;
+            other.observe(outgoing.elapsed)?;
+            let checked = other.sample()?;
+            self.observe(checked.elapsed)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+            other.refuse();
+        }
+        result
+    }
+
     /// Consume this actual successful authentication child, retaining its last
     /// observation before the parent can continue. No scalar DATA can advance
     /// this clock, replace its origin, widen a deadline or revive a refusal.
@@ -619,6 +654,103 @@ mod tests {
     #[test]
     fn unsupported_platform_never_substitutes_instant_or_wall_time() {
         assert!(NativeAcquisition::begin(5).is_err());
+    }
+
+    #[test]
+    fn shared_current_views_keep_spent_time_and_accept_either_shorter_ceiling() {
+        for (left, right) in [(1, 5), (5, 1), (3, 5), (5, 3)] {
+            let origin = Duration::from_secs(100);
+            let mut a = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(left),
+            );
+            let mut b = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(right),
+            );
+            a.fixture_time = Some(origin + Duration::from_millis(500));
+            b.fixture_time = a.fixture_time;
+            a.exchange_current_views(&mut b).unwrap();
+            let ceiling = origin + Duration::from_secs(left.min(right));
+            assert_eq!((a.origin, b.origin), (origin, origin));
+            assert_eq!((a.deadline, b.deadline), (ceiling, ceiling));
+            assert_eq!(a.latest, b.latest);
+            assert_eq!(
+                a.remaining().unwrap(),
+                Duration::from_secs(left.min(right)) - Duration::from_millis(500)
+            );
+            a.fixture_time = Some(ceiling);
+            b.fixture_time = Some(ceiling);
+            assert!(a.exchange_current_views(&mut b).is_err());
+            a.fixture_time = Some(origin);
+            b.fixture_time = Some(origin);
+            assert!(a.remaining().is_err());
+            assert!(b.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn shared_views_reject_foreign_refused_and_initial_intervals_permanently() {
+        for case in 0..7 {
+            let origin = Duration::from_secs(100);
+            let mut a = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let mut b = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            match case {
+                0 => b.domain = Digest::new(b"other"),
+                1 => b.process = b.process.wrapping_add(1),
+                2 => b.origin += Duration::from_secs(1),
+                3 => b.refuse(),
+                4 => a.refuse(),
+                5 => b.deadline = origin + INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+                _ => a.deadline = origin,
+            }
+            assert!(a.exchange_current_views(&mut b).is_err());
+            assert!(a.remaining().is_err());
+            assert!(b.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn shared_views_cannot_mask_either_last_sample_with_a_maximum() {
+        for later_left in [false, true] {
+            let origin = Duration::from_secs(100);
+            let mut a = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let mut b = NativeAcquisition::fixture(
+                Digest::new(b"same"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            if later_left {
+                a.latest = origin + Duration::from_millis(4500);
+            } else {
+                b.latest = origin + Duration::from_millis(4500);
+            }
+            a.fixture_time = Some(origin + Duration::from_millis(4250));
+            b.fixture_time = a.fixture_time;
+            assert!(a.exchange_current_views(&mut b).is_err());
+            assert!(a.remaining().is_err());
+            assert!(b.remaining().is_err());
+        }
     }
 
     #[cfg(target_os = "linux")]

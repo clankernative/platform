@@ -6,7 +6,7 @@ use super::{
     AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
-    authenticated_reads::{AuthenticatedReads, RetainedEpochReads},
+    authenticated_reads::{AuthenticatedReads, ControllerEpochReads},
     controller::{
         evidence::{PreparationFailure, PreparationStep},
         preparation_timing::{Operation, Timings},
@@ -234,7 +234,7 @@ impl InitialStorageContinuity {
         request: &Request,
     ) -> Result<(
         CurrentStorageBootstrapPhase<'storage, 'role>,
-        RetainedEpochReads,
+        ControllerEpochReads,
     )> {
         ensure!(self.ready, "initial_storage_continuation_refused");
         self.ready = false;
@@ -254,14 +254,17 @@ impl InitialStorageContinuity {
         // after the real Ready message. It retains THIS already-spent original
         // stage; neither these reads nor their material can dispatch a write.
         // The fixed writer is installed only after the file and peer join below.
-        let reads =
+        let retained =
             AuthenticatedReads::acquire(policy, selection, NativeRole::EpochController, &mut stage)
                 .and_then(AuthenticatedReads::retain_current)
                 .map_err(|error| {
                     PreparationFailure::at(PreparationStep::BootstrapTransport, error)
                 })?;
+        let (reads, provider) = retained
+            .into_controller(&mut stage, policy, selection)
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut file = pending
-            .acquire(stage)
+            .acquire_authenticated(stage, provider)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFile, error))?;
         ensure!(
             file.projection()? == expected,
@@ -391,6 +394,14 @@ fn request_binding(
 }
 
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
+    pub(in crate::security_epoch) fn check_authenticated_reads(
+        &mut self,
+        reads: &ControllerEpochReads,
+    ) -> Result<()> {
+        self.check()?;
+        self.file.check_authenticated_reads(reads)
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             ensure!(

@@ -22,7 +22,7 @@ pub(crate) use initial::{
     InitialStorageOutcome,
 };
 use native_volume::NativeVolumeObservation;
-mod persistent_disk;
+pub(in crate::security_epoch) mod persistent_disk;
 mod preparation;
 pub(crate) use preparation::{
     AppFileContinuity, AppPreparedFile, BeforeAttemptRefusal, CurrentPhysicalFilePhase,
@@ -388,8 +388,9 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
     timings.measure(Operation::VolumeAcquisition, || {
         // Retain genuine material, not a copied credential or parsed proof.
         // This diagnostic never consumes it into the fixed writer. The actual
-        // provider path intentionally remains unchanged for cost comparison.
-        let _reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire(
+        // provider metadata reads stay fresh; only this same-stage authenticated
+        // material is reused, never a preceding observation or permission.
+        let reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire(
             policy,
             store,
             crate::security_epoch::native_enrollment::NativeRole::EpochController,
@@ -397,6 +398,9 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
         )
         .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_current)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
-        native_volume::observe_provider_read_only(stage, policy, store, timings.clone())
+        let (_controller_reads, provider) = reads
+            .into_controller(&mut stage, policy, store)
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
+        native_volume::observe_provider_read_only(stage, policy, store, timings.clone(), provider)
     })
 }

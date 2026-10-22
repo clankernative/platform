@@ -20,11 +20,17 @@ use day2_capabilities::{
         bootstrap::{InitialBootstrapPolicy, NativeRole},
     },
 };
-use std::time::Duration;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 // The fixed writer is a lexical child so it can consume this material while
 // every field stays private. No credential/HTTP getter or raw-parts factory.
+mod provider;
 mod writer;
+pub(in crate::security_epoch) use provider::StorageMetadataRead;
 pub(in crate::security_epoch) use writer::ControllerBorrow;
 pub(crate) use writer::ControllerPort;
 
@@ -35,10 +41,119 @@ pub(crate) struct RetainedEpochReads {
     store: EpochStore,
     http: NativeHttp,
     credential: CredentialMaterial,
+    source: CredentialMaterial,
+    kubernetes: CredentialMaterial,
     acquisition: NativeAcquisition,
     process: NativeProcessObservation,
     selection: Digest,
     valid: bool,
+}
+
+// One actual authenticated owner, with two closed same-thread facades. There
+// is no phase backedge, raw-material getter, Clone or scalar constructor.
+struct ControllerReadState {
+    material: RefCell<RetainedEpochReads>,
+    gate: Rc<SharedUseGate>,
+}
+
+// DATA-only single-thread use gate, not a role or permission constructor.
+// An exclusive use spends availability. Only its actual non-Clone token can
+// complete it. Broader continuation guards also refuse on error or unwind;
+// neither kind grants authority or performs I/O during Drop.
+struct SharedUseGate {
+    valid: Cell<bool>,
+    available: Cell<bool>,
+}
+
+pub(in crate::security_epoch) struct RefusalGuard {
+    gate: Rc<SharedUseGate>,
+    exclusive: bool,
+    completed: bool,
+}
+
+impl SharedUseGate {
+    fn new() -> Self {
+        Self {
+            valid: Cell::new(true),
+            available: Cell::new(true),
+        }
+    }
+
+    fn enter(self: &Rc<Self>) -> Result<RefusalGuard> {
+        if !self.valid.get() || !self.available.replace(false) {
+            self.valid.set(false);
+            anyhow::bail!("epoch_shared_authentication_refused");
+        }
+        Ok(RefusalGuard {
+            gate: Rc::clone(self),
+            exclusive: true,
+            completed: false,
+        })
+    }
+
+    fn guard(self: &Rc<Self>) -> Result<RefusalGuard> {
+        if !self.valid.get() || !self.available.get() {
+            self.refuse();
+            anyhow::bail!("epoch_shared_authentication_refused");
+        }
+        Ok(RefusalGuard {
+            gate: Rc::clone(self),
+            exclusive: false,
+            completed: false,
+        })
+    }
+
+    fn refuse(&self) {
+        self.valid.set(false);
+        self.available.set(false);
+    }
+}
+
+impl RefusalGuard {
+    pub(in crate::security_epoch) fn complete(mut self) -> Result<()> {
+        ensure!(
+            self.gate.valid.get() && self.gate.available.get() != self.exclusive,
+            "epoch_shared_authentication_refused"
+        );
+        if self.exclusive {
+            self.gate.available.set(true);
+        }
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for RefusalGuard {
+    fn drop(&mut self) {
+        // Refusal only: no I/O, grant, clock sampling or successful completion.
+        if !self.completed {
+            self.gate.refuse();
+        }
+    }
+}
+
+pub(crate) struct ControllerEpochReads {
+    state: Rc<ControllerReadState>,
+}
+
+pub(crate) struct ProviderEpochReads {
+    state: Rc<ControllerReadState>,
+}
+
+impl ControllerReadState {
+    fn refuse(&self) {
+        // Refusal remains sticky even if an internal borrow is unavailable.
+        self.gate.refuse();
+        if let Ok(mut material) = self.material.try_borrow_mut() {
+            material.refuse();
+        }
+    }
+}
+
+impl ControllerEpochReads {
+    pub(in crate::security_epoch) fn refuse(&mut self) {
+        self.state.refuse();
+    }
 }
 
 impl AuthenticatedReads<'_, '_> {
@@ -52,6 +167,8 @@ impl AuthenticatedReads<'_, '_> {
             store,
             http,
             credential,
+            source,
+            kubernetes,
             acquisition,
             process,
             selection,
@@ -64,6 +181,8 @@ impl AuthenticatedReads<'_, '_> {
             store,
             http,
             credential,
+            source,
+            kubernetes,
             acquisition,
             process,
             selection,
@@ -73,6 +192,28 @@ impl AuthenticatedReads<'_, '_> {
 }
 
 impl RetainedEpochReads {
+    /// Consume the genuine full authentication exactly once. Both facades
+    /// spend the SAME original Current interval; only a later actual file/peer
+    /// phase can install the fixed writer. No credential or clock is exported.
+    pub(in crate::security_epoch) fn into_controller(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<(ControllerEpochReads, ProviderEpochReads)> {
+        self.check_bootstrap(stage, policy, store)?;
+        let state = Rc::new(ControllerReadState {
+            material: RefCell::new(self),
+            gate: Rc::new(SharedUseGate::new()),
+        });
+        Ok((
+            ControllerEpochReads {
+                state: Rc::clone(&state),
+            },
+            ProviderEpochReads { state },
+        ))
+    }
+
     /// The fixed writer must consume the SAME original read material after
     /// the actual current file/peer join, never a later stage of the same owner.
     fn check_bootstrap(
@@ -270,5 +411,83 @@ impl Port for CurrentReadPort<'_, '_, '_> {
         max_bytes: usize,
     ) -> Result<EpochReply> {
         self.owner.post(self.stage, url, body, timeout, max_bytes)
+    }
+}
+
+#[cfg(test)]
+mod shared_gate_tests {
+    // DATA-only synchronization controls. No fake role, process, credential,
+    // file phase, authenticated owner or positive native proof is constructed.
+    use super::SharedUseGate;
+    use std::{
+        cell::RefCell,
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
+
+    #[test]
+    fn successful_borrow_releases_only_availability_and_refusal_never_revives() {
+        let gate = Rc::new(SharedUseGate::new());
+        let continuation = gate.guard().unwrap();
+        gate.enter().unwrap().complete().unwrap();
+        continuation.complete().unwrap();
+        gate.enter().unwrap().complete().unwrap();
+        gate.refuse();
+        assert!(gate.enter().is_err());
+        assert!(gate.guard().is_err());
+        assert_eq!(Rc::strong_count(&gate), 1);
+        assert!(Rc::try_unwrap(gate).is_ok());
+    }
+
+    #[test]
+    fn reentry_and_refcell_borrow_failure_poison_every_facade() {
+        for reentry in [false, true] {
+            let gate = Rc::new(SharedUseGate::new());
+            let sibling = Rc::clone(&gate);
+            let material = RefCell::new(());
+            let held = material.borrow();
+            let guard = gate.enter().unwrap();
+            if reentry {
+                assert!(sibling.enter().is_err());
+                assert!(guard.complete().is_err());
+            } else {
+                assert!(material.try_borrow_mut().is_err());
+                drop(guard);
+            }
+            drop(held);
+            assert!(gate.enter().is_err());
+            assert!(sibling.guard().is_err());
+        }
+    }
+
+    #[test]
+    fn failed_semantic_continuation_poisoning_survives_successful_transport_use() {
+        let gate = Rc::new(SharedUseGate::new());
+        let semantic = gate.guard().unwrap();
+        gate.enter().unwrap().complete().unwrap();
+        // For example, a later profile/JSON/attachment check fails. Completion
+        // of the preceding I/O cannot complete that enclosing obligation.
+        drop(semantic);
+        assert!(gate.enter().is_err());
+    }
+
+    #[test]
+    fn unwind_closes_exclusive_and_nonexclusive_continuations() {
+        for exclusive in [false, true] {
+            let gate = Rc::new(SharedUseGate::new());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _guard = if exclusive {
+                        gate.enter().unwrap()
+                    } else {
+                        gate.guard().unwrap()
+                    };
+                    panic!("interrupted native use");
+                }))
+                .is_err()
+            );
+            assert!(gate.enter().is_err());
+            assert!(gate.guard().is_err());
+        }
     }
 }
