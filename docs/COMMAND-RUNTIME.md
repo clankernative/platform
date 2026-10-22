@@ -136,11 +136,13 @@ semantic model and a durable local mailbox adapter in a separate SQLite file.
 Any admitted app can use the same pack and model with explicit instance grants.
 No Reports-specific behavior lives in this adapter.
 
-[`pf.Carta`](CARTA.md) is a typed read pack backed by explicitly seeded, immutable
-synthetic captures. It reads individual stakeholder, grant, vesting and exercise
-records so nested arrays do not exceed one observation. Disposable verification
-campaigns explicitly supply its shared synthetic model; ordinary runtimes remain
-unconfigured until a native operator seeds a capture. It makes no live Carta calls.
+[`pf.Carta`](CARTA.md) is a typed read pack backed by immutable captures: explicitly
+seeded synthetic captures, or live captures that `Carta.begin` collects completely
+and publishes when its resource has a live connection. It reads individual
+stakeholder, grant, vesting and exercise records so nested arrays do not exceed one
+observation; record reads of a live capture are local. Disposable verification
+campaigns explicitly supply its shared synthetic model; ordinary runtimes without a
+live connection remain unconfigured until a native operator seeds a capture.
 
 The mailbox provides idempotent acceptance for a stable effect identity. Tests
 interrupt execution **after provider acceptance but before recording its result**,
@@ -183,7 +185,7 @@ Retry guarantees belong to each operation. A provider idempotency key or verifie
 reconciliation can resolve an acknowledgement loss. A provider lacking both must
 retain an **unknown outcome** for reconciliation; the platform cannot manufacture
 exactly-once delivery by writing an outbox row. Current executable packs include
-the local mailbox, synthetic Carta captures, and the typed GoogleDirectory,
+the local mailbox, synthetic and live Carta captures, and the typed GoogleDirectory,
 Linear and OperatorAlerts [People Ops providers](PEOPLE-PROVIDERS.md). These make
 no live provider calls; mailbox or alert "accepted" does not mean delivered.
 People Ops uses separate resource-scoped SQLite stores with stable effect ledgers,

@@ -490,7 +490,9 @@ fn correlation_retains_support_ids_after_body_loss_without_exposing_headers() {
             phase: ExchangePhase::Operation,
             http_status: Some(200),
             request_id: Some("req_provider_123".into()),
-            statement_handle: None
+            statement_handle: None,
+            page: None,
+            retry_after_seconds: None,
         }]
     );
     let requests = transport.requests.lock().unwrap();

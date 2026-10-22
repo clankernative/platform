@@ -121,7 +121,10 @@ providers! {
             NotificationsSend => "notifications.send.v1" (write),
         },
     },
-    SyntheticCarta {
+    // One provider for both sources. A connection without `live` reads the
+    // explicitly seeded synthetic store; a live connection captures Carta's
+    // issuer API (or its simulated wire world under a simulated host).
+    Carta {
         kind: CartaIssuer,
         world: "carta.synthetic.sqlite",
         actions: {

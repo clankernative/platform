@@ -117,6 +117,96 @@ fn http_durable_acceptance_exposes_actor_scoped_status_and_resumes_without_a_job
     }
     Ok(())
 }
+#[test]
+fn checked_report_search_uses_native_get_and_preserves_owner_scoped_reads() -> Result<()> {
+    let world = crate::support::commands::World::search()?;
+    for (actor, title) in [("alice", "Quarterly Alice"), ("bob", "Quarterly Bob")] {
+        let outcome = world.runtime.invoke(
+            "reports.submit",
+            actor,
+            &format!("search-{actor}"),
+            &json!({"title":title,"text":"Synthetic search fixture"}),
+            100,
+            day2::store::Fault::None,
+        )?;
+        assert_eq!(outcome.status, "success", "{}", outcome.error);
+    }
+    let server = Server::start(world.runtime.instance_path(), world.directory.path())?;
+    let client = server.client()?;
+    let started = Instant::now();
+    loop {
+        let rows = world.runtime.inspect()?;
+        let reports = rows["reports"].as_array().context("reports")?;
+        let data = reports
+            .iter()
+            .map(|row| {
+                serde_json::from_str::<Value>(row["data"].as_str().context("data")?)
+                    .map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if data.len() == 2
+            && data
+                .iter()
+                .all(|row| row["ready"] == true && row["announced"] == true)
+        {
+            break;
+        }
+        ensure!(
+            started.elapsed() < Duration::from_secs(10),
+            "synthetic report commands did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let before = world.runtime.inspect()?;
+    let response = client
+        .get(format!("{}/search?term=Quarterly", server.origin))
+        .send()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text()?;
+    let document = Html::parse_document(&html);
+    let form = document
+        .select(&selector("form#report-search")?)
+        .next()
+        .context("search form")?;
+    assert_eq!(form.value().attr("method"), Some("get"));
+    assert_eq!(form.value().attr("action"), Some("/search"));
+    assert_eq!(form.value().attr("data-query-on"), Some("input"));
+    assert_eq!(
+        form.value().attr("data-query-results"),
+        Some("report-search-results")
+    );
+    assert_eq!(fields(&html, "form#report-search")?["term"], "Quarterly");
+    let results = document
+        .select(&selector("#report-search-results")?)
+        .next()
+        .context("results")?;
+    let titles = results
+        .select(&selector("strong")?)
+        .map(|node| node.text().collect::<String>())
+        .collect::<Vec<_>>();
+    assert_eq!(titles, ["Quarterly Alice"]);
+    assert!(!results.text().collect::<String>().contains("Quarterly Bob"));
+    let empty = client
+        .get(format!("{}/search?term=quarterly", server.origin))
+        .send()?;
+    assert_eq!(empty.status(), StatusCode::OK);
+    assert!(empty.text()?.contains("No matching reports."));
+    assert_eq!(
+        world.runtime.inspect()?,
+        before,
+        "search changed business state"
+    );
+    let anonymous = Client::builder().redirect(Policy::none()).build()?;
+    assert_ne!(
+        anonymous
+            .get(format!("{}/search?term=Quarterly", server.origin))
+            .send()?
+            .status(),
+        StatusCode::OK
+    );
+    Ok(())
+}
+
 impl Server {
     fn start(path: &Path, directory: &Path) -> Result<Self> {
         Self::start_actor(path, directory, "alice")

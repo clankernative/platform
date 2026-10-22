@@ -1,0 +1,3 @@
+SearchReportsTypes :: [].{
+	Input := { term : Str }
+}

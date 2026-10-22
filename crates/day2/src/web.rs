@@ -1678,6 +1678,7 @@ impl Host {
                         @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
+                        script type="module" src="/assets/platform/reactive-queries.js" {}
                         @if let Some(script) = script { script type="module" src=(script) {} }
                         // Component behavior has a separate admitted entrypoint.
                         @if let Some(script) = component_script { script type="module" src=(script) {} }
@@ -1691,8 +1692,8 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}/assets/platform/reactive-queries.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)

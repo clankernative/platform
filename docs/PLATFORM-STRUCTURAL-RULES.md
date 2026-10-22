@@ -136,9 +136,11 @@ OAuth and credential proof APIs are unchanged. OAuth's schema admission scans
 remain a separate bounded-work obligation; the build journal's budget does not
 cover them.
 
-Provider world-coverage tests now require exactly 16 reviewed pending actions
-across LocalNotifications, SyntheticCarta, SyntheticGoogleDirectory,
-SyntheticLinear, SyntheticOperatorAlerts and LocalDelegation. Each action names
+Provider world-coverage tests now require exactly 14 reviewed pending actions
+across LocalNotifications, SyntheticGoogleDirectory, SyntheticLinear,
+SyntheticOperatorAlerts and LocalDelegation. Carta's two actions retired their
+debt: both drive the live capture pipeline and a local record read against
+distinguishable Carta wire worlds. Each action names
 an owner, reason and removal condition. New debt, duplicate records and stale
 records fail before either gate can skip an action. Closing a provider's coverage
 requires retiring its records; adding an action to a pending provider requires
