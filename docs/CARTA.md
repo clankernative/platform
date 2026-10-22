@@ -214,7 +214,11 @@ automatic provider retry, backoff or `Retry-After` support is claimed here.
 
 ## Remaining qualification
 
-Only a credentialed playground run can settle the required scopes, the
+Live provider qualification is an open evidence gap. The parity fixtures are
+reconstructed from the earlier Equity client's DTOs, not recorded from Carta,
+and every `carta-qualify` receipt reports `provider_qualified: false`; neither
+establishes that the adapter works against Carta. Only a credentialed
+playground run, reviewed afterwards, can settle the required scopes, the
 playground API origin, end-of-pagination behaviour, whether a page size can be
 requested, and which fields Carta omits or nulls. None of this requires an
 extra application operation kind.

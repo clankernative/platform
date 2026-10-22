@@ -85,7 +85,7 @@ fn reply(status: u16, body: &Value) -> Reply {
     }
 }
 
-type Scripted = std::result::Result<Reply, Failure>;
+type Scripted = std::result::Result<Reply, TransportFailure>;
 
 /// Scripted wire replies that record every request the pipeline sends.
 struct FixturePort {
@@ -108,7 +108,7 @@ impl FixturePort {
         Self::new(replies)
     }
 
-    fn next(&mut self, max_bytes: usize) -> std::result::Result<Reply, Failure> {
+    fn next(&mut self, max_bytes: usize) -> std::result::Result<Reply, TransportFailure> {
         let mut reply = self.replies.pop_front().expect("unplanned Carta request")?;
         reply.body.truncate(max_bytes + 1);
         Ok(reply)
@@ -116,7 +116,11 @@ impl FixturePort {
 }
 
 impl CartaPort for FixturePort {
-    fn token(&mut self, form: &str, max_bytes: usize) -> std::result::Result<Reply, Failure> {
+    fn token(
+        &mut self,
+        form: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, TransportFailure> {
         self.requests.push(format!("token {form}"));
         self.next(max_bytes)
     }
@@ -127,7 +131,7 @@ impl CartaPort for FixturePort {
         query: Option<&str>,
         token: &AccessToken,
         max_bytes: usize,
-    ) -> std::result::Result<Reply, Failure> {
+    ) -> std::result::Result<Reply, TransportFailure> {
         self.requests.push(format!(
             "{} {} {}",
             collection_path(ISSUER, collection),
@@ -440,7 +444,7 @@ fn statuses_classify_by_phase_without_reading_provider_content() {
             Phase::Token,
         ),
         (
-            vec![Err(Failure::Unavailable)],
+            vec![Err(Failure::Unavailable.into())],
             Failure::Unavailable,
             Phase::Token,
         ),
@@ -487,7 +491,7 @@ fn statuses_classify_by_phase_without_reading_provider_content() {
             vec![
                 Ok(reply(200, &token_body())),
                 Ok(reply(200, &page)),
-                Err(Failure::Unavailable),
+                Err(Failure::Unavailable.into()),
             ],
             Failure::Unavailable,
             Phase::OptionGrants,
@@ -538,6 +542,49 @@ fn statuses_classify_by_phase_without_reading_provider_content() {
     assert_eq!(
         (last.page, last.http_status, last.retry_after_seconds),
         (1, Some(400), Some(17))
+    );
+}
+
+#[test]
+fn a_failed_exchange_meters_the_bytes_and_metadata_it_already_consumed() {
+    let token = reply(200, &token_body());
+    let token_bytes = token.body.len() as u64;
+    let mut port = FixturePort::new(vec![
+        Ok(token),
+        Err(TransportFailure {
+            failure: Failure::Unavailable,
+            response_bytes: 1024,
+            http_status: Some(200),
+            retry_after_seconds: None,
+        }),
+    ]);
+    let (result, meter) = run(&plan(CartaChildren::Include), &mut port);
+    assert_eq!(failure(result), Failure::Unavailable);
+    assert_eq!(meter.calls, 2);
+    assert_eq!(meter.response_bytes, token_bytes + 1024);
+    assert_eq!(
+        meter.last,
+        Some(Exchange {
+            phase: Phase::Stakeholders,
+            page: 0,
+            http_status: Some(200),
+            retry_after_seconds: None,
+        })
+    );
+    // A response refused from its headers keeps the status it declared.
+    let mut port = FixturePort::new(vec![Err(TransportFailure {
+        failure: Failure::ResponseTooLarge,
+        response_bytes: 0,
+        http_status: Some(429),
+        retry_after_seconds: Some(7),
+    })]);
+    let (result, meter) = run(&plan(CartaChildren::Include), &mut port);
+    assert_eq!(failure(result), Failure::ResponseTooLarge);
+    assert_eq!(
+        meter
+            .last
+            .map(|last| (last.http_status, last.retry_after_seconds)),
+        Some((Some(429), Some(7)))
     );
 }
 
@@ -1188,7 +1235,7 @@ mod simulated {
             },
             MAX_PAGE_RESPONSE_BYTES,
         )
-        .map_err(anyhow::Error::from)?;
+        .map_err(|failure| anyhow::Error::from(failure.failure))?;
         assert_eq!(stale.status, 401);
         let directory = tempfile::tempdir()?;
         let unseeded = directory.path().join("app.sqlite");

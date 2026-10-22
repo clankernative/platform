@@ -6,7 +6,9 @@
 //! routes; [`crate::carta_live`] owns order, pagination, bounds and
 //! classification. Its own client follows no redirect, retries nothing, uses no
 //! proxy, cookie or content encoding, and keeps no idle connection.
-use crate::carta_live::{AccessToken, CapturePlan, CartaPort, Collection, Failure, Reply};
+use crate::carta_live::{
+    AccessToken, CapturePlan, CartaPort, Collection, Failure, Reply, TransportFailure,
+};
 use anyhow::Result;
 use base64::Engine as _;
 use day2_capabilities::integrations::CartaEnvironment;
@@ -163,11 +165,14 @@ impl NativeCartaPort {
         }
     }
 
+    /// One request. Every failure after the response head arrives keeps its
+    /// status and `Retry-After`, and a failed body read keeps the bytes it had
+    /// already consumed, so known settlement records all provider traffic.
     fn exchange(
         &self,
         request: reqwest::blocking::RequestBuilder,
         max_bytes: usize,
-    ) -> std::result::Result<Reply, Failure> {
+    ) -> std::result::Result<Reply, TransportFailure> {
         let response = request
             .header(reqwest::header::ACCEPT, "application/json")
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
@@ -180,29 +185,40 @@ impl NativeCartaPort {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"));
-        if headers
-            .get(reqwest::header::CONTENT_ENCODING)
-            .is_some_and(|value| value != "identity")
-        {
-            return Err(Failure::ResponseInvalid);
-        }
         // Seconds only; an HTTP date is not interpreted.
         let retry_after_seconds = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|seconds| *seconds <= MAX_RETRY_AFTER_SECONDS);
+        let failed = |failure, response_bytes: usize| TransportFailure {
+            failure,
+            response_bytes: response_bytes as u64,
+            http_status: Some(status),
+            retry_after_seconds,
+        };
+        if headers
+            .get(reqwest::header::CONTENT_ENCODING)
+            .is_some_and(|value| value != "identity")
+        {
+            return Err(failed(Failure::ResponseInvalid, 0));
+        }
         if response
             .content_length()
             .is_some_and(|size| size > max_bytes as u64)
         {
-            return Err(Failure::ResponseTooLarge);
+            return Err(failed(Failure::ResponseTooLarge, 0));
         }
+        // `read_to_end` appends as it goes: on a close or timeout mid-body,
+        // `body` holds exactly what was consumed before the failure.
         let mut body = Vec::new();
-        response
+        if response
             .take(max_bytes as u64 + 1)
             .read_to_end(&mut body)
-            .map_err(|_| Failure::Unavailable)?;
+            .is_err()
+        {
+            return Err(failed(Failure::Unavailable, body.len()));
+        }
         Ok(Reply {
             status,
             json,
@@ -213,7 +229,11 @@ impl NativeCartaPort {
 }
 
 impl CartaPort for NativeCartaPort {
-    fn token(&mut self, form: &str, max_bytes: usize) -> std::result::Result<Reply, Failure> {
+    fn token(
+        &mut self,
+        form: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, TransportFailure> {
         self.before_request()?;
         let credentials = base64::engine::general_purpose::STANDARD
             .encode(format!("{}:{}", self.client_id, self.secret.0));
@@ -240,7 +260,7 @@ impl CartaPort for NativeCartaPort {
         query: Option<&str>,
         token: &AccessToken,
         max_bytes: usize,
-    ) -> std::result::Result<Reply, Failure> {
+    ) -> std::result::Result<Reply, TransportFailure> {
         self.before_request()?;
         let mut url = self
             .api_origin

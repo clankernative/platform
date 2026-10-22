@@ -631,7 +631,7 @@ impl crate::carta_live::CartaPort for CartaReplay {
         &mut self,
         _form: &str,
         _max_bytes: usize,
-    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::Failure> {
+    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::TransportFailure> {
         Ok(self.reply())
     }
 
@@ -641,7 +641,7 @@ impl crate::carta_live::CartaPort for CartaReplay {
         _query: Option<&str>,
         _token: &crate::carta_live::AccessToken,
         _max_bytes: usize,
-    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::Failure> {
+    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::TransportFailure> {
         Ok(self.reply())
     }
 }

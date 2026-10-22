@@ -395,7 +395,7 @@ fn main() -> Result<()> {
             let secret = PathBuf::from(args.next().context(usage)?);
             let evidence = PathBuf::from(args.next().context(usage)?);
             ensure!(args.next().is_none(), "{usage}");
-            carta_qualify::execute(&profile, &secret, &evidence)?;
+            carta_qualify::execute(&root, &profile, &secret, &evidence)?;
         }
         "simulate-control" => {
             let seed = args

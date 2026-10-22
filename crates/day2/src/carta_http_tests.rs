@@ -285,7 +285,82 @@ fn responses_are_bounded_while_reading() -> Result<()> {
             "carta_response_too_large"
         );
         assert!(meter.response_bytes <= token_reply().to_string().len() as u64 + 1025);
+        assert_eq!(
+            meter.last.and_then(|last| last.http_status),
+            Some(200),
+            "a refusal keeps the status the response declared"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn a_truncated_body_settles_the_bytes_it_consumed_and_its_metadata() -> Result<()> {
+    // The response declares 4096 bytes, sends 1024 and closes.
+    let (origin, server) = serve(2, |index, _, stream| match index {
+        0 => json_reply(stream, &token_reply()),
+        _ => {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nRetry-After: 9\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n"
+            )?;
+            stream.write_all(&[b' '; 1024])?;
+            stream.flush()?;
+            stream.shutdown(std::net::Shutdown::Both)?;
+            Ok(())
+        }
+    })?;
+    let mut native = port(&origin, 5, fixed_clock)?;
+    let (result, meter) = collect_complete(&plan(5), &mut native, MAX_PAGE_RESPONSE_BYTES);
+    server.join().expect("fixture server panicked")?;
+    assert_eq!(
+        result.err().context("truncated")?.to_string(),
+        "carta_unavailable"
+    );
+    assert_eq!(meter.calls, 2);
+    assert_eq!(
+        meter.response_bytes,
+        token_reply().to_string().len() as u64 + 1024,
+        "the partial page is metered, not dropped"
+    );
+    assert_eq!(
+        meter
+            .last
+            .map(|last| (last.page, last.http_status, last.retry_after_seconds)),
+        Some((0, Some(200), Some(9)))
+    );
+
+    // A response refused from its headers keeps its status and Retry-After.
+    let (origin, server) = serve(2, |index, _, stream| match index {
+        0 => json_reply(stream, &token_reply()),
+        _ => {
+            // The adapter refuses on the header and may close first.
+            let _ = respond(
+                stream,
+                "503 Service Unavailable",
+                &[
+                    "Content-Type: application/json",
+                    "Content-Encoding: gzip",
+                    "Retry-After: 4",
+                ],
+                b"{}",
+            );
+            Ok(())
+        }
+    })?;
+    let mut native = port(&origin, 5, fixed_clock)?;
+    let (result, meter) = collect_complete(&plan(5), &mut native, MAX_PAGE_RESPONSE_BYTES);
+    server.join().expect("fixture server panicked")?;
+    assert_eq!(
+        result.err().context("encoded")?.to_string(),
+        "carta_response_invalid"
+    );
+    assert_eq!(
+        meter
+            .last
+            .map(|last| (last.http_status, last.retry_after_seconds)),
+        Some((Some(503), Some(4)))
+    );
     Ok(())
 }
 

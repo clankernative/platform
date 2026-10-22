@@ -105,19 +105,34 @@ Basic authentication, under the same profile and fingerprint checks as every
 mount; bearer resolution refuses a Carta connection. The access token lives in
 memory for one capture and is never cached.
 
+A truncated or failed response is still metered: a body read that stops on a
+close or timeout keeps the bytes it already consumed, and a response refused
+from its headers keeps its status and `Retry-After`. Known settlement and the
+failure's correlation therefore record all provider traffic.
+
 `cargo run --locked -p xtask -- carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY`
 is the explicit operator qualification. It is not part of any verification
-recipe. The profile is JSON with `format: 1`, `environment: "playground"`
-(production is refused), `client_id`, numeric `issuer_id`, optional
-`children`, `max_pages_per_collection` and `expires_at` (Unix seconds). The
-secret file must be an owner-private regular file. The command drives the native
-adapter through the production pipeline into a scratch store that is deleted,
-then writes `receipt.json`: outcome code, counts, usage, the last exchange,
-the token type, lifetime and granted scope (never the token), each page's
-status, bytes, item count and `nextPageToken` form, and per-field
-present/null/absent/empty counts plus unmapped field names. No record value
-is retained, and the receipt reports `provider_qualified: false` until a
-reviewer accepts it.
+recipe. The private [`ops/CartaQualification.roc`](../ops/CartaQualification.roc)
+recipe owns its step order and runs through `ops/Runner.roc`: open the inputs,
+create a private scratch store, collect, discard the scratch store, then publish
+the receipt. The native session supplies only those steps, refuses them out of
+order, with arguments or replayed, and deletes the scratch store if any step
+fails. The profile is JSON with `format: 1`, `environment: "playground"`
+(production is refused before the secret is read), `client_id`, numeric
+`issuer_id`, optional `children`, `max_pages_per_collection` and `expires_at`
+(Unix seconds). The secret file must be an owner-private regular file, and the
+evidence directory must be new. Collection drives the native adapter through
+the production pipeline into the scratch store. The `receipt.json` it publishes
+has an outcome code, counts, usage, the last exchange, each page's status, bytes,
+item count, `nextPageToken` form and any transport failure code, and
+per-field present/null/absent/empty counts. The token exchange is recorded only
+as JSON shapes, whether `token_type` is `Bearer`, a lifetime of at most a year,
+the granted scopes from a reviewed list and a count of other scopes. Unmapped
+field names are kept only when identifier-shaped, at most 64 per kind; the rest
+are counted. No provider value or JSON subtree is retained, including from a
+malformed response. Before publishing, the session refuses a receipt that claims
+`provider_qualified` or contains the client secret. Every receipt reports
+`provider_qualified: false` until a reviewer accepts it.
 
 ## Credentials and transport
 
