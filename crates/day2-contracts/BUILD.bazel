@@ -12,7 +12,7 @@ platform_rust_library(
     name = "lib",
     crate_name = "day2_contracts",
     crate_root = "src/lib.rs",
-    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
     compile_data = COMPILE_INPUTS,
     internal_deps = INTERNAL_DEPS,
 )
@@ -21,7 +21,7 @@ platform_rust_test(
     name = "unit_lib",
     crate_name = "day2_contracts",
     crate_root = "src/lib.rs",
-    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
     compile_data = COMPILE_INPUTS,
     internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
 )
