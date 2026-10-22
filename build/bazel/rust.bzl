@@ -7,7 +7,7 @@ def _attributes(crate_name, internal_deps, linux_deps, own_library, dev, rustc_e
     package = native.package_name()
     env = {
         "CARGO_MANIFEST_DIR": package,
-        "CARGO_PKG_NAME": package.rsplit("/", 1)[-1],
+        "CARGO_PKG_NAME": {"cli/checks": "day2-cli-checks", "crates/worker": "day2-roc-worker"}.get(package, package.rsplit("/", 1)[-1]),
         "CARGO_PKG_VERSION": "0.1.0",
     }
     env.update(rustc_env)
@@ -45,7 +45,7 @@ def platform_rust_binary(name, crate_name, internal_deps = [], linux_deps = [], 
 def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], own_library = None, rustc_env = {}, program_data = [], **kwargs):
     env = dict(rustc_env)
     for program in program_data:
-        env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "$(execpath " + program + ")"
+        env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "artifacts/bazel/bin/" + program.rsplit(":", 1)[-1]
     attributes = _attributes(crate_name, internal_deps, linux_deps, own_library, True, env)
     # Keep current Linux harness LLVM partitioning and no-LTO memory behavior.
     attributes["rustc_flags"] = attributes["rustc_flags"] + select({

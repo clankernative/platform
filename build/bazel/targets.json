@@ -17,7 +17,7 @@
       "directory": "crates/worker",
       "target": "day2_roc_worker",
       "kind": [
-        "lib"
+        "staticlib"
       ],
       "label": "//crates/worker:unit_lib",
       "test": true,

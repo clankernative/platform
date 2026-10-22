@@ -10,6 +10,7 @@ build --announce_rc
 build --experimental_guard_against_concurrent_changes
 build --experimental_disk_cache_gc_max_size=2G
 build --experimental_disk_cache_gc_max_age=7d
+build --experimental_disk_cache_gc_idle_delay=0
 test --cache_test_results=no
 test --test_output=errors
 # Keep largest Linux harness compilation within the existing CI memory budget.

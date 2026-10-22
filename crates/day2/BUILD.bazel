@@ -3,6 +3,7 @@ load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", 
 package(default_visibility = ["//visibility:public"])
 
 COMPILE_INPUTS = [
+    "//crates/worker:src/first_request.rs",
     "//:Cargo.lock",
     "//:Cargo.toml",
     "//:assets/api-docs.css",

@@ -35,7 +35,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
-          cache-save: false
+          cache-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/build/bazel-platform-migration' }}
       - name: Analyze the complete workspace with parameter files
         run: bazel aquery --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib))' > /tmp/day2-bazel-actions.json
       - name: Build the complete workspace and every harness

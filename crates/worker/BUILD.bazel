@@ -29,6 +29,7 @@ platform_rust_test(
 )
 
 exports_files([
+    "src/first_request.rs",
     "Cargo.toml",
     "generated/roc_platform_abi.rs"
 ])
