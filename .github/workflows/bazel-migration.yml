@@ -84,11 +84,11 @@ jobs:
       - name: Install the pinned launcher
         run: install -m 0555 /tmp/day2-bazel-probe-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
       - name: Populate only the toolchain action cache in an owned donor context
-        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-probe-donor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-repositories" @rules_rust//rust/toolchain:current_rustc_files
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-probe-donor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache=/tmp/day2-bazel-probe-repositories @rules_rust//rust/toolchain:current_rustc_files
       - name: Remove only the disposable donor output base
         run: rm -rf "$GITHUB_WORKSPACE/.cache/bazel-probe-donor"
       - name: Restore the configured tool into an empty consumer output base
-        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-repositories" @rules_rust//rust/toolchain:current_rustc_files
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache=/tmp/day2-bazel-probe-repositories @rules_rust//rust/toolchain:current_rustc_files
       - name: Retain actual configured tool output paths
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" cquery --config=ci-linux --output=files @rules_rust//rust/toolchain:current_rustc_files
       - name: Retain the actual consumer execution root
