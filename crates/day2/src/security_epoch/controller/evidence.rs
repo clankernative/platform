@@ -444,6 +444,12 @@ pub(in crate::security_epoch) enum ServingRole {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReadOnlyFrontier {
+    AuthProviderMetadata,
+}
+
+#[derive(Serialize)]
 struct Record<'a> {
     format: &'static str,
     sequence: u8,
@@ -463,6 +469,7 @@ enum Observation {
         timing: Option<Summary>,
     },
     PreparationReadOnlyObserved {
+        frontier: ReadOnlyFrontier,
         completed: bool,
         timing: Summary,
     },
@@ -573,7 +580,11 @@ impl<W: RecordOutput> Recorder<W> {
                 && self.next == 0,
             "native_evidence_read_only_order"
         );
-        self.emit(Observation::PreparationReadOnlyObserved { completed, timing })?;
+        self.emit(Observation::PreparationReadOnlyObserved {
+            frontier: ReadOnlyFrontier::AuthProviderMetadata,
+            completed,
+            timing,
+        })?;
         self.read_only_observed = true;
         Ok(())
     }
@@ -992,6 +1003,7 @@ mod tests {
             rows[1]["observation"]["event"],
             "preparation_read_only_observed"
         );
+        assert_eq!(rows[1]["observation"]["frontier"], "auth_provider_metadata");
         assert!(
             rows.iter()
                 .all(|row| row["observation"]["event"] != "first_holder_durability_completed")

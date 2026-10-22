@@ -353,6 +353,23 @@ impl<'role> ProviderReader<'role> {
     }
 }
 
+/// One authenticated provider-metadata frontier on the supplied original
+/// Current stage. No /state directory or block-device descriptor is opened,
+/// no mount is adopted, and no storage/file/peer/writer owner is returned.
+/// A detached or changed attachment must still refuse; its validation is not
+/// omitted just because this diagnostic returns only unit DATA.
+pub(super) fn observe_provider_read_only(
+    stage: EnrolledRoleStage<'_>,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+    timings: Timings,
+) -> Result<()> {
+    let mut reader =
+        ProviderReader::acquire(stage, policy, store, timings, StagePurpose::CurrentRole)?;
+    reader.observe_provider()?;
+    reader.check()
+}
+
 impl<'role> NativeVolumeObservation<'role> {
     pub(super) fn timings(&self) -> Timings {
         self.reader.timings.clone()

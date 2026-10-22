@@ -370,10 +370,10 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
     }
 }
 
-/// Fixed read-only diagnostic frontier. Actual provider/role/device/mount
-/// checks run under ONE original interval; errors stop it permanently. No seed,
-/// private-directory/file factory, SQLite open, provider mutation or owner is
-/// returned. Existing originals are never inspected or adopted.
+/// Fixed read-only authentication/provider-metadata diagnostic frontier under
+/// ONE original interval; errors stop it permanently. No /state/block open,
+/// mount adoption, seed, private-directory/file factory, SQLite open, provider
+/// mutation or owner is returned. Existing originals are never inspected.
 /// Full Controller authentication precedes the provider path, as it does in
 /// current bootstrap, spending the SAME five-second stage that began before
 /// role acquisition. The original first-holder ten-second path is not used.
@@ -385,7 +385,7 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
     store: &EpochStore,
     timings: &Timings,
 ) -> Result<()> {
-    let mut volume = timings.measure(Operation::VolumeAcquisition, || {
+    timings.measure(Operation::VolumeAcquisition, || {
         // Retain genuine material, not a copied credential or parsed proof.
         // This diagnostic never consumes it into the fixed writer. The actual
         // provider path intentionally remains unchanged for cost comparison.
@@ -397,10 +397,6 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
         )
         .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_current)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
-        NativeVolumeObservation::acquire(stage, policy, store, timings.clone())
-    })?;
-    for _ in 0..16 {
-        volume.check_current()?;
-    }
-    Ok(())
+        native_volume::observe_provider_read_only(stage, policy, store, timings.clone())
+    })
 }

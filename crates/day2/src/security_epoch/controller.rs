@@ -22,8 +22,9 @@ pub(crate) fn run(instance_path: &Path, app: &str) -> Result<()> {
     run_mode(instance_path, app, false)
 }
 
-/// Read-only diagnosis on an actually enrolled Controller. It cannot reach
-/// private-directory creation, initial-file creation or any provider mutation.
+/// Authentication/provider-metadata diagnosis on an actually enrolled
+/// Controller. It cannot reach /state/block descriptors, mount adoption,
+/// private-directory/initial-file creation or any provider mutation.
 pub(crate) fn observe_preparation(instance_path: &Path, app: &str) -> Result<()> {
     run_mode(instance_path, app, true)
 }
