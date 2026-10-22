@@ -77,9 +77,20 @@ variable "host_state_path" {
 }
 
 variable "activate" {
-  description = "False registers no running executor. True only after exact workload UID, profiles, App mount and code have been qualified; no original-file adoption on restart."
+  description = "False registers no running executor. True starts the selected fixed initial or read-only observation command after complete exact workload/profile/image/mount selection; native admission remains mandatory and neither mode adopts an original on restart."
   type        = bool
   default     = false
+}
+
+variable "observe_preparation_read_only" {
+  description = "Operator-only preparation observation with no native directory/file creation. Requires a qualified image supporting the exact closed diagnostic command and its 300-second ownerless hold; stop before that hold expires. This is not native qualification or serving."
+  type        = bool
+  default     = false
+  nullable    = false
+  validation {
+    condition     = !var.observe_preparation_read_only || var.activate
+    error_message = "Read-only observation requires activated complete native selections; dormant registration starts no diagnostic."
+  }
 }
 
 variable "node_profile" {
@@ -89,5 +100,17 @@ variable "node_profile" {
   validation {
     condition     = var.node_profile == null ? !var.activate : (can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.node_profile)))
     error_message = "Select the existing protected native placement profile."
+  }
+}
+
+variable "disk_device_group_id" {
+  description = "Observed owning group of the selected native block device. Required on activation, absent during registration; retained in the operator's static trusted-runtime profile."
+  type        = number
+  default     = null
+  validation {
+    condition = var.disk_device_group_id == null ? !var.activate : (
+      var.activate && var.disk_device_group_id >= 1 && var.disk_device_group_id <= 2147483647 && floor(var.disk_device_group_id) == var.disk_device_group_id
+    )
+    error_message = "Activation requires the observed disk group as an integer from 1 through 2147483647; dormant registration must omit it."
   }
 }

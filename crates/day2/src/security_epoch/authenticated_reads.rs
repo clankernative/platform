@@ -11,6 +11,7 @@ use super::{
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
@@ -105,7 +106,11 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         let mut acquisition = guard
             .stage
             .narrow_io_acquisition(selection.max_lease_seconds)?;
-        let process = NativeProcessObservation::acquire(selected.code, &mut acquisition)?;
+        let process = NativeProcessObservation::acquire(
+            selected.code,
+            &mut acquisition,
+            &HashCosts::disabled(),
+        )?;
         guard.check()?;
         let mut ca = Vec::new();
         acquisition.remaining()?;

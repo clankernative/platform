@@ -83,7 +83,7 @@ impl EnrolledRoleStage<'_> {
         let result = (|| {
             self.check()?;
             ensure!(
-                body.sender_role() == self.owner.role,
+                body.sender_role() == self.owner.role && body.stage_purpose() == self.purpose,
                 "storage_peer_local_sender_role"
             );
             let sender = self.storage_statement()?.digest()?;
@@ -169,6 +169,7 @@ impl EnrolledRoleStage<'_> {
                 &self.owner.certificate,
                 kernel_process,
                 acquisition.sample()?.elapsed,
+                self.purpose,
             )?;
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");
@@ -187,8 +188,9 @@ impl EnrolledRoleStage<'_> {
         result
     }
 
-    /// The caller holds the actual MessageProcess and checks its original
-    /// pidfd/code/namespaces around this DATA comparison, never a caller PID.
+    /// Validate DATA from the caller's retained actual MessageProcess. Before a
+    /// Peer escapes, its closed factory must freshly check that owner's original
+    /// pidfd/code/namespaces after this comparison; a caller PID cannot adopt it.
     pub(in crate::security_epoch::native_enrollment) fn check_storage_app_statement(
         &mut self,
         statement: &StageStatement,
@@ -207,6 +209,7 @@ impl EnrolledRoleStage<'_> {
                 NativeRole::AppHost,
                 observed,
                 acquisition.sample()?.elapsed,
+                self.purpose,
             )?;
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("storage_peer_platform_unsupported");

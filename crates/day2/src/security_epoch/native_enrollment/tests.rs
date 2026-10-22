@@ -148,3 +148,49 @@ fn unsupported_platform_never_installs_a_role_or_replaces_the_clock() {
     );
     assert!(super::run(false).is_err());
 }
+
+#[test]
+fn role_bind_signature_and_packet_require_the_exact_closed_stage_purpose() {
+    use super::{
+        NativeRole,
+        protocol::{Packet, StagePurpose},
+    };
+    let key = KeyOwner::generate().unwrap();
+    let policy = Digest::new(b"policy");
+    let request = Digest::new(b"request");
+    let challenge = Digest::new(b"challenge");
+    let public = key.public();
+    let binding = (
+        &policy,
+        NativeRole::AppHost,
+        StagePurpose::InitialFirstHolder,
+        &public,
+        &request,
+        &challenge,
+    );
+    let signature = key.sign("role-bind", &binding).unwrap();
+    protocol::verify(&public, "role-bind", &binding, &signature).unwrap();
+    let other = (
+        &policy,
+        NativeRole::AppHost,
+        StagePurpose::CurrentRole,
+        &public,
+        &request,
+        &challenge,
+    );
+    assert!(protocol::verify(&public, "role-bind", &other, &signature).is_err());
+    let packet = Packet::StageHello {
+        policy,
+        role: NativeRole::AppHost,
+        purpose: StagePurpose::InitialFirstHolder,
+        public_key: public,
+        request,
+    };
+    let bytes = serde_json::to_vec(&packet).unwrap();
+    assert!(protocol::decode(&bytes).is_ok());
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value.as_object_mut().unwrap().remove("purpose");
+    assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    value["purpose"] = serde_json::json!("any_stage");
+    assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+}

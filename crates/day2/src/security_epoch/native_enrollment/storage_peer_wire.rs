@@ -4,7 +4,7 @@
 use super::{
     NativeRole, StoragePeerPurpose,
     policy::{EnrollmentPolicy, decode_key},
-    protocol::{self, IssuerCertificate, ProcessData, SignedStage},
+    protocol::{self, IssuerCertificate, ProcessData, SignedStage, StagePurpose},
 };
 use crate::security_epoch::PreparedFileProjection;
 use anyhow::{Result, ensure};
@@ -21,14 +21,19 @@ pub(in crate::security_epoch::native_enrollment) struct OriginalInterval {
 }
 
 impl OriginalInterval {
-    pub(super) fn validate(&self, now: Duration, issuer_deadline_ns: u64) -> Result<()> {
+    pub(super) fn validate(
+        &self,
+        now: Duration,
+        issuer_deadline_ns: u64,
+        purpose: StagePurpose,
+    ) -> Result<()> {
         let origin = Duration::from_nanos(self.origin_ns);
         let deadline = Duration::from_nanos(self.deadline_ns);
         ensure!(
             origin <= now
                 && now < deadline
                 && deadline > origin
-                && deadline - origin <= Duration::from_secs(5)
+                && deadline - origin <= purpose.limit()
                 && self.deadline_ns <= issuer_deadline_ns,
             "storage_peer_original_interval"
         );
@@ -111,6 +116,7 @@ impl StageStatement {
         expected_role: NativeRole,
         message_process: &ProcessData,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
         ensure!(
             self.stage.data.process == *message_process,
@@ -122,6 +128,7 @@ impl StageStatement {
             expected_role,
             message_process.process,
             now,
+            purpose,
         )
     }
 
@@ -135,6 +142,7 @@ impl StageStatement {
         local_issuer: &IssuerCertificate,
         kernel_process: u32,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
         self.validate_sender(
             policy,
@@ -142,6 +150,7 @@ impl StageStatement {
             NativeRole::EpochController,
             kernel_process,
             now,
+            purpose,
         )
     }
 
@@ -152,13 +161,16 @@ impl StageStatement {
         expected_role: NativeRole,
         kernel_process: u32,
         now: Duration,
+        purpose: StagePurpose,
     ) -> Result<()> {
+        purpose.require_role(expected_role)?;
         self.certificate.verify(policy)?;
         ensure!(
             self.certificate == *local_issuer
                 && self.stage.data.issuer == self.certificate.digest()?
                 && self.stage.data.policy == policy.digest()?
                 && self.stage.data.role == expected_role
+                && self.stage.data.purpose == purpose
                 && self.stage.data.process.process == kernel_process
                 && self.stage.data.process.code == *policy.code(expected_role),
             "storage_peer_role_issuer_process"
@@ -170,14 +182,15 @@ impl StageStatement {
             origin <= now
                 && now < deadline
                 && deadline > origin
-                && deadline - origin <= Duration::from_secs(5),
+                && deadline - origin <= purpose.limit(),
             "storage_peer_signed_stage_interval"
         );
         ensure!(
             self.original.origin_ns <= self.stage.data.origin_ns,
             "storage_peer_original_origin_changed"
         );
-        self.original.validate(now, self.stage.data.deadline_ns)?;
+        self.original
+            .validate(now, self.stage.data.deadline_ns, purpose)?;
         protocol::verify(
             &self.certificate.data.public_key,
             "role-stage",
@@ -198,6 +211,23 @@ pub(in crate::security_epoch::native_enrollment) struct Exchange {
 }
 
 impl Exchange {
+    /// DATA-only continuity with the already authenticated readiness packet.
+    /// This neither authenticates a sender nor constructs a native owner.
+    pub(super) fn require_initial_ready(
+        &self,
+        ready: &StageStatement,
+        nonce: &Digest,
+        offered: &StageStatement,
+    ) -> Result<()> {
+        ensure!(
+            offered == ready
+                && self.controller_stage == ready.digest()?
+                && self.controller_nonce == *nonce,
+            "storage_peer_ready_stage_or_nonce_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-initial-holder-exchange-v1", self))
     }
@@ -225,6 +255,21 @@ pub(super) struct CurrentExchange {
 }
 
 impl CurrentExchange {
+    pub(super) fn require_begin_ready(
+        &self,
+        ready: &StageStatement,
+        nonce: &Digest,
+        offered: &StageStatement,
+    ) -> Result<()> {
+        ensure!(
+            offered == ready
+                && self.controller_stage == ready.digest()?
+                && self.controller_nonce == *nonce,
+            "storage_peer_current_ready_stage_or_nonce_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-current-storage-peer-exchange-v1", self))
     }
@@ -233,9 +278,14 @@ impl CurrentExchange {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::security_epoch::native_enrollment) enum Body {
+    InitialReady {
+        controller: Box<StageStatement>,
+        nonce: Digest,
+    },
     Hello {
         app: Box<StageStatement>,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     Offer {
         controller: Box<StageStatement>,
@@ -252,12 +302,19 @@ pub(in crate::security_epoch::native_enrollment) enum Body {
     Accepted {
         exchange: Digest,
     },
+    CurrentBeginReady {
+        controller: Box<StageStatement>,
+        initial: Digest,
+        sequence: u64,
+        nonce: Digest,
+    },
     CurrentHello {
         app: Box<StageStatement>,
         initial: Digest,
         sequence: u64,
         request: StoragePeerRequest,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     CurrentOffer {
         controller: Box<StageStatement>,
@@ -288,6 +345,25 @@ pub(super) enum CompletionKind {
 }
 
 impl Body {
+    pub(super) fn stage_purpose(&self) -> StagePurpose {
+        match self {
+            Self::InitialReady { .. }
+            | Self::Hello { .. }
+            | Self::Offer { .. }
+            | Self::Confirm { .. }
+            | Self::Complete { .. }
+            | Self::Accepted { .. } => StagePurpose::InitialFirstHolder,
+            Self::CurrentBeginReady { .. }
+            | Self::CurrentHello { .. }
+            | Self::CurrentOffer { .. }
+            | Self::CurrentAck { .. }
+            | Self::CurrentReady { .. }
+            | Self::CurrentResult { .. }
+            | Self::CurrentConsumed { .. }
+            | Self::CurrentReleased { .. } => StagePurpose::CurrentRole,
+        }
+    }
+
     pub(super) fn matches_completion(&self, expected: &Digest, kind: CompletionKind) -> bool {
         match (self, kind) {
             (Self::CurrentResult { exchange }, CompletionKind::Result)
@@ -307,8 +383,10 @@ impl Body {
             | Self::CurrentHello { .. }
             | Self::CurrentAck { .. }
             | Self::CurrentConsumed { .. } => NativeRole::AppHost,
-            Self::Offer { .. }
+            Self::InitialReady { .. }
+            | Self::Offer { .. }
             | Self::Complete { .. }
+            | Self::CurrentBeginReady { .. }
             | Self::CurrentOffer { .. }
             | Self::CurrentReady { .. }
             | Self::CurrentResult { .. }
@@ -326,10 +404,67 @@ pub(in crate::security_epoch::native_enrollment) struct Message {
 }
 
 impl Message {
+    /// Closed current-request selection DATA. Actual sender, signature and
+    /// original-role validation remain mandatory in the native receiver.
+    pub(super) fn current_hello(
+        &self,
+        initial: &Digest,
+        sequence: u64,
+        controller_nonce: &Digest,
+        expected: Option<&StoragePeerRequest>,
+    ) -> Result<(&StageStatement, &Digest, &StoragePeerRequest)> {
+        match &self.body {
+            Body::CurrentHello {
+                app,
+                initial: selected,
+                sequence: number,
+                request,
+                nonce,
+                controller_nonce: echoed,
+            } => {
+                ensure!(
+                    selected == initial
+                        && *number == sequence
+                        && echoed == controller_nonce
+                        && expected.map_or_else(
+                            || request.purpose == StoragePeerPurpose::CurrentServing,
+                            |expected| request == expected,
+                        ),
+                    "storage_peer_current_request_changed"
+                );
+                Ok((app, nonce, request))
+            }
+            _ => anyhow::bail!("storage_peer_expected_current_hello"),
+        }
+    }
+
+    /// Checked wire DATA only. The real receiver still authenticates the
+    /// signature, actual sender handles, current role and both native clocks.
+    pub(super) fn initial_hello(
+        &self,
+        expected_controller_nonce: &Digest,
+    ) -> Result<(&StageStatement, &Digest)> {
+        match &self.body {
+            Body::Hello {
+                app,
+                nonce,
+                controller_nonce,
+            } => {
+                ensure!(
+                    controller_nonce == expected_controller_nonce,
+                    "storage_peer_ready_nonce_changed"
+                );
+                Ok((app, nonce))
+            }
+            _ => anyhow::bail!("storage_peer_expected_hello"),
+        }
+    }
+
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
         ensure!(
             self.sender == statement.digest()?
-                && self.body.sender_role() == statement.stage.data.role,
+                && self.body.sender_role() == statement.stage.data.role
+                && self.body.stage_purpose() == statement.stage.data.purpose,
             "storage_peer_message_sender"
         );
         protocol::verify(
@@ -356,6 +491,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         .pointer("/body/step")
         .and_then(serde_json::Value::as_str)
     {
+        Some("initial_ready" | "current_begin_ready") => {
+            require_stage_objects(&value, "/body/controller")?
+        }
         Some("hello") => require_stage_objects(&value, "/body/app")?,
         Some("offer") => {
             require_stage_objects(&value, "/body/controller")?;
@@ -380,7 +518,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
             require_object(&value, "/body/exchange")?;
             require_object(&value, "/body/exchange/request")?;
         }
-        Some("confirm" | "complete" | "accepted" | "current_ack" | "current_ready") => {}
+        Some(
+            "confirm" | "complete" | "accepted" | "current_ack" | "current_ready"
+            | "current_result" | "current_consumed" | "current_released",
+        ) => {}
         _ => anyhow::bail!("storage_peer_step"),
     }
     Ok(serde_json::from_value(value)?)

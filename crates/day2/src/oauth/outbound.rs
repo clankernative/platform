@@ -45,6 +45,7 @@ pub(super) fn handle_callback(
             require_issuer: true,
             allowed_extras: BTreeSet::new(),
         },
+        None,
         custody_write,
     )
 }
@@ -53,8 +54,12 @@ pub(super) fn handle_callback_profile(
     db: &mut Connection,
     ingress: CallbackIngress<'_>,
     parameters: &CallbackParameters,
+    mut current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
     custody_write: impl FnOnce(&Transaction<'_>, &str) -> Result<()>,
 ) -> Result<CallbackOutcome> {
+    if let Some(current) = &mut current {
+        current.check()?;
+    }
     connect::identifier(ingress.attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(String, i64, String, String)> = tx
@@ -120,7 +125,11 @@ pub(super) fn handle_callback_profile(
             }
         }
     };
-    tx.commit()?;
+    if let Some(current) = current {
+        current.commit(tx)?;
+    } else {
+        tx.commit()?;
+    }
     Ok(outcome)
 }
 

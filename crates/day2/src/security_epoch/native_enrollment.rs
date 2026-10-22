@@ -3,17 +3,23 @@
 //!
 //! The signing root is operator-owned. Parsed certificates are DATA. A stage
 //! additionally owns the original received kernel process handle, current native
-//! self observations and the one original five-second acquisition.
+//! self observations and one original bounded acquisition. Ordinary role work
+//! remains five seconds; only the closed first-holder handshake uses ten.
 
 #[cfg(target_os = "linux")]
 mod birth;
 #[cfg(target_os = "linux")]
 mod channel;
+#[cfg(any(target_os = "linux", test))]
+mod executable_bytes;
+pub(in crate::security_epoch) mod issuer_costs;
 #[cfg(target_os = "linux")]
 mod issuer_peer;
 #[cfg(target_os = "linux")]
 mod operations;
 mod owner;
+#[cfg(any(target_os = "linux", test))]
+mod peer_idle;
 mod policy;
 #[cfg(target_os = "linux")]
 mod process;
@@ -39,12 +45,14 @@ mod storage_peer_wire;
 mod storage_socket_directory;
 
 pub(crate) use serving_peer::{
-    ControllerServingListener, ControllerServingPeer, CurrentServingPeerPhase, ShellServingPeer,
+    ControllerServingListener, ControllerServingPeer, ControllerServingRendezvous,
+    CurrentServingPeerPhase, ShellServingConnection, ShellServingPeer,
 };
 pub(crate) use storage_peer::{
     AppHolderPeerContinuity, AuthenticatedAppFirstHolder, AuthenticatedControllerFirstHolder,
-    AuthenticatedInitialHolderOffer, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
-    InitialHolderListener, InitialHolderServer,
+    AuthenticatedInitialHolderOffer, ControllerCurrentRendezvous, ControllerHolderPeerContinuity,
+    CurrentStoragePeerPhase, InitialHolderConnection, InitialHolderListener, InitialHolderServer,
+    PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
 pub(crate) use storage_peer_wire::StoragePeerRequest;
 
@@ -61,6 +69,7 @@ pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{
     EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, SameEnrolledOwner,
 };
+pub(in crate::security_epoch) use protocol::StagePurpose;
 
 pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]

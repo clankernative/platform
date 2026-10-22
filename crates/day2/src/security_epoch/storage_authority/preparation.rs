@@ -16,10 +16,17 @@ use std::fs::File;
 const INITIAL_FILE: &str = "day2-initial.sqlite";
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
+// Only original initialization and its retained initial-image rereads use this
+// batch. The complete image is already bounded to 16 MiB and resident in memory.
+// Keep every before/after native/file check around each actual syscall; avoid
+// repeating that full observation tree for each 64 KiB of the same image. Later
+// App/current serving operations retain their separate 64 KiB batch above.
+const INITIAL_IO_CHUNK_BYTES: usize = 1024 * 1024;
 
 mod app;
 mod continuity;
 pub(crate) use app::{AppFileContinuity, AppPreparedFile};
+pub(super) use continuity::PendingPhysicalFilePhase;
 pub(crate) use continuity::{
     CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
     PreparedRetentionOutcome,
@@ -35,21 +42,18 @@ pub(super) struct ReviewedFileLayout {
 }
 
 impl ReviewedFileLayout {
-    /// Artifact admission and memory initialization both spend the caller's
-    /// already-started native acquisition. No ordinary Runtime is constructed.
+    /// Revalidate previously admitted desired DATA and initialize memory inside
+    /// the caller's original acquisition. No ordinary Runtime is constructed.
+    /// The initializer reloads the complete instance and requires the SAME
+    /// digest; the image binds this metadata's scope/app/artifact to the seed.
     pub(super) fn prepare(
-        instance_path: &std::path::Path,
+        metadata: &crate::store::InitialStoreMetadata,
         selection: &ReviewedStorageSelection,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let result = (|| {
             acquisition.remaining()?;
-            let metadata = crate::store::InitialStoreMetadata::load(
-                instance_path,
-                selection.policy().scope.app.as_str(),
-            )?;
-            acquisition.remaining()?;
-            Self::prepare_metadata(&metadata, selection, acquisition)
+            Self::prepare_metadata(metadata, selection, acquisition)
         })();
         if result.is_err() {
             acquisition.refuse();
@@ -276,9 +280,13 @@ impl OriginalCreatorFd<'_> {
                         self.proposal.length,
                         acquisition,
                     )?;
-                    let end = (offset + IO_CHUNK_BYTES).min(readback.len());
-                    let read =
-                        rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)?;
+                    let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
+                    let read = self
+                        .authority
+                        .timings()
+                        .measure(super::Operation::Read, || {
+                            rustix::io::pread(&self.file, &mut readback[offset..end], offset as u64)
+                        })?;
                     ensure!(
                         read > 0 && read <= end - offset,
                         "original_file_read_progress"
@@ -456,9 +464,14 @@ impl PreparationCoordinator<'_> {
             let mut offset = 0;
             while offset < bytes.len() {
                 self.check_file(offset, acquisition)?;
-                let end = (offset + IO_CHUNK_BYTES).min(bytes.len());
-                let written =
-                    rustix::io::pwrite(self.file_ref()?, &bytes[offset..end], offset as u64)?;
+                let end = (offset + INITIAL_IO_CHUNK_BYTES).min(bytes.len());
+                let file = self.file_ref()?;
+                let written = self
+                    .authority
+                    .timings()
+                    .measure(super::Operation::Write, || {
+                        rustix::io::pwrite(file, &bytes[offset..end], offset as u64)
+                    })?;
                 ensure!(
                     written > 0 && written <= end - offset,
                     "original_file_write_progress"
@@ -470,12 +483,19 @@ impl PreparationCoordinator<'_> {
             }
             self.phase = PreparationPhase::FileSync;
             self.check_file(bytes.len(), acquisition)?;
-            rustix::fs::fsync(self.file_ref()?)?;
+            let file = self.file_ref()?;
+            self.authority
+                .timings()
+                .measure(super::Operation::FileSync, || rustix::fs::fsync(file))?;
             self.check_file(bytes.len(), acquisition)?;
             #[cfg(test)]
             plan.fixture_cut(self.phase)?;
             self.phase = PreparationPhase::DirectorySync;
-            rustix::fs::fsync(&self.authority.directory)?;
+            self.authority
+                .timings()
+                .measure(super::Operation::DirectorySync, || {
+                    rustix::fs::fsync(&self.authority.directory)
+                })?;
             self.check_file(bytes.len(), acquisition)?;
             #[cfg(test)]
             plan.fixture_cut(self.phase)?;
@@ -485,9 +505,14 @@ impl PreparationCoordinator<'_> {
             let mut offset = 0;
             while offset < readback.len() {
                 self.check_file(bytes.len(), acquisition)?;
-                let end = (offset + IO_CHUNK_BYTES).min(readback.len());
-                let read =
-                    rustix::io::pread(self.file_ref()?, &mut readback[offset..end], offset as u64)?;
+                let end = (offset + INITIAL_IO_CHUNK_BYTES).min(readback.len());
+                let file = self.file_ref()?;
+                let read = self
+                    .authority
+                    .timings()
+                    .measure(super::Operation::Read, || {
+                        rustix::io::pread(file, &mut readback[offset..end], offset as u64)
+                    })?;
                 ensure!(
                     read > 0 && read <= end - offset,
                     "original_file_read_progress"

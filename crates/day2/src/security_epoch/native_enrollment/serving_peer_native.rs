@@ -2,7 +2,10 @@
 
 use super::serving_peer_wire::{Message, Statement};
 use crate::security_epoch::native_clock::NativeAcquisition;
-use crate::security_epoch::native_enrollment::{EnrolledRoleStage, channel::ServingSender};
+use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
+use crate::security_epoch::native_enrollment::{
+    EnrolledRoleStage, channel::ServingSender, process::MessageProcess,
+};
 use anyhow::{Result, ensure};
 
 pub(super) struct Peer {
@@ -26,19 +29,16 @@ impl Peer {
             valid: true,
         };
         match &mut owner.processes[0] {
-            ServingSender::Shell(process) => {
-                process.check_identity(acquisition)?;
-                stage.check_serving_shell_statement(
-                    &owner.statement,
-                    process.data(),
-                    acquisition,
-                )?;
-                process.check_identity(acquisition)?
-            }
+            ServingSender::Shell(process) => stage.check_serving_shell_statement(
+                &owner.statement,
+                process.data(),
+                acquisition,
+            )?,
             ServingSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
             }
         }
+        // No peer escapes before this new, complete native sender observation.
         owner.check(stage, acquisition)?;
         Ok(owner)
     }
@@ -57,7 +57,7 @@ impl Peer {
     ) -> Result<()> {
         let result = (|| {
             ensure!(
-                self.valid && !self.processes.is_empty() && self.processes.len() <= 4,
+                self.valid && !self.processes.is_empty() && self.processes.len() <= 5,
                 "serving_peer_retained_process_refused"
             );
             stage.check_serving_acquisition(acquisition)?;
@@ -68,6 +68,7 @@ impl Peer {
                     && self.statement.stage.data.role == stage.serving_peer_role()?,
                 "serving_peer_original_issuer_or_role_changed"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     ServingSender::Shell(process) => {
@@ -75,12 +76,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        same_actor.push(process.as_mut());
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.check_continuity(&self.statement, stage, acquisition)?;
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_serving_acquisition(acquisition)
         })();
@@ -98,7 +106,7 @@ impl Peer {
     ) -> Result<()> {
         let result = (|| {
             ensure!(
-                self.valid && !self.processes.is_empty() && self.processes.len() <= 4,
+                self.valid && !self.processes.is_empty() && self.processes.len() <= 5,
                 "serving_peer_retained_process_refused"
             );
             stage.check_serving_acquisition(acquisition)?;
@@ -107,6 +115,7 @@ impl Peer {
                     < std::time::Duration::from_nanos(self.statement.original.deadline_ns),
                 "serving_peer_remote_stage_expired"
             );
+            let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {
                     ServingSender::Shell(process) => {
@@ -114,12 +123,19 @@ impl Peer {
                             process.data() == &self.statement.stage.data.process,
                             "serving_peer_message_sender_changed"
                         );
-                        process.check_identity(acquisition)?;
+                        same_actor.push(process.as_mut());
                     }
                     ServingSender::Controller(receipt) => {
                         receipt.bind(&self.statement, stage, acquisition)?
                     }
                 }
+            }
+            if !same_actor.is_empty() {
+                MessageProcess::check_same_actor(
+                    &mut same_actor,
+                    acquisition,
+                    &HashCosts::disabled(),
+                )?;
             }
             stage.check_serving_acquisition(acquisition)
         })();
@@ -138,7 +154,9 @@ impl Peer {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            ensure!(self.processes.len() < 4, "serving_peer_message_count");
+            // BeginReady, Offer, CurrentReady, Known and Released each retain
+            // the actual authenticated sender throughout a current Shell use.
+            ensure!(self.processes.len() < 5, "serving_peer_message_count");
             // Retain the actual newly received handle before fallible checks.
             self.processes.push(process);
             self.check(stage, acquisition)?;

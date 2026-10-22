@@ -9,7 +9,8 @@ use super::{
 use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
-    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
+    controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
+    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
         DirectoryIdentity, ReviewedStorageSelection, native_volume::NativeVolumeContinuity,
     },
@@ -53,6 +54,62 @@ pub(crate) struct CurrentPreparedFilePhase<'file, 'role> {
     thread: ThreadId,
     disposition: FilePhaseDisposition<'file>,
 }
+
+/// Irreversibly closes this file's continuation before rendezvous I/O. It owns
+/// no role, provider acquisition or permission. Dropping it leaves the original
+/// file refused; only the eventual current phase's known completion settles it.
+pub(in crate::security_epoch::storage_authority) struct PendingPreparedFilePhase<'file> {
+    volume: &'file mut NativeVolumeContinuity,
+    selection: &'file ReviewedStorageSelection,
+    directory: &'file File,
+    anchor: &'file DirectoryIdentity,
+    file: &'file File,
+    identity: &'file FileIdentity,
+    layout: &'file ReviewedFileLayout,
+    process: u32,
+    thread: ThreadId,
+    disposition: FilePhaseDisposition<'file>,
+}
+
+/// The physical counterpart has a distinct acquisition method: legitimate
+/// later writes must never be accepted as an unchanged initial image. Its
+/// private inputs are still only closed continuity, not native permission.
+pub(in crate::security_epoch::storage_authority) struct PendingPhysicalFilePhase<'file> {
+    inputs: PendingPreparedFilePhase<'file>,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Copy);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Default);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Send);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, Sync);
+    assert_not_impl!(PendingPreparedFilePhase<'static>, serde::Serialize);
+    assert_not_impl!(
+        PendingPreparedFilePhase<'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Clone);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Copy);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Default);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Send);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, Sync);
+    assert_not_impl!(PendingPhysicalFilePhase<'static>, serde::Serialize);
+    assert_not_impl!(
+        PendingPhysicalFilePhase<'static>,
+        serde::Deserialize<'static>
+    );
+};
 
 /// A current physical-file phase after legitimate application writes. It is
 /// deliberately distinct from CurrentPreparedFilePhase: the initial exchange
@@ -104,16 +161,46 @@ impl<'role> PreparedInitialFile<'role> {
     /// original file/anchor/stage remain owned by the refused outcome. A later
     /// acquisition cannot restart an expired or failed preparation.
     pub(crate) fn retain_for_current_phases(mut self) -> PreparedRetentionOutcome<'role> {
+        let timings = self.creator.authority.timings();
         let binding = (|| {
-            self.check_original()?;
+            timings.measure(crate::security_epoch::controller::preparation_timing::Operation::RetentionBefore, || self.check_original()).map_err(|error| {
+                PreparationFailure::with_progress(
+                    PreparationStep::OriginalRetentionBefore,
+                    error,
+                    PreparationProgress {
+                        last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                        ..PreparationProgress::default()
+                    },
+                )
+            })?;
             let binding = match &mut self.creator.authority.issuer {
-                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => volume.capture_same_owner()?,
+                crate::security_epoch::storage_authority::StorageIssuerOwner::Native(volume) => timings.measure(crate::security_epoch::controller::preparation_timing::Operation::RetentionOwner, || volume.capture_same_owner()).map_err(|error| {
+                    PreparationFailure::with_progress(
+                        PreparationStep::OriginalRetentionOwner,
+                        error,
+                        PreparationProgress {
+                            last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                            ..PreparationProgress::default()
+                        },
+                    )
+                })?,
                 #[cfg(test)]
                 crate::security_epoch::storage_authority::StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => {
                     anyhow::bail!("storage_native_retention_requires_enrolled_controller")
                 }
             };
-            self.check_original()?;
+            // The final genuine guard must remain the final I/O before the
+            // infallible owner move. Do not wrap it in a diagnostic clock read.
+            self.check_original().map_err(|error| {
+                PreparationFailure::with_progress(
+                    PreparationStep::OriginalRetentionAfter,
+                    error,
+                    PreparationProgress {
+                        last_checked_us: self.acquisition.last_checked_elapsed_micros(),
+                        ..PreparationProgress::default()
+                    },
+                )
+            })?;
             Ok(binding)
         })();
         match binding {
@@ -172,10 +259,17 @@ impl PreparedFileContinuity {
         &'file mut self,
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.begin_pending_initial_phase()?.acquire(stage)
+    }
+
+    /// Close before a first-holder readiness exchange, without starting file
+    /// or provider I/O. The caller must still supply the actual original stage.
+    pub(in crate::security_epoch::storage_authority) fn begin_pending_initial_phase(
+        &mut self,
+    ) -> Result<PendingPreparedFilePhase<'_>> {
         let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
-        let phase = self.volume.begin_current(stage)?;
-        let mut current = CurrentPreparedFilePhase {
-            phase,
+        Ok(PendingPreparedFilePhase {
+            volume: &mut self.volume,
             selection: &self.selection,
             directory: &self.directory,
             anchor: &self.anchor,
@@ -185,43 +279,94 @@ impl PreparedFileContinuity {
             process: self.process,
             thread: self.thread,
             disposition,
-        };
-        current.check()?;
-        Ok(current)
+        })
     }
 
-    /// Own a fresh provider/device/mount phase on the SAME original file.
-    /// Closing the continuation before any I/O retains abandonment/refusal.
-    /// Only native activation/serving composition may use this physical input;
-    /// constructing it alone never grants an active writer or control send.
-    pub(crate) fn begin_physical_phase<'file, 'role>(
-        &'file mut self,
-        stage: EnrolledRoleStage<'role>,
-    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
-        let disposition = FilePhaseDisposition::begin(&mut self.valid)?;
-        let phase = self.volume.begin_current(stage)?;
-        let mut current = CurrentPhysicalFilePhase {
-            inner: CurrentPreparedFilePhase {
-                phase,
-                selection: &self.selection,
-                directory: &self.directory,
-                anchor: &self.anchor,
-                file: &self.file,
-                identity: &self.identity,
-                layout: &self.layout,
-                process: self.process,
-                thread: self.thread,
-                disposition,
-            },
-        };
-        current.check()?;
-        Ok(current)
+    /// Close the SAME original file before readiness I/O. The pending input
+    /// owns no provider or role permission; acquire still needs its actual
+    /// original stage and all current physical guards.
+    pub(in crate::security_epoch::storage_authority) fn begin_pending_physical_phase(
+        &mut self,
+    ) -> Result<PendingPhysicalFilePhase<'_>> {
+        Ok(PendingPhysicalFilePhase {
+            inputs: self.begin_pending_initial_phase()?,
+        })
     }
 
     /// Read-only continuity observation; it grants no peer, P3 or writer
     /// authority. Legitimate later writes need the serving transition.
     pub(crate) fn check_initial(&mut self, stage: EnrolledRoleStage<'_>) -> Result<()> {
         self.begin_initial_phase(stage)?.finish_checked()
+    }
+}
+
+impl<'file> PendingPhysicalFilePhase<'file> {
+    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        let inputs = self.inputs;
+        inputs.disposition.check()?;
+        let phase = inputs.volume.begin_current(stage)?;
+        let mut current = CurrentPhysicalFilePhase {
+            inner: CurrentPreparedFilePhase {
+                phase,
+                selection: inputs.selection,
+                directory: inputs.directory,
+                anchor: inputs.anchor,
+                file: inputs.file,
+                identity: inputs.identity,
+                layout: inputs.layout,
+                process: inputs.process,
+                thread: inputs.thread,
+                disposition: inputs.disposition,
+            },
+        };
+        current.check()?;
+        Ok(current)
+    }
+}
+
+impl<'file> PendingPreparedFilePhase<'file> {
+    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.acquire_phase(stage, false)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn acquire_first_holder<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.acquire_phase(stage, true)
+    }
+
+    fn acquire_phase<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+        initial: bool,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        self.disposition.check()?;
+        let phase = if initial {
+            self.volume.begin_first_holder(stage)?
+        } else {
+            self.volume.begin_current(stage)?
+        };
+        let mut current = CurrentPreparedFilePhase {
+            phase,
+            selection: self.selection,
+            directory: self.directory,
+            anchor: self.anchor,
+            file: self.file,
+            identity: self.identity,
+            layout: self.layout,
+            process: self.process,
+            thread: self.thread,
+            disposition: self.disposition,
+        };
+        current.check()?;
+        Ok(current)
     }
 }
 
@@ -245,46 +390,16 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
             }
             #[cfg(target_os = "linux")]
             {
-                let mut bytes = vec![0_u8; self.layout.proposal.length];
-                let mut offset = 0;
-                while offset < bytes.len() {
+                check_retained_initial_bytes(self.file, self.layout.image.bytes(), || {
                     check_identity(
                         &mut self.phase,
                         self.directory,
                         self.anchor,
                         self.file,
                         self.identity,
-                        Some(bytes.len()),
-                    )?;
-                    let end = (offset + super::IO_CHUNK_BYTES).min(bytes.len());
-                    let read =
-                        rustix::io::pread(self.file, &mut bytes[offset..end], offset as u64)?;
-                    ensure!(
-                        read > 0 && read <= end - offset,
-                        "retained_initial_read_progress"
-                    );
-                    offset += read;
-                    check_identity(
-                        &mut self.phase,
-                        self.directory,
-                        self.anchor,
-                        self.file,
-                        self.identity,
-                        Some(bytes.len()),
-                    )?;
-                }
-                ensure!(
-                    bytes == self.layout.image.bytes(),
-                    "retained_initial_bytes_changed"
-                );
-                check_identity(
-                    &mut self.phase,
-                    self.directory,
-                    self.anchor,
-                    self.file,
-                    self.identity,
-                    Some(bytes.len()),
-                )
+                        Some(self.layout.proposal.length),
+                    )
+                })
             }
         })();
         if result.is_err() {
@@ -325,6 +440,11 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
     pub(in crate::security_epoch) fn into_physical_checked(
         mut self,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
+        // An initial-handshake interval cannot mint a current physical phase,
+        // even if a future internal caller reaches this conversion directly.
+        self.phase
+            .controller_stage()?
+            .require_purpose(StagePurpose::CurrentRole)?;
         self.check()?;
         let mut physical = CurrentPhysicalFilePhase { inner: self };
         physical.check()?;
@@ -439,6 +559,37 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
     }
 }
 
+/// Reread the complete retained INITIAL image on every call. This private
+/// atomic operation grants no native owner; production supplies the same
+/// identity/original-clock check before and after each actual pread and last.
+/// Later physical serving checks do not use this initial-image operation.
+#[cfg(any(target_os = "linux", test))]
+fn check_retained_initial_bytes(
+    file: &File,
+    expected: &[u8],
+    mut check_identity: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    ensure!(
+        !expected.is_empty() && expected.len() <= super::MAX_IMAGE_BYTES,
+        "retained_initial_image_bound"
+    );
+    let mut bytes = vec![0_u8; expected.len()];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        check_identity()?;
+        let end = (offset + super::INITIAL_IO_CHUNK_BYTES).min(bytes.len());
+        let read = rustix::io::pread(file, &mut bytes[offset..end], offset as u64)?;
+        ensure!(
+            read > 0 && read <= end - offset,
+            "retained_initial_read_progress"
+        );
+        offset += read;
+        check_identity()?;
+    }
+    ensure!(bytes == expected, "retained_initial_bytes_changed");
+    check_identity()
+}
+
 #[cfg(target_os = "linux")]
 fn check_identity(
     phase: &mut CurrentVolumePhase<'_, '_>,
@@ -473,6 +624,100 @@ fn check_identity(
     );
     phase.acquisition().remaining()?;
     phase.check_directory(directory, anchor)
+}
+
+#[cfg(test)]
+mod retained_initial_read_tests {
+    use super::check_retained_initial_bytes;
+    use anyhow::{Result, bail};
+    use std::{cell::Cell, fs::File, io::Write};
+
+    fn image_file(bytes: &[u8]) -> Result<File> {
+        let mut file = tempfile::tempfile()?;
+        file.write_all(bytes)?;
+        Ok(file)
+    }
+
+    #[test]
+    fn multi_batch_complete_reread_keeps_every_syscall_guard_and_last_check() -> Result<()> {
+        let bytes: Vec<u8> = (0..super::super::INITIAL_IO_CHUNK_BYTES + 17)
+            .map(|n| (n % 251) as u8)
+            .collect();
+        let file = image_file(&bytes)?;
+        let mut checks = 0;
+        check_retained_initial_bytes(&file, &bytes, || {
+            checks += 1;
+            Ok(())
+        })?;
+        assert_eq!(checks, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn same_length_changed_bytes_are_reread_without_a_cached_positive() -> Result<()> {
+        let bytes = vec![7; super::super::INITIAL_IO_CHUNK_BYTES + 17];
+        let file = image_file(&bytes)?;
+        check_retained_initial_bytes(&file, &bytes, || Ok(()))?;
+        // Change the second batch, with the original file length retained.
+        rustix::io::pwrite(&file, &[8], super::super::INITIAL_IO_CHUNK_BYTES as u64)?;
+        let error = check_retained_initial_bytes(&file, &bytes, || Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "retained_initial_bytes_changed");
+        Ok(())
+    }
+
+    #[test]
+    fn zero_progress_after_truncation_is_refused() -> Result<()> {
+        let file = image_file(&[7; 17])?;
+        let error = check_retained_initial_bytes(&file, &[7; 17], || {
+            file.set_len(0)?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "retained_initial_read_progress");
+        Ok(())
+    }
+
+    #[test]
+    fn pre_read_refusal_prevents_the_syscall_and_preserves_its_cause() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = File::open(directory.path())?;
+        let error =
+            check_retained_initial_bytes(&file, &[7], || bail!("pre_read_refused")).unwrap_err();
+        assert_eq!(error.to_string(), "pre_read_refused");
+        Ok(())
+    }
+
+    #[test]
+    fn post_read_and_final_refusals_cannot_become_success() -> Result<()> {
+        let file = image_file(&[7; 17])?;
+        for refused_check in [2, 3] {
+            let checks = Cell::new(0);
+            let error = check_retained_initial_bytes(&file, &[7; 17], || {
+                checks.set(checks.get() + 1);
+                if checks.get() == refused_check {
+                    bail!("original_guard_refused");
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "original_guard_refused");
+            assert_eq!(checks.get(), refused_check);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_image_lengths_refuse_before_read_or_guard() -> Result<()> {
+        let file = image_file(&[7])?;
+        for bytes in [vec![], vec![7; super::super::MAX_IMAGE_BYTES + 1]] {
+            let error = check_retained_initial_bytes(&file, &bytes, || {
+                panic!("unbounded image must not reach a native guard")
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "retained_initial_image_bound");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,9 +1,10 @@
+use super::issuer_costs::{Costs, Operation, Outcome, Recorder, Subject, preserve_error};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     birth::IssuerOwner,
     channel::Channel,
     policy::decode_key,
-    process::SelfSnapshot,
+    process::{MessageProcess, SelfSnapshot},
     protocol::{self, Packet, ProcessData, SignedStage, StageData},
     runtime::{self, RuntimeBinding},
 };
@@ -19,14 +20,62 @@ struct Enrollment {
 pub(super) fn run() -> Result<()> {
     let mut issuer = IssuerOwner::born()?;
     let mut enrolled = BTreeMap::new();
+    let mut recorder = Recorder::new(std::io::stderr());
     loop {
         let (mut channel, mut acquisition) = issuer.listener.next()?;
-        // Parent failure terminates the issuer generation. A malformed client
-        // consumes and closes only its one connection/acquisition.
-        issuer.parent.check_identity(&mut acquisition)?;
-        let _ = serve(&mut issuer, &mut enrolled, &mut channel, &mut acquisition);
-        let mut check = NativeAcquisition::begin(5)?;
-        issuer.parent.check_identity(&mut check)?;
+        let costs = recorder.connection();
+        // Parent failure remains fatal; request failure still closes only its
+        // own connection. No diagnostic record formats the native error.
+        let before = costs.measure(Operation::ParentBefore, || {
+            issuer
+                .parent
+                .check_identity(&mut acquisition, &costs.hashes(Subject::ParentBefore))
+        });
+        if let Err(error) = before {
+            drop(channel);
+            drop(acquisition);
+            return preserve_error(
+                Err(error),
+                recorder.emit(&costs, Outcome::ParentBeforeError),
+            );
+        }
+        let served = costs.measure(Operation::Serve, || {
+            serve(
+                &mut issuer,
+                &mut enrolled,
+                &mut channel,
+                &mut acquisition,
+                &costs,
+            )
+        });
+        let checked = (|| {
+            let mut check = NativeAcquisition::begin(5)?;
+            costs.measure(Operation::ParentAfter, || {
+                issuer
+                    .parent
+                    .check_identity(&mut check, &costs.hashes(Subject::ParentAfter))
+            })
+        })();
+        // Preserve the original connection lifetime THROUGH the post-grant
+        // parent check. Only then close it and end both temporary intervals.
+        drop(channel);
+        drop(acquisition);
+        let outcome = if checked.is_err() {
+            Outcome::ParentAfterError
+        } else if served.is_err() {
+            Outcome::RequestError
+        } else {
+            Outcome::Completed
+        };
+        let exported = recorder.emit(&costs, outcome);
+        if checked.is_err() {
+            return preserve_error(checked, exported);
+        }
+        if exported.is_err() {
+            return preserve_error(served, exported);
+        }
+        // As before, a malformed/failed request alone does not restart or
+        // reconstruct this issuer generation or clear an enrollment row.
     }
 }
 
@@ -35,12 +84,19 @@ fn serve(
     enrolled: &mut BTreeMap<(u32, u64, super::NativeRole), Enrollment>,
     channel: &mut Channel,
     acquisition: &mut NativeAcquisition,
+    costs: &Costs,
 ) -> Result<()> {
     ensure!(
         super::birth::load_policy(acquisition)? == issuer.policy,
         "native_enrollment_operator_selection_changed"
     );
-    let mut current = SelfSnapshot::acquire(&issuer.policy.issuer_code, acquisition)?;
+    let mut current = costs.measure(Operation::IssuerSnapshot, || {
+        SelfSnapshot::acquire(
+            &issuer.policy.issuer_code,
+            acquisition,
+            &costs.hashes(Subject::Issuer),
+        )
+    })?;
     current.require_node_init(acquisition)?;
     ensure!(
         current.data == issuer.certificate.data.process,
@@ -49,16 +105,24 @@ fn serve(
     // Parse the closed role before selecting its executable pin. An initial
     // untrusted role header cannot create authority; actual receipt observes
     // kernel process handles and later joins the selected runtime role.
-    let (packet, mut peer) = channel.receive_role(&issuer.policy, acquisition)?;
+    let (packet, mut peer) = costs.measure(Operation::Hello, || {
+        channel.receive_role(
+            &issuer.policy,
+            acquisition,
+            &costs.hashes(Subject::Requester),
+        )
+    })?;
     let Packet::StageHello {
         policy,
         role,
+        purpose,
         public_key,
         request,
     } = packet
     else {
         anyhow::bail!("native_enrollment_role_order")
     };
+    purpose.require_role(role)?;
     ensure!(
         policy == issuer.policy.digest()?,
         "native_enrollment_policy_mismatch"
@@ -82,10 +146,17 @@ fn serve(
         },
         acquisition,
     )?;
-    let (packet, mut bound) = channel.receive(issuer.policy.code(role), acquisition)?;
+    let (packet, mut bound) = costs.measure(Operation::Bind, || {
+        channel.receive(
+            issuer.policy.code(role),
+            acquisition,
+            &costs.hashes(Subject::Requester),
+        )
+    })?;
     let Packet::StageBind {
         policy: selected,
         role: selected_role,
+        purpose: selected_purpose,
         public_key: selected_key,
         request: echoed,
         challenge: answered,
@@ -97,6 +168,7 @@ fn serve(
     ensure!(
         selected == policy
             && selected_role == role
+            && selected_purpose == purpose
             && selected_key == public_key
             && echoed == request
             && answered == challenge
@@ -106,25 +178,40 @@ fn serve(
     protocol::verify(
         &public_key,
         "role-bind",
-        &(&policy, role, &public_key, &request, &challenge),
+        &(&policy, role, purpose, &public_key, &request, &challenge),
         &signature,
     )?;
-    let runtime = runtime::current(&issuer.policy, role, &mut peer, acquisition)?;
+    let runtime = costs.measure(Operation::Runtime, || {
+        runtime::current(&issuer.policy, role, &mut peer, acquisition, costs)
+    })?;
     if let Some(existing) = enrolled.get(&identity) {
         ensure!(
             existing.runtime == runtime,
             "native_enrollment_runtime_incarnation_changed"
         );
     }
-    issuer.parent.check_identity(acquisition)?;
+    costs.measure(Operation::ParentBeforeGrant, || {
+        issuer
+            .parent
+            .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))
+    })?;
     issuer.certificate.verify(&issuer.policy)?;
-    peer.check_identity(acquisition)?;
-    bound.check_identity(acquisition)?;
-    let (origin, deadline) = acquisition.interval_data()?;
+    MessageProcess::check_same_actor(
+        &mut [&mut peer, &mut bound],
+        acquisition,
+        &costs.hashes(Subject::Requester),
+    )?;
+    let (origin, _) = acquisition.interval_data()?;
+    // Serving this request still has the original five-second issuer budget.
+    // Only a signed initial-holder grant carries the longer peer lifetime.
+    let deadline = origin
+        .checked_add(purpose.limit())
+        .ok_or_else(|| anyhow::anyhow!("native_enrollment_stage_interval_overflow"))?;
     let data = StageData {
         issuer: issuer.certificate.digest()?,
         policy,
         role,
+        purpose,
         public_key: public_key.clone(),
         challenge,
         request,
@@ -144,7 +231,11 @@ fn serve(
         process: peer.data().clone(),
         runtime,
     });
-    issuer.parent.check_identity(acquisition)?;
+    costs.measure(Operation::ParentBeforePublish, || {
+        issuer
+            .parent
+            .check_identity(acquisition, &costs.hashes(Subject::ParentBefore))
+    })?;
     current.check(acquisition)?;
     channel.send(
         &Packet::StageGrant {

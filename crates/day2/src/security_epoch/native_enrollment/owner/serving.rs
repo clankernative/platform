@@ -42,7 +42,7 @@ impl EnrolledRoleStage<'_> {
     pub(in crate::security_epoch::native_enrollment) fn serving_role(
         &mut self,
     ) -> Result<NativeRole> {
-        self.check()?;
+        self.require_purpose(super::StagePurpose::CurrentRole)?;
         ensure!(
             matches!(
                 self.owner.role,
@@ -128,6 +128,7 @@ impl EnrolledRoleStage<'_> {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         // This shared original-clock guard has no App-specific role conversion.
+        self.require_purpose(super::StagePurpose::CurrentRole)?;
         self.check_storage_acquisition(acquisition)
     }
 

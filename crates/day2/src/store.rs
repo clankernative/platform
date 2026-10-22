@@ -580,8 +580,9 @@ pub(crate) struct InitialStoreMetadata {
 }
 
 impl InitialStoreMetadata {
-    /// Desired configuration checks only, inside an already genuine native
-    /// scope. Neither this metadata nor the returned Instance grants authority.
+    /// Desired configuration checks only, before enrollment or inside a genuine
+    /// native scope. Neither this metadata nor the returned Instance creates a
+    /// role, native acquisition or authority; consumers supply their own scope.
     pub(crate) fn require_native_selection(
         &self,
         selected: &day2_capabilities::security_epoch::EpochStore,
@@ -973,6 +974,12 @@ impl Runtime {
         &self.db
     }
 
+    /// Classification DATA only. Current native permission still requires the
+    /// actual retained participant and enrolled stage at each consumer.
+    pub(crate) fn uses_native_storage(&self) -> bool {
+        native_storage::is_native_database(&self.db)
+    }
+
     pub fn scope(&self) -> &str {
         &self.scope
     }
@@ -1018,6 +1025,7 @@ impl Runtime {
             "native_runtime_current_serving_required"
         );
         let binding = instance.apps.get(app).context("app_not_installed")?;
+        crate::security_epoch::serving::require_runtime_admission(&instance, app)?;
         let parent = instance_path.parent().context("instance directory")?;
         let directory = parent.join(".state");
         fs::create_dir_all(&directory)?;

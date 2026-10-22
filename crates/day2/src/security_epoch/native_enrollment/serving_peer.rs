@@ -19,11 +19,27 @@ use day2_capabilities::Digest;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Disposition {
     Ready(u64),
+    Pending(u64),
     Busy(u64),
     Refused,
 }
 
 impl Disposition {
+    fn notify(&mut self) -> Result<u64> {
+        let sequence = self.begin()?;
+        *self = Self::Pending(sequence);
+        Ok(sequence)
+    }
+
+    fn begin_notified(&mut self) -> Result<u64> {
+        let Self::Pending(sequence) = *self else {
+            *self = Self::Refused;
+            anyhow::bail!("serving_peer_notification_missing_or_spent");
+        };
+        *self = Self::Busy(sequence);
+        Ok(sequence)
+    }
+
     fn begin(&mut self) -> Result<u64> {
         let previous = match *self {
             Self::Ready(n) => n,
@@ -67,12 +83,32 @@ struct Retained {
 pub(crate) struct ShellServingPeer {
     owner: Retained,
 }
+
+/// Completed same-owner transport DATA, not a current role or serving scope.
+pub(crate) struct ShellServingConnection {
+    same: SameEnrolledOwner,
+    setup: Statement,
+    valid: bool,
+    #[cfg(target_os = "linux")]
+    channel: Channel,
+}
+
+/// Same actual Controller stage and Ready transcript through the later
+/// physical/provider acquisition. It creates no storage or consumer permit.
+pub(crate) struct ControllerServingRendezvous<'peer> {
+    owner: &'peer mut Retained,
+    acquisition: NativeAcquisition,
+    local: Statement,
+    sequence: u64,
+    nonce: Digest,
+}
 pub(crate) struct ControllerServingPeer {
     owner: Retained,
 }
 
 pub(crate) struct ControllerServingListener {
     same: SameEnrolledOwner,
+    setup: Statement,
     accepted: bool,
     valid: bool,
     #[cfg(target_os = "linux")]
@@ -92,7 +128,16 @@ pub(crate) struct CurrentServingPeerPhase<'peer> {
     peer: Peer,
 }
 
-impl ShellServingPeer {
+impl ShellServingConnection {
+    /// Wait only for transport DATA before the caller acquires its fresh role.
+    /// This lends no serving permission and preserves idle_ready's refusal latch.
+    pub(crate) fn wait_ready(&mut self) -> Result<()> {
+        while !self.idle_ready()? {
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
     pub(crate) fn connect(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
         let result = (|| {
             // One-way gate belongs to the actual role owner, not a temporary
@@ -108,26 +153,18 @@ impl ShellServingPeer {
             }
             #[cfg(target_os = "linux")]
             {
+                let mut same = same;
                 let mut acquisition = acquisition;
                 let mut channel = Channel::connect_serving(stage, &mut acquisition)?;
-                let mut session = Session {
-                    channel: &mut channel,
-                    stage,
-                    acquisition: &mut acquisition,
-                    original: None,
-                };
-                let (peer, exchange) = handshake(&mut session, &local, None, 0, None, None)?;
-                let remote = peer.statement().clone();
-                let owner = Retained {
+                same.check(stage)?;
+                channel.check_serving_open(stage, &mut acquisition)?;
+                stage.check_serving_acquisition(&mut acquisition)?;
+                Ok(Self {
                     same,
-                    latest_local: local,
-                    latest_remote: remote,
-                    initial: exchange.digest()?,
-                    disposition: Disposition::Ready(0),
+                    setup: local,
+                    valid: true,
                     channel,
-                    original_peer: peer,
-                };
-                Ok(Self { owner })
+                })
             }
         })();
         if result.is_err() {
@@ -136,17 +173,99 @@ impl ShellServingPeer {
         result
     }
 
+    pub(crate) fn idle_ready(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(self.valid, "serving_peer_connection_refused");
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("serving_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            self.channel.pending_serving()
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    pub(crate) fn receive(mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<ShellServingPeer> {
+        ensure!(self.valid, "serving_peer_connection_refused");
+        self.valid = false;
+        let result = (|| {
+            self.same.check(stage)?;
+            let local = stage.serving_statement()?;
+            local.require_fresh(&self.setup)?;
+            let acquisition = stage.narrow_io_acquisition(5)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (local, acquisition);
+                anyhow::bail!("serving_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let mut acquisition = acquisition;
+                let mut channel = self.channel;
+                let mut session = Session {
+                    channel: &mut channel,
+                    stage,
+                    acquisition: &mut acquisition,
+                    original: None,
+                };
+                let (peer, exchange) = handshake(&mut session, &local, None, 0, None, None, None)?;
+                let remote = peer.statement().clone();
+                let owner = Retained {
+                    same: self.same,
+                    latest_local: local,
+                    latest_remote: remote,
+                    initial: exchange.digest()?,
+                    disposition: Disposition::Ready(0),
+                    channel,
+                    original_peer: peer,
+                };
+                Ok(ShellServingPeer { owner })
+            }
+        })();
+        if result.is_err() {
+            stage.refuse_serving();
+        }
+        result
+    }
+}
+
+impl ShellServingPeer {
+    pub(crate) fn prepare_current(&mut self) -> Result<()> {
+        let sequence = self.owner.disposition.notify()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.refuse();
+            let _ = sequence;
+            anyhow::bail!("serving_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let result = (|| {
+                self.owner.channel.notify_idle(
+                    super::peer_idle::PeerChannel::Serving,
+                    &self.owner.initial,
+                    sequence,
+                )?;
+                while !self.owner.channel.pending_serving()? {
+                    std::thread::park_timeout(std::time::Duration::from_millis(5));
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                self.refuse();
+            }
+            result
+        }
+    }
+
     pub(crate) fn begin_current<'peer>(
         &'peer mut self,
         stage: &mut EnrolledRoleStage<'_>,
         binding: Digest,
     ) -> Result<CurrentServingPeerPhase<'peer>> {
-        start_current(
-            &mut self.owner,
-            stage,
-            NativeRole::SecurityShell,
-            Some(binding),
-        )
+        start_shell_current(&mut self.owner, stage, binding)
     }
 
     pub(crate) fn refuse(&mut self) {
@@ -159,10 +278,11 @@ impl ControllerServingListener {
         let result = (|| {
             stage.begin_serving_attempt(NativeRole::EpochController)?;
             let acquisition = stage.narrow_io_acquisition(5)?;
+            let setup = stage.serving_statement()?;
             let same = stage.capture_same_owner()?;
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (acquisition, same);
+                let _ = (acquisition, same, setup);
                 anyhow::bail!("serving_peer_platform_unsupported");
             }
             #[cfg(target_os = "linux")]
@@ -171,6 +291,7 @@ impl ControllerServingListener {
                 let listener = ServingListener::bind(stage, &mut acquisition)?;
                 Ok(Self {
                     same,
+                    setup,
                     accepted: false,
                     valid: true,
                     listener,
@@ -215,6 +336,7 @@ impl ControllerServingListener {
             );
             let acquisition = stage.narrow_io_acquisition(5)?;
             let local = stage.serving_statement()?;
+            local.require_fresh(&self.setup)?;
             let same = stage.capture_same_owner()?;
             #[cfg(not(target_os = "linux"))]
             {
@@ -231,7 +353,7 @@ impl ControllerServingListener {
                     acquisition: &mut acquisition,
                     original: None,
                 };
-                let (peer, exchange) = handshake(&mut session, &local, None, 0, None, None)?;
+                let (peer, exchange) = handshake(&mut session, &local, None, 0, None, None, None)?;
                 let remote = peer.statement().clone();
                 Ok(ControllerServingPeer {
                     owner: Retained {
@@ -272,15 +394,127 @@ impl ControllerServingPeer {
         result
     }
 
-    pub(crate) fn accept_current<'peer>(
-        &'peer mut self,
+    pub(crate) fn prepare_current(
+        &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-    ) -> Result<CurrentServingPeerPhase<'peer>> {
-        start_current(&mut self.owner, stage, NativeRole::EpochController, None)
+    ) -> Result<ControllerServingRendezvous<'_>> {
+        let result = (|| {
+            let sequence = self.owner.disposition.begin()?;
+            let (acquisition, local) =
+                current_resources(&mut self.owner, stage, NativeRole::EpochController)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (acquisition, local, sequence);
+                anyhow::bail!("serving_peer_platform_unsupported");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let mut acquisition = acquisition;
+                self.owner.channel.receive_idle(
+                    super::peer_idle::PeerChannel::Serving,
+                    &self.owner.initial,
+                    sequence,
+                    &mut acquisition,
+                )?;
+                self.owner.check_resources(stage, &mut acquisition)?;
+                let nonce = {
+                    let mut session = Session {
+                        channel: &mut self.owner.channel,
+                        stage,
+                        acquisition: &mut acquisition,
+                        original: Some(&mut self.owner.original_peer),
+                    };
+                    announce_begin_ready(&mut session, &local, Some(&self.owner.initial), sequence)?
+                };
+                self.owner.check_resources(stage, &mut acquisition)?;
+                Ok((acquisition, local, sequence, nonce))
+            }
+        })();
+        let (acquisition, local, sequence, nonce) = match result {
+            Ok(fields) => fields,
+            Err(error) => {
+                self.refuse();
+                stage.refuse_serving();
+                return Err(error);
+            }
+        };
+        Ok(ControllerServingRendezvous {
+            owner: &mut self.owner,
+            acquisition,
+            local,
+            sequence,
+            nonce,
+        })
     }
 
     pub(crate) fn refuse(&mut self) {
         self.owner.disposition = Disposition::Refused;
+    }
+}
+
+impl<'peer> ControllerServingRendezvous<'peer> {
+    pub(crate) fn accept_current(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<CurrentServingPeerPhase<'peer>> {
+        let mut acquisition = self.acquisition;
+        let result = (|| -> Result<Started> {
+            self.owner.disposition.check(self.sequence)?;
+            self.owner.check_resources(stage, &mut acquisition)?;
+            ensure!(
+                self.local == stage.serving_statement()?,
+                "serving_peer_ready_actual_stage_changed"
+            );
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("serving_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let mut session = Session {
+                    channel: &mut self.owner.channel,
+                    stage,
+                    acquisition: &mut acquisition,
+                    original: Some(&mut self.owner.original_peer),
+                };
+                let (peer, exchange) = handshake(
+                    &mut session,
+                    &self.local,
+                    Some(&self.owner.initial),
+                    self.sequence,
+                    None,
+                    Some(&self.owner.latest_remote),
+                    Some(self.nonce),
+                )?;
+                let remote = peer.statement().clone();
+                self.owner.check_resources(stage, &mut acquisition)?;
+                Ok(Started {
+                    acquisition,
+                    local: self.local,
+                    remote,
+                    exchange,
+                    peer,
+                })
+            }
+        })();
+        let started = match result {
+            Ok(fields) => fields,
+            Err(error) => {
+                self.owner.disposition = Disposition::Refused;
+                stage.refuse_serving();
+                return Err(error);
+            }
+        };
+        let mut phase = CurrentServingPeerPhase {
+            owner: self.owner,
+            acquisition: started.acquisition,
+            local: started.local,
+            remote: started.remote,
+            exchange: started.exchange,
+            completion: Completion::Waiting,
+            #[cfg(target_os = "linux")]
+            peer: started.peer,
+        };
+        phase.check(stage)?;
+        Ok(phase)
     }
 }
 
@@ -319,22 +553,27 @@ struct Started {
     peer: Peer,
 }
 
-fn begin(
+fn current_resources(
     owner: &mut Retained,
     stage: &mut EnrolledRoleStage<'_>,
     role: NativeRole,
-    binding: Option<Digest>,
-) -> Result<Started> {
-    // Busy BEFORE any fallible clock/role/identity/packet work. Dropping the
-    // borrowed phase leaves this latch closed: only consuming finish_checked
-    // can return the parent to Ready, and no replacement phase can be created.
-    let sequence = owner.disposition.begin()?;
+) -> Result<(NativeAcquisition, Statement)> {
     owner.same.check(stage)?;
     ensure!(stage.serving_role()? == role, "serving_peer_phase_role");
     let mut acquisition = stage.narrow_io_acquisition(5)?;
     let local = stage.serving_statement()?;
     local.require_fresh(&owner.latest_local)?;
     owner.check_resources(stage, &mut acquisition)?;
+    Ok((acquisition, local))
+}
+
+fn begin_shell(
+    owner: &mut Retained,
+    stage: &mut EnrolledRoleStage<'_>,
+    binding: Digest,
+) -> Result<Started> {
+    let sequence = owner.disposition.begin_notified()?;
+    let (acquisition, local) = current_resources(owner, stage, NativeRole::SecurityShell)?;
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (sequence, acquisition, local, binding);
@@ -342,6 +581,7 @@ fn begin(
     }
     #[cfg(target_os = "linux")]
     {
+        let mut acquisition = acquisition;
         let mut session = Session {
             channel: &mut owner.channel,
             stage,
@@ -353,8 +593,9 @@ fn begin(
             &local,
             Some(&owner.initial),
             sequence,
-            binding,
+            Some(binding),
             Some(&owner.latest_remote),
+            None,
         )?;
         let remote = peer.statement().clone();
         owner.check_resources(stage, &mut acquisition)?;
@@ -368,13 +609,12 @@ fn begin(
     }
 }
 
-fn start_current<'peer>(
+fn start_shell_current<'peer>(
     owner: &'peer mut Retained,
     stage: &mut EnrolledRoleStage<'_>,
-    role: NativeRole,
-    binding: Option<Digest>,
+    binding: Digest,
 ) -> Result<CurrentServingPeerPhase<'peer>> {
-    let started = match begin(owner, stage, role, binding) {
+    let started = match begin_shell(owner, stage, binding) {
         Ok(started) => started,
         Err(error) => {
             owner.disposition = Disposition::Refused;
@@ -444,6 +684,30 @@ impl Session<'_, '_> {
 }
 
 #[cfg(target_os = "linux")]
+fn announce_begin_ready(
+    session: &mut Session<'_, '_>,
+    local: &Statement,
+    initial: Option<&Digest>,
+    sequence: u64,
+) -> Result<Digest> {
+    let nonce = protocol::nonce("serving-controller")?;
+    let body = match initial {
+        Some(initial) => Body::CurrentBeginReady {
+            controller: Box::new(local.clone()),
+            initial: initial.clone(),
+            sequence,
+            nonce: nonce.clone(),
+        },
+        None => Body::InitialBeginReady {
+            controller: Box::new(local.clone()),
+            nonce: nonce.clone(),
+        },
+    };
+    session.send(body, None)?;
+    Ok(nonce)
+}
+
+#[cfg(target_os = "linux")]
 fn handshake(
     session: &mut Session<'_, '_>,
     local: &Statement,
@@ -451,14 +715,37 @@ fn handshake(
     sequence: u64,
     binding: Option<Digest>,
     previous: Option<&Statement>,
+    ready_nonce: Option<Digest>,
 ) -> Result<(Peer, Exchange)> {
     let current = initial.is_some();
     if local.stage.data.role == NativeRole::SecurityShell {
+        ensure!(ready_nonce.is_none(), "serving_peer_shell_ready_argument");
+        let (ready, process) = session.receive()?;
+        let (remote, controller_nonce) = match &ready.body {
+            Body::InitialBeginReady { controller, nonce } if !current => {
+                (controller.as_ref().clone(), nonce.clone())
+            }
+            Body::CurrentBeginReady {
+                controller,
+                initial: selected,
+                sequence: number,
+                nonce,
+            } if current && Some(selected) == initial && *number == sequence => {
+                (controller.as_ref().clone(), nonce.clone())
+            }
+            _ => anyhow::bail!("serving_peer_begin_ready_changed"),
+        };
+        if let Some(previous) = previous {
+            remote.require_fresh(previous)?;
+        }
+        let mut peer =
+            Peer::authenticate(&ready, remote, process, session.stage, session.acquisition)?;
         let nonce = protocol::nonce("serving-shell")?;
         let hello = match initial {
             None => Body::Hello {
                 shell: Box::new(local.clone()),
                 nonce: nonce.clone(),
+                controller_nonce: controller_nonce.clone(),
             },
             Some(initial) => Body::CurrentHello {
                 shell: Box::new(local.clone()),
@@ -468,9 +755,10 @@ fn handshake(
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("serving_peer_binding_missing"))?,
                 nonce: nonce.clone(),
+                controller_nonce: controller_nonce.clone(),
             },
         };
-        session.send(hello, None)?;
+        session.send(hello, Some(&mut peer))?;
         let (offer, process) = session.receive()?;
         let (remote, exchange) = match &offer.body {
             Body::Offer {
@@ -483,11 +771,8 @@ fn handshake(
             } if current => (controller.as_ref().clone(), exchange.clone()),
             _ => anyhow::bail!("serving_peer_offer_order"),
         };
-        if let Some(previous) = previous {
-            remote.require_fresh(previous)?;
-        }
-        let mut peer =
-            Peer::authenticate(&offer, remote, process, session.stage, session.acquisition)?;
+        exchange.require_begin_ready(peer.statement(), &controller_nonce, &remote)?;
+        peer.accept_message(&offer, process, session.stage, session.acquisition)?;
         ensure!(
             exchange.initial.as_ref() == initial
                 && exchange.sequence == sequence
@@ -525,22 +810,13 @@ fn handshake(
             local.stage.data.role == NativeRole::EpochController,
             "serving_peer_controller_role"
         );
-        let (hello, process) = session.receive()?;
-        let (remote, nonce, binding) = match &hello.body {
-            Body::Hello { shell, nonce } if !current => {
-                (shell.as_ref().clone(), nonce.clone(), None)
-            }
-            Body::CurrentHello {
-                shell,
-                initial: actual,
-                sequence: number,
-                binding,
-                nonce,
-            } if current && Some(actual) == initial && *number == sequence => {
-                (shell.as_ref().clone(), nonce.clone(), Some(binding.clone()))
-            }
-            _ => anyhow::bail!("serving_peer_hello_order_or_sequence"),
+        let controller_nonce = match ready_nonce {
+            Some(nonce) => nonce,
+            None => announce_begin_ready(session, local, initial, sequence)?,
         };
+        let (hello, process) = session.receive()?;
+        let (remote, nonce, binding) = hello.hello(initial, sequence, &controller_nonce)?;
+        let (remote, nonce, binding) = (remote.clone(), nonce.clone(), binding.cloned());
         if let Some(previous) = previous {
             remote.require_fresh(previous)?;
         }
@@ -553,7 +829,7 @@ fn handshake(
             shell_stage: peer.statement().digest()?,
             controller_stage: local.digest()?,
             shell_nonce: nonce,
-            controller_nonce: protocol::nonce("serving-controller")?,
+            controller_nonce,
         };
         let digest = exchange.digest()?;
         session.send(
@@ -810,4 +1086,17 @@ mod tests {
         assert!(owner.begin().is_err());
         assert!(owner.complete(1).is_err());
     }
+}
+#[test]
+fn untrusted_notification_cannot_complete_or_replace_a_current_serving_phase() {
+    let mut state = Disposition::Ready(0);
+    assert_eq!(state.notify().unwrap(), 1);
+    assert_eq!(state, Disposition::Pending(1));
+    assert!(state.complete(1).is_err());
+    assert_eq!(state.begin_notified().unwrap(), 1);
+    assert_eq!(state, Disposition::Busy(1));
+    assert!(state.begin_notified().is_err());
+    assert_eq!(state, Disposition::Refused);
+    assert!(state.complete(1).is_err());
+    assert!(state.notify().is_err());
 }

@@ -61,3 +61,70 @@ Controller holds no live role stage while waiting for App startup; it consumes
 the original listener into a fresh same-owner initial-file phase only after a
 pending connection. No offer, P3 or activation is inferred from that readiness.
 The original five-second exchange budget is unchanged.
+
+Activation requires `disk_device_group_id`, the operator-observed owning group
+of the selected block device on the actual native node (integer 1..2147483647).
+Record this selection and the default `Merge` group policy in the retained
+operator static runtime/TCB profile. The current Calendar node was observed with
+root:disk, mode0660, GID6; this is an instance selection, not a GKE-wide default.
+The activated Controller declares only this supplemental group; registration
+must omit the input and declares no supplemental group. Primary UID/GID10001
+remain. No `fsGroup`, init-container, device chmod/chown or volume
+ownership repair is introduced; App and Shell roots receive no change.
+[Supplemental groups](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)
+apply to processes, unlike volume ownership handling through `fsGroup`.
+
+The pinned Kubernetes provider's typed Deployment cannot express
+`supplementalGroupsPolicy`. This stack retains the same Deployment resource and
+uses Kubernetes' default `Merge` policy, which can add group memberships from the
+image. Before activation, inspect `/etc/passwd` and `/etc/group` in the exact
+pinned image, and retain the running Pod's actual process groups. The current
+Calendar selection expects GID6 and primary GID10001; any additional image group
+must be explicitly accepted in the operator's trusted Controller profile.
+Registration's empty declaration is not proof of an empty process group set.
+
+Disk-group DAC is not a read-only device permission: mode0660 allows group writes
+as well, potentially to other exposed devices with that group. The accepted
+privileged Controller remains trusted; its fixed storage adapter opens the
+selected block device read-only. No hostile-Controller containment is claimed.
+S1's process/code/birth/namespace/workload checks do not compare supplemental
+groups, and this deployment change weakens no native check. Qualify actual
+process groups and device access on the selected node; mock plans verify only
+the declaration. Final apply and native/P3 qualification remain operator-owned.
+
+The activated Controller also mounts a pod-local memory `emptyDir`, limited to
+64Mi, at `/tmp`. Artifact admission copies its verified worker executable into a
+private temporary file before starting the worker, as App and Shell admission do.
+The root filesystem remains read-only; scratch is neither the selected state
+volume nor a host directory, and dormant registration declares no volume or
+mount. Its memory use counts against the Controller's existing memory limit.
+The operator must qualify writing and executing the admitted worker in the real
+Pod; a mock plan is not that evidence. This supplies the missing scratch path;
+it does not establish the exact errno of an earlier `image_admission/io` refusal
+or authorize retrying, adopting or resetting a refused original storage owner.
+
+## Bounded preparation observation
+
+For an operator-only observation, set `activate=true` with the same complete
+native selections and `observe_preparation_read_only=true`. The manifest selects
+exactly `day2-epoch-controller --observe-preparation-read-only INSTANCE APP`
+before starting any process; applying the normal command first and patching it
+after startup can already attempt an original and is not this procedure.
+There is no arbitrary command, argument or callback input.
+
+Select a qualified diagnostic image whose command returns before every seed,
+private-directory, file, first-holder and serving factory. Its one observation
+must drop all native owners on both outcomes before the fixed 300-second
+ownerless hold. Retain the first observation/refusal and stop/scale to zero
+before the hold ends. Neither startup nor liveness probes are installed;
+readiness keeps probing the fixed health endpoint, which this diagnostic never
+opens, so it remains unready. Forced replacement, timeout or an operator delay
+can restart the Deployment and invalidate a single-attempt claim. No permanent
+marker or once-across-restarts guarantee is introduced.
+
+The trusted Controller's normal identity, mounts and device grants remain.
+Read-only describes this fixed executable path's effects, not read-only DAC or
+hostile-code containment. Never open/adopt/reset the failed native SQLite file
+or change provider/control records. Timing is observation DATA and establishes
+no storage owner, P3, writer, serving, readiness or OAuth qualification. Normal
+initial activation still requires its separately selected fresh original.

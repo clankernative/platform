@@ -1,5 +1,6 @@
 //! Bounded historical observations from the real Controller executor. Nothing
 //! accepts these records as a native owner, permission, readiness or replay.
+use super::preparation_timing::Summary;
 use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
     kernel::{Holder, Request, Snapshot},
@@ -45,9 +46,11 @@ pub(in crate::security_epoch) struct Recorder<W> {
     at: FailurePhase,
     refused: bool,
     export_failed: bool,
+    preparation_timing: Option<Summary>,
+    read_only_observed: bool,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum FailurePhase {
     Selection,
@@ -69,6 +72,317 @@ pub(in crate::security_epoch) enum FailurePhase {
     ShellAccept,
     ShellServing,
     Health,
+}
+
+/// Fixed diagnostic DATA only. No field carries a path, URL, response body,
+/// credential, arbitrary message, measured latency assertion or permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum PreparationStep {
+    Unknown,
+    RoleStage,
+    StorageAcquisition,
+    StorageProfile,
+    ClusterCa,
+    TransportSetup,
+    MetadataCredential,
+    ProjectIdentity,
+    ClusterIdentity,
+    ControllerIdentity,
+    ControllerCredential,
+    EpochDatabase,
+    KubernetesCredential,
+    ClaimBinding,
+    VolumeBinding,
+    NodeBoot,
+    NodeBinding,
+    DiskBinding,
+    InstanceBinding,
+    VolumeDirectory,
+    VolumeIdentity,
+    BlockDevice,
+    VolumeCurrent,
+    Seed,
+    PrivateDirectory,
+    ImageAdmission,
+    OriginalPreparation,
+    OriginalRetention,
+    OriginalRetentionBefore,
+    OriginalRetentionOwner,
+    OriginalRetentionAfter,
+    HolderRoleStage,
+    HolderFilePhase,
+    HolderListenerBind,
+    HolderOwner,
+    HolderProjection,
+    HolderInterval,
+    HolderTransport,
+    HolderFinalCheck,
+    FirstRole,
+    FirstReady,
+    FirstFile,
+    FirstStart,
+    FirstExchange,
+    FirstCheck,
+    FirstProjection,
+    FirstAccept,
+    FirstHello,
+    FirstPeer,
+    FirstOffer,
+    FirstConfirm,
+    FirstComplete,
+    FirstAccepted,
+    FirstDurability,
+    FirstRetain,
+}
+
+/// Cumulative microseconds from the last successful samples of the SAME
+/// original acquisition at fixed boundaries. No clock is read for these fields;
+/// absent samples stay absent. Values are historical progress DATA, not exact
+/// boundary timestamps, operation durations, remaining time or authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub(in crate::security_epoch) struct PreparationProgress {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) acquired_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) image_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) prepared_us: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::security_epoch) last_checked_us: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PreparationErrorCategory {
+    ClockExpiredOrRewound,
+    AcquisitionRefused,
+    TransportUnavailable,
+    SocketPollTimeout,
+    SocketUnexpectedEvents,
+    ChannelClosed,
+    ChannelProfileChanged,
+    RemoteStageExpired,
+    ProcessExited,
+    ProcessNotVisible,
+    ProcessIdentityChanged,
+    #[cfg(target_os = "linux")]
+    PacketSocketProfile,
+    #[cfg(target_os = "linux")]
+    PacketEmptyPayloadBuffer,
+    #[cfg(target_os = "linux")]
+    PacketClosedOrEmpty,
+    #[cfg(target_os = "linux")]
+    PacketTruncated,
+    #[cfg(target_os = "linux")]
+    PacketMalformedAncillary,
+    #[cfg(target_os = "linux")]
+    PacketUnexpectedAncillary,
+    #[cfg(target_os = "linux")]
+    PacketMissingProcess,
+    #[cfg(target_os = "linux")]
+    PacketDuplicateProcess,
+    #[cfg(target_os = "linux")]
+    PacketSenderUnavailable,
+    #[cfg(target_os = "linux")]
+    PacketMissingCredentials,
+    #[cfg(target_os = "linux")]
+    PacketDuplicateCredentials,
+    #[cfg(target_os = "linux")]
+    PacketMalformedCredentials,
+    #[cfg(target_os = "linux")]
+    PacketDescriptorNotCloexec,
+    ResponseStatusOrBound,
+    AdmissionRejected,
+    PermissionDenied,
+    NotFound,
+    AlreadyExists,
+    TimedOut,
+    PathResolution,
+    Unsupported,
+    Io,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(in crate::security_epoch) struct PreparationFailure {
+    step: PreparationStep,
+    category: PreparationErrorCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<PreparationProgress>,
+}
+
+impl std::fmt::Display for PreparationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native preparation boundary refused")
+    }
+}
+
+impl PreparationFailure {
+    /// Preserve the innermost annotated actual boundary. This only adds error
+    /// context; the original error and every existing refusal remain intact.
+    pub(in crate::security_epoch) fn at(
+        step: PreparationStep,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if error.downcast_ref::<Self>().is_some() {
+            return error;
+        }
+        let context = Self {
+            step,
+            category: preparation_error_category(&error),
+            progress: None,
+        };
+        error.context(context)
+    }
+
+    pub(in crate::security_epoch) fn with_progress(
+        step: PreparationStep,
+        error: anyhow::Error,
+        mut progress: PreparationProgress,
+    ) -> anyhow::Error {
+        let mut context = Self::observe(&error);
+        if context.step == PreparationStep::Unknown {
+            context.step = step;
+        }
+        if let Some(inner) = context.progress {
+            progress.acquired_us = progress.acquired_us.or(inner.acquired_us);
+            progress.image_us = progress.image_us.or(inner.image_us);
+            progress.prepared_us = progress.prepared_us.or(inner.prepared_us);
+            progress.last_checked_us = inner.last_checked_us.or(progress.last_checked_us);
+        }
+        context.progress = Some(progress);
+        error.context(context)
+    }
+
+    fn observe(error: &anyhow::Error) -> Self {
+        error.downcast_ref::<Self>().copied().unwrap_or(Self {
+            step: PreparationStep::Unknown,
+            category: preparation_error_category(error),
+            progress: None,
+        })
+    }
+}
+
+fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory {
+    use PreparationErrorCategory as Category;
+    // Inspect only stored message DATA against a closed list. Never format the
+    // error, walk Display causes, or emit an unrecognized string.
+    let code = error
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| error.downcast_ref::<String>().map(String::as_str));
+    match code {
+        Some("native_enrollment_socket_poll_timeout") => return Category::SocketPollTimeout,
+        Some("native_enrollment_socket_unexpected_events") => {
+            return Category::SocketUnexpectedEvents;
+        }
+        Some("storage_peer_channel_closed" | "storage_peer_idle_channel_closed") => {
+            return Category::ChannelClosed;
+        }
+        Some("storage_peer_channel_cloexec_required" | "storage_peer_listener_cloexec_lost") => {
+            return Category::ChannelProfileChanged;
+        }
+        Some("storage_peer_remote_stage_expired") => return Category::RemoteStageExpired,
+        Some("native_enrollment_process_exited") => return Category::ProcessExited,
+        Some("native_enrollment_pid_not_visible" | "storage_peer_controller_pid_not_visible") => {
+            return Category::ProcessNotVisible;
+        }
+        Some(
+            "native_enrollment_process_owner_changed"
+            | "native_enrollment_proc_mount_changed"
+            | "native_enrollment_process_replaced"
+            | "native_enrollment_process_start_changed"
+            | "native_enrollment_boot_changed"
+            | "native_enrollment_code_mismatch"
+            | "native_enrollment_namespace_changed"
+            | "native_enrollment_child_time_namespace"
+            | "native_enrollment_process_leader",
+        ) => return Category::ProcessIdentityChanged,
+        Some(
+            "epoch_native_clock_rewind_or_expired"
+            | "epoch_native_acquisition_expired"
+            | "epoch_native_narrowed_acquisition_expired"
+            | "native_enrollment_stage_expired",
+        ) => return Category::ClockExpiredOrRewound,
+        Some("epoch_native_acquisition_refused" | "native_enrollment_owner_refused") => {
+            return Category::AcquisitionRefused;
+        }
+        Some(
+            "epoch_native_transport_unavailable"
+            | "epoch_native_response_unavailable"
+            | "epoch_native_metadata_unavailable",
+        ) => return Category::TransportUnavailable,
+        Some("epoch_native_response_status_or_bound" | "epoch_native_metadata_status_or_bound") => {
+            return Category::ResponseStatusOrBound;
+        }
+        Some(
+            "storage_provider_selection_mismatch"
+            | "storage_provider_kubernetes_identity"
+            | "storage_provider_claim_binding"
+            | "storage_provider_volume_binding"
+            | "storage_provider_node_binding"
+            | "storage_provider_disk_binding"
+            | "storage_provider_instance_binding"
+            | "storage_provider_attachment_binding"
+            | "storage_provider_attachment_missing"
+            | "storage_provider_attachment_ambiguous"
+            | "storage_native_mount_binding"
+            | "storage_native_block_device_mismatch"
+            | "storage_native_private_anchor_profile"
+            | "epoch_preparation_admitted_schema_mismatch"
+            | "epoch_preparation_runtime_selection_mismatch"
+            | "native_enrollment_full_selection_changed",
+        ) => return Category::AdmissionRejected,
+        _ => {}
+    }
+    let errno = error.downcast_ref::<rustix::io::Errno>().copied();
+    // The pinned packet error does not expose its errno through Error::source.
+    // Inspect its typed variants directly; never parse or format its Display.
+    #[cfg(target_os = "linux")]
+    let errno = if let Some(packet) = error.downcast_ref::<rustix::net::RecvPidfdError>() {
+        use rustix::net::RecvPidfdError as Packet;
+        match packet {
+            Packet::Io(errno) => Some(*errno),
+            Packet::SocketProfile => return Category::PacketSocketProfile,
+            Packet::EmptyPayloadBuffer => return Category::PacketEmptyPayloadBuffer,
+            Packet::ClosedOrEmptyPacket => return Category::PacketClosedOrEmpty,
+            Packet::Truncated => return Category::PacketTruncated,
+            Packet::MalformedAncillary => return Category::PacketMalformedAncillary,
+            Packet::UnexpectedAncillary => return Category::PacketUnexpectedAncillary,
+            Packet::MissingProcess => return Category::PacketMissingProcess,
+            Packet::DuplicateProcess => return Category::PacketDuplicateProcess,
+            Packet::SenderUnavailable(_) => return Category::PacketSenderUnavailable,
+            Packet::MissingCredentials => return Category::PacketMissingCredentials,
+            Packet::DuplicateCredentials => return Category::PacketDuplicateCredentials,
+            Packet::MalformedCredentials => return Category::PacketMalformedCredentials,
+            Packet::DescriptorNotCloexec => return Category::PacketDescriptorNotCloexec,
+            _ => return Category::Other,
+        }
+    } else {
+        errno
+    };
+    let kind = error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+        .or_else(|| {
+            errno.map(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()).kind())
+        });
+    match kind {
+        Some(std::io::ErrorKind::PermissionDenied) => Category::PermissionDenied,
+        Some(std::io::ErrorKind::NotFound) => Category::NotFound,
+        Some(std::io::ErrorKind::AlreadyExists) => Category::AlreadyExists,
+        Some(std::io::ErrorKind::TimedOut) => Category::TimedOut,
+        Some(std::io::ErrorKind::Unsupported) => Category::Unsupported,
+        Some(_)
+            if errno
+                .is_some_and(|e| e == rustix::io::Errno::LOOP || e == rustix::io::Errno::XDEV) =>
+        {
+            Category::PathResolution
+        }
+        Some(_) => Category::Io,
+        None => Category::Other,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,6 +428,12 @@ enum Observation {
     FirstHolderDurabilityCompleted {
         seed: Digest,
         holder: Digest,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timing: Option<Summary>,
+    },
+    PreparationReadOnlyObserved {
+        completed: bool,
+        timing: Summary,
     },
     BootstrapCompleted {
         step: Step,
@@ -132,6 +452,10 @@ enum Observation {
     },
     Refused {
         at: FailurePhase,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preparation: Option<PreparationFailure>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timing: Option<Summary>,
     },
 }
 
@@ -157,6 +481,8 @@ impl<W: RecordOutput> Recorder<W> {
             at: FailurePhase::Selection,
             refused: false,
             export_failed: false,
+            preparation_timing: None,
+            read_only_observed: false,
         }
     }
 
@@ -192,14 +518,32 @@ impl<W: RecordOutput> Recorder<W> {
 
     pub(super) fn first_holder(&mut self, seed: &OriginalSeedCore, holder: &Holder) -> Result<()> {
         ensure!(
-            self.incarnation.is_some() && !self.first_holder,
+            self.incarnation.is_some() && !self.first_holder && !self.read_only_observed,
             "native_evidence_first_holder_order"
         );
         self.emit(Observation::FirstHolderDurabilityCompleted {
             seed: seed.digest()?,
             holder: Digest::of(&("day2-controller-first-holder-evidence-v1", holder))?,
+            timing: self.preparation_timing.clone(),
         })?;
         self.first_holder = true;
+        Ok(())
+    }
+
+    pub(super) fn preparation_timings(&mut self, timing: Summary) {
+        self.preparation_timing = Some(timing);
+    }
+
+    pub(super) fn preparation_read_only(&mut self, timing: Summary, completed: bool) -> Result<()> {
+        ensure!(
+            self.incarnation.is_some()
+                && !self.first_holder
+                && !self.read_only_observed
+                && self.next == 0,
+            "native_evidence_read_only_order"
+        );
+        self.emit(Observation::PreparationReadOnlyObserved { completed, timing })?;
+        self.read_only_observed = true;
         Ok(())
     }
 
@@ -272,9 +616,25 @@ impl<W: RecordOutput> Recorder<W> {
         Ok(())
     }
 
-    pub(super) fn refuse(&mut self) -> Result<()> {
+    pub(super) fn refuse(&mut self, error: Option<&anyhow::Error>) -> Result<()> {
         if !self.refused {
-            self.emit(Observation::Refused { at: self.at })?;
+            let preparation = if matches!(
+                self.at,
+                FailurePhase::Preparation
+                    | FailurePhase::HolderListener
+                    | FailurePhase::FirstHolder
+            ) {
+                error.map(PreparationFailure::observe)
+            } else {
+                None
+            };
+            self.emit(Observation::Refused {
+                at: self.at,
+                preparation,
+                // This completed preparation DATA remains attributable if a
+                // later listener/holder phase refuses before first-holder log.
+                timing: self.preparation_timing.clone(),
+            })?;
             self.refused = true;
         }
         Ok(())
@@ -437,8 +797,8 @@ mod tests {
             }
         }
         recorder.enter(FailurePhase::ShellServing);
-        recorder.refuse().unwrap();
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
+        recorder.refuse(None).unwrap();
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), usize::from(MAX_RECORDS));
         assert!(recorder.output.len() <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES);
@@ -537,7 +897,7 @@ mod tests {
                 .activated(&complete, &Digest::new(b"snapshot"))
                 .is_err()
         );
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
         assert!(
             recorder
                 .bootstrap(&create, Action::Dispatch, &snapshot)
@@ -547,10 +907,62 @@ mod tests {
     }
 
     #[test]
+    fn maximal_timing_data_fits_existing_records_and_read_only_observation_cannot_claim_holder() {
+        let (mut recorder, seed, holder, ..) = fixture();
+        recorder
+            .enrolled(Digest::new(b"Controller timing"))
+            .unwrap();
+        recorder.preparation_timings(
+            super::super::preparation_timing::Timings::maximal_summary_fixture(),
+        );
+        recorder.first_holder(&seed, &holder).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        recorder
+            .refuse(Some(&PreparationFailure::at(
+                PreparationStep::OriginalRetention,
+                anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+            )))
+            .unwrap();
+        assert_eq!(records(&recorder.output).len(), 3);
+
+        let (mut recorder, seed, holder, ..) = fixture();
+        recorder
+            .enrolled(Digest::new(b"Controller read-only"))
+            .unwrap();
+        recorder
+            .preparation_read_only(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+                true,
+            )
+            .unwrap();
+        assert!(recorder.first_holder(&seed, &holder).is_err());
+        assert!(
+            recorder
+                .preparation_read_only(
+                    super::super::preparation_timing::Timings::new().summary(),
+                    true
+                )
+                .is_err()
+        );
+        recorder.enter(FailurePhase::Preparation);
+        recorder.refuse(None).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[1]["observation"]["event"],
+            "preparation_read_only_observed"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["observation"]["event"] != "first_holder_durability_completed")
+        );
+    }
+
+    #[test]
     fn refusal_before_selection_is_fixed_metadata_without_positive_milestones() {
         let mut recorder = Recorder::with_writer(Vec::new());
-        recorder.refuse().unwrap();
-        recorder.refuse().unwrap();
+        recorder.refuse(None).unwrap();
+        recorder.refuse(None).unwrap();
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), 1);
         assert!(rows[0]["selection"].is_null());
@@ -608,11 +1020,455 @@ mod tests {
     #[test]
     fn failed_partial_export_is_terminal_and_cannot_claim_a_complete_record() {
         let mut recorder = Recorder::with_writer(InterruptedWriter { bytes: Vec::new() });
-        assert!(recorder.refuse().is_err());
+        assert!(recorder.refuse(None).is_err());
         assert_eq!(recorder.records, 0);
         assert_eq!(recorder.output.bytes.len(), 10);
-        assert!(recorder.refuse().is_err());
+        assert!(recorder.refuse(None).is_err());
         assert_eq!(recorder.output.bytes.len(), 10);
         assert!(!recorder.output.bytes.contains(&b'\n'));
+    }
+    #[test]
+    fn preparation_categories_accept_only_closed_messages_and_os_kinds() {
+        use PreparationErrorCategory as Category;
+        for (code, expected) in [
+            (
+                "native_enrollment_socket_poll_timeout",
+                Category::SocketPollTimeout,
+            ),
+            (
+                "native_enrollment_socket_unexpected_events",
+                Category::SocketUnexpectedEvents,
+            ),
+            ("storage_peer_channel_closed", Category::ChannelClosed),
+            ("storage_peer_idle_channel_closed", Category::ChannelClosed),
+            (
+                "storage_peer_channel_cloexec_required",
+                Category::ChannelProfileChanged,
+            ),
+            (
+                "storage_peer_listener_cloexec_lost",
+                Category::ChannelProfileChanged,
+            ),
+            (
+                "native_enrollment_pid_not_visible",
+                Category::ProcessNotVisible,
+            ),
+            (
+                "storage_peer_controller_pid_not_visible",
+                Category::ProcessNotVisible,
+            ),
+            (
+                "native_enrollment_code_mismatch",
+                Category::ProcessIdentityChanged,
+            ),
+            (
+                "native_enrollment_namespace_changed",
+                Category::ProcessIdentityChanged,
+            ),
+            ("storage_peer_channel_closed /SECRET", Category::Other),
+            ("native_enrollment_code_mismatch /SECRET", Category::Other),
+            ("native_enrollment_process_exited", Category::ProcessExited),
+            (
+                "storage_peer_remote_stage_expired",
+                Category::RemoteStageExpired,
+            ),
+            ("storage_peer_remote_stage_expired /SECRET", Category::Other),
+            (
+                "epoch_native_clock_rewind_or_expired",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
+                "native_enrollment_stage_expired",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
+                "epoch_native_acquisition_refused",
+                Category::AcquisitionRefused,
+            ),
+            (
+                "epoch_native_transport_unavailable",
+                Category::TransportUnavailable,
+            ),
+            (
+                "epoch_native_response_status_or_bound",
+                Category::ResponseStatusOrBound,
+            ),
+            ("storage_provider_disk_binding", Category::AdmissionRejected),
+            (
+                "epoch_native_clock_rewind_or_expired /SECRET",
+                Category::Other,
+            ),
+        ] {
+            assert_eq!(
+                preparation_error_category(&anyhow::Error::msg(code)),
+                expected
+            );
+            assert_eq!(
+                preparation_error_category(&anyhow::Error::msg(code.to_owned())),
+                expected
+            );
+        }
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::PermissionDenied,
+                Category::PermissionDenied,
+            ),
+            (std::io::ErrorKind::NotFound, Category::NotFound),
+            (std::io::ErrorKind::AlreadyExists, Category::AlreadyExists),
+            (std::io::ErrorKind::TimedOut, Category::TimedOut),
+        ] {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "/SECRET Bearer TOKEN"));
+            assert_eq!(preparation_error_category(&error), expected);
+        }
+        assert_eq!(
+            preparation_error_category(&anyhow::Error::new(rustix::io::Errno::LOOP)),
+            Category::PathResolution
+        );
+    }
+
+    #[test]
+    fn preparation_context_preserves_original_error_and_innermost_boundary() {
+        let error = PreparationFailure::at(
+            PreparationStep::ClaimBinding,
+            anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SECRET",
+            )),
+        );
+        let error = PreparationFailure::at(PreparationStep::StorageAcquisition, error);
+        assert_eq!(
+            PreparationFailure::observe(&error),
+            PreparationFailure {
+                step: PreparationStep::ClaimBinding,
+                category: PreparationErrorCategory::PermissionDenied,
+                progress: None,
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn preparation_progress_keeps_inner_boundary_and_fixed_private_record_bound() {
+        let error = PreparationFailure::with_progress(
+            PreparationStep::OriginalRetentionBefore,
+            anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+            PreparationProgress {
+                last_checked_us: Some(u32::MAX),
+                ..PreparationProgress::default()
+            },
+        );
+        let error = PreparationFailure::with_progress(
+            PreparationStep::OriginalRetention,
+            error,
+            PreparationProgress {
+                acquired_us: Some(u32::MAX),
+                image_us: Some(u32::MAX),
+                prepared_us: Some(u32::MAX),
+                last_checked_us: Some(1),
+            },
+        );
+        assert_eq!(
+            error.downcast_ref::<&'static str>(),
+            Some(&"epoch_native_clock_rewind_or_expired")
+        );
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        let preparation = &rows[1]["observation"]["preparation"];
+        assert_eq!(preparation["step"], "original_retention_before");
+        assert_eq!(preparation["category"], "clock_expired_or_rewound");
+        assert_eq!(
+            preparation["progress"],
+            serde_json::json!({
+                "acquired_us":u32::MAX, "image_us":u32::MAX,
+                "prepared_us":u32::MAX, "last_checked_us":u32::MAX,
+            })
+        );
+        assert_eq!(preparation.as_object().unwrap().len(), 3);
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("rewind_or_expired")
+        );
+    }
+
+    #[derive(Debug)]
+    struct MustNotDisplay;
+    impl std::fmt::Display for MustNotDisplay {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("diagnostics must never format an unknown error")
+        }
+    }
+    impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn receive_boundary_categories_preserve_causes_without_exporting_error_text() {
+        for (code, category) in [
+            ("storage_peer_channel_closed", "channel_closed"),
+            (
+                "storage_peer_channel_cloexec_required",
+                "channel_profile_changed",
+            ),
+            ("native_enrollment_pid_not_visible", "process_not_visible"),
+            (
+                "native_enrollment_process_replaced",
+                "process_identity_changed",
+            ),
+            ("storage_peer_channel_closed /SECRET Bearer TOKEN", "other"),
+        ] {
+            let error = anyhow::Error::msg(code.to_owned()).context(MustNotDisplay);
+            let error = PreparationFailure::at(PreparationStep::FirstHello, error);
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(error.downcast_ref::<String>().unwrap(), code);
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let boundary = &rows[1]["observation"]["preparation"];
+            assert_eq!(boundary["step"], "first_hello");
+            assert_eq!(boundary["category"], category);
+            let exported = String::from_utf8(recorder.output).unwrap();
+            for private in [code, "/SECRET", "Bearer", "TOKEN"] {
+                assert!(!exported.contains(private));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn typed_packet_failures_keep_their_closed_category_and_original_cause() {
+        use rustix::{io::Errno, net::RecvPidfdError as Packet};
+        for (packet, category) in [
+            (Packet::SocketProfile, "packet_socket_profile"),
+            (Packet::EmptyPayloadBuffer, "packet_empty_payload_buffer"),
+            (Packet::ClosedOrEmptyPacket, "packet_closed_or_empty"),
+            (Packet::Truncated, "packet_truncated"),
+            (Packet::MalformedAncillary, "packet_malformed_ancillary"),
+            (Packet::UnexpectedAncillary, "packet_unexpected_ancillary"),
+            (Packet::MissingProcess, "packet_missing_process"),
+            (Packet::DuplicateProcess, "packet_duplicate_process"),
+            (
+                Packet::SenderUnavailable(Errno::SRCH),
+                "packet_sender_unavailable",
+            ),
+            (
+                Packet::SenderUnavailable(Errno::PERM),
+                "packet_sender_unavailable",
+            ),
+            (Packet::MissingCredentials, "packet_missing_credentials"),
+            (Packet::DuplicateCredentials, "packet_duplicate_credentials"),
+            (Packet::MalformedCredentials, "packet_malformed_credentials"),
+            (
+                Packet::DescriptorNotCloexec,
+                "packet_descriptor_not_cloexec",
+            ),
+            (Packet::Io(Errno::ACCESS), "permission_denied"),
+            (Packet::Io(Errno::NOENT), "not_found"),
+            (Packet::Io(Errno::EXIST), "already_exists"),
+            (Packet::Io(Errno::TIMEDOUT), "timed_out"),
+            (Packet::Io(Errno::LOOP), "path_resolution"),
+            (Packet::Io(Errno::XDEV), "path_resolution"),
+            (Packet::Io(Errno::IO), "io"),
+        ] {
+            let error = anyhow::Error::new(packet).context(MustNotDisplay);
+            let error = PreparationFailure::at(PreparationStep::FirstHello, error);
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(error.downcast_ref::<Packet>(), Some(&packet));
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let boundary = &rows[1]["observation"]["preparation"];
+            assert_eq!(boundary["step"], "first_hello");
+            assert_eq!(boundary["category"], category);
+            let exported = String::from_utf8(recorder.output).unwrap();
+            assert!(!exported.contains("PIDFD packet reception failed"));
+            assert!(!exported.contains("native_enrollment"));
+        }
+    }
+
+    #[test]
+    fn first_holder_refusals_keep_fixed_inner_boundaries_timings_and_record_bound() {
+        for (step, name) in [
+            (PreparationStep::FirstRole, "first_role"),
+            (PreparationStep::FirstFile, "first_file"),
+            (PreparationStep::FirstStart, "first_start"),
+            (PreparationStep::FirstExchange, "first_exchange"),
+            (PreparationStep::FirstCheck, "first_check"),
+            (PreparationStep::FirstProjection, "first_projection"),
+            (PreparationStep::FirstAccept, "first_accept"),
+            (PreparationStep::FirstHello, "first_hello"),
+            (PreparationStep::FirstPeer, "first_peer"),
+            (PreparationStep::FirstOffer, "first_offer"),
+            (PreparationStep::FirstConfirm, "first_confirm"),
+            (PreparationStep::FirstComplete, "first_complete"),
+            (PreparationStep::FirstAccepted, "first_accepted"),
+            (PreparationStep::FirstDurability, "first_durability"),
+            (PreparationStep::FirstRetain, "first_retain"),
+        ] {
+            let error = PreparationFailure::at(
+                step,
+                anyhow::anyhow!("native_enrollment_socket_poll_timeout"),
+            );
+            let error = PreparationFailure::at(PreparationStep::FirstExchange, error);
+            assert_eq!(PreparationFailure::observe(&error).step, step);
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"native_enrollment_socket_poll_timeout")
+            );
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::FirstHolder);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(rows[1]["observation"]["at"], "first_holder");
+            assert_eq!(rows[1]["observation"]["preparation"]["step"], name);
+            assert_eq!(
+                rows[1]["observation"]["preparation"]["category"],
+                "socket_poll_timeout"
+            );
+            let timing = rows[1]["observation"]["timing"].as_array().unwrap();
+            for name in ["first_role", "first_file", "first_exchange"] {
+                assert!(timing.iter().any(|row| row[0] == name));
+            }
+            assert!(
+                !String::from_utf8(recorder.output)
+                    .unwrap()
+                    .contains("native_enrollment_socket")
+            );
+        }
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::FirstHolder);
+        recorder
+            .refuse(Some(&PreparationFailure::at(
+                PreparationStep::FirstPeer,
+                anyhow::Error::new(MustNotDisplay),
+            )))
+            .unwrap();
+        assert_eq!(
+            records(&recorder.output)[1]["observation"]["preparation"]["category"],
+            "other"
+        );
+    }
+
+    #[test]
+    fn holder_listener_refusal_keeps_inner_step_category_and_cached_preparation() {
+        for (cause, step, name, category) in [
+            (
+                anyhow::Error::new(rustix::io::Errno::XDEV),
+                PreparationStep::HolderTransport,
+                "holder_transport",
+                "path_resolution",
+            ),
+            (
+                anyhow::anyhow!("epoch_native_acquisition_expired"),
+                PreparationStep::HolderFilePhase,
+                "holder_file_phase",
+                "clock_expired_or_rewound",
+            ),
+            (
+                anyhow::anyhow!("epoch_native_acquisition_expired"),
+                PreparationStep::HolderFinalCheck,
+                "holder_final_check",
+                "clock_expired_or_rewound",
+            ),
+        ] {
+            let error = PreparationFailure::at(step, cause);
+            let error = PreparationFailure::at(PreparationStep::HolderListenerBind, error);
+            assert_eq!(PreparationFailure::observe(&error).step, step);
+            if category == "path_resolution" {
+                assert_eq!(
+                    error.downcast_ref::<rustix::io::Errno>(),
+                    Some(&rustix::io::Errno::XDEV)
+                );
+            }
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::HolderListener);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(rows[1]["observation"]["at"], "holder_listener");
+            assert_eq!(rows[1]["observation"]["preparation"]["step"], name);
+            assert_eq!(rows[1]["observation"]["preparation"]["category"], category);
+            assert!(rows[1]["observation"]["timing"].is_array());
+            let timing = rows[1]["observation"]["timing"].as_array().unwrap();
+            for name in ["holder_role", "holder_listener"] {
+                assert!(timing.iter().any(|row| row[0] == name));
+            }
+            for line in recorder
+                .output
+                .split(|b| *b == b'\n')
+                .filter(|s| !s.is_empty())
+            {
+                assert!(line.len() < MAX_RECORD_BYTES);
+            }
+            let text = String::from_utf8(recorder.output).unwrap();
+            assert!(!text.contains("epoch_native_acquisition_expired"));
+            assert!(!text.contains("Cross-device"));
+        }
+    }
+
+    #[test]
+    fn preparation_refusal_is_bounded_fixed_data_and_never_formats_unknown_causes() {
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        let error = PreparationFailure::at(
+            PreparationStep::MetadataCredential,
+            anyhow::Error::new(MustNotDisplay),
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1]["observation"],
+            serde_json::json!({
+                "event":"refused", "at":"preparation",
+                "preparation":{"step":"metadata_credential", "category":"other"}
+            })
+        );
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("MustNotDisplay")
+        );
+    }
+
+    #[test]
+    fn preparation_details_are_not_exported_for_another_phase_or_as_success() {
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enter(FailurePhase::Enrollment);
+        let error = PreparationFailure::at(
+            PreparationStep::RoleStage,
+            anyhow::anyhow!("native_enrollment_stage_expired"),
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        assert_eq!(
+            records(&recorder.output)[0]["observation"],
+            serde_json::json!({"event":"refused", "at":"enrollment"})
+        );
+        assert_eq!(recorder.records, 1);
+        assert!(!recorder.first_holder && !recorder.activated);
     }
 }

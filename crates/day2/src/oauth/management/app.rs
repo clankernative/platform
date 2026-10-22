@@ -101,19 +101,25 @@ impl CommittedCapture<'_> {
 }
 
 impl Manager {
-    pub(in crate::oauth) fn native_scopes(
+    pub(in crate::oauth) fn native_selections(
         &self,
-    ) -> Result<Vec<day2_capabilities::security_epoch::AuthorityScope>> {
+    ) -> Result<Vec<crate::oauth::native_management::NativeSelection>> {
         let instance = crate::artifact::Instance::load(self.runtime.instance_path())?;
         ensure!(
             instance.scope(self.runtime.app())? == self.runtime.scope(),
             "native App scope changed"
         );
-        crate::oauth::native_management::selected_scopes(&instance, Some(self.runtime.app()))
+        crate::oauth::native_management::selected_profiles(&instance, Some(self.runtime.app()))
     }
 
     pub(in crate::oauth) fn app(&self) -> &str {
         self.runtime.app()
+    }
+
+    pub(in crate::oauth) fn native_runtime_response_scope(
+        &self,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        crate::oauth::native_management::runtime_response_scope(&self.runtime)
     }
 
     pub(in crate::oauth) fn new(
@@ -295,103 +301,118 @@ impl Manager {
             marker: 0,
             local: std::marker::PhantomData,
         };
-        let original = crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
+        let mut original =
+            crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
         crate::oauth::connect::identifier(registration)?;
-        let mut db = store::open(self.runtime.db())?;
-        iap::bind_subject(&db, identity, now)?;
-        self.authority_in(&db, identity)?;
-        let selection = self.selection(registration, identity, now)?;
-        let suffix = effects::random()?;
-        let challenge = Digest::new(effects::random()?.as_bytes());
-        let captured_at = effects::wall_time()?;
-        ensure!(captured_at >= now, "OAuth management clock moved backwards");
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if action == Action::Connect {
-            Self::unclaimed(&tx, &selection.slot, None)?;
-        }
-        tx.execute(
-            "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
-            [captured_at],
-        )?;
-        let count: i64 =
-            tx.query_row("SELECT count(*) FROM oauth_management_intents", [], |row| {
-                row.get(0)
-            })?;
-        ensure!(count < 1024, "OAuth management capacity reached");
-        let route = crate::oauth::shell_transport::route_prefix(
-            selection.binding.namespace.installation.as_str(),
-            selection.binding.namespace.environment.as_str(),
-            self.runtime.app(),
-        )?;
-        let view = View {
-            id: format!("{route}{suffix}"),
-            app: self.runtime.app().into(),
-            scope: self.runtime.scope().into(),
-            artifact: self.runtime.artifact().id().into(),
-            authority: self.authority_in(&tx, identity)?,
-            registration: registration.into(),
-            logical_id: selection.requirement.logical_id.clone(),
-            action,
-            human: identity.email.clone(),
-            subject: identity.subject.clone(),
-            selection: selection.identity()?,
-            slot: selection.slot.clone(),
-            fence: Self::fence(&tx, &selection.slot)?,
-            binding_namespace: admission::binding_namespace(&selection.binding)?,
-            usage: selection.requirement.usage.clone(),
-            scopes: selection
-                .permission
-                .action_scopes
-                .values()
-                .flatten()
-                .cloned()
-                .collect(),
-            app_origin: selection.instance.app_origin_url.clone(),
-            shell_origin: selection.instance.shell.origin_url.clone(),
-            callback_url: selection.instance.registration.callback_url.clone(),
-            challenge,
-            created_at: captured_at,
-            expires_at: captured_at
-                .checked_add(super::SECONDS)
-                .context("OAuth management deadline overflow")?,
-        };
-        view.validate(identity, captured_at)?;
-        let json = serde_json::to_string(&view)?;
-        ensure!(json.len() <= 16384, "OAuth management context budget");
-        tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
-            params![view.id, json, view.expires_at])?;
-        tx.commit()?;
+        let view = original.with_pending(|current| {
+            let mut db = store::open(self.runtime.db())?;
+            current.check()?;
+            iap::bind_subject(&db, identity, now)?;
+            self.authority_in(&db, identity)?;
+            let selection = self.selection(registration, identity, now)?;
+            let suffix = effects::random()?;
+            let challenge = Digest::new(effects::random()?.as_bytes());
+            let captured_at = effects::wall_time()?;
+            ensure!(captured_at >= now, "OAuth management clock moved backwards");
+            current.check()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if action == Action::Connect {
+                Self::unclaimed(&tx, &selection.slot, None)?;
+            }
+            tx.execute(
+                "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
+                [captured_at],
+            )?;
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM oauth_management_intents", [], |row| {
+                    row.get(0)
+                })?;
+            ensure!(count < 1024, "OAuth management capacity reached");
+            let route = crate::oauth::shell_transport::route_prefix(
+                selection.binding.namespace.installation.as_str(),
+                selection.binding.namespace.environment.as_str(),
+                self.runtime.app(),
+            )?;
+            let view = View {
+                id: format!("{route}{suffix}"),
+                app: self.runtime.app().into(),
+                scope: self.runtime.scope().into(),
+                artifact: self.runtime.artifact().id().into(),
+                authority: self.authority_in(&tx, identity)?,
+                registration: registration.into(),
+                logical_id: selection.requirement.logical_id.clone(),
+                action,
+                human: identity.email.clone(),
+                subject: identity.subject.clone(),
+                selection: selection.identity()?,
+                slot: selection.slot.clone(),
+                fence: Self::fence(&tx, &selection.slot)?,
+                binding_namespace: admission::binding_namespace(&selection.binding)?,
+                usage: selection.requirement.usage.clone(),
+                scopes: selection
+                    .permission
+                    .action_scopes
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect(),
+                app_origin: selection.instance.app_origin_url.clone(),
+                shell_origin: selection.instance.shell.origin_url.clone(),
+                callback_url: selection.instance.registration.callback_url.clone(),
+                challenge,
+                created_at: captured_at,
+                expires_at: captured_at
+                    .checked_add(super::SECONDS)
+                    .context("OAuth management deadline overflow")?,
+            };
+            view.validate(identity, captured_at)?;
+            let json = serde_json::to_string(&view)?;
+            ensure!(json.len() <= 16384, "OAuth management context budget");
+            tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
+                params![view.id, json, view.expires_at])?;
+            current.commit(tx)?;
+            Ok(view)
+        })?;
         original.bind(
             CommittedCapture {
                 start: &start,
                 intent: crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
             },
-            captured_at,
+            view.created_at,
         )?;
         Ok(view)
     }
 
     pub(super) fn pending(&self, id: &str, identity: &iap::Verified, now: i64) -> Result<View> {
-        let db = store::open(self.runtime.db())?;
-        let (view, state, _) = self.load(&db, id, identity, now)?;
-        crate::oauth::native_management::check(
-            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+        let intent =
+            crate::oauth::native_management::pending_intent(self.runtime.app(), id, identity)?;
+        crate::oauth::native_management::with_consumer(
+            &intent,
             crate::oauth::native_management::Phase::Pending,
             now,
-        )?;
-        ensure!(
-            state == "pending",
-            "OAuth management intent already consumed"
-        );
-        self.check_in(&db, &view, identity)?;
-        drop(db);
-        let selection = self.selection(&view.registration, identity, now)?;
-        ensure!(
-            selection.identity()? == view.selection,
-            "OAuth management selection changed"
-        );
-        view.validate(identity, effects::wall_time()?)?;
-        Ok(view)
+            |current| {
+                current.arm()?;
+                let db = store::open(self.runtime.db())?;
+                let (view, state, _) = self.load(&db, id, identity, now)?;
+                ensure!(
+                    crate::oauth::fresh_auth::FreshIntent::management(&view, identity)? == intent,
+                    "OAuth Pending differs from retained original"
+                );
+                if state != "pending" {
+                    return Ok(None);
+                }
+                self.check_in(&db, &view, identity)?;
+                let selection = self.selection(&view.registration, identity, now)?;
+                ensure!(
+                    selection.identity()? == view.selection,
+                    "OAuth management selection changed"
+                );
+                view.validate(identity, effects::wall_time()?)?;
+                current.check()?;
+                Ok(Some(view))
+            },
+        )?
+        .context("OAuth management intent already consumed")
     }
 
     pub(in crate::oauth) fn fresh_owner(
@@ -421,19 +442,35 @@ impl Manager {
         let expected = self.pending(&call.attempt, identity, now)?;
         let at = effects::wall_time()?;
         ensure!(at >= now, "OAuth management clock moved backwards");
-        let mut db = store::open(self.runtime.db())?;
-        let tx = crate::write_queue::immediate(&mut db)?;
-        let (view, state, _) = self.load(&tx, &call.attempt, identity, at)?;
-        ensure!(
-            state == "pending" && view == expected,
-            "OAuth management pending changed"
-        );
-        self.check_in(&tx, &view, identity)?;
-        let intent = FreshIntent::management(&view, identity)?;
-        let reply =
-            crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, at)?;
-        tx.commit()?;
-        Ok(reply)
+        let intent = FreshIntent::management(&expected, identity)?;
+        call.require_intent(&intent)?;
+        crate::oauth::native_management::with_consumer(
+            &intent,
+            call.native_phase(),
+            at,
+            |current| {
+                // Open/recovery, writer, mutation and known COMMIT all remain under
+                // the same original/role/physical scope. No RPC occurs inside it.
+                current.arm()?;
+                let mut db = store::open(self.runtime.db())?;
+                let tx = crate::write_queue::immediate(&mut db)?;
+                let (view, state, _) =
+                    self.load(&tx, &call.attempt, identity, effects::wall_time()?)?;
+                ensure!(
+                    state == "pending" && view == expected,
+                    "OAuth management pending changed"
+                );
+                self.check_in(&tx, &view, identity)?;
+                let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(
+                    &tx,
+                    &intent,
+                    call,
+                    effects::wall_time()?,
+                )?;
+                current.commit_write(tx)?;
+                Ok(reply)
+            },
+        )
     }
 
     pub(super) fn authorize_connect(
@@ -450,137 +487,141 @@ impl Manager {
         );
         self.authority
             .verify_management(&view, proof, identity, now)?;
-        let selection = self.selection(&view.registration, identity, now)?;
-        ensure!(
-            selection.identity()? == view.selection,
-            "OAuth management selection changed"
-        );
-        let key = self
-            .authority
-            .custody(
-                self.runtime.app(),
-                &view.registration,
-                &identity.email,
-                &view.selection,
-                now,
-            )?
-            .context("OAuth custody unavailable")?;
-        let verifier = effects::random()?;
-        let state = format!("product.{}.{}", view.id, effects::random()?);
-        let at = effects::wall_time()?;
-        ensure!(at >= now, "OAuth management clock moved backwards");
-        view.validate(identity, at)?;
-        let callback = crate::oauth::connect::CallbackBinding::from_secret_state(
-            state.as_bytes(),
-            crate::oauth::connect::CallbackBindingSpec {
-                issuer: selection.reviewed.issuer.clone(),
-                issuer_url: selection.reviewed.issuer_url.clone(),
-                security_origin: selection.instance.shell.origin.clone(),
-                profile: selection.permission.profile.clone(),
-                callback: selection.instance.registration.callback.clone(),
-                binding_namespace: view.binding_namespace.clone(),
-                session: proof.session.clone(),
-                product_return: selection.binding.product_return.clone(),
-            },
-        )?;
-        let intent = crate::oauth::connect::ConnectIntent {
-            attempt: view.id.clone(),
-            slot: view.slot.as_str().into(),
-            expected_generation: None,
-            expected_epoch: 1,
-            proposed_generation: 1,
-            owner: view.human.clone(),
-            profile: selection.permission.profile.id.as_str().into(),
-            registration: Digest::of(&selection.instance.registration.registration)?
-                .as_str()
-                .into(),
-            callback: Digest::of(&selection.instance.registration.callback)?
-                .as_str()
-                .into(),
-            consent: selection
-                .permission
-                .consent_digest(&selection.requirement)?
-                .as_str()
-                .into(),
-            expires_at: view.expires_at,
-        };
-        let prepared = crate::oauth::exchange::prepare_authorization(
-            crate::oauth::profiles::OutboundQualification {
-                intent: &intent,
-                binding: &callback,
-                requirement: &selection.requirement,
-                permission: &selection.permission,
-                reviewed: &selection.reviewed,
-                instance: &selection.instance,
-            },
-            &key,
-            &verifier,
-        )?;
-        let client = self.authority.management_client(&view)?;
-        let mut location = url::Url::parse(&selection.reviewed.authorization_endpoint)?;
-        ensure!(
-            location.as_str() == crate::oauth::google::AUTHORIZATION,
-            "OAuth authorization endpoint changed"
-        );
-        location.query_pairs_mut().extend_pairs([
-            ("client_id", client.as_str()),
-            (
-                "redirect_uri",
-                selection.instance.registration.callback_url.as_str(),
-            ),
-            ("response_type", "code"),
-            (
-                "scope",
-                view.scopes
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .as_str(),
-            ),
-            ("state", state.as_str()),
-            ("code_challenge", prepared.code_challenge()),
-            ("code_challenge_method", "S256"),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-            ("include_granted_scopes", "false"),
-            ("login_hint", identity.email.as_str()),
-        ]);
-        let mut db = store::open(self.runtime.db())?;
         let guard = StartGuard {
             manager: self,
             view: &view,
             identity,
             session: &proof.session,
         };
-        let mut prepared = Some(prepared);
-        let checking = effects::wall_time()?;
-        ensure!(checking >= at, "OAuth connect clock moved backwards");
-        view.validate(identity, checking)?;
-        let started = usage::Authority::with_current(
-            self.authority.as_ref(),
-            self.runtime.app(),
-            &view.registration,
-            &identity.email,
-            checking,
-            &mut |current| {
-                ensure!(
-                    current.identity()? == view.selection,
-                    "OAuth connect readiness changed"
-                );
-                let finished = effects::wall_time()?;
-                ensure!(finished >= checking, "OAuth connect clock moved backwards");
-                view.validate(identity, finished)?;
-                crate::oauth::connect::begin_managed(
-                    &mut db,
-                    prepared.take().context("OAuth connect permit consumed")?,
-                    finished,
-                    &guard,
-                )
-            },
-        )?;
-        ensure!(started, "OAuth connect intent already consumed");
-        Ok(location.into())
+        guard.with_current(now, |consumer| {
+            consumer.arm()?;
+            let selection = self.selection(&view.registration, identity, now)?;
+            ensure!(
+                selection.identity()? == view.selection,
+                "OAuth management selection changed"
+            );
+            let key = self
+                .authority
+                .custody(
+                    self.runtime.app(),
+                    &view.registration,
+                    &identity.email,
+                    &view.selection,
+                    now,
+                )?
+                .context("OAuth custody unavailable")?;
+            let verifier = effects::random()?;
+            let state = format!("product.{}.{}", view.id, effects::random()?);
+            let at = effects::wall_time()?;
+            ensure!(at >= now, "OAuth management clock moved backwards");
+            view.validate(identity, at)?;
+            let callback = crate::oauth::connect::CallbackBinding::from_secret_state(
+                state.as_bytes(),
+                crate::oauth::connect::CallbackBindingSpec {
+                    issuer: selection.reviewed.issuer.clone(),
+                    issuer_url: selection.reviewed.issuer_url.clone(),
+                    security_origin: selection.instance.shell.origin.clone(),
+                    profile: selection.permission.profile.clone(),
+                    callback: selection.instance.registration.callback.clone(),
+                    binding_namespace: view.binding_namespace.clone(),
+                    session: proof.session.clone(),
+                    product_return: selection.binding.product_return.clone(),
+                },
+            )?;
+            let intent = crate::oauth::connect::ConnectIntent {
+                attempt: view.id.clone(),
+                slot: view.slot.as_str().into(),
+                expected_generation: None,
+                expected_epoch: 1,
+                proposed_generation: 1,
+                owner: view.human.clone(),
+                profile: selection.permission.profile.id.as_str().into(),
+                registration: Digest::of(&selection.instance.registration.registration)?
+                    .as_str()
+                    .into(),
+                callback: Digest::of(&selection.instance.registration.callback)?
+                    .as_str()
+                    .into(),
+                consent: selection
+                    .permission
+                    .consent_digest(&selection.requirement)?
+                    .as_str()
+                    .into(),
+                expires_at: view.expires_at,
+            };
+            let prepared = crate::oauth::exchange::prepare_authorization(
+                crate::oauth::profiles::OutboundQualification {
+                    intent: &intent,
+                    binding: &callback,
+                    requirement: &selection.requirement,
+                    permission: &selection.permission,
+                    reviewed: &selection.reviewed,
+                    instance: &selection.instance,
+                },
+                &key,
+                &verifier,
+            )?;
+            let client = self.authority.management_client(&view)?;
+            let mut location = url::Url::parse(&selection.reviewed.authorization_endpoint)?;
+            ensure!(
+                location.as_str() == crate::oauth::google::AUTHORIZATION,
+                "OAuth authorization endpoint changed"
+            );
+            location.query_pairs_mut().extend_pairs([
+                ("client_id", client.as_str()),
+                (
+                    "redirect_uri",
+                    selection.instance.registration.callback_url.as_str(),
+                ),
+                ("response_type", "code"),
+                (
+                    "scope",
+                    view.scopes
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .as_str(),
+                ),
+                ("state", state.as_str()),
+                ("code_challenge", prepared.code_challenge()),
+                ("code_challenge_method", "S256"),
+                ("access_type", "offline"),
+                ("prompt", "consent"),
+                ("include_granted_scopes", "false"),
+                ("login_hint", identity.email.as_str()),
+            ]);
+            let mut db = store::open(self.runtime.db())?;
+            let mut prepared = Some(prepared);
+            let checking = effects::wall_time()?;
+            ensure!(checking >= at, "OAuth connect clock moved backwards");
+            view.validate(identity, checking)?;
+            let started = usage::Authority::with_current(
+                self.authority.as_ref(),
+                self.runtime.app(),
+                &view.registration,
+                &identity.email,
+                checking,
+                &mut |current| {
+                    ensure!(
+                        current.identity()? == view.selection,
+                        "OAuth connect readiness changed"
+                    );
+                    let finished = effects::wall_time()?;
+                    ensure!(finished >= checking, "OAuth connect clock moved backwards");
+                    view.validate(identity, finished)?;
+                    crate::oauth::connect::begin_managed(
+                        &mut db,
+                        prepared.take().context("OAuth connect permit consumed")?,
+                        finished,
+                        &guard,
+                        consumer,
+                    )
+                },
+            )?;
+            ensure!(started, "OAuth connect intent already consumed");
+            Ok(location.into())
+        })
     }
 
     fn context(
@@ -611,46 +652,83 @@ impl Manager {
         now: i64,
     ) -> Result<Reply> {
         ensure!(query.len() <= 8192, "OAuth callback budget");
-        let mut db = store::open(self.runtime.db())?;
-        let (view, state, stored_session) = self.load(&db, id, identity, now)?;
-        crate::oauth::native_management::check(
+        let original =
+            crate::oauth::native_management::pending_intent(self.runtime.app(), id, identity)?;
+        ensure!(
+            original.purpose() == crate::oauth::fresh_auth::FreshPurpose::OAuthConnect,
+            "OAuth callback purpose refused"
+        );
+        let (view, selection, intent, binding, private) =
+            crate::oauth::native_management::with_consumer(
+                &original,
+                crate::oauth::native_management::Phase::Callback,
+                now,
+                |current| {
+                    current.arm()?;
+                    let db = store::open(self.runtime.db())?;
+                    let (view, state, stored_session) = self.load(&db, id, identity, now)?;
+                    ensure!(
+                        crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
+                            == original,
+                        "OAuth callback differs from retained original"
+                    );
+                    if state != "authorized" || stored_session.as_deref() != Some(session.as_str())
+                    {
+                        return Ok(None);
+                    }
+                    self.check_in(&db, &view, identity)?;
+                    let selection = self.selection(&view.registration, identity, now)?;
+                    ensure!(
+                        selection.identity()? == view.selection,
+                        "OAuth callback selection changed"
+                    );
+                    let (intent, binding) = self.context(&db, id)?;
+                    let private = crate::oauth::exchange::load_binding(&db, id)?
+                        .context("OAuth exchange missing")?;
+                    Ok(Some((view, selection, intent, binding, private)))
+                },
+            )?
+            .context("OAuth callback confirmation missing or consumed")?;
+        // Reject malformed ingress before the mutating callback phase. The
+        // preceding scoped read is a known result, not an unknown mutation.
+        crate::oauth::protocol::parse_callback(
+            query.as_bytes(),
+            &crate::oauth::exchange::callback_parameters(&selection.reviewed),
+        )?;
+        let key = crate::oauth::native_management::with_consumer(
             &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
             crate::oauth::native_management::Phase::Callback,
             now,
+            |current| {
+                current.arm()?;
+                self.authority
+                    .custody(
+                        self.runtime.app(),
+                        &view.registration,
+                        &identity.email,
+                        &view.selection,
+                        now,
+                    )?
+                    .context("OAuth custody unavailable")
+            },
         )?;
-        ensure!(
-            view.action == Action::Connect
-                && state == "authorized"
-                && stored_session.as_deref() == Some(session.as_str()),
-            "OAuth callback confirmation missing or consumed"
-        );
-        self.check_in(&db, &view, identity)?;
-        let selection = self.selection(&view.registration, identity, now)?;
-        ensure!(
-            selection.identity()? == view.selection,
-            "OAuth callback selection changed"
-        );
-        let key = self
-            .authority
-            .custody(
-                self.runtime.app(),
-                &view.registration,
-                &identity.email,
-                &view.selection,
-                now,
-            )?
-            .context("OAuth custody unavailable")?;
-        let client = self
-            .authority
-            .refresh_client(
-                self.runtime.app(),
-                &view.registration,
-                &identity.email,
-                &view.selection,
-                now,
-            )?
-            .context("OAuth client unavailable")?;
-        let (intent, binding) = self.context(&db, id)?;
+        let client = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback,
+            now,
+            |current| {
+                current.arm()?;
+                self.authority
+                    .refresh_client(
+                        self.runtime.app(),
+                        &view.registration,
+                        &identity.email,
+                        &view.selection,
+                        now,
+                    )?
+                    .context("OAuth client unavailable")
+            },
+        )?;
         let input = || crate::oauth::profiles::OutboundQualification {
             intent: &intent,
             binding: &binding,
@@ -659,28 +737,56 @@ impl Manager {
             reviewed: &selection.reviewed,
             instance: &selection.instance,
         };
-        let private =
-            crate::oauth::exchange::load_binding(&db, id)?.context("OAuth exchange missing")?;
         let at = effects::wall_time()?;
         ensure!(at >= now, "OAuth callback clock moved backwards");
         view.validate(identity, at)?;
-        let outcome = crate::oauth::exchange::handle_qualified_callback(
-            &mut db,
-            input(),
-            crate::oauth::outbound::CallbackIngress {
-                attempt: id,
-                raw_query: query.as_bytes(),
-                route: binding.callback(),
-                session,
-                issuer_binding: binding.issuer(),
-                code_ref: &private.code_ref,
-                now: at,
+        let outcome = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+            crate::oauth::native_management::Phase::Callback,
+            at,
+            |current| {
+                current.arm()?;
+                let mut db = store::open(self.runtime.db())?;
+                crate::oauth::exchange::handle_qualified_callback(
+                    &mut db,
+                    input(),
+                    crate::oauth::outbound::CallbackIngress {
+                        attempt: id,
+                        raw_query: query.as_bytes(),
+                        route: binding.callback(),
+                        session,
+                        issuer_binding: binding.issuer(),
+                        code_ref: &private.code_ref,
+                        now: at,
+                    },
+                    &key,
+                    Some(current),
+                )
             },
-            &key,
         )?;
         match outcome {
             crate::oauth::outbound::CallbackOutcome::Denied { .. } => {
-                db.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])?;
+                crate::oauth::native_management::with_consumer(
+                    &crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?,
+                    crate::oauth::native_management::Phase::Callback,
+                    at,
+                    |current| {
+                        current.arm()?;
+                        let mut db = store::open(self.runtime.db())?;
+                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let (stored, state, stored_session) =
+                            self.load(&tx, id, identity, effects::wall_time()?)?;
+                        ensure!(
+                            stored == view
+                                && state == "authorized"
+                                && stored_session.as_deref() == Some(session.as_str()),
+                            "OAuth denied callback confirmation changed"
+                        );
+                        self.check_in(&tx, &view, identity)?;
+                        ensure!(tx.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])? == 1, "OAuth denied callback consumed");
+                        current.commit(tx)
+                    },
+                )?;
                 return Ok(Reply::Completed {
                     status: "Provider authorization declined.".into(),
                 });
@@ -697,26 +803,35 @@ impl Manager {
             session,
         };
         let mut permit = None;
-        let dispatched = usage::Authority::with_current(
-            self.authority.as_ref(),
-            self.runtime.app(),
-            &view.registration,
-            &identity.email,
+        let dispatched = guard.with_current(
+            crate::oauth::native_management::Phase::DispatchCommit,
             at,
-            &mut |current| {
-                ensure!(
-                    current.identity()? == view.selection,
-                    "OAuth exchange readiness changed"
-                );
-                let checked = effects::wall_time()?;
-                ensure!(checked >= at, "OAuth exchange clock moved backwards");
-                permit = crate::oauth::exchange::authorize_managed_exchange(
-                    &mut db,
-                    input(),
-                    checked,
-                    &guard,
-                )?;
-                Ok(permit.is_some())
+            |consumer| {
+                consumer.arm()?;
+                let mut db = store::open(self.runtime.db())?;
+                usage::Authority::with_current(
+                    self.authority.as_ref(),
+                    self.runtime.app(),
+                    &view.registration,
+                    &identity.email,
+                    at,
+                    &mut |current| {
+                        ensure!(
+                            current.identity()? == view.selection,
+                            "OAuth exchange readiness changed"
+                        );
+                        let checked = effects::wall_time()?;
+                        ensure!(checked >= at, "OAuth exchange clock moved backwards");
+                        permit = crate::oauth::exchange::authorize_managed_exchange(
+                            &mut db,
+                            input(),
+                            checked,
+                            &guard,
+                            consumer,
+                        )?;
+                        Ok(permit.is_some())
+                    },
+                )
             },
         )?;
         ensure!(dispatched, "OAuth exchange permit unavailable");
@@ -726,7 +841,6 @@ impl Manager {
         let (outcome, account) = client.initial_exchange(
             permit.context("OAuth exchange permit absent")?,
             crate::oauth::refresh::InitialExchange {
-                db: &db,
                 key: &key,
                 selection: &selection,
                 subject: &identity.subject,
@@ -735,8 +849,11 @@ impl Manager {
             },
         )?;
         let response = match outcome {
-            crate::oauth::exchange::ExchangeObservation::Uncertain(uncertain) => {
-                uncertain.record(&db)?;
+            crate::oauth::exchange::ExchangeObservation::Uncertain(_uncertain) => {
+                // The permanent dispatch barrier already records the unresolved
+                // outcome. A refused/expired original cannot acquire another
+                // SQL phase merely to relabel it; there is no retry or publication.
+                view.validate(identity, effects::wall_time()?)?;
                 return Ok(Reply::Completed { status: "Connection outcome unknown. No connection was published; operator cleanup is required before another attempt.".into() });
             }
             crate::oauth::exchange::ExchangeObservation::Response(response) => response,
@@ -762,43 +879,51 @@ impl Manager {
                 .into(),
             mapping_revision: mapping.revision.clone(),
         };
-        let prepared = response
-            .validate_mapped(
-                input(),
-                &mapped,
-                &account.context("OAuth provider account unavailable")?,
-            )?
-            .prepare_tokens(&key)?;
-        let mut prepared = Some(prepared);
+        let mut response = Some(response);
+        let account = account.context("OAuth provider account unavailable")?;
         let checking = effects::wall_time()?;
         ensure!(
             checking >= sent_at,
             "OAuth settlement clock moved backwards"
         );
         view.validate(identity, checking)?;
-        let settled = usage::Authority::with_current(
-            self.authority.as_ref(),
-            self.runtime.app(),
-            &view.registration,
-            &identity.email,
+        let settled = guard.with_current(
+            crate::oauth::native_management::Phase::FinishCommit,
             checking,
-            &mut |current| {
-                ensure!(
-                    current.identity()? == view.selection,
-                    "OAuth settlement readiness changed"
-                );
-                let finished = effects::wall_time()?;
-                ensure!(
-                    finished >= checking,
-                    "OAuth settlement clock moved backwards"
-                );
-                crate::oauth::exchange::settle_managed(
-                    &mut db,
-                    prepared.take().context("OAuth settlement consumed")?,
-                    input(),
-                    &mapping.revision,
-                    finished,
-                    &guard,
+            |consumer| {
+                consumer.arm()?;
+                usage::Authority::with_current(
+                    self.authority.as_ref(),
+                    self.runtime.app(),
+                    &view.registration,
+                    &identity.email,
+                    checking,
+                    &mut |current| {
+                        ensure!(
+                            current.identity()? == view.selection,
+                            "OAuth settlement readiness changed"
+                        );
+                        let finished = effects::wall_time()?;
+                        ensure!(
+                            finished >= checking,
+                            "OAuth settlement clock moved backwards"
+                        );
+                        let prepared = response
+                            .take()
+                            .context("OAuth settlement consumed")?
+                            .validate_mapped(input(), &mapped, &account)?
+                            .prepare_tokens(&key)?;
+                        let mut db = store::open(self.runtime.db())?;
+                        crate::oauth::exchange::settle_managed(
+                            &mut db,
+                            prepared,
+                            input(),
+                            &mapping.revision,
+                            finished,
+                            &guard,
+                            consumer,
+                        )
+                    },
                 )
             },
         )?;
@@ -826,55 +951,63 @@ impl Manager {
             .fence
             .as_ref()
             .context("OAuth disconnect slot absent")?;
-        let mut db = store::open(self.runtime.db())?;
         let checking = effects::wall_time()?;
         ensure!(checking >= now, "OAuth disconnect clock moved backwards");
         view.validate(identity, checking)?;
-        let fenced = usage::Authority::with_current(
-            self.authority.as_ref(),
-            self.runtime.app(),
-            &view.registration,
-            &identity.email,
+        let fenced = crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(view, identity)?,
+            crate::oauth::native_management::Phase::DisconnectCommit,
             checking,
-            &mut |current| {
-                ensure!(
-                    current.identity()? == view.selection,
-                    "OAuth disconnect readiness changed"
-                );
-                let finished = effects::wall_time()?;
-                ensure!(
-                    finished >= checking,
-                    "OAuth disconnect clock moved backwards"
-                );
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
-                ensure!(
-                    state == "pending" && stored == *view,
-                    "OAuth disconnect pending changed"
-                );
-                self.check_in(&tx, view, identity)?;
-                let changed = tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1
+            |consumer| {
+                consumer.arm()?;
+                usage::Authority::with_current(
+                    self.authority.as_ref(),
+                    self.runtime.app(),
+                    &view.registration,
+                    &identity.email,
+                    checking,
+                    &mut |current| {
+                        ensure!(
+                            current.identity()? == view.selection,
+                            "OAuth disconnect readiness changed"
+                        );
+                        let finished = effects::wall_time()?;
+                        ensure!(
+                            finished >= checking,
+                            "OAuth disconnect clock moved backwards"
+                        );
+                        let mut db = store::open(self.runtime.db())?;
+                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
+                        ensure!(
+                            state == "pending" && stored == *view,
+                            "OAuth disconnect pending changed"
+                        );
+                        self.check_in(&tx, view, identity)?;
+                        let changed = tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1
                 WHERE slot=?1 AND generation=?2 AND token_version=?3 AND security_epoch=?4 AND status='active'",
                 params![view.slot.as_str(), fence.generation, fence.token_version, fence.epoch])?;
-                ensure!(changed == 1, "OAuth disconnect fence lost");
-                tx.execute(
+                        ensure!(changed == 1, "OAuth disconnect fence lost");
+                        tx.execute(
                     "UPDATE oauth_refresh_attempts SET state='publication_rejected' WHERE slot=?1
                 AND state IN ('ready','may_have_been_sent','uncertain')",
                     [view.slot.as_str()],
                 )?;
-                tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
+                        tx.execute("UPDATE oauth_connect_attempts SET state='cancelled',code_ref=NULL,account=NULL,scope_evidence=NULL WHERE slot=?1
                 AND state IN ('awaiting_provider_authorization','exchange_ready','exchange_may_have_been_sent','exchange_uncertain','awaiting_account_approval')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
-                tx.execute(
-                    "DELETE FROM oauth_private_tokens WHERE slot=?1",
-                    [view.slot.as_str()],
-                )?;
-                tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
+                        tx.execute("DELETE FROM oauth_private_codes WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute("DELETE FROM oauth_private_verifiers WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute("DELETE FROM oauth_external_quarantine WHERE attempt IN(SELECT attempt FROM oauth_connect_attempts WHERE slot=?1 AND state='cancelled')", [view.slot.as_str()])?;
+                        tx.execute(
+                            "DELETE FROM oauth_private_tokens WHERE slot=?1",
+                            [view.slot.as_str()],
+                        )?;
+                        tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
-                tx.commit()?;
-                Ok(true)
+                        consumer.commit(tx)?;
+                        Ok(true)
+                    },
+                )
             },
         )?;
         ensure!(fenced, "OAuth disconnect not admitted");
@@ -895,7 +1028,56 @@ pub(in crate::oauth) struct StartGuard<'a> {
     session: &'a Digest,
 }
 
+fn require_connect_intent(
+    view: &View,
+    intent: &crate::oauth::connect::ConnectIntent,
+) -> Result<()> {
+    ensure!(
+        view.action == Action::Connect
+            && view.fence.is_none()
+            && intent.attempt == view.id
+            && intent.slot == view.slot.as_str()
+            && intent.owner == view.human
+            && intent.expires_at == view.expires_at
+            && intent.expected_generation.is_none()
+            && intent.expected_epoch == 1
+            && intent.proposed_generation == 1,
+        "OAuth consumer original intent or slot/version changed"
+    );
+    Ok(())
+}
+
 impl StartGuard<'_> {
+    pub(in crate::oauth) fn require_consumer(
+        &self,
+        current: &mut crate::oauth::native_management::Consumer<'_, '_, '_>,
+    ) -> Result<()> {
+        current.require_context(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            crate::oauth::native_management::Phase::StartCommit,
+        )
+    }
+
+    pub(in crate::oauth) fn require_intent(
+        &self,
+        intent: &crate::oauth::connect::ConnectIntent,
+    ) -> Result<()> {
+        require_connect_intent(self.view, intent)
+    }
+
+    pub(in crate::oauth) fn with_current<T>(
+        &self,
+        now: i64,
+        operation: impl FnOnce(&mut crate::oauth::native_management::Consumer<'_, '_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            crate::oauth::native_management::Phase::StartCommit,
+            now,
+            operation,
+        )
+    }
+
     pub(in crate::oauth) fn check(&self, db: &Connection, now: i64) -> Result<()> {
         let (stored, state, _) = self.manager.load(db, &self.view.id, self.identity, now)?;
         ensure!(
@@ -923,7 +1105,73 @@ pub(in crate::oauth) struct FinishGuard<'a> {
 }
 
 impl FinishGuard<'_> {
-    pub(in crate::oauth) fn require_send(&self, entry: i64) -> Result<()> {
+    pub(in crate::oauth) fn require_consumer(
+        &self,
+        current: &mut crate::oauth::native_management::Consumer<'_, '_, '_>,
+        phase: crate::oauth::native_management::Phase,
+    ) -> Result<()> {
+        ensure!(
+            matches!(
+                phase,
+                crate::oauth::native_management::Phase::DispatchCommit
+                    | crate::oauth::native_management::Phase::FinishCommit
+            ),
+            "OAuth settlement consumer phase refused"
+        );
+        current.require_context(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            phase,
+        )
+    }
+
+    pub(in crate::oauth) fn require_intent(
+        &self,
+        intent: &crate::oauth::connect::ConnectIntent,
+    ) -> Result<()> {
+        require_connect_intent(self.view, intent)
+    }
+
+    pub(in crate::oauth) fn with_current<T>(
+        &self,
+        phase: crate::oauth::native_management::Phase,
+        now: i64,
+        operation: impl FnOnce(&mut crate::oauth::native_management::Consumer<'_, '_, '_>) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            matches!(
+                phase,
+                crate::oauth::native_management::Phase::DispatchCommit
+                    | crate::oauth::native_management::Phase::ProviderSend
+                    | crate::oauth::native_management::Phase::FinishCommit
+            ),
+            "OAuth finish consumer phase refused"
+        );
+        crate::oauth::native_management::with_consumer(
+            &crate::oauth::fresh_auth::FreshIntent::management(self.view, self.identity)?,
+            phase,
+            now,
+            operation,
+        )
+    }
+
+    pub(in crate::oauth) fn send<T>(
+        &self,
+        entry: i64,
+        operation: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.with_current(
+            crate::oauth::native_management::Phase::ProviderSend,
+            entry,
+            |current| {
+                current.arm()?;
+                let db = store::open(self.manager.runtime.db())?;
+                self.require_send(&db, entry)?;
+                operation(&db)
+            },
+        )
+    }
+
+    fn require_send(&self, db: &Connection, entry: i64) -> Result<()> {
         let now = effects::wall_time()?;
         ensure!(now >= entry, "OAuth initial dispatch clock moved backwards");
         self.view.validate(self.identity, now)?;
@@ -939,9 +1187,8 @@ impl FinishGuard<'_> {
             finished >= now,
             "OAuth initial dispatch clock moved backwards"
         );
-        let db = store::open(self.manager.runtime.db())?;
-        self.check(&db, finished)?;
-        self.require_dispatched(&db)
+        self.check(db, finished)?;
+        self.require_dispatched(db)
     }
 
     pub(in crate::oauth) fn commit_dispatch(&self, db: &Connection) -> Result<()> {
@@ -1186,6 +1433,106 @@ mod tests {
     }
 
     #[test]
+    fn consumer_guards_cannot_substitute_a_different_committed_attempt() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let (a, session, _) = fixture.connect()?;
+            let (b, _, _) = fixture.connect()?;
+            let db = store::open(fixture.manager.runtime.db())?;
+            let (intent_a, _) = fixture.manager.context(&db, &a.id)?;
+            let (intent_b, _) = fixture.manager.context(&db, &b.id)?;
+            let start = StartGuard {
+                manager: &fixture.manager,
+                view: &a,
+                identity: &fixture.identity,
+                session: &session,
+            };
+            let finish = FinishGuard {
+                manager: &fixture.manager,
+                view: &a,
+                identity: &fixture.identity,
+                session: &session,
+            };
+            start.require_intent(&intent_a)?;
+            finish.require_intent(&intent_a)?;
+            assert!(start.require_intent(&intent_b).is_err());
+            assert!(finish.require_intent(&intent_b).is_err());
+            let mut changed_version = intent_a;
+            changed_version.expected_epoch += 1;
+            assert!(start.require_intent(&changed_version).is_err());
+            assert!(finish.require_intent(&changed_version).is_err());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn pending_writer_expiry_and_second_commit_cannot_publish_a_creator() -> Result<()> {
+        for case in [
+            "before_commit",
+            "after_commit",
+            "second_commit",
+            "missing_commit",
+        ] {
+            let fixture = Fixture::new(false)?;
+            effects::scope(fixture.port.clone(), || -> Result<()> {
+                let start = CaptureStart {
+                    marker: 0,
+                    local: std::marker::PhantomData,
+                };
+                let mut original = crate::oauth::native_management::capture_app(
+                    &start,
+                    fixture.manager.runtime.app(),
+                )?;
+                let mut db = Connection::open_in_memory()?;
+                db.execute_batch("CREATE TABLE pending_probe(value INTEGER)")?;
+                let result = original.with_pending(|current| {
+                    if case == "missing_commit" {
+                        return Ok(());
+                    }
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO pending_probe VALUES(1)", [])?;
+                    if case == "before_commit" {
+                        fixture.port.now.store(105, SeqCst);
+                    }
+                    let committed = current.commit(tx);
+                    if case == "before_commit" {
+                        assert!(committed.is_err());
+                        return Ok(()); // Swallowing refusal cannot restore it.
+                    }
+                    committed?;
+                    if case == "after_commit" {
+                        fixture.port.now.store(105, SeqCst);
+                    }
+                    if case == "second_commit" {
+                        let tx = db.transaction()?;
+                        tx.execute("INSERT INTO pending_probe VALUES(2)", [])?;
+                        assert!(current.commit(tx).is_err());
+                    }
+                    Ok(())
+                });
+                assert!(result.is_err(), "{case}");
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM pending_probe", [], |r| r
+                        .get::<_, i64>(0))?,
+                    i64::from(matches!(case, "after_commit" | "second_commit"))
+                );
+                let entered = std::cell::Cell::new(false);
+                assert!(
+                    original
+                        .with_pending(|_| {
+                            entered.set(true);
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                assert!(!entered.get());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn original_binding_covers_the_complete_committed_management_context() -> Result<()> {
         let fixture = Fixture::new(false)?;
         effects::scope(fixture.port.clone(), || -> Result<()> {
@@ -1240,6 +1587,88 @@ mod tests {
                     .is_err()
                 );
             }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn pending_excludes_unknown_wrong_human_and_lost_original_before_sqlite_open() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        let view = effects::scope(fixture.port.clone(), || {
+            fixture
+                .manager
+                .capture("calendar", Action::Connect, &fixture.identity, 100)
+        })?;
+        let path = fixture.manager.runtime.db();
+        let retained = path.with_extension("retained.sqlite");
+        std::fs::rename(path, &retained)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let foreign = iap::Verified {
+                email: fixture.identity.email.clone(),
+                subject: "accounts.google.com:other".into(),
+            };
+            assert!(fixture.manager.pending(&view.id, &foreign, 100).is_err());
+            assert!(!path.exists(), "foreign lookup opened or created SQLite");
+            assert!(
+                fixture
+                    .manager
+                    .pending(&format!("{}x", view.id), &fixture.identity, 100)
+                    .is_err()
+            );
+            assert!(!path.exists(), "unknown lookup opened or created SQLite");
+            std::fs::rename(&retained, path)?;
+            assert_eq!(
+                fixture.manager.pending(&view.id, &fixture.identity, 100)?,
+                view,
+                "pure exclusions burned the rightful original"
+            );
+            Ok(())
+        })?;
+        crate::oauth::native_management::fixtures::restart(effects::Hooks::domain(
+            fixture.port.as_ref(),
+        ));
+        std::fs::rename(path, &retained)?;
+        effects::scope(fixture.port.clone(), || {
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            assert!(
+                !path.exists(),
+                "persisted rows restored an original before SQLite open"
+            );
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn pending_expiry_refuses_before_sqlite_open_and_cannot_rearm_after_rewind() -> Result<()> {
+        let fixture = Fixture::new(false)?;
+        effects::scope(fixture.port.clone(), || -> Result<()> {
+            let view =
+                fixture
+                    .manager
+                    .capture("calendar", Action::Connect, &fixture.identity, 100)?;
+            let path = fixture.manager.runtime.db();
+            std::fs::rename(path, path.with_extension("retained.sqlite"))?;
+            fixture.port.now.store(view.expires_at + 1, SeqCst);
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            assert!(!path.exists(), "expired original opened or created SQLite");
+            fixture.port.now.store(100, SeqCst);
+            assert!(
+                fixture
+                    .manager
+                    .pending(&view.id, &fixture.identity, 100)
+                    .is_err()
+            );
+            assert!(!path.exists(), "rewind restored a refused original");
             Ok(())
         })
     }
@@ -1467,6 +1896,18 @@ mod tests {
                     .manager
                     .capture("calendar", Action::Connect, &fixture.identity, 100)?;
             let proof = fixture.proof(&view, Digest::new(b"browser"))?;
+            let mut forged: Attestation = serde_json::from_value(serde_json::to_value(&proof)?)?;
+            forged.mac = "0".repeat(64);
+            assert!(
+                fixture
+                    .manager
+                    .authority
+                    .verify_management(&view, &forged, &fixture.identity, 102,)
+                    .is_err()
+            );
+            // The key retrieval is known, but this MAC is rejected. It cannot
+            // consume the rightful original before the valid confirmation.
+            fixture.manager.pending(&view.id, &fixture.identity, 102)?;
             let mut changed = view.clone();
             changed.action = Action::Disconnect;
             assert!(

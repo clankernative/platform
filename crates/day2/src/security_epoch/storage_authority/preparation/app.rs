@@ -64,7 +64,7 @@ impl<'stage, 'role> AppPreparedFile<'stage, 'role> {
         // file open, byte read or SQLite parsing; DATA cannot bypass this gate.
         let projection = offer.projection(stage, policy, store)?;
         stage.check_selection(policy, store, NativeRole::AppHost)?;
-        let acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+        let acquisition = stage.initial_first_holder_acquisition(store.max_lease_seconds)?;
         projection.validate_selection(policy, store)?;
         stage.check_selection(policy, store, NativeRole::AppHost)?;
         #[cfg(not(target_os = "linux"))]

@@ -2,6 +2,172 @@
 //! message pidfd, original file, P3 or first-holder owner is constructed here.
 
 use super::*;
+
+#[test]
+fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_signed() {
+    let (_, app, key) = fixture(NativeRole::AppHost);
+    let initial = Digest::new(b"one retained peer");
+    let ready_nonce = Digest::new(b"one controller ready");
+    let request = StoragePeerRequest {
+        purpose: StoragePeerPurpose::CurrentServing,
+        binding: Digest::new(b"actual consumer"),
+    };
+    let hello = signed(
+        &app,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(app.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            request: request.clone(),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: ready_nonce.clone(),
+        },
+    );
+    let encoded = serde_json::to_vec(&hello).unwrap();
+    let decoded = decode(&encoded).unwrap();
+    decoded.verify(&app).unwrap();
+    decoded
+        .current_hello(&initial, 1, &ready_nonce, None)
+        .unwrap();
+    decoded
+        .current_hello(&initial, 1, &ready_nonce, Some(&request))
+        .unwrap();
+    assert!(
+        decoded
+            .current_hello(&initial, 1, &Digest::new(b"other ready"), None)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello(&initial, 2, &ready_nonce, None)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .current_hello(&Digest::new(b"other original"), 1, &ready_nonce, None)
+            .is_err()
+    );
+    let foreign = StoragePeerRequest {
+        purpose: request.purpose,
+        binding: Digest::new(b"another consumer"),
+    };
+    assert!(
+        decoded
+            .current_hello(&initial, 1, &ready_nonce, Some(&foreign))
+            .is_err()
+    );
+    let bootstrap = StoragePeerRequest {
+        purpose: StoragePeerPurpose::BootstrapCreate,
+        binding: request.binding.clone(),
+    };
+    let wrong_purpose = signed(
+        &app,
+        &key,
+        Body::CurrentHello {
+            app: Box::new(app.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            request: bootstrap.clone(),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: ready_nonce.clone(),
+        },
+    );
+    wrong_purpose.verify(&app).unwrap();
+    assert!(
+        wrong_purpose
+            .current_hello(&initial, 1, &ready_nonce, None)
+            .is_err()
+    );
+    wrong_purpose
+        .current_hello(&initial, 1, &ready_nonce, Some(&bootstrap))
+        .unwrap();
+    let mut missing = serde_json::to_value(&hello).unwrap();
+    missing["body"]
+        .as_object_mut()
+        .unwrap()
+        .remove("controller_nonce");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+}
+
+#[test]
+fn current_begin_ready_cannot_be_replaced_by_a_later_grant_clock_or_nonce() {
+    let (_, controller, key, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    let nonce = Digest::new(b"one current ready");
+    let initial = Digest::new(b"original peer");
+    let ready = signed(
+        &controller,
+        &key,
+        Body::CurrentBeginReady {
+            controller: Box::new(controller.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            nonce: nonce.clone(),
+        },
+    );
+    let bytes = serde_json::to_vec(&ready).unwrap();
+    decode(&bytes).unwrap().verify(&controller).unwrap();
+    let exchange = CurrentExchange {
+        initial,
+        sequence: 1,
+        request: StoragePeerRequest {
+            purpose: StoragePeerPurpose::CurrentServing,
+            binding: Digest::new(b"consumer"),
+        },
+        app_stage: Digest::new(b"fresh app stage"),
+        controller_stage: controller.digest().unwrap(),
+        app_nonce: Digest::new(b"fresh app nonce"),
+        controller_nonce: nonce.clone(),
+    };
+    exchange
+        .require_begin_ready(&controller, &nonce, &controller)
+        .unwrap();
+    let mut replacement = controller.clone();
+    replacement.stage.data.challenge = Digest::new(b"later role grant");
+    replacement.stage.signature = issuer.sign("role-stage", &replacement.stage.data).unwrap();
+    assert!(replacement.same_enrollment(&controller));
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &nonce, &replacement)
+            .is_err()
+    );
+    let mut replacement = controller.clone();
+    replacement.original.origin_ns += 1;
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &nonce, &replacement)
+            .is_err()
+    );
+    assert!(
+        exchange
+            .require_begin_ready(&controller, &Digest::new(b"different ready"), &controller)
+            .is_err()
+    );
+    assert!(
+        controller
+            .require_new_grant(&controller.grant_digest().unwrap())
+            .is_err()
+    );
+    let original = serde_json::to_value(&ready).unwrap();
+    for path in [
+        "/body/controller",
+        "/body/controller/stage",
+        "/body/controller/original",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    for field in ["initial", "sequence", "nonce"] {
+        let mut changed = original.clone();
+        changed["body"].as_object_mut().unwrap().remove(field);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let duplicate = String::from_utf8(bytes)
+        .unwrap()
+        .replace("\"sequence\":1", "\"sequence\":1,\"sequence\":1");
+    assert!(decode(duplicate.as_bytes()).is_err());
+}
 use crate::security_epoch::{
     native_enrollment::{
         protocol::{IssuerData, KeyOwner, RuntimeBinding, StageData},
@@ -75,6 +241,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, K
         issuer: certificate.digest().unwrap(),
         policy: policy.digest().unwrap(),
         role,
+        purpose: StagePurpose::CurrentRole,
         public_key: key.public(),
         challenge: Digest::new(b"fixture-role-challenge"),
         request: Digest::new(b"fixture-role-request"),
@@ -138,6 +305,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
             NativeRole::AppHost,
             &stage.stage.data.process,
             now,
+            StagePurpose::CurrentRole,
         )
         .unwrap();
     for role in [NativeRole::EpochController, NativeRole::SecurityShell] {
@@ -148,7 +316,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     &stage.certificate,
                     role,
                     &stage.stage.data.process,
-                    now
+                    now,
+                    StagePurpose::CurrentRole,
                 )
                 .is_err()
         );
@@ -162,7 +331,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -175,7 +345,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &issuer,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -187,7 +358,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     &stage.certificate,
                     NativeRole::AppHost,
                     &stage.stage.data.process,
-                    time
+                    time,
+                    StagePurpose::CurrentRole,
                 )
                 .is_err()
         );
@@ -201,7 +373,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -214,7 +387,8 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 &stage.certificate,
                 NativeRole::AppHost,
                 &stage.stage.data.process,
-                now
+                now,
+                StagePurpose::CurrentRole,
             )
             .is_err()
     );
@@ -222,13 +396,14 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
 
 #[test]
 fn storage_messages_bind_original_stage_nonce_step_and_projection() {
-    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let (_policy, stage, key) = initial_fixture(NativeRole::AppHost);
     let hello = signed(
         &stage,
         &key,
         Body::Hello {
             app: Box::new(stage.clone()),
             nonce: Digest::new(b"app-nonce"),
+            controller_nonce: Digest::new(b"controller-ready-nonce"),
         },
     );
     hello.verify(&stage).unwrap();
@@ -267,6 +442,157 @@ fn storage_messages_bind_original_stage_nonce_step_and_projection() {
 }
 
 #[test]
+fn initial_ready_requires_a_controller_signature_and_closed_record_shape() {
+    let (_, controller, key) = initial_fixture(NativeRole::EpochController);
+    let (_, app, _) = initial_fixture(NativeRole::AppHost);
+    let ready = signed(
+        &controller,
+        &key,
+        Body::InitialReady {
+            controller: Box::new(controller.clone()),
+            nonce: Digest::new(b"one ready nonce"),
+        },
+    );
+    let encoded = serde_json::to_vec(&ready).unwrap();
+    decode(&encoded).unwrap().verify(&controller).unwrap();
+    assert!(decode(&encoded).unwrap().verify(&app).is_err());
+    let original = serde_json::to_value(&ready).unwrap();
+    for path in [
+        "/body/controller",
+        "/body/controller/stage",
+        "/body/controller/original",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    for replacement in [serde_json::Value::Null, serde_json::json!([])] {
+        let mut changed = original.clone();
+        changed["body"]["nonce"] = replacement;
+        assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    let mut changed = original.clone();
+    changed["body"].as_object_mut().unwrap().remove("nonce");
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    let mut changed = original.clone();
+    changed["body"]["unknown"] = serde_json::json!(true);
+    assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    let mut changed = original;
+    changed["body"]["nonce"] = serde_json::to_value(Digest::new(b"tampered ready")).unwrap();
+    assert!(
+        decode(&serde_json::to_vec(&changed).unwrap())
+            .unwrap()
+            .verify(&controller)
+            .is_err()
+    );
+    let duplicate = String::from_utf8(encoded).unwrap().replace(
+        "\"step\":\"initial_ready\"",
+        &format!(
+            "\"step\":\"initial_ready\",\"nonce\":{}",
+            serde_json::to_string(&Digest::new(b"duplicate")).unwrap()
+        ),
+    );
+    assert!(decode(duplicate.as_bytes()).is_err());
+}
+
+#[test]
+fn initial_hello_must_echo_the_ready_nonce_even_with_a_valid_app_signature() {
+    let (_, app, key) = initial_fixture(NativeRole::AppHost);
+    let nonce = Digest::new(b"controller ready");
+    let hello = signed(
+        &app,
+        &key,
+        Body::Hello {
+            app: Box::new(app.clone()),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: nonce.clone(),
+        },
+    );
+    let encoded = serde_json::to_vec(&hello).unwrap();
+    let decoded = decode(&encoded).unwrap();
+    decoded.verify(&app).unwrap();
+    let (selected, _) = decoded.initial_hello(&nonce).unwrap();
+    assert!(*selected == app);
+    assert!(
+        decoded
+            .initial_hello(&Digest::new(b"different ready"))
+            .is_err()
+    );
+    let wrong = signed(
+        &app,
+        &key,
+        Body::Hello {
+            app: Box::new(app.clone()),
+            nonce: Digest::new(b"app nonce"),
+            controller_nonce: Digest::new(b"other controller ready"),
+        },
+    );
+    wrong.verify(&app).unwrap();
+    assert!(wrong.initial_hello(&nonce).is_err());
+    let mut missing = serde_json::to_value(&hello).unwrap();
+    missing["body"]
+        .as_object_mut()
+        .unwrap()
+        .remove("controller_nonce");
+    assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+    let other = signed(
+        &app,
+        &key,
+        Body::Confirm {
+            exchange: Digest::new(b"not hello"),
+            projection: Digest::new(b"no projection"),
+        },
+    );
+    assert!(other.initial_hello(&nonce).is_err());
+}
+
+#[test]
+fn first_offer_cannot_replace_the_ready_stage_clock_or_nonce() {
+    let (_, ready, _, issuer) = initial_fixture_with_issuer(NativeRole::EpochController);
+    let nonce = Digest::new(b"controller ready nonce");
+    let exchange = Exchange {
+        app_stage: Digest::new(b"app stage"),
+        controller_stage: ready.digest().unwrap(),
+        app_nonce: Digest::new(b"app nonce"),
+        controller_nonce: nonce.clone(),
+        projection: Digest::new(b"initial image"),
+    };
+    exchange
+        .require_initial_ready(&ready, &nonce, &ready)
+        .unwrap();
+    let mut replacement = ready.clone();
+    replacement.stage.data.challenge = Digest::new(b"later issuer grant");
+    replacement.stage.signature = issuer.sign("role-stage", &replacement.stage.data).unwrap();
+    assert!(ready.same_enrollment(&replacement));
+    assert!(
+        exchange
+            .require_initial_ready(&ready, &nonce, &replacement)
+            .is_err()
+    );
+    let mut changed_clock = ready.clone();
+    changed_clock.original.origin_ns += 1;
+    assert!(
+        exchange
+            .require_initial_ready(&ready, &nonce, &changed_clock)
+            .is_err()
+    );
+    let mut changed = exchange.clone();
+    changed.controller_nonce = Digest::new(b"other ready nonce");
+    assert!(
+        changed
+            .require_initial_ready(&ready, &nonce, &ready)
+            .is_err()
+    );
+    let mut changed = exchange;
+    changed.controller_stage = replacement.digest().unwrap();
+    assert!(
+        changed
+            .require_initial_ready(&ready, &nonce, &ready)
+            .is_err()
+    );
+}
+
+#[test]
 fn transcript_changes_do_not_alias_another_exchange() {
     let exchange = Exchange {
         app_stage: Digest::new(b"app"),
@@ -291,13 +617,14 @@ fn transcript_changes_do_not_alias_another_exchange() {
 
 #[test]
 fn storage_wire_refuses_duplicate_unknown_array_and_oversized_records() {
-    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let (_policy, stage, key) = initial_fixture(NativeRole::AppHost);
     let hello = signed(
         &stage,
         &key,
         Body::Hello {
             app: Box::new(stage.clone()),
             nonce: Digest::new(b"nonce"),
+            controller_nonce: Digest::new(b"controller-ready-nonce"),
         },
     );
     let encoded = serde_json::to_vec(&hello).unwrap();
@@ -331,7 +658,7 @@ fn storage_wire_refuses_duplicate_unknown_array_and_oversized_records() {
 
 #[test]
 fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data() {
-    let (policy, controller, key) = fixture(NativeRole::EpochController);
+    let (policy, controller, key) = initial_fixture(NativeRole::EpochController);
     let now = Duration::from_secs(102);
     controller
         .validate_attested_controller(
@@ -339,6 +666,7 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
             &controller.certificate,
             controller.stage.data.process.process,
             now,
+            StagePurpose::InitialFirstHolder,
         )
         .unwrap();
     assert!(
@@ -347,7 +675,8 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
                 &policy,
                 &controller.certificate,
                 controller.stage.data.process.process + 1,
-                now
+                now,
+                StagePurpose::InitialFirstHolder,
             )
             .is_err()
     );
@@ -359,13 +688,14 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
         },
     );
     complete.verify(&controller).unwrap();
-    let (policy, app, _key) = fixture(NativeRole::AppHost);
+    let (policy, app, _key) = initial_fixture(NativeRole::AppHost);
     assert!(
         app.validate_attested_controller(
             &policy,
             &app.certificate,
             app.stage.data.process.process,
-            now
+            now,
+            StagePurpose::InitialFirstHolder,
         )
         .is_err()
     );
@@ -409,7 +739,8 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             &old.certificate,
             NativeRole::AppHost,
             &old.stage.data.process,
-            now
+            now,
+            StagePurpose::CurrentRole,
         )
         .is_err()
     );
@@ -420,6 +751,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             NativeRole::AppHost,
             &old.stage.data.process,
             now,
+            StagePurpose::CurrentRole,
         )
         .unwrap();
     let hello = signed(
@@ -434,6 +766,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
                 binding: Digest::new(b"exact-request"),
             },
             nonce: Digest::new(b"fresh-app-nonce"),
+            controller_nonce: Digest::new(b"controller-ready"),
         },
     );
     hello.verify(&fresh).unwrap();
@@ -512,6 +845,7 @@ fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
                 binding: Digest::new(b"request"),
             },
             nonce: Digest::new(b"nonce"),
+            controller_nonce: Digest::new(b"controller-ready"),
         },
     );
     let encoded = serde_json::to_vec(&hello).unwrap();
@@ -577,7 +911,9 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
         ),
     ];
     for (body, kind, sender, key) in cases {
-        let mut message = signed(sender, key, body);
+        let message = signed(sender, key, body);
+        let encoded = serde_json::to_vec(&message).unwrap();
+        let mut message = decode(&encoded).unwrap();
         message.verify(sender).unwrap();
         assert!(message.body.matches_completion(&exchange, kind));
         assert!(!message.body.matches_completion(&foreign, kind));
@@ -594,6 +930,27 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
             );
             assert_eq!(message.body.matches_completion(&exchange, other), expected);
         }
+        for (field, value) in [
+            ("unexpected", serde_json::json!(true)),
+            ("exchange", serde_json::Value::Null),
+            ("step", serde_json::json!("current_unknown")),
+        ] {
+            let mut changed = serde_json::to_value(&message).unwrap();
+            changed["body"][field] = value;
+            assert!(decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let mut missing = serde_json::to_value(&message).unwrap();
+        missing["body"].as_object_mut().unwrap().remove("exchange");
+        assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());
+        let exchange_json = serde_json::to_string(&exchange).unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let duplicate = encoded.replacen(
+            &format!("\"exchange\":{exchange_json}"),
+            &format!("\"exchange\":{exchange_json},\"exchange\":{exchange_json}"),
+            1,
+        );
+        assert_ne!(duplicate, encoded);
+        assert!(decode(duplicate.as_bytes()).is_err());
         match &mut message.body {
             Body::CurrentResult { exchange }
             | Body::CurrentConsumed { exchange }
@@ -632,4 +989,171 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
         .verify(&controller)
         .is_err()
     );
+}
+
+fn initial_fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
+    let (policy, statement, key, _) = initial_fixture_with_issuer(role);
+    (policy, statement, key)
+}
+
+fn initial_fixture_with_issuer(
+    role: NativeRole,
+) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
+    let (policy, mut statement, key, issuer) = fixture_with_issuer(role);
+    statement.stage.data.purpose = StagePurpose::InitialFirstHolder;
+    statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+    (policy, statement, key, issuer)
+}
+
+#[test]
+fn initial_ten_second_grants_never_authorize_current_or_serving_work() {
+    use crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
+    use crate::security_epoch::native_enrollment::serving_peer_wire::Statement;
+    assert_eq!(StagePurpose::CurrentRole.limit(), Duration::from_secs(5));
+    assert_eq!(
+        StagePurpose::InitialFirstHolder.limit(),
+        INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
+    );
+    assert!(
+        StagePurpose::InitialFirstHolder
+            .require_role(NativeRole::SecurityShell)
+            .is_err()
+    );
+    for role in [NativeRole::AppHost, NativeRole::EpochController] {
+        let (policy, mut statement, _, issuer) = initial_fixture_with_issuer(role);
+        let deadline = Duration::from_nanos(statement.stage.data.origin_ns)
+            + INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
+        statement.stage.data.deadline_ns = deadline.as_nanos().try_into().unwrap();
+        statement.original.deadline_ns = statement.stage.data.deadline_ns;
+        statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+        let check = |statement: &StageStatement, now, purpose| {
+            statement.validate(
+                &policy,
+                &statement.certificate,
+                role,
+                &statement.stage.data.process,
+                now,
+                purpose,
+            )
+        };
+        check(
+            &statement,
+            Duration::from_millis(106_300),
+            StagePurpose::InitialFirstHolder,
+        )
+        .unwrap();
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(110),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(99),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &statement,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        let serving = Statement {
+            certificate: statement.certificate.clone(),
+            stage: statement.stage.clone(),
+            original: statement.original.clone(),
+        };
+        assert!(
+            serving
+                .validate(
+                    &policy,
+                    &statement.certificate,
+                    role,
+                    statement.stage.data.process.process,
+                    Some(&statement.stage.data.process),
+                    Duration::from_secs(102)
+                )
+                .is_err()
+        );
+        // Even a correctly signed CurrentRole cannot acquire a ten-second span.
+        let mut ordinary = statement.clone();
+        ordinary.stage.data.purpose = StagePurpose::CurrentRole;
+        ordinary.stage.signature = issuer.sign("role-stage", &ordinary.stage.data).unwrap();
+        assert!(
+            check(
+                &ordinary,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        let mut over = statement.clone();
+        over.stage.data.deadline_ns += 1;
+        over.original.deadline_ns += 1;
+        over.stage.signature = issuer.sign("role-stage", &over.stage.data).unwrap();
+        assert!(
+            check(
+                &over,
+                Duration::from_secs(102),
+                StagePurpose::InitialFirstHolder
+            )
+            .is_err()
+        );
+        let mut changed = statement.clone();
+        changed.stage.data.purpose = StagePurpose::CurrentRole;
+        changed.stage.data.deadline_ns = 105_000_000_000;
+        changed.original.deadline_ns = 105_000_000_000;
+        assert!(
+            check(
+                &changed,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole
+            )
+            .is_err()
+        );
+        // A short initial grant still cannot be replayed as ordinary authority.
+        let mut short = statement.clone();
+        short.stage.data.deadline_ns = 105_000_000_000;
+        short.original.deadline_ns = 105_000_000_000;
+        short.stage.signature = issuer.sign("role-stage", &short.stage.data).unwrap();
+        check(
+            &short,
+            Duration::from_secs(102),
+            StagePurpose::InitialFirstHolder,
+        )
+        .unwrap();
+        assert!(check(&short, Duration::from_secs(102), StagePurpose::CurrentRole).is_err());
+    }
+}
+
+#[test]
+fn signed_storage_messages_cannot_cross_initial_and_current_purposes() {
+    let (_, initial, key) = initial_fixture(NativeRole::AppHost);
+    let message = signed(
+        &initial,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"current"),
+        },
+    );
+    assert!(message.verify(&initial).is_err());
+    let (_, current, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &current,
+        &key,
+        Body::Hello {
+            app: Box::new(current.clone()),
+            nonce: Digest::new(b"app"),
+            controller_nonce: Digest::new(b"controller"),
+        },
+    );
+    assert!(message.verify(&current).is_err());
 }

@@ -23,11 +23,27 @@ use day2_capabilities::Digest;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Disposition {
     Ready(u64),
+    Pending(u64),
     Busy(u64),
     Refused,
 }
 
 impl Disposition {
+    fn notify(&mut self) -> Result<u64> {
+        let sequence = self.begin()?;
+        *self = Self::Pending(sequence);
+        Ok(sequence)
+    }
+
+    fn begin_notified(&mut self, sequence: u64) -> Result<()> {
+        if *self != Self::Pending(sequence) {
+            self.refuse();
+            anyhow::bail!("storage_peer_notification_changed_or_spent");
+        }
+        *self = Self::Busy(sequence);
+        Ok(())
+    }
+
     fn begin(&mut self) -> Result<u64> {
         let Self::Ready(previous) = *self else {
             anyhow::bail!("storage_peer_continuation_busy_or_refused");
@@ -80,6 +96,30 @@ pub(crate) struct AppHolderPeerContinuity {
 
 pub(crate) struct ControllerHolderPeerContinuity {
     owner: RetainedPeer,
+}
+
+/// A single sent wakeup and the same retained peer. No role, clock, file or
+/// action permission is live while this waits for signed readiness DATA.
+pub(crate) struct PendingAppCurrentPeer<'peer> {
+    owner: &'peer mut RetainedPeer,
+    sequence: u64,
+}
+
+/// Queued notification DATA only. The actual retained peer, fresh role and
+/// original Ready transcript must still be joined before any current phase.
+pub(crate) struct QueuedAppCurrentPeer {
+    initial: Digest,
+    sequence: u64,
+}
+
+/// The actual Controller stage and channel stay bound to this readiness
+/// transcript while its caller acquires the physical/provider phase.
+pub(crate) struct ControllerCurrentRendezvous<'peer> {
+    owner: &'peer mut RetainedPeer,
+    acquisition: NativeAcquisition,
+    local: StageStatement,
+    sequence: u64,
+    nonce: Digest,
 }
 
 /// Identity/channel phase only. This owns no active file, P3, epoch, writer,
@@ -179,6 +219,15 @@ impl RetainedPeer {
         // Close before ANY fallible current work. No destructor, timeout or
         // later role can rearm an abandoned/unknown exchange.
         let sequence = self.disposition.begin()?;
+        self.start_phase(stage, role, sequence)
+    }
+
+    fn start_phase(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        role: NativeRole,
+        sequence: u64,
+    ) -> Result<(NativeAcquisition, StageStatement, u64)> {
         self.same.check(stage)?;
         ensure!(
             self.local.stage.data.role == role,
@@ -234,12 +283,86 @@ impl AppHolderPeerContinuity {
         self.owner.disposition.refuse();
     }
 
+    pub(crate) fn notify_current(&mut self) -> Result<PendingAppCurrentPeer<'_>> {
+        let sequence = self.owner.disposition.notify()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.refuse();
+            let _ = sequence;
+            anyhow::bail!("storage_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) = self.owner.channel.notify_idle(
+                super::super::peer_idle::PeerChannel::Storage,
+                &self.owner.initial,
+                sequence,
+            ) {
+                self.refuse();
+                return Err(error);
+            }
+            Ok(PendingAppCurrentPeer {
+                owner: &mut self.owner,
+                sequence,
+            })
+        }
+    }
+
     pub(crate) fn begin_current<'peer>(
         &'peer mut self,
+        queued: QueuedAppCurrentPeer,
         stage: &mut EnrolledRoleStage<'_>,
         request: StoragePeerRequest,
     ) -> Result<CurrentStoragePeerPhase<'peer>> {
-        let (acquisition, local, sequence) = self.owner.start(stage, NativeRole::AppHost)?;
+        if queued.initial != self.owner.initial {
+            self.refuse();
+            anyhow::bail!("storage_peer_notification_original_changed");
+        }
+        PendingAppCurrentPeer {
+            owner: &mut self.owner,
+            sequence: queued.sequence,
+        }
+        .begin_current(stage, request)
+    }
+}
+
+impl<'peer> PendingAppCurrentPeer<'peer> {
+    pub(crate) fn wait(mut self) -> Result<QueuedAppCurrentPeer> {
+        while !self.idle_ready()? {
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        Ok(QueuedAppCurrentPeer {
+            initial: self.owner.initial.clone(),
+            sequence: self.sequence,
+        })
+    }
+
+    pub(crate) fn idle_ready(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(
+                self.owner.disposition == Disposition::Pending(self.sequence),
+                "storage_peer_notification_changed_or_spent"
+            );
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            self.owner.channel.storage_pending()
+        })();
+        if result.is_err() {
+            self.owner.disposition.refuse();
+        }
+        result
+    }
+
+    pub(crate) fn begin_current(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        request: StoragePeerRequest,
+    ) -> Result<CurrentStoragePeerPhase<'peer>> {
+        self.owner.disposition.begin_notified(self.sequence)?;
+        let (acquisition, local, sequence) =
+            self.owner
+                .start_phase(stage, NativeRole::AppHost, self.sequence)?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (acquisition, local, sequence, request);
@@ -248,6 +371,27 @@ impl AppHolderPeerContinuity {
         #[cfg(target_os = "linux")]
         {
             let mut acquisition = acquisition;
+            let (ready, process) = self
+                .owner
+                .channel
+                .receive_storage(stage, &mut acquisition)?;
+            let (remote, controller_nonce) = match &ready.body {
+                Body::CurrentBeginReady {
+                    controller,
+                    initial,
+                    sequence: selected,
+                    nonce,
+                } if *initial == self.owner.initial && *selected == sequence => {
+                    (controller.as_ref().clone(), nonce.clone())
+                }
+                _ => anyhow::bail!("storage_peer_current_begin_ready_changed"),
+            };
+            ensure!(
+                self.owner.peer.statement().same_enrollment(&remote),
+                "storage_peer_remote_enrollment_changed"
+            );
+            remote.require_new_grant(&self.owner.last_remote_grant)?;
+            let mut peer = Peer::authenticate(&ready, remote, process, stage, &mut acquisition)?;
             let nonce = protocol::nonce("current-storage-peer-app")?;
             self.owner.check_resources(stage, &mut acquisition)?;
             let hello = stage.sign_storage_message(Body::CurrentHello {
@@ -256,6 +400,7 @@ impl AppHolderPeerContinuity {
                 sequence,
                 request: request.clone(),
                 nonce: nonce.clone(),
+                controller_nonce: controller_nonce.clone(),
             })?;
             self.owner
                 .channel
@@ -276,8 +421,8 @@ impl AppHolderPeerContinuity {
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
             );
-            remote.require_new_grant(&self.owner.last_remote_grant)?;
-            let mut peer = Peer::authenticate(&offer, remote, process, stage, &mut acquisition)?;
+            exchange.require_begin_ready(peer.statement(), &controller_nonce, &remote)?;
+            peer.accept_message(&offer, process, stage, &mut acquisition)?;
             ensure!(
                 exchange.initial == self.owner.initial
                     && exchange.sequence == sequence
@@ -309,7 +454,7 @@ impl AppHolderPeerContinuity {
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
                 remote_grant: peer.statement().grant_digest()?,
-                owner: &mut self.owner,
+                owner: self.owner,
                 acquisition,
                 local,
                 exchange,
@@ -375,28 +520,67 @@ impl ControllerHolderPeerContinuity {
         result
     }
 
-    pub(in crate::security_epoch) fn accept_serving_current<'peer>(
-        &'peer mut self,
+    pub(crate) fn prepare_current(
+        &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-    ) -> Result<CurrentStoragePeerPhase<'peer>> {
-        self.accept_selected_current(stage, None)
+    ) -> Result<ControllerCurrentRendezvous<'_>> {
+        let (acquisition, local, sequence) =
+            self.owner.start(stage, NativeRole::EpochController)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (acquisition, local, sequence);
+            anyhow::bail!("storage_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut acquisition = acquisition;
+            self.owner.channel.receive_idle(
+                super::super::peer_idle::PeerChannel::Storage,
+                &self.owner.initial,
+                sequence,
+                &mut acquisition,
+            )?;
+            self.owner.check_resources(stage, &mut acquisition)?;
+            let nonce = protocol::nonce("current-storage-peer-controller")?;
+            let ready = stage.sign_storage_message(Body::CurrentBeginReady {
+                controller: Box::new(local.clone()),
+                initial: self.owner.initial.clone(),
+                sequence,
+                nonce: nonce.clone(),
+            })?;
+            self.owner
+                .channel
+                .send_storage(&ready, stage, &mut acquisition)?;
+            self.owner.check_resources(stage, &mut acquisition)?;
+            Ok(ControllerCurrentRendezvous {
+                owner: &mut self.owner,
+                acquisition,
+                local,
+                sequence,
+                nonce,
+            })
+        }
     }
+}
 
-    pub(crate) fn accept_current<'peer>(
-        &'peer mut self,
-        stage: &mut EnrolledRoleStage<'_>,
-        expected: &StoragePeerRequest,
-    ) -> Result<CurrentStoragePeerPhase<'peer>> {
-        self.accept_selected_current(stage, Some(expected))
-    }
-
-    fn accept_selected_current<'peer>(
-        &'peer mut self,
+impl<'peer> ControllerCurrentRendezvous<'peer> {
+    pub(crate) fn accept_current(
+        self,
         stage: &mut EnrolledRoleStage<'_>,
         expected: Option<&StoragePeerRequest>,
     ) -> Result<CurrentStoragePeerPhase<'peer>> {
-        let (acquisition, local, sequence) =
-            self.owner.start(stage, NativeRole::EpochController)?;
+        self.owner.disposition.check(self.sequence)?;
+        // Keep exactly the already-spent Ready acquisition. A different
+        // actual stage cannot satisfy the original-origin and statement checks.
+        let mut acquisition = self.acquisition;
+        self.owner.check_resources(stage, &mut acquisition)?;
+        let local = self.local;
+        let sequence = self.sequence;
+        ensure!(
+            local == stage.storage_statement()?,
+            "storage_peer_current_ready_stage_changed"
+        );
+        stage.check_storage_acquisition(&mut acquisition)?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (acquisition, local, sequence, expected);
@@ -404,33 +588,13 @@ impl ControllerHolderPeerContinuity {
         }
         #[cfg(target_os = "linux")]
         {
-            let mut acquisition = acquisition;
             let (hello, process) = self
                 .owner
                 .channel
                 .receive_storage(stage, &mut acquisition)?;
-            let (remote, nonce, request) = match &hello.body {
-                Body::CurrentHello {
-                    app,
-                    initial,
-                    sequence: selected,
-                    request,
-                    nonce,
-                } => {
-                    ensure!(
-                        *initial == self.owner.initial
-                            && *selected == sequence
-                            && expected.map_or_else(
-                                || request.purpose
-                                    == super::super::StoragePeerPurpose::CurrentServing,
-                                |expected| request == expected
-                            ),
-                        "storage_peer_current_request_changed"
-                    );
-                    (app.as_ref().clone(), nonce.clone(), request.clone())
-                }
-                _ => anyhow::bail!("storage_peer_expected_current_hello"),
-            };
+            let (remote, nonce, request) =
+                hello.current_hello(&self.owner.initial, sequence, &self.nonce, expected)?;
+            let (remote, nonce, request) = (remote.clone(), nonce.clone(), request.clone());
             ensure!(
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
@@ -444,7 +608,7 @@ impl ControllerHolderPeerContinuity {
                 app_stage: peer.statement().digest()?,
                 controller_stage: local.digest()?,
                 app_nonce: nonce,
-                controller_nonce: protocol::nonce("current-storage-peer-controller")?,
+                controller_nonce: self.nonce,
             };
             self.owner.check_resources(stage, &mut acquisition)?;
             peer.check(stage, &mut acquisition)?;
@@ -475,7 +639,7 @@ impl ControllerHolderPeerContinuity {
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
                 remote_grant: peer.statement().grant_digest()?,
-                owner: &mut self.owner,
+                owner: self.owner,
                 acquisition,
                 local,
                 exchange,
@@ -687,6 +851,40 @@ impl CurrentStoragePeerPhase<'_> {
 #[cfg(test)]
 mod disposition_tests {
     use super::Disposition;
+
+    #[test]
+    fn notification_is_not_a_phase_and_only_its_exact_sequence_can_begin() {
+        let mut state = Disposition::Ready(0);
+        assert_eq!(state.notify().unwrap(), 1);
+        assert_eq!(state, Disposition::Pending(1));
+        assert!(state.complete(1).is_err());
+        assert!(state.begin().is_err());
+        assert_eq!(state, Disposition::Pending(1));
+        state.begin_notified(1).unwrap();
+        state.check(1).unwrap();
+        assert!(state.begin_notified(1).is_err());
+        assert_eq!(state, Disposition::Refused);
+        assert!(state.complete(1).is_err());
+
+        let mut changed = Disposition::Ready(7);
+        assert_eq!(changed.notify().unwrap(), 8);
+        assert!(changed.begin_notified(7).is_err());
+        assert_eq!(changed, Disposition::Refused);
+        assert!(changed.begin_notified(8).is_err());
+    }
+
+    #[test]
+    fn only_known_current_completion_allows_a_later_notification() {
+        let mut state = Disposition::Ready(0);
+        state.notify().unwrap();
+        state.begin_notified(1).unwrap();
+        state.complete(1).unwrap();
+        assert_eq!(state.notify().unwrap(), 2);
+        assert!(state.complete(1).is_err());
+        state.refuse();
+        assert!(state.begin_notified(2).is_err());
+        assert!(state.notify().is_err());
+    }
 
     #[test]
     fn unknown_or_abandoned_phase_never_reopens_from_time_or_another_begin() {

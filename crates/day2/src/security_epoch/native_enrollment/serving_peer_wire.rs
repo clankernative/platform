@@ -3,7 +3,7 @@
 use super::{
     NativeRole,
     policy::{EnrollmentPolicy, decode_key},
-    protocol::{self, IssuerCertificate, ProcessData, SignedStage},
+    protocol::{self, IssuerCertificate, ProcessData, SignedStage, StagePurpose},
     storage_peer_wire::OriginalInterval,
 };
 use anyhow::{Result, ensure};
@@ -72,6 +72,7 @@ impl Statement {
                 && self.stage.data.issuer == issuer.digest()?
                 && self.stage.data.policy == policy.digest()?
                 && self.stage.data.role == role
+                && self.stage.data.purpose == StagePurpose::CurrentRole
                 && self.stage.data.process.process == pid
                 && self.stage.data.process.code == *policy.code(role)
                 && observed.is_none_or(|actual| self.stage.data.process == *actual),
@@ -88,7 +89,8 @@ impl Statement {
                 && self.original.origin_ns <= self.stage.data.origin_ns,
             "serving_peer_signed_interval"
         );
-        self.original.validate(now, self.stage.data.deadline_ns)?;
+        self.original
+            .validate(now, self.stage.data.deadline_ns, StagePurpose::CurrentRole)?;
         protocol::verify(
             &issuer.data.public_key,
             "role-stage",
@@ -111,6 +113,21 @@ pub(super) struct Exchange {
 }
 
 impl Exchange {
+    pub(super) fn require_begin_ready(
+        &self,
+        ready: &Statement,
+        nonce: &Digest,
+        offered: &Statement,
+    ) -> Result<()> {
+        ensure!(
+            offered == ready
+                && self.controller_stage == ready.digest()?
+                && self.controller_nonce == *nonce,
+            "serving_peer_ready_statement_or_nonce_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn digest(&self) -> Result<Digest> {
         ensure!(
             (self.sequence == 0 && self.initial.is_none() && self.binding.is_none())
@@ -124,9 +141,20 @@ impl Exchange {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Body {
+    InitialBeginReady {
+        controller: Box<Statement>,
+        nonce: Digest,
+    },
+    CurrentBeginReady {
+        controller: Box<Statement>,
+        initial: Digest,
+        sequence: u64,
+        nonce: Digest,
+    },
     Hello {
         shell: Box<Statement>,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     Offer {
         controller: Box<Statement>,
@@ -144,6 +172,7 @@ pub(super) enum Body {
         sequence: u64,
         binding: Digest,
         nonce: Digest,
+        controller_nonce: Digest,
     },
     CurrentOffer {
         controller: Box<Statement>,
@@ -188,6 +217,34 @@ pub(super) struct Message {
 }
 
 impl Message {
+    pub(super) fn hello(
+        &self,
+        initial: Option<&Digest>,
+        sequence: u64,
+        controller_nonce: &Digest,
+    ) -> Result<(&Statement, &Digest, Option<&Digest>)> {
+        match &self.body {
+            Body::Hello {
+                shell,
+                nonce,
+                controller_nonce: echoed,
+            } if initial.is_none() && sequence == 0 && echoed == controller_nonce => {
+                Ok((shell, nonce, None))
+            }
+            Body::CurrentHello {
+                shell,
+                initial: selected,
+                sequence: number,
+                binding,
+                nonce,
+                controller_nonce: echoed,
+            } if Some(selected) == initial && *number == sequence && echoed == controller_nonce => {
+                Ok((shell, nonce, Some(binding)))
+            }
+            _ => anyhow::bail!("serving_peer_hello_order_or_sequence"),
+        }
+    }
+
     pub(super) fn verify(&self, statement: &Statement) -> Result<()> {
         ensure!(
             self.sender == statement.digest()? && self.body.role() == statement.stage.data.role,
@@ -215,6 +272,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Message> {
         .and_then(serde_json::Value::as_str)
     {
         Some("hello" | "current_hello") => stage_objects(&value, "/body/shell")?,
+        Some("initial_begin_ready" | "current_begin_ready") => {
+            stage_objects(&value, "/body/controller")?
+        }
         Some("offer" | "current_offer") => {
             stage_objects(&value, "/body/controller")?;
             object(&value, "/body/exchange")?;

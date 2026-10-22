@@ -28,10 +28,16 @@ run "registration_needs_only_identity_and_qualified_image" {
     condition = (
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].volume) == 0 &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount) == 0 &&
+      alltrue([
+        for mount in kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].container[0].volume_mount :
+        mount.mount_path != "/run/day2-native-enrollment-reference"
+      ]) &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].node_selector) == 0 &&
       length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].toleration) == 0 &&
       !contains(keys(kubernetes_deployment_v1.controller.spec[0].template[0].metadata[0].annotations), "day2.dev/native-inputs") &&
-      !kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].automount_service_account_token
+      !kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].automount_service_account_token &&
+      length(kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].supplemental_groups) == 0 &&
+      kubernetes_deployment_v1.controller.spec[0].template[0].spec[0].security_context[0].fs_group == null
     )
     error_message = "Dormant registration must contain no native inputs, node pin, mounts or projected credentials."
   }
@@ -47,6 +53,7 @@ run "activation_cannot_omit_native_inputs" {
     var.storage_json,
     var.host_state_path,
     var.node_profile,
+    var.disk_device_group_id,
   ]
 }
 
@@ -54,4 +61,10 @@ run "dormant_registration_still_requires_qualified_image" {
   command = plan
   variables { image = "registry.example.com/day2/calendar:latest" }
   expect_failures = [var.image]
+}
+
+run "registration_refuses_a_disk_group_grant" {
+  command = plan
+  variables { disk_device_group_id = 6 }
+  expect_failures = [var.disk_device_group_id]
 }

@@ -78,18 +78,74 @@ fn wrong_selected_schema_cannot_prepare_a_layout_or_renew_the_acquisition() {
 }
 
 #[test]
-fn failed_layout_artifact_admission_refuses_the_original_acquisition() {
-    let (directory, selection, _plan, _interval) = layout();
+fn missing_current_instance_refuses_pre_admitted_metadata_and_original_acquisition() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(directory.path().join("instance.json")).unwrap();
     let mut interval = acquisition();
-    assert!(
-        ReviewedFileLayout::prepare(
-            &directory.path().join("instance.json"),
-            &selection,
-            &mut interval
-        )
-        .is_err()
-    );
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut interval).is_err());
     assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
+}
+
+#[test]
+fn changed_current_instance_refuses_pre_admitted_metadata_without_persistent_state() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    let path = directory.path().join("instance.json");
+    let mut changed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    changed["apps"]["calendar"]["writers"] = serde_json::json!(["changed@example.com"]);
+    std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    let mut interval = acquisition();
+    let error = ReviewedFileLayout::prepare(&runtime, &selection, &mut interval)
+        .err()
+        .unwrap();
+    assert!(error.downcast_ref::<crate::error::Failure>().is_some());
+    assert!(interval.remaining().is_err());
+    assert!(!directory.path().join(".state").exists());
+}
+
+#[test]
+fn pre_admitted_metadata_keeps_the_original_budget_and_cannot_clear_refusal() {
+    let (directory, runtime) = image_fixture::runtime();
+    let store = epoch_fixture::selection();
+    let policy = image_fixture::policy(&runtime, &store);
+    let seed = OriginalSeedCore::new(&policy, &store, image_fixture::incarnations()).unwrap();
+    let selection = ReviewedStorageSelection::decode(
+        &serde_json::to_vec(&serde_json::json!({"policy":policy,"store":store,"seed":seed}))
+            .unwrap(),
+    )
+    .unwrap();
+    let mut original = acquisition();
+    let (origin, deadline) = original.interval_data().unwrap();
+    ReviewedFileLayout::prepare(&runtime, &selection, &mut original).unwrap();
+    assert_eq!(original.interval_data().unwrap(), (origin, deadline));
+    original.refuse();
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut original).is_err());
+    assert!(original.remaining().is_err());
+    let mut expired = NativeAcquisition::fixture(
+        Digest::new(b"expired-pre-admitted-metadata"),
+        std::process::id(),
+        Duration::from_secs(100),
+        Duration::ZERO,
+    );
+    assert!(ReviewedFileLayout::prepare(&runtime, &selection, &mut expired).is_err());
+    assert!(expired.remaining().is_err());
     assert!(!directory.path().join(".state").exists());
 }
 
@@ -275,6 +331,103 @@ mod linux {
             interval,
         )
         .unwrap()
+    }
+
+    fn multi_batch_layout() -> (
+        tempfile::TempDir,
+        ReviewedStorageSelection,
+        ReviewedFileLayout,
+        NativeAcquisition,
+    ) {
+        let (directory, selection, mut plan, interval) = layout();
+        image_fixture::reserve_empty_fixture_pages(
+            &mut plan.image,
+            2 * INITIAL_IO_CHUNK_BYTES + 17,
+        );
+        plan.proposal.image = Digest::new(plan.image.bytes());
+        plan.proposal.length = plan.image.bytes().len();
+        assert!(plan.proposal.length > 2 * INITIAL_IO_CHUNK_BYTES);
+        assert!(plan.proposal.length < 3 * INITIAL_IO_CHUNK_BYTES);
+        (directory, selection, plan, interval)
+    }
+
+    #[test]
+    fn multiple_initial_batches_preserve_complete_image_and_latch_tail_tampering() {
+        let (directory, selected, plan, mut interval) = multi_batch_layout();
+        let auth = authority(&directory, selected, &mut interval);
+        let NativeOriginalPreparationOutcome::Prepared(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("multi-batch local filesystem fixture failed");
+        };
+        assert_eq!(
+            std::fs::read(directory.path().join(INITIAL_FILE)).unwrap(),
+            plan.image.bytes()
+        );
+        let db = rusqlite::Connection::open_with_flags(
+            directory.path().join(INITIAL_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(db);
+        owner
+            .check_unchanged_initial_file(&plan, &mut interval)
+            .unwrap();
+        let offset = INITIAL_IO_CHUNK_BYTES + 7;
+        let byte = plan.image.bytes()[offset];
+        owner.file.write_all_at(&[byte ^ 1], offset as u64).unwrap();
+        assert_eq!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut interval)
+                .unwrap_err()
+                .to_string(),
+            "original_file_continuity_bytes"
+        );
+        owner.file.write_all_at(&[byte], offset as u64).unwrap();
+        assert!(
+            owner
+                .check_unchanged_initial_file(&plan, &mut acquisition())
+                .is_err()
+        );
+        assert!(interval.remaining().is_err());
+        assert_eq!(owner.file.metadata().unwrap().ino(), owner.identity.inode);
+    }
+
+    #[test]
+    fn a_refused_first_initial_batch_never_writes_the_remaining_image_or_resumes() {
+        let (directory, selected, mut plan, mut interval) = multi_batch_layout();
+        let auth = authority(&directory, selected, &mut interval);
+        plan.fixture_refusal = Some(PreparationPhase::Write);
+        let NativeOriginalPreparationOutcome::RefusedAfterAttempt(mut owner) =
+            prepare_original_file(auth, &plan, &mut interval)
+        else {
+            panic!("first-batch error did not retain the refused original");
+        };
+        let file = owner.file.as_ref().unwrap();
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            INITIAL_IO_CHUNK_BYTES as u64
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(INITIAL_FILE)).unwrap(),
+            &plan.image.bytes()[..INITIAL_IO_CHUNK_BYTES]
+        );
+        assert!(owner.authority.check_current(&mut acquisition()).is_err());
+        assert!(interval.remaining().is_err());
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            INITIAL_IO_CHUNK_BYTES as u64
+        );
     }
 
     #[test]

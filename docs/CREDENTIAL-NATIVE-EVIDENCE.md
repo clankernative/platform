@@ -83,3 +83,113 @@ current epoch authority. Actual current checks remain mandatory at security
 consumers. Conditional PD/ext4 durability and accepted provider/governance trust
 limits remain unchanged. The S1 supplier qualification, actual App/Shell consumer
 settlement and end-to-end Google campaign remain separately required.
+
+### Preparation refusal details
+
+A refusal at `preparation` or `holder_listener` additionally exports a closed `preparation` record:
+`{"step":"claim_binding","category":"permission_denied"}` is an example.
+The step is the innermost annotated actual boundary, including its existing
+pre/post checks; it does not establish that a request was sent or a filesystem
+operation completed. It distinguishes the role-stage acquisition, selected
+profile/CA/credentials, fixed provider joins, block/mount checks, private-directory
+creation, memory-image admission and original-file preparation/retention.
+At `holder_listener`, fixed `holder_*` steps separately identify acquisition of
+the next role, current-file phase, owner capture, projection, interval narrowing,
+transport binding and final checks. An existing more specific inner boundary
+retains precedence. Thus a later listener failure does not relabel a completed
+original preparation, and a missing historical category must not be inferred.
+Desired instance/artifact admission runs before enrollment, so a preparation
+refusal there can have no Controller incarnation or preceding `enrolled` event.
+That admission is DATA only; no native acquisition, original seed or file owner
+exists yet. Native image initialization and file retention still use the same
+original bounded phase. The ordering does not assert a latency cause or a later
+successful preparation.
+
+When available, `progress` contains fixed optional `acquired_us`, `image_us`,
+`prepared_us` and `last_checked_us` fields. Each copies cumulative microseconds
+from an already successful sample of the same original acquisition. Recording
+them reads no clock and changes no validity flag or deadline. A failed or expired
+sample is not included, so the values are not exact boundary times, operation
+durations or current remaining time. Missing values stay absent. Retention can
+identify `original_retention_before`, `original_retention_owner` or
+`original_retention_after`, while preserving any more specific inner boundary.
+The progress is emitted only with the existing refusal after unwinding; there is
+no extra in-phase log I/O or successful-preparation receipt.
+
+Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
+transport unavailable, response status or bound, admission rejected, known OS
+error categories, or `other`. The combined response category does not reveal or
+prove a particular HTTP status; transport unavailability does not itself prove
+a timeout. Unknown causes are never formatted or exported. The original error
+and existing refusal remain intact internally. The same twelve-record and
+2,048-byte record ceilings apply; no request, check, deadline, retry, adoption or
+permission is added. These details diagnose a stopped attempt only; they are
+neither authority nor a successful preparation receipt.
+
+The fixed Compute instance GET requests only
+`id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
+[partial-response fields parameter](https://docs.cloud.google.com/compute/docs/api/how-tos/performance).
+Every attachment remains present for the unchanged complete-list, ambiguity,
+32-attachment and read/write joins. The 65,536-byte response ceiling, exact
+resource selection, authenticated transport and original acquisition are
+unchanged. This avoids unrelated instance metadata; it does not filter disks,
+truncate a response, retry a failed read or establish the cause of a prior
+refusal.
+## Preparation timing diagnosis
+
+`day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
+one-process diagnostic for the actual enrolled Controller. It performs the
+ordinary artifact/instance admission, role-stage exchange and selected provider,
+device and mount acquisition, followed by exactly sixteen current-volume checks
+under that same original interval. It returns unconditionally before seed,
+private-directory, initial-file, first-holder, bootstrap or serving construction.
+It never opens the existing native SQLite file or writes provider/control state.
+Run it only with the actual source/image/profile bindings and preserve any first
+refusal. It is not permission to retry a failed original. After either outcome
+all role/storage owners have dropped and the command remains ownerless for a
+fixed five-minute hold, without another observation, provider call or listener.
+For this operator-only Deployment run, disable liveness/startup probes, keep
+readiness failing and stop/scale it to zero before that hold ends. There is no
+once-across-restarts or hard OS scheduling guarantee; forced replacement or
+letting the hold expire can cause Kubernetes to start another process.
+
+Its `preparation_read_only_observed` record contains `completed` and `timing`.
+Completion means the fixed read-only calls returned, not readiness or a current
+permission. A failed read-only run instead emits the ordinary single refusal
+with its original boundary and timing. An export failure remains terminal and
+does not replace an earlier native error. The ordinary executor instead caches
+the same preparation summary into its existing first-holder or first refusal
+record (including a later listener/holder refusal). The twelve-record and 2048-byte bounds remain unchanged; logging
+does not run inside the measured original phase.
+
+Each timing row is `[fixed_operation, [calls, total_us, max_us]]`. Durations come
+from separate diagnostic Linux boot-clock reads, never from cached successful
+authority samples. They are **inclusive**: for example `volume_acquisition`
+contains its network and `native_check` rows, and `original_file` contains its
+read/write/sync/check rows. Do not add nested rows together. Missing, rewound or
+overflowed measurements are `null`, never zero or success. Measurement overhead
+spends the original deadline; no diagnostic value feeds an acquisition, issuer,
+budget, retry or renewal. Later serving phases disable collection. The final
+retention guard is deliberately not wrapped in an ending clock read: it remains
+the last I/O before the infallible owner transfer.
+
+On 2026-10-21, separate native Rust controls ran ten times on the selected
+oauthcalendar node and retained disk, with its actual Controller KSA for metadata
+reads. The complete eleven-request metadata sequence measured 600–1170 ms
+(median 727 ms); the Firestore **database metadata GET** measured 39–237 ms.
+Synthetic 946176-byte scratch-file writes measured 0.49–0.78 ms, file fsync
+3.10–8.72 ms, directory fsync 0.002–0.003 ms, and readback/equality 0.36–1.04 ms.
+Only a process-created sibling scratch directory/files were changed and removed;
+the failed SQLite and native directory were not opened for contents or modified.
+Both disposable probes were removed. Parent-root metadata changed from scratch
+creation/removal. Pod creation to the CSI successful-attach event was eight
+seconds, using coarse Kubernetes timestamps including scheduling/CSI overhead;
+attachment preceded the timed file operations and is outside the original
+Controller's five-second preparation interval.
+
+These are infrastructure controls, not timings inside the failed Controller
+invocation or evidence that its bound is reliable. The original observed failure
+was 5.002 seconds from enrollment to refusal. Its role exchange, image preparation
+and nested native validation costs still require the source-bound Controller
+diagnostic; neither a passing scratch run nor original I/O batching proves a
+cause, a complete latency budget, or successful native preparation.

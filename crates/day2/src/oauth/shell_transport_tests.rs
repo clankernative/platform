@@ -2227,6 +2227,14 @@ mod owned_google {
                     self.wall_time()?,
                 )
             });
+            // Model the server's known local response completion separately
+            // from the caller losing that reply below. Actual partial/failed
+            // socket delivery is exercised by the native HTTP tests.
+            let completion = app_sink.finish();
+            if completion.is_err() {
+                app_sink.abort();
+            }
+            let result = completion.and(result);
             let reentry = {
                 let mut slot = self.reentry.lock().unwrap();
                 if matches!(&*slot, Some(Reentry::Manual { .. })) {

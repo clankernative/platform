@@ -363,9 +363,18 @@ impl VerifiedAuthTime {
         self.google.require_post_pending_authentication()
     }
 
-    pub(in crate::oauth) fn require_management_authentication(&self) -> Result<()> {
+    pub(in crate::oauth) fn require_management_authentication(
+        &self,
+        current: &mut super::native_management::Consumer<'_, '_, '_>,
+    ) -> Result<()> {
         self.google.intent().require_oauth_management()?;
-        self.google.require_post_pending_authentication()
+        self.google.require_management_authentication(current)
+    }
+
+    /// Observation DATA validation only; this cannot replace the consuming
+    /// native producer or authenticate a session/signature by itself.
+    pub(in crate::oauth) fn validate_management_observation(&self) -> Result<()> {
+        self.google.validate_management_observation()
     }
 
     pub(in crate::oauth) fn purpose(&self) -> FreshPurpose {

@@ -109,13 +109,15 @@ impl Shell {
         let view = self.pending(proof.attempt(), headers, identity, now)?;
         proof.require_intent(&FreshIntent::management(&view, identity)?, identity)?;
         proof.require_current(now)?;
-        proof.require_management_authentication()?;
+        proof.validate_management_observation()?;
         let intent = FreshIntent::management(&view, identity)?;
-        crate::oauth::native_management::with_current_original(
+        crate::oauth::native_management::with_consumer(
             &intent,
             crate::oauth::native_management::Phase::Session,
             now,
-            |role, original| {
+            |current| {
+                proof.require_management_authentication(current)?;
+                current.arm()?;
                 let token = effects::random()?;
                 let digest = Digest::new(token.as_bytes());
                 let session = Session {
@@ -134,13 +136,26 @@ impl Shell {
                     sessions.len() < 1024,
                     "OAuth management session capacity reached"
                 );
-                original.check(role)?;
+                current.check()?;
+                ensure!(
+                    !sessions.contains_key(digest.as_str()),
+                    "OAuth management session collision"
+                );
                 sessions.insert(digest.as_str().into(), session);
-                with_cookie(
-                    redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
-                    &token,
-                    view.expires_at - now,
-                )
+                // An expired/changed owner after insertion must not leave a
+                // usable session even if the response is never constructed.
+                let response = (|| {
+                    current.check()?;
+                    with_cookie(
+                        redirect(&format!("{}pending/{}", super::PREFIX, view.id)),
+                        &token,
+                        view.expires_at - now,
+                    )
+                })();
+                if response.is_err() {
+                    sessions.remove(digest.as_str());
+                }
+                response
             },
         )
     }

@@ -4,7 +4,8 @@
 
 mod continuation;
 pub(crate) use continuation::{
-    AppHolderPeerContinuity, ControllerHolderPeerContinuity, CurrentStoragePeerPhase,
+    AppHolderPeerContinuity, ControllerCurrentRendezvous, ControllerHolderPeerContinuity,
+    CurrentStoragePeerPhase, PendingAppCurrentPeer, QueuedAppCurrentPeer,
 };
 
 #[cfg(target_os = "linux")]
@@ -14,6 +15,10 @@ use super::{
     channel::{Channel, StorageListener},
     protocol,
 };
+#[cfg(target_os = "linux")]
+use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
+#[cfg(target_os = "linux")]
+use crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::storage_peer_wire::Body;
 use crate::security_epoch::native_enrollment::storage_peer_wire::{Exchange, StageStatement};
@@ -36,12 +41,65 @@ pub(crate) struct InitialHolderListener {
     listener: StorageListener,
 }
 
+/// A completed same-owner connection, without a live old stage or permission.
+/// Readiness polling is DATA only; consuming it requires a fresh actual stage.
+pub(crate) struct InitialHolderConnection {
+    owner: SameEnrolledOwner,
+    setup_grant: day2_capabilities::Digest,
+    valid: bool,
+    #[cfg(target_os = "linux")]
+    channel: Channel,
+}
+
+/// Retains the exact accepted channel and original stage's narrowed interval
+/// after sending readiness. This alone supplies no file, holder or P3 proof.
+pub(crate) struct InitialHolderRendezvous {
+    owner: SameEnrolledOwner,
+    projection: PreparedFileProjection,
+    acquisition: NativeAcquisition,
+    local: StageStatement,
+    controller_nonce: day2_capabilities::Digest,
+    valid: bool,
+    #[cfg(target_os = "linux")]
+    channel: Channel,
+}
+
+// Completed transport DATA still owns real nontransferable resources. It is
+// not an application-serializable or clonable supplier for another executor.
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(InitialHolderConnection, Clone);
+    assert_not_impl!(InitialHolderConnection, Copy);
+    assert_not_impl!(InitialHolderConnection, Default);
+    assert_not_impl!(InitialHolderConnection, Send);
+    assert_not_impl!(InitialHolderConnection, Sync);
+    assert_not_impl!(InitialHolderConnection, serde::Serialize);
+    assert_not_impl!(InitialHolderConnection, serde::Deserialize<'static>);
+    assert_not_impl!(InitialHolderRendezvous, Clone);
+    assert_not_impl!(InitialHolderRendezvous, Copy);
+    assert_not_impl!(InitialHolderRendezvous, Default);
+    assert_not_impl!(InitialHolderRendezvous, Send);
+    assert_not_impl!(InitialHolderRendezvous, Sync);
+    assert_not_impl!(InitialHolderRendezvous, serde::Serialize);
+    assert_not_impl!(InitialHolderRendezvous, serde::Deserialize<'static>);
+};
+
 pub(crate) struct InitialHolderServer<'file, 'role> {
     phase: CurrentPreparedFilePhase<'file, 'role>,
     acquisition: NativeAcquisition,
     local: StageStatement,
+    controller_nonce: day2_capabilities::Digest,
     #[cfg(target_os = "linux")]
-    listener: StorageListener,
+    channel: Channel,
 }
 
 /// The controller authenticates this offer BEFORE an App may open/parse the
@@ -80,6 +138,59 @@ pub(crate) struct AuthenticatedControllerFirstHolder<'file, 'role> {
     valid: bool,
 }
 
+impl InitialHolderConnection {
+    /// Wait only for transport DATA before the caller acquires its fresh role.
+    /// This lends no file or authority and preserves idle_ready's refusal latch.
+    pub(crate) fn wait_ready(&mut self) -> Result<()> {
+        while !self.idle_ready()? {
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    /// Complete transport setup under THIS actual stage. No old acquisition
+    /// survives the return, and the one-way owner gate closes before connect.
+    pub(crate) fn connect(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stage;
+            anyhow::bail!("storage_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            stage.begin_initial_holder_attempt()?;
+            let mut owner = stage.capture_same_owner()?;
+            let mut acquisition = stage.narrow_io_acquisition(5)?;
+            let mut channel = Channel::connect_storage(stage, &mut acquisition)?;
+            let setup_grant = stage.storage_statement()?.grant_digest()?;
+            owner.check(stage)?;
+            channel.check_storage_open(stage, &mut acquisition)?;
+            stage.check_storage_acquisition(&mut acquisition)?;
+            Ok(Self {
+                owner,
+                setup_grant,
+                valid: true,
+                channel,
+            })
+        }
+    }
+
+    /// Queued readiness is DATA, never authentication or a retained stage.
+    pub(crate) fn idle_ready(&mut self) -> Result<bool> {
+        let result = (|| {
+            ensure!(self.valid, "storage_peer_connection_refused");
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("storage_peer_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            self.channel.storage_pending()
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+}
+
 impl InitialHolderListener {
     pub(crate) fn bind(mut phase: CurrentPreparedFilePhase<'_, '_>) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
@@ -89,15 +200,33 @@ impl InitialHolderListener {
         }
         #[cfg(target_os = "linux")]
         {
-            phase.check()?;
-            let owner = phase.controller_stage()?.capture_same_owner()?;
-            let projection = phase.projection()?;
-            let mut acquisition = phase.controller_stage()?.narrow_io_acquisition(5)?;
-            let listener = StorageListener::bind(phase.controller_stage()?, &mut acquisition)?;
-            phase.check()?;
+            phase
+                .check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
+            let owner = phase
+                .controller_stage()
+                .and_then(|stage| stage.capture_same_owner())
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderOwner, error))?;
+            let projection = phase.projection().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderProjection, error)
+            })?;
+            let mut acquisition = phase
+                .controller_stage()
+                .and_then(|stage| stage.narrow_io_acquisition(5))
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderInterval, error))?;
+            let stage = phase
+                .controller_stage()
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderFilePhase, error))?;
+            let listener = StorageListener::bind(stage, &mut acquisition)
+                .map_err(|error| PreparationFailure::at(PreparationStep::HolderTransport, error))?;
+            phase.check().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderFinalCheck, error)
+            })?;
             // Binding is a completed atomic operation, NOT a first-holder
             // exchange. No signed offer or durable activation has occurred.
-            phase.finish_checked()?;
+            phase.finish_checked().map_err(|error| {
+                PreparationFailure::at(PreparationStep::HolderFinalCheck, error)
+            })?;
             Ok(Self {
                 owner,
                 projection,
@@ -123,11 +252,55 @@ impl InitialHolderListener {
 
     /// Consume this one original listener BEFORE any fallible exchange work.
     /// Its completed old bind stage cannot authorize a packet or renew time.
+    pub(crate) fn prepare(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<InitialHolderRendezvous> {
+        ensure!(self.valid, "storage_peer_listener_refused");
+        self.valid = false;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stage;
+            anyhow::bail!("storage_peer_platform_unsupported");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.owner.check(stage)?;
+            let mut acquisition = stage.initial_first_holder_acquisition(
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
+            )?;
+            let mut channel = self
+                .listener
+                .accept(stage, &mut acquisition)
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstAccept, error))?;
+            let local = stage.storage_statement()?;
+            let controller_nonce = protocol::nonce("initial-holder-controller")?;
+            let ready = stage.sign_storage_message(Body::InitialReady {
+                controller: Box::new(local.clone()),
+                nonce: controller_nonce.clone(),
+            })?;
+            channel.send_storage(&ready, stage, &mut acquisition)?;
+            self.owner.check(stage)?;
+            channel.check_storage_open(stage, &mut acquisition)?;
+            Ok(InitialHolderRendezvous {
+                owner: self.owner,
+                projection: self.projection,
+                acquisition,
+                local,
+                controller_nonce,
+                valid: true,
+                channel,
+            })
+        }
+    }
+}
+
+impl InitialHolderRendezvous {
     pub(crate) fn start<'file, 'role>(
         mut self,
         mut phase: CurrentPreparedFilePhase<'file, 'role>,
     ) -> Result<InitialHolderServer<'file, 'role>> {
-        ensure!(self.valid, "storage_peer_listener_refused");
+        ensure!(self.valid, "storage_peer_rendezvous_refused");
         self.valid = false;
         self.owner.check(phase.controller_stage()?)?;
         phase.check()?;
@@ -135,20 +308,23 @@ impl InitialHolderListener {
             phase.projection()? == self.projection,
             "storage_peer_listener_original_changed"
         );
-        let acquisition = phase.controller_stage()?.narrow_io_acquisition(5)?;
-        let local = phase.controller_stage()?.storage_statement()?;
+        phase
+            .controller_stage()?
+            .check_storage_acquisition(&mut self.acquisition)?;
+        ensure!(
+            phase.controller_stage()?.storage_statement()? == self.local,
+            "storage_peer_ready_stage_changed"
+        );
         self.owner.check(phase.controller_stage()?)?;
         #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (acquisition, local);
-            anyhow::bail!("storage_peer_platform_unsupported");
-        }
+        anyhow::bail!("storage_peer_platform_unsupported");
         #[cfg(target_os = "linux")]
         Ok(InitialHolderServer {
             phase,
-            acquisition,
-            local,
-            listener: self.listener,
+            acquisition: self.acquisition,
+            local: self.local,
+            controller_nonce: self.controller_nonce,
+            channel: self.channel,
         })
     }
 }
@@ -178,96 +354,137 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
         }
         #[cfg(target_os = "linux")]
         {
-            self.check()?;
-            let mut channel = self
-                .listener
-                .accept(self.phase.controller_stage()?, &mut self.acquisition)?;
-            let (hello, process) =
-                channel.receive_storage(self.phase.controller_stage()?, &mut self.acquisition)?;
-            let (app, app_nonce) = match &hello.body {
-                Body::Hello { app, nonce } => (app.as_ref().clone(), nonce.clone()),
-                _ => anyhow::bail!("storage_peer_expected_hello"),
-            };
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            let (hello, process) = (|| {
+                self.channel
+                    .receive_storage(self.phase.controller_stage()?, &mut self.acquisition)
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstHello, error))?;
+            let (app, app_nonce) = hello.initial_hello(&self.controller_nonce)?;
+            let (app, app_nonce) = (app.clone(), app_nonce.clone());
             hello.verify(&app)?;
-            let mut peer = Peer::authenticate(
-                &hello,
-                app,
-                process,
-                self.phase.controller_stage()?,
-                &mut self.acquisition,
-            )?;
-            self.check()?;
-            let projection = self.phase.projection()?;
+            let mut peer = (|| {
+                Peer::authenticate(
+                    &hello,
+                    app,
+                    process,
+                    self.phase.controller_stage()?,
+                    &mut self.acquisition,
+                )
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            let projection = self
+                .phase
+                .projection()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstProjection, error))?;
             let exchange = Exchange {
                 app_stage: peer.statement().digest()?,
                 controller_stage: self.local.digest()?,
                 app_nonce,
-                controller_nonce: protocol::nonce("initial-holder-controller")?,
+                controller_nonce: self.controller_nonce.clone(),
                 projection: projection.digest()?,
             };
-            self.check()?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
-            let offer = self
-                .phase
-                .controller_stage()?
-                .sign_storage_message(Body::Offer {
-                    controller: Box::new(self.local.clone()),
-                    exchange: exchange.clone(),
-                    projection: Box::new(projection),
-                })?;
-            channel.send_storage(
-                &offer,
-                self.phase.controller_stage()?,
-                &mut self.acquisition,
-            )?;
-            self.check()?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
-            let (confirm, process) =
-                channel.receive_storage(self.phase.controller_stage()?, &mut self.acquisition)?;
-            peer.accept_message(
-                &confirm,
-                process,
-                self.phase.controller_stage()?,
-                &mut self.acquisition,
-            )?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
+            let offer = (|| {
+                self.phase
+                    .controller_stage()?
+                    .sign_storage_message(Body::Offer {
+                        controller: Box::new(self.local.clone()),
+                        exchange: exchange.clone(),
+                        projection: Box::new(projection),
+                    })
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstOffer, error))?;
+            (|| {
+                self.channel.send_storage(
+                    &offer,
+                    self.phase.controller_stage()?,
+                    &mut self.acquisition,
+                )
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstOffer, error))?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
+            let (confirm, process) = (|| {
+                self.channel
+                    .receive_storage(self.phase.controller_stage()?, &mut self.acquisition)
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstConfirm, error))?;
+            (|| {
+                peer.accept_message(
+                    &confirm,
+                    process,
+                    self.phase.controller_stage()?,
+                    &mut self.acquisition,
+                )
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstConfirm, error))?;
             let exchange_digest = exchange.digest()?;
             ensure!(
                 matches!(&confirm.body, Body::Confirm { exchange: selected, projection } if *selected == exchange_digest && *projection == exchange.projection),
                 "storage_peer_confirmation_changed"
             );
-            self.check()?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
-            let complete = self
-                .phase
-                .controller_stage()?
-                .sign_storage_message(Body::Complete {
-                    exchange: exchange_digest.clone(),
-                })?;
-            channel.send_storage(
-                &complete,
-                self.phase.controller_stage()?,
-                &mut self.acquisition,
-            )?;
-            self.check()?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
+            let complete = (|| {
+                self.phase
+                    .controller_stage()?
+                    .sign_storage_message(Body::Complete {
+                        exchange: exchange_digest.clone(),
+                    })
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstComplete, error))?;
+            (|| {
+                self.channel.send_storage(
+                    &complete,
+                    self.phase.controller_stage()?,
+                    &mut self.acquisition,
+                )
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstComplete, error))?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
             // A successful send is not an App receipt. Wait for its signed
             // acceptance after it received Complete and rechecked its real file.
-            let (accepted, process) =
-                channel.receive_storage(self.phase.controller_stage()?, &mut self.acquisition)?;
-            peer.accept_message(
-                &accepted,
-                process,
-                self.phase.controller_stage()?,
-                &mut self.acquisition,
-            )?;
+            let (accepted, process) = (|| {
+                self.channel
+                    .receive_storage(self.phase.controller_stage()?, &mut self.acquisition)
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstAccepted, error))?;
+            (|| {
+                peer.accept_message(
+                    &accepted,
+                    process,
+                    self.phase.controller_stage()?,
+                    &mut self.acquisition,
+                )
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstAccepted, error))?;
             ensure!(
                 matches!(&accepted.body, Body::Accepted { exchange: selected } if *selected == exchange_digest),
                 "storage_peer_acceptance_changed"
             );
-            self.check()?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
-            peer.check(self.phase.controller_stage()?, &mut self.acquisition)?;
-            channel.check_storage_open(self.phase.controller_stage()?, &mut self.acquisition)?;
+            self.check()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
+            (|| peer.check(self.phase.controller_stage()?, &mut self.acquisition))()
+                .map_err(|error| PreparationFailure::at(PreparationStep::FirstPeer, error))?;
+            (|| {
+                self.channel
+                    .check_storage_open(self.phase.controller_stage()?, &mut self.acquisition)
+            })()
+            .map_err(|error| PreparationFailure::at(PreparationStep::FirstCheck, error))?;
             Ok(AuthenticatedControllerFirstHolder {
                 remote: peer.statement().clone(),
                 phase: self.phase,
@@ -275,7 +492,7 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
                 local: self.local,
                 exchange,
                 peer,
-                channel,
+                channel: self.channel,
                 valid: true,
             })
         }
@@ -283,7 +500,12 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
 }
 
 impl AuthenticatedInitialHolderOffer {
-    pub(crate) fn receive(stage: &mut EnrolledRoleStage<'_>) -> Result<Self> {
+    pub(crate) fn receive(
+        mut connection: InitialHolderConnection,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<Self> {
+        ensure!(connection.valid, "storage_peer_connection_refused");
+        connection.valid = false;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = stage;
@@ -291,14 +513,28 @@ impl AuthenticatedInitialHolderOffer {
         }
         #[cfg(target_os = "linux")]
         {
-            stage.begin_initial_holder_attempt()?;
+            connection.owner.check(stage)?;
             let local = stage.storage_statement()?;
-            let mut acquisition = stage.narrow_io_acquisition(5)?;
-            let mut channel = Channel::connect_storage(stage, &mut acquisition)?;
+            local.require_new_grant(&connection.setup_grant)?;
+            let mut acquisition = stage.initial_first_holder_acquisition(
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
+            )?;
+            let mut channel = connection.channel;
+            let (ready, process) = channel.receive_storage(stage, &mut acquisition)?;
+            let (controller, controller_nonce) = match &ready.body {
+                Body::InitialReady { controller, nonce } => {
+                    (controller.as_ref().clone(), nonce.clone())
+                }
+                _ => anyhow::bail!("storage_peer_expected_initial_ready"),
+            };
+            ready.verify(&controller)?;
+            let mut peer =
+                Peer::authenticate(&ready, controller, process, stage, &mut acquisition)?;
             let app_nonce = protocol::nonce("initial-holder-app")?;
             let hello = stage.sign_storage_message(Body::Hello {
                 app: Box::new(local.clone()),
                 nonce: app_nonce.clone(),
+                controller_nonce: controller_nonce.clone(),
             })?;
             channel.send_storage(&hello, stage, &mut acquisition)?;
             let (offer, process) = channel.receive_storage(stage, &mut acquisition)?;
@@ -315,11 +551,13 @@ impl AuthenticatedInitialHolderOffer {
                 _ => anyhow::bail!("storage_peer_expected_offer"),
             };
             offer.verify(&controller)?;
-            let peer = Peer::authenticate(&offer, controller, process, stage, &mut acquisition)?;
+            exchange.require_initial_ready(peer.statement(), &controller_nonce, &controller)?;
+            peer.accept_message(&offer, process, stage, &mut acquisition)?;
             ensure!(
                 exchange.app_stage == local.digest()?
                     && exchange.controller_stage == peer.statement().digest()?
                     && exchange.app_nonce == app_nonce
+                    && exchange.controller_nonce == controller_nonce
                     && exchange.projection == projection.digest()?,
                 "storage_peer_offer_changed"
             );

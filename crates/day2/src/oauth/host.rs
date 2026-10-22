@@ -49,6 +49,7 @@ impl Providers {
 }
 
 struct Registrations {
+    runtime: Runtime,
     authority: Arc<admission::ArtifactApprovalAuthority>,
     readiness: Arc<super::registration::ProviderReadiness>,
 }
@@ -61,8 +62,15 @@ impl shell_transport::RegistrationSink for Registrations {
         identity: &crate::iap::Verified,
         now: i64,
     ) -> Result<()> {
-        self.authority
-            .receive_registration(proof, app, identity, &self.readiness, now)
+        super::native_management::with_runtime_consumer(
+            &self.runtime,
+            super::native_management::RuntimePhase::Registration,
+            |current| {
+                current.require_runtime(&self.runtime)?;
+                self.authority
+                    .receive_registration(proof, app, identity, &self.readiness, now)
+            },
+        )
     }
 }
 
@@ -126,6 +134,7 @@ pub(crate) fn app_receiver(
     let receiver = shell_transport::AppApprovalReceiver::from_instance(&instance, backend)?;
     let receiver = match &providers.registrations {
         Some(readiness) => receiver.with_registrations(Arc::new(Registrations {
+            runtime: runtime.clone(),
             authority: authority.clone(),
             readiness: readiness.clone(),
         })),

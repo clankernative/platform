@@ -13,6 +13,10 @@ use url::Url;
 use zeroize::Zeroizing;
 
 const MAX_BYTES: usize = 65_536;
+// The complete validator input, with EVERY attachment retained. Instance
+// metadata/startup scripts are unnecessary and can exceed the response bound.
+const COMPUTE_INSTANCE_FIELDS: &str =
+    "id,name,selfLink,status,disks(source,deviceName,type,mode,boot)";
 
 pub(super) enum Route<'a> {
     TokenReview,
@@ -188,6 +192,10 @@ impl NativeHttp {
                     .map_err(|_| anyhow::anyhow!("storage_provider_origin"))?
                     .pop_if_empty()
                     .extend(["projects", project, "zones", zone, collection, name]);
+                if matches!(route, Route::ComputeInstance { .. }) {
+                    url.query_pairs_mut()
+                        .append_pair("fields", COMPUTE_INSTANCE_FIELDS);
+                }
                 (url, Method::GET, false)
             }
             Route::Node(name) => (kube(&["api", "v1", "nodes", name])?, Method::GET, true),
@@ -545,5 +553,41 @@ mod tests {
             .to_string();
         assert_eq!(error, "epoch_native_sensitive_credential_required");
         assert!(acquisition.remaining().is_err());
+    }
+    #[test]
+    fn compute_instance_uses_only_fixed_complete_attachment_fields() {
+        let http = fixture();
+        let route = Route::ComputeInstance {
+            zone: "zone-one",
+            name: "node-one",
+        };
+        let (url, method, kube) = http.address(&route).unwrap();
+        assert_eq!(method, Method::GET);
+        assert!(!kube);
+        assert_eq!(
+            url.path(),
+            "/compute/v1/projects/project-seven/zones/zone-one/instances/node-one"
+        );
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            vec![(
+                "fields".into(),
+                "id,name,selfLink,status,disks(source,deviceName,type,mode,boot)".into()
+            )]
+        );
+        assert!(http.matches(&route, url.as_str()).unwrap());
+        let mut forwarded = url.clone();
+        forwarded.set_query(None);
+        assert!(!http.matches(&route, forwarded.as_str()).unwrap());
+        forwarded.query_pairs_mut().append_pair("fields", "*");
+        assert!(!http.matches(&route, forwarded.as_str()).unwrap());
+        let disk = http
+            .address(&Route::ComputeDisk {
+                zone: "zone-one",
+                name: "disk-one",
+            })
+            .unwrap()
+            .0;
+        assert!(disk.query().is_none());
     }
 }

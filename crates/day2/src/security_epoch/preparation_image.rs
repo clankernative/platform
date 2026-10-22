@@ -328,11 +328,17 @@ impl ObservedInitialImage {
 /// accepts a caller connection only as DATA validation, never as a file,
 /// provider, first-holder or current-writer constructor.
 pub(super) fn check_current_seed(
-    connection: &Connection,
+    connection: &rusqlite::Transaction<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
     core: &OriginalSeedCore,
 ) -> Result<()> {
+    // The typed SQLite transaction is necessary, but a caller can still close
+    // it with raw COMMIT. Refuse that stale handle before the first read.
+    ensure!(
+        !connection.is_autocommit(),
+        "epoch_current_seed_transaction_required"
+    );
     core.validate(policy, store)?;
     ensure!(
         schema_contract(connection)? == core.schema_contract,
@@ -736,6 +742,40 @@ pub(super) mod tests {
         (directory, runtime)
     }
 
+    // Grow only the SQLite freelist of a synthetic test image. Logical rows,
+    // schema, seed and marker remain unchanged; this supplies no native owner.
+    #[cfg(target_os = "linux")]
+    pub(in crate::security_epoch) fn reserve_empty_fixture_pages(
+        image: &mut InitialPreparationImage,
+        payload_bytes: usize,
+    ) {
+        let mut memory = FreshMemoryDatabase::empty(&mut acquisition()).unwrap();
+        memory
+            .connection
+            .deserialize_read_exact(MAIN_DB, image.bytes(), image.bytes().len(), false)
+            .unwrap();
+        assert_eq!(
+            memory
+                .connection
+                .query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        memory
+            .connection
+            .execute(
+                "INSERT INTO items(id,version,created_at,value) VALUES(1,1,0,?1)",
+                ["x".repeat(payload_bytes)],
+            )
+            .unwrap();
+        memory
+            .connection
+            .execute("DELETE FROM items WHERE id=1", [])
+            .unwrap();
+        image.image = memory.freeze(&mut acquisition()).unwrap();
+        assert_eq!(image.image.schema(), &image.core.schema_contract);
+    }
+
     pub(in crate::security_epoch) fn incarnations() -> Incarnations {
         Incarnations {
             record: Digest::new(b"record"),
@@ -954,7 +994,13 @@ pub(super) mod tests {
         let decoded = image
             .decode_exact_readback(image.bytes(), &mut acquisition())
             .unwrap();
-        check_current_seed(&decoded, &policy, &store, image.core()).unwrap();
+        let observe = |connection: &Connection, core: &OriginalSeedCore| -> Result<()> {
+            let snapshot = connection.unchecked_transaction()?;
+            let result = check_current_seed(&snapshot, &policy, &store, core);
+            snapshot.rollback()?;
+            result
+        };
+        observe(&decoded, image.core()).unwrap();
         // The native initial decoder is intentionally read-only; copy its real
         // complete SQLite image to a new writable memory DB for this DATA test.
         let mut live = Connection::open_in_memory().unwrap();
@@ -965,7 +1011,7 @@ pub(super) mod tests {
             [],
         )
         .unwrap();
-        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        observe(&live, image.core()).unwrap();
         for (sql, argument) in [
             (
                 "UPDATE day2_initial_security_seed SET store=?1",
@@ -984,7 +1030,7 @@ pub(super) mod tests {
             tx.execute(sql, [argument]).unwrap();
             assert!(check_current_seed(&tx, &policy, &store, image.core()).is_err());
             tx.rollback().unwrap();
-            check_current_seed(&live, &policy, &store, image.core()).unwrap();
+            observe(&live, image.core()).unwrap();
         }
         for sql in [
             "CREATE TABLE forged(value TEXT)",
@@ -1011,8 +1057,18 @@ pub(super) mod tests {
         tx.rollback().unwrap();
         let mut replaced = image.core().clone();
         replaced.incarnations.database = Digest::new(b"copied backup incarnation");
-        assert!(check_current_seed(&live, &policy, &store, &replaced).is_err());
-        check_current_seed(&live, &policy, &store, image.core()).unwrap();
+        assert!(observe(&live, &replaced).is_err());
+        observe(&live, image.core()).unwrap();
+        let ended = live.transaction().unwrap();
+        ended.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            check_current_seed(&ended, &policy, &store, image.core())
+                .unwrap_err()
+                .to_string(),
+            "epoch_current_seed_transaction_required"
+        );
+        drop(ended);
+        observe(&live, image.core()).unwrap();
         assert_eq!(
             live.query_row("SELECT value FROM items", [], |row| row.get::<_, String>(0))
                 .unwrap(),

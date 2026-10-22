@@ -3,6 +3,8 @@
 //! Namespace, Kubernetes and volume DATA cannot construct the native owner.
 //! Live profile qualification and current counter/writer admission are separate.
 
+use super::controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep};
+use super::controller::preparation_timing::{Operation, Timings};
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -161,15 +163,24 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'role>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        timings: &Timings,
     ) -> Result<(Self, NativeAcquisition)> {
-        let mut volume = NativeVolumeObservation::acquire(stage, policy, store)?;
-        let seed = volume.original_seed()?;
+        let mut volume = timings
+            .measure(Operation::VolumeAcquisition, || {
+                NativeVolumeObservation::acquire(stage, policy, store, timings.clone())
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::StorageAcquisition, error))?;
+        let seed = volume
+            .original_seed()
+            .map_err(|error| PreparationFailure::at(PreparationStep::Seed, error))?;
         let selection = ReviewedStorageSelection::decode(&serde_json::to_vec(&SelectionData {
             policy: policy.clone(),
             store: store.clone(),
             seed,
         })?)?;
-        let (directory, identity, mut acquisition) = volume.create_initial_directory()?;
+        let (directory, identity, mut acquisition) = volume
+            .create_initial_directory()
+            .map_err(|error| PreparationFailure::at(PreparationStep::PrivateDirectory, error))?;
         let preparation = acquisition.budget()?;
         let mut authority = Self {
             selection,
@@ -184,6 +195,14 @@ impl<'role> NativeStorageCreationAuthority<'role> {
         };
         authority.check_current(&mut acquisition)?;
         Ok((authority, acquisition))
+    }
+
+    fn timings(&self) -> Timings {
+        match &self.issuer {
+            StorageIssuerOwner::Native(volume) => volume.timings(),
+            #[cfg(test)]
+            StorageIssuerOwner::UnqualifiedFilesystemFixture { .. } => Timings::disabled(),
+        }
     }
     pub(super) fn check_current(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
         let result = (|| {
@@ -294,33 +313,78 @@ mod tests;
 /// creator can be retained. All error paths stop the caller; there is no
 /// conversion of a refused/unknown original into a new candidate or adoption.
 pub(in crate::security_epoch) fn prepare_controller_initial(
-    instance: &std::path::Path,
+    metadata: &crate::store::InitialStoreMetadata,
     stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
+    timings: &Timings,
 ) -> Result<PreparedFileContinuity> {
     let (authority, mut acquisition) =
-        NativeStorageCreationAuthority::acquire_initial(stage, policy, store)?;
-    let layout =
-        preparation::ReviewedFileLayout::prepare(instance, &authority.selection, &mut acquisition)?;
-    match preparation::prepare_original_file(authority, &layout, &mut acquisition) {
+        NativeStorageCreationAuthority::acquire_initial(stage, policy, store, timings)?;
+    let mut progress = PreparationProgress {
+        acquired_us: acquisition.last_checked_elapsed_micros(),
+        ..PreparationProgress::default()
+    };
+    let layout = timings.measure(Operation::Image, || {
+        preparation::ReviewedFileLayout::prepare(metadata, &authority.selection, &mut acquisition)
+    });
+    progress.image_us = acquisition.last_checked_elapsed_micros();
+    let layout = layout.map_err(|error| {
+        PreparationFailure::with_progress(PreparationStep::ImageAdmission, error, progress)
+    })?;
+    let outcome = timings.measure(Operation::OriginalFile, || {
+        preparation::prepare_original_file(authority, &layout, &mut acquisition)
+    });
+    progress.prepared_us = acquisition.last_checked_elapsed_micros();
+    match outcome {
         NativeOriginalPreparationOutcome::Prepared(creator) => {
             let original = PreparedInitialFile::retain_original(creator, layout, acquisition);
             match original.retain_for_current_phases() {
                 PreparedRetentionOutcome::Retained(file) => Ok(*file),
                 PreparedRetentionOutcome::Refused { original, error } => {
                     let _refused_original = original;
-                    Err(error)
+                    Err(PreparationFailure::with_progress(
+                        PreparationStep::OriginalRetention,
+                        error,
+                        progress,
+                    ))
                 }
             }
         }
         NativeOriginalPreparationOutcome::RefusedBeforeAttempt(original) => {
             let _refused_original = original;
-            anyhow::bail!("native_controller_initial_preparation_refused")
+            Err(PreparationFailure::with_progress(
+                PreparationStep::OriginalPreparation,
+                anyhow::anyhow!("native_controller_initial_preparation_refused"),
+                progress,
+            ))
         }
         NativeOriginalPreparationOutcome::RefusedAfterAttempt(original) => {
             let _refused_original = original;
-            anyhow::bail!("native_controller_initial_preparation_unknown")
+            Err(PreparationFailure::with_progress(
+                PreparationStep::OriginalPreparation,
+                anyhow::anyhow!("native_controller_initial_preparation_unknown"),
+                progress,
+            ))
         }
     }
+}
+
+/// Fixed read-only diagnostic frontier. Actual provider/role/device/mount
+/// checks run under ONE original interval; errors stop it permanently. No seed,
+/// private-directory/file factory, SQLite open, provider mutation or owner is
+/// returned. Existing originals are never inspected or adopted.
+pub(in crate::security_epoch) fn observe_preparation_read_only(
+    stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+    timings: &Timings,
+) -> Result<()> {
+    let mut volume = timings.measure(Operation::VolumeAcquisition, || {
+        NativeVolumeObservation::acquire(stage, policy, store, timings.clone())
+    })?;
+    for _ in 0..16 {
+        volume.check_current()?;
+    }
+    Ok(())
 }

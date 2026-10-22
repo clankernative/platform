@@ -50,6 +50,7 @@ pub(crate) struct CurrentAppServingPhase<'storage> {
     continuation: &'storage mut bool,
     disposition: ServingDisposition,
     purpose: super::serving::ScopePurpose,
+    evidence: super::serving::ConsumerScopeEvidence,
 }
 
 /// Fixed lifecycle step selection DATA. None is a write permit. An uncertain
@@ -308,6 +309,18 @@ pub(crate) struct ActiveControllerStorageContinuity {
 }
 
 impl AppStorageBootstrap {
+    pub(crate) fn prepare_current(&mut self) -> Result<()> {
+        ensure!(
+            self.valid && self.next < 6,
+            "app_storage_bootstrap_refused_or_complete"
+        );
+        if let Err(error) = self.storage.prepare_current() {
+            self.refuse();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn retain(
         storage: super::AppInitialStorageContinuity,
         policy: &InitialBootstrapPolicy,
@@ -447,6 +460,15 @@ impl AppStorageBootstrap {
 }
 
 impl ActiveAppStorageContinuity {
+    pub(in crate::security_epoch) fn prepare_current(&mut self) -> Result<()> {
+        ensure!(self.valid, "active_app_storage_refused");
+        if let Err(error) = self.storage.prepare_current() {
+            self.refuse();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn refuse(&mut self) {
         self.valid = false;
         self.storage.refuse();
@@ -549,6 +571,7 @@ pub(super) fn activate_controller(
         let mut pending = None;
         for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
             evidence.enter_bootstrap(&create, action);
+            wait_app_pending(&mut storage)?;
             let observed = run_phase(
                 &mut storage,
                 owner.begin_current_stage()?,
@@ -571,6 +594,7 @@ pub(super) fn activate_controller(
         let mut activated = None;
         for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
             evidence.enter_bootstrap(&complete, action);
+            wait_app_pending(&mut storage)?;
             let observed = run_phase(
                 &mut storage,
                 owner.begin_current_stage()?,
@@ -607,6 +631,15 @@ pub(super) fn activate_controller(
             }
         }
     }
+}
+
+fn wait_app_pending(storage: &mut InitialStorageContinuity) -> Result<()> {
+    while !storage.app_pending()? {
+        // Readiness is DATA only. Do not acquire or renew a role while the
+        // actual App is still completing its preceding known operation.
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 /// A current coherent snapshot must retain the exact activation, including all

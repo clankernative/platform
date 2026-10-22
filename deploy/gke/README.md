@@ -241,6 +241,108 @@ effective IAM policy, including inherited grants and other KSA/GSA bindings,
 before qualifying the live installation. Named container grants apply to every
 version; native exact-version selection does not narrow that IAM permission.
 
+### Selected native App and Shell workloads
+
+`control.security_bootstraps` in the canonical admitted instance selects native
+mode. There is no deployment flag that grants a native owner. For a selected
+App, or the Shell's one selected native OAuth scope, supply
+`native_enrollment_json` with the matching public enrollment policy and
+`native_enrollment_placement = { pool_name = "...", profile = "..." }` with the
+existing dedicated pool and protected label/taint profile. Placement alone grants
+no native role; it can mount the read-only issuer socket before bootstrap selection. Keep
+the root key non-exportable: these inputs contain public selections, never a
+private key or bearer credential. Missing, ambiguous, foreign or unused enrollment
+inputs and contradictory node selectors are refused. The native launcher still performs the complete closed-schema,
+artifact, code, role and current-provider admission.
+
+The namespace, KSA and workload must already be registered. The roots read their
+actual immutable UIDs and require the selected role, image and enrollment/store
+to match them. Preserve those workload objects when moving to native mode;
+deleting/recreating a StatefulSet to avoid ordinary activation would invalidate
+the selected UID. The native Runtime only opens the Controller-owned existing
+`/state/day2-native/day2-initial.sqlite` through its real App participant and
+current admission. It never opens or upgrades the ordinary application database.
+Consequently native deployment uses its mandatory initial-file/first-holder
+path rather than an ordinary migration stamp. Ordinary mode retains the existing
+maintenance activation guard. `release_managed` cannot select this native mode.
+
+Both workloads use hostPID on the selected protected native node, UID/GID10001,
+RuntimeDefault, a read-only root filesystem and dropALL. The public policy is a
+content-addressed immutable ConfigMap mounted through a regular read-only
+subPath at `/etc/day2/native-enrollment.json`. The existing fixed
+`/run/day2-native-enrollment` directory is mounted read-only; it is never created
+or repaired by these workloads. No containerd, device, KMS or ptrace grant is
+added. These initial-namespace processes and the dedicated node remain accepted
+TCB; this is not hostile-code containment.
+
+App mounts the SAME existing PVC at `/state` as well as the installation's state
+path. It receives only its own explicit Kubernetes API token/CA and a subject
+token with `policy.app.token_review_audience`; token automount stays off. Shell
+receives neither of those token projections nor an App database or Controller
+credential: its native enrollment and authenticated serving peer need only the
+public policy and socket directory. Each Shell currently has one fixed public
+enrollment file, so multiple selected native OAuth scopes are refused.
+
+Native mode runs no state-ownership chown init container, no liveness recovery
+probe and no ordinary backup CronJob. The CronJob is suspended because its
+ordinary store tool has no native original-holder backup path. Readiness remains
+a process/lifecycle check, not native permission. A Kubernetes process restart
+cannot adopt or recreate a lost original; changing native executors or recovering
+an uncertain attempt requires an explicitly owned fresh disposable installation,
+with earlier failures retained. Do not clear slots, unlink originals, refresh
+deadlines or manufacture activation annotations.
+
+Use the [Controller registration and activation root](stacks/security-epoch-controller/README.md)
+and the separately approved instance access plan. Register/read the actual
+Controller UID before selecting complete active profiles. Observe the actual
+same-disk CSI mount on the protected node, then perform genuine first-holder,
+storage/P3, writer, App/Shell serving and product qualification. A mock plan or
+matching public JSON cannot supply any of those owners. These roots create no
+node, disk, GSA, issuer or IAM grants; native activation is a separate reviewed
+deployment, not an automatic consequence of adding these variables.
+
+### Historical native consumer observations
+
+The actual App and Shell serving owners export capped JSON lines to their own
+private container stderr with prefix `day2-native-consumer-evidence ` and format
+`day2_native_consumer_evidence_v1`. Collect the exact selected Pod and container,
+including its UID, image digest and restart count, rather than combining replicas:
+
+```sh
+umask 077
+kubectl -n APP_NAMESPACE logs APP_POD -c day2 --timestamps > app-native-private.log
+kubectl -n SHELL_NAMESPACE logs SHELL_POD -c security-shell --timestamps > shell-native-private.log
+```
+
+Each process exports at most 128 consumer lines of at most 2048 bytes. Records
+contain fixed outcomes, checked incarnation and request commitments; they contain
+no tokens, subjects, URLs, paths or raw errors. `scope_completed` follows the actual
+known consumer, final peer acknowledgement and same-stage postchecks. App also
+records the final coherent provider snapshot through the existing journal digest.
+Its binding is the actual wrapped storage request binding, matching the Controller
+record. Shell records its actual serving request binding and has no provider
+snapshot or App selection; correlate that binding with the Controller's release.
+Other outcomes are terminal failure observations, never completion. A native
+scope closed as an exclusion does not produce `scope_completed`. A known read
+result can still be rejected by the application (for example, a bad signature
+after successful key retrieval); scope completion does not assert acceptance.
+
+`executor_enrolled` is a separate startup observation from the actual final
+App/Shell executor after native enrollment and selected-stage checks. It has a
+role, selection and incarnation commitment, with null binding, purpose and
+snapshot. Shell has connected its actual retained authenticated peer at this
+point; no Shell serving consumer has run. There is no supported browser-free
+Shell consumer. Pre-browser qualification is therefore limited to the nine
+Controller startup records, actual App initial Runtime admission, and actual
+App/Shell enrollment and startup. A genuine Shell consumer and OAuth acceptance
+remain part of the real human flow; no synthetic request can supply them.
+
+These are historical diagnostic DATA, not a permission, readiness receipt, or an
+independent proof of the entire OAuth lifecycle. A matching health response,
+stored row, missing/truncated log, or a record from another process cannot replace
+the actual joined native qualification. In particular, these security consumer
+fences do not claim every generic business SQL read and commit is epoch-fenced.
+
 ## Build, qualify and deploy
 
 For a selected managed-credential verifier, `app-edge.credential_api = true`
@@ -503,7 +605,7 @@ reason, and the app is restored on its image.
 
 #### Activation and the day2-app stack
 
-Every day2-app plan reads the live StatefulSet (none on the first install, which
+Every ordinary-mode day2-app plan reads the live StatefulSet (none on the first install, which
 plans normally). An activation is pending while the StatefulSet carries
 `day2.dev/activated-image` and it differs from the image of the template's
 `day2` container; a stamp equal to the live image is inert.
@@ -533,7 +635,7 @@ removing them is an explicit decommissioning change after verified backups.
 
 ## Scheduled off-cluster backups
 
-`day2-app` creates the CronJob `day2-<app>-backup` (schedule `backup_schedule`,
+In ordinary mode, `day2-app` creates the active CronJob `day2-<app>-backup` (schedule `backup_schedule`,
 default `17 * * * *`, UTC; `concurrencyPolicy: Forbid`, a 10-minute start
 deadline, a 30-minute run deadline, one retry, three successful and three failed
 Jobs kept). Each run:

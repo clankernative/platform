@@ -70,7 +70,8 @@ resource "kubernetes_deployment_v1" "controller" {
       metadata {
         labels = local.labels
         annotations = var.activate ? {
-          "day2.dev/native-inputs" = sha256(jsonencode([var.instance_json, var.enrollment_json, var.storage_json]))
+          "day2.dev/native-inputs"   = sha256(jsonencode([var.instance_json, var.enrollment_json, var.storage_json]))
+          "day2.dev/controller-mode" = var.observe_preparation_read_only ? "preparation-read-only" : "initial"
         } : {}
       }
       spec {
@@ -100,13 +101,20 @@ resource "kubernetes_deployment_v1" "controller" {
           run_as_non_root = true
           run_as_user     = 10001
           run_as_group    = 10001
+          # Instance-owned observation of the selected native block device.
+          # This trusted Controller alone needs DAC access; fsGroup would
+          # instead mutate volume ownership and is deliberately absent.
+          supplemental_groups = var.activate ? [var.disk_device_group_id] : []
         }
         container {
           name              = "epoch-controller"
           image             = var.image
           image_pull_policy = "IfNotPresent"
           command           = ["/usr/local/bin/day2-epoch-controller"]
-          args              = ["/srv/day2/instance.json", var.app]
+          args = concat(
+            var.observe_preparation_read_only ? ["--observe-preparation-read-only"] : [],
+            ["/srv/day2/instance.json", var.app],
+          )
           security_context {
             privileged                = true
             read_only_root_filesystem = true
@@ -118,6 +126,15 @@ resource "kubernetes_deployment_v1" "controller" {
           port {
             name           = "health"
             container_port = 8080
+          }
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
+              # Artifact admission retains a private executable worker copy.
+              name       = "tmp"
+              mount_path = "/tmp"
+              read_only  = false
+            }
           }
           dynamic "volume_mount" {
             for_each = var.activate ? [1] : []
@@ -164,8 +181,19 @@ resource "kubernetes_deployment_v1" "controller" {
           dynamic "volume_mount" {
             for_each = var.activate ? [1] : []
             content {
+              # Retain an unoverlaid view of the same provisioner-owned child
+              # for strict path/identity checks beside the writable bind below.
+              name       = "enrollment"
+              mount_path = "/run/day2-native-enrollment-reference"
+              read_only  = true
+            }
+          }
+          dynamic "volume_mount" {
+            for_each = var.activate ? [1] : []
+            content {
               name       = "storage-peer"
               mount_path = "/run/day2-native-enrollment/storage"
+              read_only  = false
             }
           }
           dynamic "volume_mount" {
@@ -201,7 +229,19 @@ resource "kubernetes_deployment_v1" "controller" {
             timeout_seconds   = 2
             failure_threshold = 3
           }
-          # No liveness restart loop: an uncertain original is never adopted.
+          # Neither mode has liveness/startup probes. The read-only diagnostic
+          # opens no health listener and remains unready; stop it before its
+          # fixed ownerless hold ends. Never infer once-across-restarts.
+        }
+        dynamic "volume" {
+          for_each = var.activate ? [1] : []
+          content {
+            name = "tmp"
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "64Mi"
+            }
+          }
         }
         dynamic "volume" {
           for_each = var.activate ? [1] : []
