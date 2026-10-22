@@ -116,6 +116,14 @@ identify `original_retention_before`, `original_retention_owner` or
 The progress is emitted only with the existing refusal after unwinding; there is
 no extra in-phase log I/O or successful-preparation receipt.
 
+When an HTTP send fails, optional `request` is
+`[last_sampled_elapsed_us, selected_timeout_us, is_timeout]`. The elapsed sample
+and timeout were already selected before that send; exporting them reads no
+clock or private error text. The first element can be `null`. These historical
+values do not prove transmission, remote effects or exact expiry. The native
+postcheck still runs, and its refusal remains terminal even when the original
+request failure takes precedence in the diagnostic.
+
 Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
 transport unavailable, response status or bound, admission rejected, known OS
 error categories, or `other`. The combined response category does not reveal or
@@ -139,9 +147,11 @@ refusal.
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
-ordinary artifact/instance admission, role-stage exchange and selected provider,
-device and mount acquisition, followed by exactly sixteen current-volume checks
-under that same original interval. It returns unconditionally before seed,
+ordinary artifact/instance admission, role-stage exchange, complete Controller
+authentication and selected provider-metadata checks under the same original
+five-second current-role interval. Attachment checks remain strict: a detached
+or changed disk refuses. It opens neither `/state` nor a block-device descriptor,
+and performs no mount acquisition or current-volume checks. It returns before seed,
 private-directory, initial-file, first-holder, bootstrap or serving construction.
 It never opens the existing native SQLite file or writes provider/control state.
 Run it only with the actual source/image/profile bindings and preserve any first
@@ -153,9 +163,11 @@ readiness failing and stop/scale it to zero before that hold ends. There is no
 once-across-restarts or hard OS scheduling guarantee; forced replacement or
 letting the hold expire can cause Kubernetes to start another process.
 
-Its `preparation_read_only_observed` record contains `completed` and `timing`.
-Completion means the fixed read-only calls returned, not readiness or a current
-permission. A failed read-only run instead emits the ordinary single refusal
+Its `preparation_read_only_observed` record contains the fixed
+`frontier: "auth_provider_metadata"`, `completed` and `timing`. Completion means
+the authentication and provider-metadata calls returned; it establishes no
+filesystem observation, readiness or current permission. A failed read-only run
+instead emits the ordinary single refusal
 with its original boundary and timing. An export failure remains terminal and
 does not replace an earlier native error. The ordinary executor instead caches
 the same preparation summary into its existing first-holder or first refusal
