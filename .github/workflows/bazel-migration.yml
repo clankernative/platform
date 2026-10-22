@@ -1,93 +1,62 @@
 name: Bazel migration qualification
-
 on:
-  push:
-    branches: [build/bazel-platform-migration]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: bazel-migration-${{ github.ref }}
+  group: bazel-native-images-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
-  graph:
+  native-images:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            config: ci-linux
-          - os: macos-15
-            config: ci-mac
+            asset: bazel-9.3.0-linux-x86_64
+            sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          - os: ubuntu-24.04-arm
+            asset: bazel-9.3.0-linux-arm64
+            sha256: 615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc6a6ca0
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Log exact source
+      - name: Retain exact native source
         run: git show -s --format=fuller HEAD
-      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+      - name: Download pinned native Bazel
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern '${{ matrix.asset }}' --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify pinned native Bazel
+        working-directory: /tmp/day2-bazel-tools
+        run: echo '${{ matrix.sha256 }}  ${{ matrix.asset }}' | sha256sum --check
+      - name: Install pinned native Bazel
+        run: sudo install -m 0555 '/tmp/day2-bazel-tools/${{ matrix.asset }}' /usr/local/bin/bazel
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3
         with:
-          bazelisk-cache: true
+          bazelisk-cache: false
           repository-cache: true
           disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/build/bazel-platform-migration' }}
-      - name: Analyze the complete workspace with parameter files
-        run: bazel aquery --lockfile_mode=update --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib //cli/checks:lib))' > /tmp/day2-bazel-actions.json
-      - name: Check normal and build-tool feature context selection
-        run: bazel build --config=${{ matrix.config }} //build/bazel:context_controls
-      - name: Check production normal and build-tool context selection
-        run: bazel build --config=${{ matrix.config }} --config=release --config=production //build/bazel:context_controls
-      - name: Analyze production binaries without test dependency features
-        run: bazel aquery --config=${{ matrix.config }} --config=release --config=production --include_param_files --output=jsonproto 'deps(set(//:all_programs //crates/worker:lib))' > /tmp/day2-bazel-production-actions.json
-      - name: Execute the whole patched compiler wrapper control module
-        run: bazel test --config=${{ matrix.config }} --test_output=all @rules_rust//util/process_wrapper:process_wrapper_test
-      - name: Compile the converted verifier and its controls
-        run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //crates/xtask:xtask //crates/xtask:unit_xtask //crates/day2-control:control_integration
-      - name: Execute actual build process and evidence controls
-        run: |
-          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build_capture::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
-      - name: Execute portable offline repository admission controls
-        run: |
-          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build::bazel_sources::tests:: --test_arg=--nocapture //crates/day2-control:unit_lib
-      - name: Execute actual verifier installation identity controls
-        run: |
-          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=tests::cli_install_ --test_arg=--nocapture //crates/xtask:unit_xtask
-      - name: Execute build input identity controls
-        run: |
-          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
-      - name: Install the current verifier
-        run: bazel --batch run --config=${{ matrix.config }} //crates/xtask:xtask -- install-verifier
-      - name: Collect current source effect inventory for review
-        run: build-out/bin/xtask architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
-      - name: Build a real harness through configured-producer admission
-        run: build-out/bin/xtask build-rust-test //crates/xtask:unit_xtask
-      - name: Execute actual dependency and coverage controls
-        run: |
-          build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_dependencies::tests:: --nocapture
-      - name: Check every manifest default target against the Bazel catalog
-        run: build-out/bin/xtask architecture-dependencies
-      - name: Check real compiler-backed architectural refusals
-        run: |
-          build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_kernel::tests:: --test-threads=1 --nocapture
-      - name: Enforce current architecture roles, effects and native proofs
-        run: build-out/bin/xtask architecture-check
-      - name: Enforce whole-workspace all-target Clippy
-        run: build-out/bin/xtask lint
-      - name: Retain exact graph, lockfile and build outcome
+          cache-save: false
+      - name: Install current source verifier
+        run: bazel --batch run --config=ci-linux //crates/xtask:xtask -- install-verifier
+      - name: Bootstrap current native inputs
+        run: build-out/bin/xtask bootstrap
+      - name: Qualify actual native tooling and runtime images
+        run: build-out/bin/xtask qualify-linux artifacts/bazel-native-images
+      - name: Build the current native enrollment image
+        run: docker build --target runtime --iidfile /tmp/day2-enrollment-image.id -f deploy/gke/images/native-enrollment/Dockerfile .
+      - name: Retain actual image and native admission evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: bazel-migration-${{ runner.os }}-${{ runner.arch }}
+          name: bazel-native-images-${{ runner.os }}-${{ runner.arch }}
           path: |
-            /tmp/day2-bazel-actions.json
-            /tmp/day2-bazel-production-actions.json
-            /tmp/day2-bazel-build.json
-            /tmp/day2-bazel-architecture-inventory.json
-            MODULE.bazel.lock
-            build/bazel/targets.json
+            artifacts/bazel-native-images/*.json
+            artifacts/bazel-native-images/*.log
+            artifacts/bazel-native-images/*.id
+            /tmp/day2-enrollment-image.id
           if-no-files-found: error
