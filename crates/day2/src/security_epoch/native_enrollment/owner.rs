@@ -74,6 +74,13 @@ pub(crate) struct EnrolledRoleStage<'a> {
     current_grant: SignedStage,
 }
 
+/// Exclusive, short borrow of an actual enrolled stage for storage work.
+/// Every operation retains that stage's exact purpose, clock and refusal.
+/// There is no raw-stage getter, dereference, adoption or independent owner.
+pub(crate) struct EnrolledStorageStage<'stage, 'role> {
+    stage: &'stage mut EnrolledRoleStage<'role>,
+}
+
 /// Captured at the actual creator entry, before any entropy or I/O. This owns
 /// the original self-task and common-clock namespace anchors independently of
 /// the short role-stage acquisition. It does not grant a human lifetime.
@@ -373,7 +380,16 @@ impl EnrolledRoleStage<'_> {
         }
         result
     }
+}
 
+impl<'role> EnrolledRoleStage<'role> {
+    pub(in crate::security_epoch) fn storage(&mut self) -> Result<EnrolledStorageStage<'_, 'role>> {
+        self.check()?;
+        Ok(EnrolledStorageStage { stage: self })
+    }
+}
+
+impl EnrolledStorageStage<'_, '_> {
     /// Full provider authentication shares the stage's original plus five
     /// seconds, including time already spent authenticating its enrolled role.
     pub(in crate::security_epoch) fn narrow_storage_authentication(
@@ -381,13 +397,13 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.require_storage_authentication_purpose()?;
-            let child = self.acquisition.narrow_authentication()?;
-            self.check()?;
+            let child = self.stage.acquisition.narrow_authentication()?;
+            self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -401,13 +417,13 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<NativeAcquisition> {
         if let Err(error) = self.require_storage_authentication_purpose() {
             child.refuse();
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
             return Err(error);
         }
         let result = (|| {
-            self.acquisition.complete_authentication(child)?;
-            match self.purpose {
+            self.stage.acquisition.complete_authentication(child)?;
+            match self.stage.purpose {
                 StagePurpose::StorageBootstrap => {
                     self.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
                 }
@@ -418,8 +434,8 @@ impl EnrolledRoleStage<'_> {
             }
         })();
         if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -429,15 +445,18 @@ impl EnrolledRoleStage<'_> {
         max_lease_seconds: u32,
     ) -> Result<NativeAcquisition> {
         let result = (|| {
-            self.require_purpose(StagePurpose::StorageBootstrap)?;
-            self.acquisition.require_storage_bootstrap()?;
-            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
-            self.check()?;
+            self.stage.require_purpose(StagePurpose::StorageBootstrap)?;
+            self.stage.acquisition.require_storage_bootstrap()?;
+            let child = self
+                .stage
+                .acquisition
+                .narrow(max_lease_seconds, self.stage.deadline)?;
+            self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
         }
         result
     }
@@ -447,37 +466,48 @@ impl EnrolledRoleStage<'_> {
         max_lease_seconds: u32,
     ) -> Result<NativeAcquisition> {
         let result = (|| {
-            self.require_purpose(StagePurpose::StorageMetadataObservation)?;
-            self.acquisition.require_storage_metadata_observation()?;
-            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
-            self.check()?;
+            self.stage
+                .require_purpose(StagePurpose::StorageMetadataObservation)?;
+            self.stage
+                .acquisition
+                .require_storage_metadata_observation()?;
+            let child = self
+                .stage
+                .acquisition
+                .narrow(max_lease_seconds, self.stage.deadline)?;
+            self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
         }
         result
     }
 
     fn require_storage_authentication_purpose(&mut self) -> Result<()> {
         let result = (|| {
-            self.check()?;
-            match self.purpose {
-                StagePurpose::StorageBootstrap => self.acquisition.require_storage_bootstrap(),
-                StagePurpose::StorageMetadataObservation => {
-                    self.acquisition.require_storage_metadata_observation()
+            self.stage.check()?;
+            match self.stage.purpose {
+                StagePurpose::StorageBootstrap => {
+                    self.stage.acquisition.require_storage_bootstrap()
                 }
+                StagePurpose::StorageMetadataObservation => self
+                    .stage
+                    .acquisition
+                    .require_storage_metadata_observation(),
                 _ => anyhow::bail!("native_enrollment_storage_authentication_purpose"),
             }
         })();
         if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
         }
         result
     }
+}
 
+impl EnrolledRoleStage<'_> {
     pub(in crate::security_epoch) fn require_purpose(
         &mut self,
         purpose: StagePurpose,

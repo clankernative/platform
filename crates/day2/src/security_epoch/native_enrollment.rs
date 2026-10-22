@@ -67,7 +67,8 @@ pub(crate) enum StoragePeerPurpose {
 
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
 pub(crate) use owner::{
-    EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, SameEnrolledOwner,
+    EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage, EnrolledStorageStage,
+    SameEnrolledOwner,
 };
 pub(in crate::security_epoch) use protocol::StagePurpose;
 
