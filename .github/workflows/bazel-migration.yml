@@ -51,6 +51,12 @@ jobs:
       - name: Execute actual build process and evidence controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build_capture::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
+      - name: Execute portable offline repository admission controls
+        run: |
+          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build::bazel_sources::tests:: --test_arg=--nocapture //crates/day2-control:unit_lib
+      - name: Execute actual verifier installation identity controls
+        run: |
+          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=tests::cli_install_ --test_arg=--nocapture //crates/xtask:unit_xtask
       - name: Execute build input identity controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask

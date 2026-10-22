@@ -416,6 +416,7 @@ impl Session {
             }
             "linux-start-tooling" => {
                 ensure!(self.runtime_image.is_some(), "runtime image required");
+                let setup_started = Instant::now();
                 logged(
                     &self.output,
                     "start-tooling",
@@ -453,7 +454,31 @@ impl Session {
                     120,
                 )?;
                 self.tooling_started = true;
-                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024})
+                // The bounded tmpfs hides the image's source ABI input. Seed
+                // that same reviewed file before the ordinary Roc build checks
+                // fresh generator equality; no nested mount or guard bypass.
+                let remaining = Duration::from_secs(120)
+                    .checked_sub(setup_started.elapsed())
+                    .context("tooling initialization deadline exhausted")?
+                    .as_secs();
+                ensure!(remaining > 0, "tooling initialization deadline exhausted");
+                logged(
+                    &self.output,
+                    "seed-tooling-abi",
+                    Command::new("docker")
+                        .arg("cp")
+                        .arg(
+                            self.output.join(
+                                "inputs/platform/crates/worker/generated/roc_platform_abi.rs",
+                            ),
+                        )
+                        .arg(format!(
+                            "{}:/workspace/platform/crates/worker/generated/roc_platform_abi.rs",
+                            self.container
+                        )),
+                    remaining,
+                )?;
+                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024,"reviewed_abi_seed_staged":true})
             }
             "linux-build-check" => {
                 ensure!(self.tooling_started, "start tooling first");

@@ -146,10 +146,15 @@ The tooling image contains the existing `cli/day2` distribution. Its compiler
 requires a finite memory cgroup and bounded tmpfs mounts for both staging and
 generated ABI files. Roc reserves sparse memory larger than its physical usage;
 tmpfs quotas bound real output independently of those virtual reservations.
-Use a disposable container, with `APP_SOURCE` replaced by an absolute app path:
+Use a disposable container, with `APP_SOURCE` replaced by an absolute app path.
+The generated-output tmpfs starts empty: copy the reviewed ABI seed from the
+same platform checkout used to build the image before the ordinary check. The
+build still requires fresh generator equality; no nested source bind mount is
+allowed inside the bounded output directory:
 
 ```text
 docker run -d --name day2-linux-tooling --memory=6g --cpus=4 --pids-limit=512 --cgroupns=private --tmpfs /workspace/platform/artifacts:rw,exec,nosuid,nodev,size=1g --tmpfs /workspace/platform/crates/worker/generated:rw,nosuid,nodev,size=64m --mount type=bind,source=APP_SOURCE,target=/workspace/reports-app,readonly day2-tooling:spike sleep infinity
+docker cp crates/worker/generated/roc_platform_abi.rs day2-linux-tooling:/workspace/platform/crates/worker/generated/roc_platform_abi.rs
 docker exec day2-linux-tooling cli/day2 platform check /workspace/reports-app 42 16
 ```
 

@@ -3,12 +3,7 @@ use anyhow::{Context, Result, ensure};
 use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
+use std::{fs, path::PathBuf, process::Command, time::Duration};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -84,7 +84,13 @@ The private Mac builder receives only the pinned standalone Bazel binary,
 byte/mode-pinned source inputs and prefetched repositories. Its ordinary
 filesystem/network confinement and native admission still apply. It receives
 neither operator build caches nor credentials; no Linux production builder port
-is introduced.
+is introduced. Preparation omits Bazel's generated output-base bridge and copies
+only dependency aliases that resolve inside the same approved vendor tree into
+regular files. It rejects escaped targets, directory cycles, credentials, VCS
+metadata and special files, then pins exactly the prepared repositories. The
+private loader still refuses every alias and rechecks the complete byte/mode
+manifest under its existing input limits. This does not certify a hostile or
+concurrently changing filesystem.
 
 ## CI cache and measurements
 

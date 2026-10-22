@@ -3,6 +3,7 @@
 mod bazel_sources;
 mod ui_assembly;
 use bazel_sources::OfflineBazelSources;
+pub use bazel_sources::prepare_bazel_repositories;
 use ui_assembly::{UiAssemblyInputs, validate_ui_activation};
 
 use crate::{

@@ -1274,6 +1274,7 @@ fn tests(
     let outputs = crate::bazel::build(root, &compile, budget)?;
     #[cfg(target_os = "linux")]
     install_linux_test_programs(root, &outputs)?;
+    let private_build = prepare_private_build_inputs(root, suite)?;
     for target in selected {
         let mut command = Command::new(
             root.join(
@@ -1289,7 +1290,7 @@ fn tests(
         {
             command.env("DAY2_TEST_RUSTC", crate::bazel::tool(root, "rustc")?);
         }
-        configure_tests(root, suite, fixtures, &mut command)?;
+        configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
         let remaining = budget
             .checked_sub(started.elapsed())
             .context("test campaign budget exhausted")?;
@@ -1298,20 +1299,43 @@ fn tests(
     Ok(())
 }
 
+struct PrivateBuildInputs {
+    bazel: PathBuf,
+    repositories: tempfile::TempDir,
+    verifier: PathBuf,
+}
+
+fn prepare_private_build_inputs(root: &Path, suite: &str) -> Result<Option<PrivateBuildInputs>> {
+    if !["isolated-build", "installation-build"].contains(&suite) {
+        return Ok(None);
+    }
+    let bazel = crate::bazel::standalone(root)?;
+    let vendor = crate::bazel::offline_repositories(root)?;
+    let repositories = tempfile::tempdir_in(root.join(".cache"))?;
+    day2_control::build::prepare_bazel_repositories(&vendor, &repositories.path().join("sources"))?;
+    Ok(Some(PrivateBuildInputs {
+        bazel,
+        repositories,
+        verifier: std::env::current_exe()?,
+    }))
+}
+
 fn configure_tests(
     root: &Path,
     suite: &str,
     fixtures: &BTreeMap<String, PathBuf>,
+    private_build: Option<&PrivateBuildInputs>,
     command: &mut Command,
 ) -> Result<()> {
-    if ["isolated-build", "installation-build"].contains(&suite) {
-        let bazel = crate::bazel::standalone(root)?;
-        let repositories = crate::bazel::offline_repositories(root)?;
+    if let Some(inputs) = private_build {
         command
             .args(["--ignored", "--exact"])
-            .env("DAY2_TEST_BUILD_XTASK", std::env::current_exe()?)
-            .env("DAY2_TEST_BUILD_BAZEL", bazel)
-            .env("DAY2_TEST_BUILD_REPOSITORIES", repositories);
+            .env("DAY2_TEST_BUILD_XTASK", &inputs.verifier)
+            .env("DAY2_TEST_BUILD_BAZEL", &inputs.bazel)
+            .env(
+                "DAY2_TEST_BUILD_REPOSITORIES",
+                inputs.repositories.path().join("sources"),
+            );
     }
     // Library unit tests own their temporary state, so the fast gate uses
     // libtest's default parallelism; the reviewed probes use four threads.

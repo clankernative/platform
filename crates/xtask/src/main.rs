@@ -1099,9 +1099,34 @@ fn verify_reports(root: &Path) -> Result<()> {
 }
 
 // Replacing an executable in place can leave macOS's cached signature bound to
-// its previous bytes. Install a fresh inode atomically, including on repeat builds.
+// its previous bytes. Install changed bytes/modes with a fresh inode atomically; identical files
+// retain their inode so the running Linux verifier stays addressable.
 fn install_cli_file(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
+    let source = source.as_ref();
     let destination = destination.as_ref();
+    if let Ok(retained) = fs::symlink_metadata(destination) {
+        let producer = fs::symlink_metadata(source)?;
+        #[cfg(unix)]
+        let same_permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            producer.permissions().mode() == retained.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let same_permissions =
+            producer.permissions().readonly() == retained.permissions().readonly();
+        if producer.file_type().is_file()
+            && retained.file_type().is_file()
+            && producer.len() == retained.len()
+            && same_permissions
+        {
+            let source_digest = digest(&fs::read(source)?);
+            if source_digest == digest(&fs::read(destination)?) {
+                // Replacing the same running Linux verifier unlinks its inode:
+                // later current_exe() then names an unavailable "(deleted)" path.
+                return Ok(());
+            }
+        }
+    }
     let temporary = tempfile::NamedTempFile::new_in(
         destination.parent().context("CLI destination directory")?,
     )?;
@@ -1291,6 +1316,88 @@ fn build_row_authority_adversaries(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_preserves_an_identical_executable_inode_and_replaces_changed_bytes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"first reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        install_cli_file(&source, &installed)?;
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
+        fs::write(&source, b"other reviewed executable")?;
+        install_cli_file(&source, &installed)?;
+        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_running_executable_fixture() -> Result<()> {
+        if std::env::var_os("DAY2_CLI_INSTALL_CHILD").as_deref() != Some(std::ffi::OsStr::new("1"))
+        {
+            return Ok(());
+        }
+        let executable = std::env::current_exe()?;
+        let producer = executable.with_file_name("producer-copy");
+        fs::copy(&executable, &producer)?;
+        install_cli_file(&producer, &executable)?;
+        // On Linux an atomic replacement of the executing inode makes this
+        // exact lookup return a deleted pathname even though the new file exists.
+        let current = std::env::current_exe()?;
+        assert!(fs::metadata(&current)?.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_real_child_keeps_its_running_executable_addressable() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("running-verifier");
+        fs::copy(std::env::current_exe()?, &executable)?;
+        run_with_budget(
+            directory.path(),
+            Command::new(&executable)
+                .args([
+                    "--exact",
+                    "tests::cli_install_running_executable_fixture",
+                    "--nocapture",
+                ])
+                .env("DAY2_CLI_INSTALL_CHILD", "1"),
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_replaces_wrong_modes_and_aliases_despite_matching_bytes() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o644))?;
+        install_cli_file(&source, &installed)?;
+        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(
+            fs::metadata(&installed)?.permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_file(&installed)?;
+        std::os::unix::fs::symlink(&source, &installed)?;
+        install_cli_file(&source, &installed)?;
+        assert!(fs::symlink_metadata(&installed)?.file_type().is_file());
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
 
     #[test]
     fn app_snapshot_rejects_project_files_headers_and_symlinks() -> Result<()> {
