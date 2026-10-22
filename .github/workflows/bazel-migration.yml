@@ -39,10 +39,27 @@ jobs:
         run: /bin/cat '${{ runner.temp }}/private-bazel-outside-marker'
       - name: Establish the outside witness is actually writable
         run: /usr/bin/touch '${{ runner.temp }}/private-bazel-outside-marker'
+      - name: Stage only the fixed public metadata action
+        run: cp .github/bazel-private-probe.BUILD '${{ runner.temp }}/private-bazel-probe/platform/BUILD.bazel'
+      - name: Stage only the fixed public action declaration
+        run: cp .github/bazel-private-probe.bzl '${{ runner.temp }}/private-bazel-probe/platform/probe.bzl'
+      - name: Prefetch only the empty public action's analysis dependencies outside confinement
+        working-directory: ${{ runner.temp }}/private-bazel-probe/platform
+        run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' build --define=DAY2_PUBLIC_PROBE=outside //:marker
       - name: Exercise only the required power-notification client with no app or SDK inputs
         working-directory: ${{ runner.temp }}/private-bazel-probe/platform
         run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' version
 
+      - name: Observe a fresh public action with the default inner Bazel strategy
+        id: default_strategy
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/private-bazel-probe/platform
+        run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' build --repository_disable_download --define=DAY2_PUBLIC_PROBE=nested //:marker
+      - name: Execute a different fresh public action inside only the existing outer profile
+        working-directory: ${{ runner.temp }}/private-bazel-probe/platform
+        run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' build --repository_disable_download --spawn_strategy=standalone --define=DAY2_PUBLIC_PROBE=outer //:marker
+      - name: Retain the actual default strategy observation
+        run: echo 'default-strategy=${{ steps.default_strategy.outcome }}'
       - name: Require outside-root reads to remain refused
         id: outside_read
         continue-on-error: true

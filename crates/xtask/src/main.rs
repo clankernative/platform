@@ -1117,10 +1117,12 @@ fn install_cli_file(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
         if producer.file_type().is_file()
             && retained.file_type().is_file()
             && producer.len() == retained.len()
-            && same_permissions
         {
             let source_digest = digest(&fs::read(source)?);
             if source_digest == digest(&fs::read(destination)?) {
+                if !same_permissions {
+                    fs::set_permissions(destination, producer.permissions())?;
+                }
                 // Replacing the same running Linux verifier unlinks its inode:
                 // later current_exe() then names an unavailable "(deleted)" path.
                 return Ok(());
@@ -1347,6 +1349,14 @@ mod tests {
         let executable = std::env::current_exe()?;
         let producer = executable.with_file_name("producer-copy");
         fs::copy(&executable, &producer)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Cache materialization and tar transport can disagree about the
+            // owner-write bit even when the executing bytes are identical.
+            let mode = fs::metadata(&producer)?.permissions().mode() ^ 0o200;
+            fs::set_permissions(&producer, fs::Permissions::from_mode(mode))?;
+        }
         install_cli_file(&producer, &executable)?;
         // On Linux an atomic replacement of the executing inode makes this
         // exact lookup return a deleted pathname even though the new file exists.
@@ -1375,7 +1385,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cli_install_replaces_wrong_modes_and_aliases_despite_matching_bytes() -> Result<()> {
+    fn cli_install_restores_mode_in_place_and_replaces_aliases_despite_matching_bytes() -> Result<()>
+    {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let root = tempfile::tempdir()?;
         let source = root.path().join("producer");
@@ -1386,7 +1397,7 @@ mod tests {
         let first_inode = fs::metadata(&installed)?.ino();
         fs::set_permissions(&installed, fs::Permissions::from_mode(0o644))?;
         install_cli_file(&source, &installed)?;
-        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
         assert_eq!(
             fs::metadata(&installed)?.permissions().mode() & 0o777,
             0o755

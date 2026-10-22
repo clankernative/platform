@@ -95,7 +95,9 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
         if verbose {
             command.arg("--verbose");
         }
-        let output = command.output()?;
+        let output = command
+            .output()
+            .with_context(|| format!("execute {tool} for compiler cache identity"))?;
         ensure!(output.status.success(), "compiler cache tool identity");
         Ok(String::from_utf8(output.stdout)?)
     };
@@ -133,7 +135,8 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
             let compiler = crate::bazel::tool(root, "rustc")?;
             let output = Command::new(&compiler)
                 .args(["--version", "--verbose"])
-                .output()?;
+                .output()
+                .context("execute configured Bazel Rust compiler identity")?;
             ensure!(
                 output.status.success(),
                 "configured Bazel Rust compiler required"
@@ -141,13 +144,18 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
             format!(
                 "{}\ncompiler-digest: {}",
                 String::from_utf8(output.stdout)?,
-                digest(&fs::read(compiler)?)
+                digest(
+                    &fs::read(compiler).context("read configured Bazel Rust compiler identity")?
+                )
             )
         },
         bazel: {
             let mut command = crate::bazel::command(root);
             command.args(["version", "--gnu_format"]);
-            let output = command.current_dir(root).output()?;
+            let output = command
+                .current_dir(root)
+                .output()
+                .context("execute Bazel version for compiler cache identity")?;
             ensure!(output.status.success(), "actual Bazel version required");
             String::from_utf8(output.stdout)?
         },

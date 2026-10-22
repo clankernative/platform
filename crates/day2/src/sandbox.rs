@@ -110,6 +110,9 @@ fn compiler_scoped(
 
 /// Bazel's trusted platform dependencies run separately from the stricter Roc
 /// compiler/worker sandboxes: macOS refuses nested sandbox initialization.
+/// Its pinned JVM registers sleep/wake notifications and a no-idle-sleep
+/// assertion. The power client permission is broader than those two operations;
+/// it is confined to trusted dependency builds, never Roc or app execution.
 pub fn build_host(job: &Path, bazel: &Path) -> Result<Command> {
     ensure!(
         cfg!(all(target_os = "macos", target_arch = "aarch64")),
@@ -132,8 +135,10 @@ pub fn build_host(job: &Path, bazel: &Path) -> Result<Command> {
         (allow process-fork)
         (allow process-exec (subpath {root}) (subpath "/usr/bin") (subpath "/bin")
             (subpath "/Library/Developer") (subpath "/Applications/Xcode.app"))
+        (allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))
         (allow sysctl-read)
-        (allow mach-lookup (global-name "com.apple.system.logger"))"#
+        (allow mach-lookup (global-name "com.apple.system.logger")
+            (global-name "com.apple.PowerManagement.control"))"#
     );
     let mut command = Command::new("/usr/bin/sandbox-exec");
     command

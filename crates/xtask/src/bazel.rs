@@ -761,9 +761,15 @@ pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
         execution_root.is_absolute(),
         "absolute Bazel execution root required"
     );
-    let tool = execution_root.join(paths[0]).canonicalize()?;
+    let tool = execution_root
+        .join(paths[0])
+        .canonicalize()
+        .with_context(|| format!("configured Bazel {name} output missing: {}", paths[0]))?;
     ensure!(
-        fs::symlink_metadata(&tool)?.file_type().is_file(),
+        fs::symlink_metadata(&tool)
+            .with_context(|| format!("configured Bazel {name} metadata missing"))?
+            .file_type()
+            .is_file(),
         "actual regular Bazel compiler required"
     );
     Ok(tool)
