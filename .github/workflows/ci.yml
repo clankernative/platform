@@ -103,7 +103,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -190,7 +190,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -336,7 +336,7 @@ jobs:
             build-out/tests/*
 
       - name: Persist newly compiled actions under the captured source key
-        if: ${{ success() && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
+        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
@@ -379,7 +379,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -470,7 +470,7 @@ jobs:
             build-out/tests/*
 
       - name: Persist newly compiled actions under the captured source key
-        if: ${{ success() && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
+        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
@@ -518,7 +518,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -619,7 +619,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -708,7 +708,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
@@ -832,7 +832,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-

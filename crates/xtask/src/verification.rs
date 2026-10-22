@@ -955,10 +955,10 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
     }
     sources.extend(crate::bazel::configuration(&root)?);
     let executable = std::env::current_exe()?.canonicalize()?;
-    // Capture before rebuilding can atomically replace this installed pathname.
-    // A new producer must not relabel a previously running verifier's identity.
+    // Compare the actual configured producer without installing over the
+    // running inode. A mismatch refuses cache reuse and preserves the verifier
+    // needed for fresh native artifact admission.
     let executing = digest(&fs::read(&executable)?);
-    crate::bazel::programs(&root, &["xtask"])?;
     let compiled = crate::bazel::configured_output(&root, "//crates/xtask:xtask")?;
     ensure!(
         executing == digest(&fs::read(&compiled)?),

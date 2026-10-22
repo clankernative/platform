@@ -89,7 +89,9 @@ changed, missing or extra input rather than silently using stale feature data.
 Refreshing checksums alone does not establish that a feature model is correct.
 
 The private Mac builder receives only the pinned standalone Bazel binary,
-byte/mode-pinned source inputs and prefetched repositories. Its ordinary
+byte/mode-pinned source inputs and prefetched repositories. The selected system Xcode bundle or CommandLineTools directory is resolved through
+the fixed OS selector and validated before granting its trusted dependency-builder
+read/execute access; other application paths remain refused. Its ordinary
 filesystem/network confinement and native admission still apply. It receives
 neither operator build caches nor credentials; no Linux production builder port
 is introduced. Preparation omits Bazel's generated output-base bridge and copies
@@ -103,9 +105,11 @@ concurrently changing filesystem.
 ## CI cache and measurements
 
 The commit-pinned setup-bazel action persists Bazel action/repository caches in
-GitHub Actions storage. Compiled-output snapshots use source-derived keys with
+GitHub Actions storage. Compiled-output snapshots use exact checkout commit keys with
 same-role and OS/architecture fallbacks, so a Rust-only edit can save new actions
-without discarding reusable prior actions. Only the native preparation builders
+without discarding reusable prior actions. Valid compiled actions may be saved
+after a later fresh-runtime failure, while cancelled runs do not save them.
+Only the native preparation builders
 and Mac job write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
 the local content-addressed disk cache. Trusted main/merge-group runs may save
 shared outputs. PRs can read trusted base caches and save only their own

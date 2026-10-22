@@ -775,6 +775,8 @@ pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(tool)
 }
 
+/// Build and admit the configured producer without replacing an installed
+/// program. Compiler identity checks may be running that installed inode.
 pub(crate) fn configured_output(root: &Path, label: &str) -> Result<PathBuf> {
     let selected = targets(root)?
         .into_iter()
@@ -784,6 +786,11 @@ pub(crate) fn configured_output(root: &Path, label: &str) -> Result<PathBuf> {
         selected.len() == 1,
         "one declared configured producer required"
     );
+    dependency_inputs(root)?;
+    let mut command = build_command(root, "build", None)?;
+    Profile::Development.configure(&mut command);
+    command.arg(label);
+    crate::build_capture::run(root, &mut command, Duration::from_secs(12_600))?;
     let records = descriptors(
         root,
         &selected,

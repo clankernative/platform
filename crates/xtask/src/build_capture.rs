@@ -1,5 +1,6 @@
 //! Preserve the actual compiler-driver outcome before decoding its evidence.
-//! Diagnostics contain fixed numeric fields, never argv or environment values.
+//! Public diagnostics contain fixed observations and bounded numeric fields,
+//! never raw source text, argv or environment values.
 use crate::{CommandStatusError, command_status_with_budget};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
