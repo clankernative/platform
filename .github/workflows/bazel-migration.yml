@@ -73,8 +73,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: git show -s --format=fuller HEAD
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: git show -s --format=fuller HEAD
       - name: Download the pinned Linux Bazel launcher
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-probe-tools
         env:
