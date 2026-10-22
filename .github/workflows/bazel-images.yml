@@ -1,0 +1,62 @@
+name: Bazel migration native images
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bazel-native-images-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-images:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset: bazel-9.3.0-linux-x86_64
+            sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
+          - os: ubuntu-24.04-arm
+            asset: bazel-9.3.0-linux-arm64
+            sha256: 615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc6a6ca0
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Retain exact native source
+        run: git show -s --format=fuller HEAD
+      - name: Download pinned native Bazel
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern '${{ matrix.asset }}' --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify pinned native Bazel
+        working-directory: /tmp/day2-bazel-tools
+        run: echo '${{ matrix.sha256 }}  ${{ matrix.asset }}' | sha256sum --check
+      - name: Install pinned native Bazel
+        run: sudo install -m 0555 '/tmp/day2-bazel-tools/${{ matrix.asset }}' /usr/local/bin/bazel
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3
+        with:
+          bazelisk-cache: false
+          repository-cache: true
+          disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
+          cache-save: false
+      - name: Install current source verifier
+        run: bazel --batch run --config=ci-linux //crates/xtask:xtask -- install-verifier
+      - name: Bootstrap current native inputs
+        run: build-out/bin/xtask bootstrap
+      - name: Qualify actual native tooling and runtime images
+        run: build-out/bin/xtask qualify-linux artifacts/bazel-native-images
+      - name: Build the current native enrollment image
+        run: docker build --target runtime --iidfile /tmp/day2-enrollment-image.id -f deploy/gke/images/native-enrollment/Dockerfile .
+      - name: Retain actual image and native admission evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bazel-native-images-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            artifacts/bazel-native-images/*.json
+            artifacts/bazel-native-images/*.log
+            artifacts/bazel-native-images/*.id
+            /tmp/day2-enrollment-image.id
+          if-no-files-found: error

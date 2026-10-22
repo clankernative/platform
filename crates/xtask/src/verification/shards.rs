@@ -1011,6 +1011,7 @@ pub(super) fn tests(
     };
     let arguments = test_selection(suite)?.arguments;
     let started = Instant::now();
+    let private_build = prepare_private_build_inputs(root, suite)?;
     let mut executed = BTreeSet::new();
     for binary in prepared
         .binaries
@@ -1019,7 +1020,7 @@ pub(super) fn tests(
     {
         let mut command = Command::new(root.join(&binary.executable));
         command.args(&arguments);
-        configure_tests(root, suite, fixtures, &mut command)?;
+        configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
         // Manifest and supporting executable paths are workspace-relative and
         // admitted by the current Bazel graph and prepared-byte identity.
         let remaining = budget

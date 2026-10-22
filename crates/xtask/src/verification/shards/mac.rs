@@ -499,7 +499,7 @@ pub(in super::super) fn focused(
         if *ignored {
             command.arg("--ignored");
         }
-        configure_tests(root, "mac-native", fixtures, &mut command)?;
+        configure_tests(root, "mac-native", fixtures, None, &mut command)?;
         let remaining = Duration::from_secs(3600)
             .checked_sub(started.elapsed())
             .context("focused Mac native case allowance exhausted")?;
