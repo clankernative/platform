@@ -66,7 +66,7 @@ input when applicable, and fingerprints of both callback replies. Evidence can c
 application data; keep it private. Replay it with:
 
 ```console
-bazel run //crates/day2:day2 -- replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
+build-out/bin/day2 replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
 ```
 
 This re-evaluates only the artifact-bound pure callback and typed-input validation,

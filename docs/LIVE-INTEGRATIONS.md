@@ -188,7 +188,7 @@ permissions. Both containers run with that UID, so an unreadable mount fails
 before registration. Keep each file available for the runtime's lifetime.
 
 ```text
-bazel run //crates/day2:day2-package -- INSTANCE APP ACTOR RUNTIME_IMAGE_DIGEST PORT NEW_DIRECTORY --provisioning PRIVATE_PROVISIONING_JSON
+build-out/bin/day2-package INSTANCE APP ACTOR RUNTIME_IMAGE_DIGEST PORT NEW_DIRECTORY --provisioning PRIVATE_PROVISIONING_JSON
 docker compose -f NEW_DIRECTORY/compose.json run --rm provision-credentials
 docker compose -f NEW_DIRECTORY/compose.json up -d app
 ```

@@ -675,13 +675,13 @@ mod tests {
         let platform = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()?;
-        let module = fs::read_to_string(platform.join("MODULE.bazel"))?
-            .replace("\"//:", "\"@day2_platform//:")
-            .replace("\"//crates/", "\"@day2_platform//crates/")
-            .replace("\"//cli/", "\"@day2_platform//cli/")
-            .replace("\"//build/", "\"@day2_platform//build/");
-        let module = module.replace("module(name = \"day2_platform\", version = \"0.0.0\")", &format!("module(name=\"boundary_fixture\")\nbazel_dep(name=\"day2_platform\", version=\"0.0.0\")\nlocal_path_override(module_name=\"day2_platform\", path={:?})", platform.to_str().context("fixture platform path")?));
-        fs::write(directory.path().join("MODULE.bazel"), module)?;
+        // A standalone fixture owns its own extension invocation. Depending on
+        // the platform module would require a second transitive crate_universe
+        // lock and could fail before Clippy ever examines the negative source.
+        fs::copy(
+            platform.join("MODULE.bazel"),
+            directory.path().join("MODULE.bazel"),
+        )?;
         fs::copy(
             platform.join("MODULE.bazel.lock"),
             directory.path().join("MODULE.bazel.lock"),
@@ -696,9 +696,39 @@ mod tests {
             .append(true)
             .open(directory.path().join(".bazelrc"))?
             .write_all(b"\ncommon --lockfile_mode=update\n")?;
+        for name in ["Cargo.toml", "Cargo.lock"] {
+            fs::copy(platform.join(name), directory.path().join(name))?;
+        }
+        let catalog = crate::bazel::targets(&platform)?;
+        let packages = catalog
+            .iter()
+            .map(|target| target.directory.clone())
+            .collect::<BTreeSet<_>>();
+        for package in packages {
+            let destination = directory.path().join(&package);
+            fs::create_dir_all(&destination)?;
+            fs::copy(
+                platform.join(&package).join("Cargo.toml"),
+                destination.join("Cargo.toml"),
+            )?;
+            fs::write(
+                destination.join("BUILD.bazel"),
+                "exports_files([\"Cargo.toml\"])\n",
+            )?;
+        }
+        // Cargo reads only dependency manifests here. Empty target roots let it
+        // identify their source kinds without copying or building product code.
+        for target in &catalog {
+            let destination = directory.path().join(&target.source);
+            fs::create_dir_all(destination.parent().context("metadata target parent")?)?;
+            fs::write(
+                destination,
+                "// Dependency-input metadata only; never a fixture build target.\n",
+            )?;
+        }
         fs::write(
             directory.path().join("BUILD.bazel"),
-            "exports_files([\"architecture/clippy.toml\"])\n",
+            "exports_files([\"architecture/clippy.toml\", \"Cargo.toml\", \"Cargo.lock\"])\n",
         )?;
         fs::create_dir_all(directory.path().join("build/bazel"))?;
         for name in [
@@ -712,6 +742,21 @@ mod tests {
             fs::copy(
                 platform.join("build/bazel").join(name),
                 directory.path().join("build/bazel").join(name),
+            )?;
+        }
+        fs::create_dir(directory.path().join("build/bazel/patches"))?;
+        for entry in fs::read_dir(platform.join("build/bazel/patches"))? {
+            let entry = entry?;
+            ensure!(
+                entry.file_type()?.is_file(),
+                "regular reviewed dependency patch required"
+            );
+            fs::copy(
+                entry.path(),
+                directory
+                    .path()
+                    .join("build/bazel/patches")
+                    .join(entry.file_name()),
             )?;
         }
         fs::write(
@@ -736,6 +781,21 @@ mod tests {
             directory.path().join("build/bazel/targets.json"),
         )?)?;
         catalog["targets"].as_array_mut().unwrap().push(serde_json::json!({"package":"boundary-contract","directory":"contract","target":"boundary_contract","kind":["lib"],"label":"//contract:lib","test":false,"source":"contract/src/lib.rs"}));
+        fs::create_dir(directory.path().join("build/bazel/patches"))?;
+        for entry in fs::read_dir(platform.join("build/bazel/patches"))? {
+            let entry = entry?;
+            ensure!(
+                entry.file_type()?.is_file(),
+                "regular reviewed dependency patch required"
+            );
+            fs::copy(
+                entry.path(),
+                directory
+                    .path()
+                    .join("build/bazel/patches")
+                    .join(entry.file_name()),
+            )?;
+        }
         fs::write(
             directory.path().join("build/bazel/targets.json"),
             serde_json::to_vec(&catalog)?,

@@ -13,7 +13,7 @@
 +    rustc_flags.add("-Cdebug-assertions=off" if platform_release else "-Cdebug-assertions=on")
 +    rustc_flags.add("-Coverflow-checks=off" if platform_release else "-Coverflow-checks=on")
 +    if not _will_emit_object_file(emit):
-+        units = "256" if platform_tool else ctx.var.get("DAY2_PLATFORM_CODEGEN_UNITS", "16")
++        units = "256" if platform_tool else ("16" if platform_release else ctx.var.get("DAY2_PLATFORM_CODEGEN_UNITS", "16"))
 +        rustc_flags.add("-Ccodegen-units=%s" % units)
 +    if platform_release:
 +        rustc_flags.add("-Cpanic=unwind" if platform_tool or crate_info.is_test else "-Cpanic=abort")

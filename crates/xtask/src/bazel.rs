@@ -333,16 +333,7 @@ fn build_profile(
             "one configured Rust output required"
         );
         let path = &record.files[0];
-        ensure!(
-            relative(path) && path.starts_with("bazel-out"),
-            "confined declared Rust output required"
-        );
-        let actual = root.join(path).canonicalize()?;
-        ensure!(
-            actual.starts_with(&output_root)
-                && fs::symlink_metadata(&actual)?.file_type().is_file(),
-            "Rust output leaves the owned compiler context or is not regular"
-        );
+        let actual = confined_output(root, path, &output_root)?;
         let destination = if target.test {
             root.join(test_output(target))
         } else if target.kind == ["bin"] {
@@ -600,22 +591,62 @@ pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 pub(crate) fn configured_output(root: &Path, label: &str) -> Result<PathBuf> {
-    let mut query = command(root);
-    query.args(["cquery", "--output=files"]);
-    configuration_arguments(&mut query);
-    query.arg(label);
-    let output = capture_query(root, &mut query, Duration::from_secs(120), 16 * 1024)?;
-    let files = std::str::from_utf8(&output)?
-        .lines()
-        .filter(|line| !line.is_empty() && !line.ends_with(".rmeta"))
+    let selected = targets(root)?
+        .into_iter()
+        .filter(|target| target.label == label)
         .collect::<Vec<_>>();
     ensure!(
-        files.len() == 1
-            && relative(Path::new(files[0]))
-            && Path::new(files[0]).starts_with("bazel-out"),
-        "one configured workspace output required"
+        selected.len() == 1,
+        "one declared configured producer required"
     );
-    Ok(root.join(files[0]).canonicalize()?)
+    let records = descriptors(
+        root,
+        &selected,
+        Profile::Development,
+        None,
+        Duration::from_secs(120),
+    )?;
+    ensure!(
+        records.len() == 1 && records[0].files.len() == 1,
+        "one configured Rust output required"
+    );
+    confined_output(
+        root,
+        &records[0].files[0],
+        &root.join(".cache/bazel-executor"),
+    )
+}
+
+fn confined_output(root: &Path, path: &Path, output_root: &Path) -> Result<PathBuf> {
+    ensure!(
+        relative(path) && path.starts_with("bazel-out"),
+        "confined declared Rust output required"
+    );
+    let actual = root.join(path).canonicalize()?;
+    ensure!(
+        actual.starts_with(output_root.canonicalize()?)
+            && fs::symlink_metadata(&actual)?.file_type().is_file(),
+        "Rust output leaves its owned compiler context or is not regular"
+    );
+    Ok(actual)
+}
+
+fn configuration_bytes(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.file_type().is_file() && metadata.len() <= 4 * 1024 * 1024,
+        "regular bounded Bazel configuration required"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 4 * 1024 * 1024,
+        "Bazel configuration byte budget"
+    );
+    Ok(bytes)
 }
 
 pub(crate) fn configuration(root: &Path) -> Result<BTreeMap<String, String>> {
@@ -629,7 +660,10 @@ pub(crate) fn configuration(root: &Path) -> Result<BTreeMap<String, String>> {
         "Cargo.toml",
         "Cargo.lock",
     ] {
-        files.insert(name.to_owned(), day2::digest(&fs::read(root.join(name))?));
+        files.insert(
+            name.to_owned(),
+            day2::digest(&configuration_bytes(&root.join(name))?),
+        );
     }
     fn visit(
         root: &Path,
@@ -651,7 +685,7 @@ pub(crate) fn configuration(root: &Path) -> Result<BTreeMap<String, String>> {
                 let path = entry.path();
                 files.insert(
                     path.strip_prefix(root)?.to_string_lossy().into_owned(),
-                    day2::digest(&fs::read(path)?),
+                    day2::digest(&configuration_bytes(&path)?),
                 );
             }
         }
@@ -889,6 +923,48 @@ mod tests {
         let root = workspace()?;
         std::os::unix::fs::symlink("rust.bzl", root.path().join("build/bazel/alias.bzl"))?;
         assert!(configuration(root.path()).is_err());
+        fs::remove_file(root.path().join("build/bazel/alias.bzl"))?;
+        fs::remove_file(root.path().join(".bazelrc"))?;
+        std::os::unix::fs::symlink(".bazelversion", root.path().join(".bazelrc"))?;
+        assert!(configuration(root.path()).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_output_refuses_absolute_traversal_foreign_or_directory_leaves() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let owned = root
+            .path()
+            .join(".cache/bazel-executor/execroot/_main/bazel-out");
+        fs::create_dir_all(&owned)?;
+        fs::write(owned.join("program"), b"actual owned output")?;
+        std::os::unix::fs::symlink(&owned, root.path().join("bazel-out"))?;
+        confined_output(
+            root.path(),
+            Path::new("bazel-out/program"),
+            &root.path().join(".cache/bazel-executor"),
+        )?;
+        for path in ["/bin/echo", "bazel-out/../program", "bazel-out"] {
+            assert!(
+                confined_output(
+                    root.path(),
+                    Path::new(path),
+                    &root.path().join(".cache/bazel-executor")
+                )
+                .is_err()
+            );
+        }
+        let foreign = tempfile::NamedTempFile::new()?;
+        std::os::unix::fs::symlink(foreign.path(), owned.join("foreign"))?;
+        assert!(
+            confined_output(
+                root.path(),
+                Path::new("bazel-out/foreign"),
+                &root.path().join(".cache/bazel-executor")
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

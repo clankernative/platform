@@ -232,6 +232,11 @@ fn build_recipe(
 }
 
 fn main() -> Result<()> {
+    // Bazel runs binaries in their runfiles tree. Preserve the caller's relative
+    // app, instance and replay paths before reading any command arguments.
+    if let Some(directory) = std::env::var_os("BUILD_WORKING_DIRECTORY") {
+        std::env::set_current_dir(directory)?;
+    }
     let mut args = std::env::args().skip(1);
     let action = args.next().unwrap_or_else(|| "build".into());
     let mut isolated_app = None;

@@ -48,8 +48,14 @@ jobs:
       - name: Execute build input identity controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
-      - name: Install the verifier through its authenticated configured producer
+      - name: Install the current verifier
         run: bazel --batch run --config=${{ matrix.config }} //crates/xtask:xtask -- install-verifier
+      - name: Build a real harness through configured-producer admission
+        run: build-out/bin/xtask build-rust-test //crates/xtask:unit_xtask
+      - name: Execute actual dependency and coverage controls
+        run: build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_dependencies::tests:: --nocapture
+      - name: Check real compiler-backed architectural refusals
+        run: build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_kernel::tests:: --test-threads=1 --nocapture
       - name: Collect current source effect inventory for review
         run: build-out/bin/xtask architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
       - name: Retain exact graph, lockfile and build outcome

@@ -24,6 +24,12 @@ bazel run //crates/xtask:xtask -- cli
 ./cli/day2 platform local-dev examples/reports --directory ../my-private-instance
 ```
 
+The native operator programs are also installed in `build-out/bin`. Invoke
+those programs directly so relative instance/artifact paths keep the caller's
+working directory. `bazel run //crates/xtask:xtask -- ...` preserves that directory
+for build and verification commands.
+
+
 Open the one-use login URL printed by the local server. This is loopback-only
 development authentication. The Reports app is an explicitly public teaching
 example: it calculates text statistics and sends notifications to a local mailbox.
