@@ -5,6 +5,7 @@ use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
     kernel::{Holder, Request, Snapshot},
     seed_core::OriginalSeedCore,
+    transport::FailedRequestWindow,
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -236,6 +237,8 @@ pub(in crate::security_epoch) struct PreparationFailure {
     category: PreparationErrorCategory,
     #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<PreparationProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<FailedRequestWindow>,
 }
 
 impl std::fmt::Display for PreparationFailure {
@@ -258,6 +261,7 @@ impl PreparationFailure {
             step,
             category: preparation_error_category(&error),
             progress: None,
+            request: FailedRequestWindow::observe(&error),
         };
         error.context(context)
     }
@@ -286,6 +290,7 @@ impl PreparationFailure {
             step: PreparationStep::Unknown,
             category: preparation_error_category(error),
             progress: None,
+            request: FailedRequestWindow::observe(error),
         })
     }
 }
@@ -1177,6 +1182,7 @@ mod tests {
                 step: PreparationStep::ClaimBinding,
                 category: PreparationErrorCategory::PermissionDenied,
                 progress: None,
+                request: None,
             }
         );
         assert_eq!(
@@ -1580,6 +1586,56 @@ mod tests {
             "MustNotDisplay",
         ] {
             assert!(!bytes.contains(value));
+        }
+    }
+
+    #[test]
+    fn failed_request_window_keeps_first_boundary_and_fits_maximal_private_record() {
+        for timeout in [false, true] {
+            let window = FailedRequestWindow::maximal_fixture(timeout);
+            let native = anyhow::Error::new(window)
+                .context("epoch_native_transport_unavailable")
+                .context(MustNotDisplay);
+            let error =
+                PreparationFailure::at(PreparationStep::BootstrapDispatchCounterSend, native);
+            let error = PreparationFailure::with_progress(
+                PreparationStep::BootstrapFile,
+                error,
+                PreparationProgress {
+                    acquired_us: Some(u32::MAX),
+                    image_us: Some(u32::MAX),
+                    prepared_us: Some(u32::MAX),
+                    last_checked_us: Some(u32::MAX),
+                },
+            );
+            assert_eq!(FailedRequestWindow::observe(&error), Some(window));
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::ActivateDispatch);
+            recorder.records = MAX_RECORDS - 1;
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let preparation = &rows[1]["observation"]["preparation"];
+            assert_eq!(preparation["step"], "bootstrap_dispatch_counter_send");
+            assert_eq!(preparation["category"], "transport_unavailable");
+            assert_eq!(
+                preparation["request"],
+                serde_json::json!([u32::MAX, 5_000_000, timeout])
+            );
+            assert_eq!(rows[1]["sequence"], MAX_RECORDS);
+            assert!(recorder.refused && !recorder.activated);
+            let bytes = String::from_utf8(recorder.output).unwrap();
+            for value in [
+                "MustNotDisplay",
+                "epoch_native_transport_unavailable",
+                "https://",
+                "Bearer",
+            ] {
+                assert!(!bytes.contains(value));
+            }
         }
     }
 
