@@ -11,4 +11,5 @@
             (subpath "/Library/Developer") (subpath "/Applications/Xcode.app"))
         (allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))
         (allow sysctl-read)
-        (allow mach-lookup (global-name "com.apple.system.logger"))
+        (allow mach-lookup (global-name "com.apple.system.logger")
+            (global-name "com.apple.PowerManagement.control"))
