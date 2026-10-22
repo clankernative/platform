@@ -189,7 +189,10 @@ pub fn build_host(job: &Path, bazel: &Path) -> Result<Command> {
         (allow file-read* (subpath {root}) (subpath "/System") (subpath "/usr/lib")
             (subpath "/usr/share") (subpath "/Library/Developer") (subpath {developer})
             (subpath "/usr/bin") (subpath "/bin") (literal "/dev/null") (literal "/dev/urandom")
-            (literal "/private/etc/ssl/openssl.cnf"))
+            (literal "/private/etc/ssl/openssl.cnf")
+            (literal "/Library/Preferences/com.apple.dt.Xcode.plist")
+            (subpath "/Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework")
+            (subpath "/Library/Apple/System/Library/PrivateFrameworks/Mercury.framework"))
         (allow file-write* (subpath {root}) (literal "/dev/null"))
         (allow process-fork)
         (allow process-exec (subpath {root}) (subpath "/usr/bin") (subpath "/bin")
@@ -260,7 +263,7 @@ mod tests {
     #[test]
     fn selected_developer_profile_keeps_outside_file_and_network_refusals() -> Result<()> {
         use std::{
-            io::Write,
+            io::{Read, Write},
             net::TcpListener,
             sync::{
                 Arc,
@@ -308,7 +311,23 @@ mod tests {
             while !serving.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                        let mut request = Vec::new();
+                        while !request.ends_with(b"\r\n\r\n") && request.len() < 4096 {
+                            let mut byte = [0_u8; 1];
+                            if stream.read(&mut byte)? == 0 {
+                                return Err(std::io::Error::other(
+                                    "public witness request ended early",
+                                ));
+                            }
+                            request.push(byte[0]);
+                        }
+                        if !request.ends_with(b"\r\n\r\n") {
+                            return Err(std::io::Error::other(
+                                "public witness request header budget",
+                            ));
+                        }
                         stream.write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
                         )?;
