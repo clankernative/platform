@@ -194,3 +194,211 @@ fn role_bind_signature_and_packet_require_the_exact_closed_stage_purpose() {
     value["purpose"] = serde_json::json!("any_stage");
     assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
 }
+
+#[test]
+fn storage_stage_purposes_are_closed_and_role_restricted_independent_of_duration() {
+    use super::{NativeRole, protocol::StagePurpose};
+    for purpose in [
+        StagePurpose::CurrentRole,
+        StagePurpose::InitialFirstHolder,
+        StagePurpose::StorageBootstrap,
+        StagePurpose::StorageMetadataObservation,
+    ] {
+        for role in [
+            NativeRole::AppHost,
+            NativeRole::EpochController,
+            NativeRole::SecurityShell,
+        ] {
+            let expected = match purpose {
+                StagePurpose::CurrentRole => true,
+                StagePurpose::InitialFirstHolder | StagePurpose::StorageBootstrap => {
+                    role != NativeRole::SecurityShell
+                }
+                StagePurpose::StorageMetadataObservation => role == NativeRole::EpochController,
+            };
+            assert_eq!(purpose.require_role(role).is_ok(), expected);
+        }
+    }
+    assert_eq!(
+        StagePurpose::CurrentRole.limit(),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        StagePurpose::InitialFirstHolder.limit(),
+        std::time::Duration::from_secs(10)
+    );
+    assert_eq!(
+        StagePurpose::StorageBootstrap.limit(),
+        crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+    );
+    assert_eq!(
+        StagePurpose::StorageMetadataObservation.limit(),
+        crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+    );
+}
+
+#[test]
+fn validly_signed_short_bootstrap_and_metadata_grants_fail_the_ordinary_current_purpose_gate() {
+    // Cryptographic DATA only. This is the exact comparison used by the real
+    // EnrolledRoleStage::require_current_role gate, not a native-stage fixture.
+    use super::{
+        NativeRole,
+        protocol::{RuntimeBinding, SignedStage, StageData, StagePurpose},
+    };
+    let root = KeyOwner::generate().unwrap();
+    let issuer = KeyOwner::generate().unwrap();
+    let key = KeyOwner::generate().unwrap();
+    let selected = policy(&root);
+    let issuer_data = IssuerData {
+        policy: selected.digest().unwrap(),
+        root_version: selected.root.version.clone(),
+        nonce: Digest::new(b"purpose-test-issuer"),
+        public_key: issuer.public(),
+        process: process(selected.issuer_code.clone()),
+        provisioner: process(selected.provisioner_code.clone()),
+    };
+    let certificate = IssuerCertificate {
+        signature: root.sign("issuer-birth", &issuer_data).unwrap(),
+        data: issuer_data,
+    };
+    certificate.verify(&selected).unwrap();
+    for purpose in [
+        StagePurpose::CurrentRole,
+        StagePurpose::InitialFirstHolder,
+        StagePurpose::StorageBootstrap,
+        StagePurpose::StorageMetadataObservation,
+    ] {
+        for seconds in [1_u64, 5] {
+            let role = NativeRole::EpochController;
+            purpose.require_role(role).unwrap();
+            let data = StageData {
+                issuer: certificate.digest().unwrap(),
+                policy: selected.digest().unwrap(),
+                role,
+                purpose,
+                public_key: key.public(),
+                challenge: Digest::new(b"purpose-challenge"),
+                request: Digest::new(b"purpose-request"),
+                process: process(selected.code(role).clone()),
+                runtime: RuntimeBinding {
+                    container: crate::security_epoch::runtime_profile::ContainerFacts {
+                        pod_name: "controller".into(),
+                        pod_uid: "controller-uid".into(),
+                        node_name: "node-one".into(),
+                        container_name: "controller".into(),
+                        container_id: "a".repeat(64),
+                        image: Digest::new(b"controller-image"),
+                        restart_count: 0,
+                    },
+                    node_uid: "node-uid".into(),
+                    boot: "boot-one".into(),
+                },
+                origin_ns: 100_000_000_000,
+                deadline_ns: 100_000_000_000 + seconds * 1_000_000_000,
+            };
+            let stage = SignedStage {
+                signature: issuer.sign("role-stage", &data).unwrap(),
+                data,
+            };
+            protocol::verify(
+                &certificate.data.public_key,
+                "role-stage",
+                &stage.data,
+                &stage.signature,
+            )
+            .unwrap();
+            assert_eq!(
+                stage
+                    .data
+                    .purpose
+                    .require_exact(StagePurpose::CurrentRole)
+                    .is_ok(),
+                purpose == StagePurpose::CurrentRole
+            );
+            for expected in [
+                StagePurpose::CurrentRole,
+                StagePurpose::InitialFirstHolder,
+                StagePurpose::StorageBootstrap,
+                StagePurpose::StorageMetadataObservation,
+            ] {
+                assert_eq!(
+                    stage.data.purpose.require_exact(expected).is_ok(),
+                    purpose == expected
+                );
+                if expected != purpose {
+                    let mut substituted = stage.clone();
+                    substituted.data.purpose = expected;
+                    assert!(
+                        protocol::verify(
+                            &certificate.data.public_key,
+                            "role-stage",
+                            &substituted.data,
+                            &substituted.signature
+                        )
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hello_bind_and_grant_signature_never_substitute_a_storage_stage_purpose() {
+    use super::{
+        NativeRole,
+        protocol::{Packet, StagePurpose},
+    };
+    let key = KeyOwner::generate().unwrap();
+    let policy = Digest::new(b"purpose-policy");
+    let request = Digest::new(b"purpose-request");
+    let challenge = Digest::new(b"purpose-challenge");
+    let public = key.public();
+    for purpose in [
+        StagePurpose::CurrentRole,
+        StagePurpose::InitialFirstHolder,
+        StagePurpose::StorageBootstrap,
+        StagePurpose::StorageMetadataObservation,
+    ] {
+        let role = NativeRole::EpochController;
+        let binding = (&policy, role, purpose, &public, &request, &challenge);
+        let signature = key.sign("role-bind", &binding).unwrap();
+        protocol::verify(&public, "role-bind", &binding, &signature).unwrap();
+        for other in [
+            StagePurpose::CurrentRole,
+            StagePurpose::InitialFirstHolder,
+            StagePurpose::StorageBootstrap,
+            StagePurpose::StorageMetadataObservation,
+        ] {
+            if other != purpose {
+                let changed = (&policy, role, other, &public, &request, &challenge);
+                assert!(protocol::verify(&public, "role-bind", &changed, &signature).is_err());
+            }
+        }
+        for packet in [
+            Packet::StageHello {
+                policy: policy.clone(),
+                role,
+                purpose,
+                public_key: public.clone(),
+                request: request.clone(),
+            },
+            Packet::StageBind {
+                policy: policy.clone(),
+                role,
+                purpose,
+                public_key: public.clone(),
+                request: request.clone(),
+                challenge: challenge.clone(),
+                signature: signature.clone(),
+            },
+        ] {
+            let mut value = serde_json::to_value(&packet).unwrap();
+            assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_ok());
+            value.as_object_mut().unwrap().remove("purpose");
+            assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+            value["purpose"] = serde_json::json!("any_storage");
+            assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+}

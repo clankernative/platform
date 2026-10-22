@@ -172,6 +172,20 @@ impl EnrolledProcessRoleOwner {
         self.begin_stage(StagePurpose::InitialFirstHolder)
     }
 
+    /// Only the fixed Controller bootstrap lifecycle and its exact App
+    /// responder use this purpose. Ordinary Current and serving stay separate.
+    pub(crate) fn begin_storage_bootstrap_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
+        self.begin_stage(StagePurpose::StorageBootstrap)
+    }
+
+    /// Controller-only read-only metadata qualification. This signed purpose
+    /// is rejected by actual storage, peer, original and consumer factories.
+    pub(in crate::security_epoch) fn begin_storage_metadata_observation_stage(
+        &mut self,
+    ) -> Result<EnrolledRoleStage<'_>> {
+        self.begin_stage(StagePurpose::StorageMetadataObservation)
+    }
+
     fn begin_stage(&mut self, purpose: StagePurpose) -> Result<EnrolledRoleStage<'_>> {
         #[cfg(not(target_os = "linux"))]
         {
@@ -187,9 +201,12 @@ impl EnrolledProcessRoleOwner {
                     StagePurpose::InitialFirstHolder => {
                         NativeAcquisition::begin_initial_first_holder()?
                     }
+                    StagePurpose::StorageBootstrap => NativeAcquisition::begin_storage_bootstrap()?,
+                    StagePurpose::StorageMetadataObservation => {
+                        NativeAcquisition::begin_storage_metadata_observation()?
+                    }
                 };
-                let (_, ceiling) = acquisition.interval_data()?;
-                let mut authentication = acquisition.narrow(5, ceiling)?;
+                let mut authentication = acquisition.narrow_authentication()?;
                 self.check_local()?;
                 purpose.require_role(self.role)?;
                 if purpose == StagePurpose::InitialFirstHolder {
@@ -323,6 +340,11 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    /// Closed ordinary-consumer gate. No caller-selected purpose or timeout.
+    pub(crate) fn require_current_role(&mut self) -> Result<()> {
+        self.require_purpose(StagePurpose::CurrentRole)
+    }
+
     pub(crate) fn capture_same_owner(&mut self) -> Result<SameEnrolledOwner> {
         self.check()?;
         Ok(SameEnrolledOwner {
@@ -352,14 +374,118 @@ impl EnrolledRoleStage<'_> {
         result
     }
 
+    /// Full provider authentication shares the stage's original plus five
+    /// seconds, including time already spent authenticating its enrolled role.
+    pub(in crate::security_epoch) fn narrow_storage_authentication(
+        &mut self,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.require_storage_authentication_purpose()?;
+            let child = self.acquisition.narrow_authentication()?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    /// Consume the actual successful five-second child, then derive a new I/O
+    /// view from the still-owned parent. The auth child is never widened.
+    pub(in crate::security_epoch) fn complete_storage_authentication(
+        &mut self,
+        mut child: NativeAcquisition,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        if let Err(error) = self.require_storage_authentication_purpose() {
+            child.refuse();
+            self.owner.refused = true;
+            self.acquisition.refuse();
+            return Err(error);
+        }
+        let result = (|| {
+            self.acquisition.complete_authentication(child)?;
+            match self.purpose {
+                StagePurpose::StorageBootstrap => {
+                    self.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
+                }
+                StagePurpose::StorageMetadataObservation => {
+                    self.narrow_storage_metadata_observation_io_acquisition(max_lease_seconds)
+                }
+                _ => anyhow::bail!("native_enrollment_storage_authentication_purpose"),
+            }
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn narrow_storage_bootstrap_io_acquisition(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.require_purpose(StagePurpose::StorageBootstrap)?;
+            self.acquisition.require_storage_bootstrap()?;
+            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn narrow_storage_metadata_observation_io_acquisition(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.require_purpose(StagePurpose::StorageMetadataObservation)?;
+            self.acquisition.require_storage_metadata_observation()?;
+            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            self.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
+    fn require_storage_authentication_purpose(&mut self) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            match self.purpose {
+                StagePurpose::StorageBootstrap => self.acquisition.require_storage_bootstrap(),
+                StagePurpose::StorageMetadataObservation => {
+                    self.acquisition.require_storage_metadata_observation()
+                }
+                _ => anyhow::bail!("native_enrollment_storage_authentication_purpose"),
+            }
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn require_purpose(
         &mut self,
         purpose: StagePurpose,
     ) -> Result<()> {
-        if self.purpose != purpose {
+        if let Err(error) = self.purpose.require_exact(purpose) {
             self.owner.refused = true;
             self.acquisition.refuse();
-            anyhow::bail!("native_enrollment_stage_purpose_changed");
+            return Err(error);
         }
         self.check()
     }
@@ -417,6 +543,14 @@ impl EnrolledRoleStage<'_> {
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.owner.check_local()?;
+            self.purpose.require_role(self.owner.role)?;
+            match self.purpose {
+                StagePurpose::StorageBootstrap => self.acquisition.require_storage_bootstrap()?,
+                StagePurpose::StorageMetadataObservation => {
+                    self.acquisition.require_storage_metadata_observation()?
+                }
+                StagePurpose::CurrentRole | StagePurpose::InitialFirstHolder => {}
+            }
             ensure!(
                 self.acquisition.sample()?.elapsed < self.deadline,
                 "native_enrollment_stage_expired"

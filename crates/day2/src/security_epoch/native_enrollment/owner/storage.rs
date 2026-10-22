@@ -18,7 +18,7 @@ impl EnrolledRoleStage<'_> {
         &mut self,
     ) -> Result<()> {
         let result = (|| {
-            self.check()?;
+            self.require_current_role()?;
             ensure!(
                 self.owner.role == NativeRole::AppHost,
                 "storage_peer_app_role_required"
@@ -42,7 +42,7 @@ impl EnrolledRoleStage<'_> {
         &mut self,
     ) -> Result<StageStatement> {
         let result = (|| {
-            self.check()?;
+            self.require_storage_peer_purpose()?;
             ensure!(
                 matches!(
                     self.owner.role,
@@ -81,9 +81,10 @@ impl EnrolledRoleStage<'_> {
         body: Body,
     ) -> Result<Message> {
         let result = (|| {
-            self.check()?;
+            self.require_storage_peer_purpose()?;
+            body.require_stage_purpose(self.purpose)?;
             ensure!(
-                body.sender_role() == self.owner.role && body.stage_purpose() == self.purpose,
+                body.sender_role() == self.owner.role,
                 "storage_peer_local_sender_role"
             );
             let sender = self.storage_statement()?.digest()?;
@@ -110,7 +111,10 @@ impl EnrolledRoleStage<'_> {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
-            self.check()?;
+            self.require_storage_peer_purpose()?;
+            if self.purpose == super::StagePurpose::StorageBootstrap {
+                acquisition.require_storage_bootstrap()?;
+            }
             let current = self.acquisition.sample()?;
             let child = acquisition.sample()?;
             let (origin, deadline) = self.acquisition.interval_data()?;
@@ -134,7 +138,7 @@ impl EnrolledRoleStage<'_> {
     pub(in crate::security_epoch::native_enrollment) fn storage_peer_role(
         &mut self,
     ) -> Result<NativeRole> {
-        self.check()?;
+        self.require_storage_peer_purpose()?;
         match self.owner.role {
             NativeRole::EpochController => Ok(NativeRole::AppHost),
             NativeRole::AppHost => Ok(NativeRole::EpochController),
@@ -244,5 +248,25 @@ impl EnrolledRoleStage<'_> {
             "storage_peer_runtime_selection"
         );
         Ok(())
+    }
+
+    fn require_storage_peer_purpose(&mut self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                matches!(
+                    self.purpose,
+                    super::StagePurpose::CurrentRole
+                        | super::StagePurpose::InitialFirstHolder
+                        | super::StagePurpose::StorageBootstrap
+                ),
+                "storage_peer_stage_purpose_refused"
+            );
+            self.check()
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
     }
 }
