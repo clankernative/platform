@@ -1,6 +1,7 @@
 # One build graph; tests and runtime campaigns always execute fresh.
 startup --host_jvm_args=-Xmx768m
 common --lockfile_mode=error
+common --enable_platform_specific_config
 build --jobs=2
 build --define=DAY2_PLATFORM_JOBS=2
 build --local_resources=cpu=2
@@ -9,10 +10,15 @@ build --compilation_mode=fastbuild
 build --verbose_failures
 build --show_timestamps
 build --announce_rc
-build --experimental_guard_against_concurrent_changes
+build --guard_against_concurrent_changes
 build --experimental_disk_cache_gc_max_size=2G
 build --experimental_disk_cache_gc_max_age=7d
 build --experimental_disk_cache_gc_idle_delay=0
+# The detected Linux C++ toolchain otherwise injects deprecated gold into Rust
+# links. Use the existing GNU binutils linker for both targets and build tools;
+# keep strict compiler warnings fatal instead of filtering the diagnostic.
+build:linux --linkopt=-fuse-ld=bfd
+build:linux --host_linkopt=-fuse-ld=bfd
 test --cache_test_results=no
 test --test_output=errors
 # Keep largest Linux harness compilation within the existing CI memory budget.

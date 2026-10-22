@@ -50,6 +50,8 @@ jobs:
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
       - name: Install the current verifier
         run: bazel --batch run --config=${{ matrix.config }} //crates/xtask:xtask -- install-verifier
+      - name: Collect current source effect inventory for review
+        run: build-out/bin/xtask architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
       - name: Build a real harness through configured-producer admission
         run: build-out/bin/xtask build-rust-test //crates/xtask:unit_xtask
       - name: Execute actual dependency and coverage controls
@@ -60,8 +62,6 @@ jobs:
       - name: Check real compiler-backed architectural refusals
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_kernel::tests:: --test-threads=1 --nocapture
-      - name: Collect current source effect inventory for review
-        run: build-out/bin/xtask architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
       - name: Retain exact graph, lockfile and build outcome
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

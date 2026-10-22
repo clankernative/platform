@@ -1269,6 +1269,8 @@ fn tests(
             .cloned(),
     );
     let outputs = crate::bazel::build(root, &compile, budget)?;
+    #[cfg(target_os = "linux")]
+    install_linux_test_programs(root, &outputs)?;
     for target in selected {
         let mut command = Command::new(
             root.join(
@@ -1447,8 +1449,11 @@ fn configure_tests(
 /// test supervisors so tests use the same fixed-sibling lookup as deployment.
 /// Production worker lookup and confinement are unchanged.
 #[cfg(target_os = "linux")]
-fn prepare_linux_test_installation(root: &Path) -> Result<()> {
-    shards::prepare_linux_installation(root)
+pub(super) fn install_linux_test_programs(
+    root: &Path,
+    outputs: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    shards::install_built_linux_auxiliaries(root, outputs)
 }
 
 fn receipt(
@@ -1659,6 +1664,11 @@ mod tests {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".bazelrc",
+            ".bazelversion",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
             "architecture-proofs.json",
@@ -1677,6 +1687,7 @@ mod tests {
         }
         for name in [
             "crates",
+            "build/bazel",
             "tools",
             "vendor",
             "assets",
@@ -1930,6 +1941,9 @@ mod tests {
         );
         assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(cache.contains("github.event_name == 'merge_group'"));
+        assert!(cache.contains(
+            "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
+        ));
         assert!(!cache.contains("github.event_name != 'pull_request'"));
         let native = job
             .split_once("      - run: build-out/bin/xtask verify-mac\n")

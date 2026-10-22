@@ -931,6 +931,11 @@ mod platform_input_tests {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".bazelrc",
+            ".bazelversion",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
             "architecture-proofs.json",
@@ -944,6 +949,7 @@ mod platform_input_tests {
         }
         for name in [
             "crates",
+            "build/bazel",
             "tools",
             "vendor",
             "assets",
@@ -952,7 +958,7 @@ mod platform_input_tests {
             "deploy",
             "toolchains",
         ] {
-            fs::create_dir(root.join(name))?;
+            fs::create_dir_all(root.join(name))?;
         }
         let approved = platform_sources(root)?;
         assert_eq!(approved, platform_sources(root)?);

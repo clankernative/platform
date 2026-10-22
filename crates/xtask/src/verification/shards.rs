@@ -504,9 +504,30 @@ fn install_auxiliaries(root: &Path, auxiliaries: &[Binary]) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn prepare_linux_installation(root: &Path) -> Result<()> {
-    let targets = compiler_targets(root)?;
-    let auxiliaries = build_auxiliaries(root, &targets.auxiliaries, &targets.members)?;
+pub(super) fn install_built_linux_auxiliaries(
+    root: &Path,
+    outputs: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    let expected = auxiliary_targets("linux");
+    let mut auxiliaries = Vec::new();
+    for target in crate::bazel::targets(root)? {
+        if !target.test
+            && expected.contains(&(
+                target.package.clone(),
+                target.target.clone(),
+                target.kind.clone(),
+            ))
+        {
+            auxiliaries.push(built_binary(
+                root,
+                &target,
+                outputs
+                    .get(&target.label)
+                    .context("current built Linux launcher required")?
+                    .clone(),
+            )?);
+        }
+    }
     install_auxiliaries(root, &auxiliaries)
 }
 

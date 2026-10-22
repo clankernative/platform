@@ -391,6 +391,8 @@ pub(crate) fn test_target(
     let budget = Duration::from_secs(12_600);
     let started = std::time::Instant::now();
     let outputs = build(root, &compile, budget)?;
+    #[cfg(target_os = "linux")]
+    crate::verification::install_linux_test_programs(root, &outputs)?;
     let executable = root.join(outputs.get(label).context("built Rust harness required")?);
     if let Some(arguments) = arguments {
         let mut command = Command::new(&executable);
@@ -452,19 +454,130 @@ pub(crate) fn programs(root: &Path, packages: &[&str]) -> Result<()> {
 }
 
 pub(crate) fn lint(root: &Path) -> Result<()> {
+    let started = std::time::Instant::now();
+    let budget = Duration::from_secs(12_600);
     let selected = targets(root)?;
+    let labels = selected
+        .iter()
+        .map(|target| target.label.clone())
+        .collect::<Vec<_>>();
     let mut command = command(root);
     command.arg("build");
     configuration_arguments(&mut command);
+    clippy_arguments(&mut command);
+    command.arg("--@rules_rust//rust/settings:clippy_flag=-Dwarnings");
+    // Filegroup roots do not traverse srcs in the Clippy aspect.
+    command.args(&labels);
+    run_with_budget(root, &mut command, budget)?;
+    admit_clippy_outputs(
+        root,
+        &root.join(".cache/bazel-executor"),
+        &labels,
+        false,
+        budget
+            .checked_sub(started.elapsed())
+            .context("Clippy budget exhausted")?,
+    )
+}
+
+pub(crate) fn clippy_arguments(command: &mut Command) {
     command.args([
         "--aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect",
-        "--output_groups=clippy_checks",
-        "--@rules_rust//rust/settings:clippy_flag=-Dwarnings",
+        "--output_groups=clippy_checks,clippy_output",
+        "--@rules_rust//rust/settings:clippy_output_diagnostics=true",
     ]);
-    // Apply the aspect to each Rust rule directly: filegroup roots do not
-    // traverse srcs in rules_rust's Clippy aspect and could silently check none.
-    command.args(selected.iter().map(|target| &target.label));
-    run_with_budget(root, &mut command, Duration::from_secs(12_600))
+}
+
+/// Read the declared diagnostic outputs even after a successful cached action.
+/// Console output alone does not repeat configuration warnings on cache hits.
+pub(crate) fn admit_clippy_outputs(
+    root: &Path,
+    output_base: &Path,
+    labels: &[String],
+    strict: bool,
+    budget: Duration,
+) -> Result<()> {
+    use std::io::Read;
+    ensure!(
+        !labels.is_empty(),
+        "nonempty Clippy producer inventory required"
+    );
+    let mut query = command(root);
+    query
+        .arg(format!("--output_base={}", output_base.display()))
+        .args(["cquery", "--output=files"]);
+    configuration_arguments(&mut query);
+    clippy_arguments(&mut query);
+    query.arg("--output_groups=clippy_output");
+    if strict {
+        query.args([
+            "--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml",
+            "--@rules_rust//rust/settings:clippy_flag=--cap-lints=forbid",
+        ]);
+    }
+    query.arg("--@rules_rust//rust/settings:clippy_flag=-Dwarnings");
+    query.arg(format!("config(set({}), target)", labels.join(" ")));
+    let files = capture_query(root, &mut query, budget, MAX_CATALOG_BYTES)?;
+    let paths = std::str::from_utf8(&files)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        paths.len() == labels.len(),
+        "complete distinct Clippy diagnostic inventory required"
+    );
+    for name in paths {
+        ensure!(
+            name.ends_with(".clippy.diagnostics"),
+            "declared Clippy diagnostic output required"
+        );
+        let path = confined_output(root, Path::new(name), output_base)?;
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(MAX_CATALOG_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        admit_clippy_json(&bytes)?;
+    }
+    Ok(())
+}
+
+fn admit_clippy_json(bytes: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() <= MAX_CATALOG_BYTES,
+        "Clippy diagnostic byte budget"
+    );
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let value: serde_json::Value = day2::json::decode(line)?;
+        if value["$message_type"] == "artifact" {
+            ensure!(
+                matches!(value["emit"].as_str(), Some("dep-info" | "metadata"))
+                    && value["artifact"]
+                        .as_str()
+                        .is_some_and(|name| !name.is_empty())
+                    && value.get("level").is_none(),
+                "Clippy metadata artifact notification required"
+            );
+            continue;
+        }
+        ensure!(
+            value["$message_type"] == "diagnostic",
+            "Clippy diagnostic record required"
+        );
+        match value["level"].as_str() {
+            Some("note" | "help") => {}
+            Some("warning" | "error" | "failure-note") => anyhow::bail!(
+                "strict compiler diagnostic: {}",
+                value["message"]
+                    .as_str()
+                    .unwrap_or("diagnostic message unavailable")
+            ),
+            _ => anyhow::bail!("unknown Clippy diagnostic record"),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn docs(root: &Path) -> Result<()> {
@@ -865,6 +978,28 @@ mod tests {
         assert_eq!(original, configuration(root.path())?);
         fs::remove_file(root.path().join("MODULE.bazel.lock"))?;
         assert!(configuration(root.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn retained_clippy_configuration_warning_refuses_every_cache_read() -> Result<()> {
+        admit_clippy_json(b"")?;
+        admit_clippy_json(
+            br#"{"$message_type":"artifact","artifact":"lib.rmeta","emit":"metadata"}"#,
+        )?;
+        let warning = br#"{"$message_type":"diagnostic","level":"warning","message":"invalid disallowed path: misspelled_now"}"#;
+        for _ in 0..2 {
+            assert!(admit_clippy_json(warning).is_err());
+        }
+        for record in [
+            br#"{"$message_type":"diagnostic","level":"error","message":"ambient effect"}"#.as_slice(),
+            br#"{"$message_type":"diagnostic","level":"unknown"}"#.as_slice(),
+            br#"{"$message_type":"artifact","artifact":"lib.rmeta","emit":"unknown"}"#.as_slice(),
+            br#"{"$message_type":"artifact","artifact":"lib.rmeta","emit":"metadata","level":"warning"}"#.as_slice(),
+            b"malformed".as_slice(),
+        ] {
+            assert!(admit_clippy_json(record).is_err());
+        }
         Ok(())
     }
 

@@ -38,6 +38,7 @@ pub struct StrictCrate<'a> {
 }
 
 pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
+    let started = std::time::Instant::now();
     ensure!(
         !packages.is_empty() && packages.len() <= 128,
         "strict crate inventory budget"
@@ -85,7 +86,9 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         &mut clippy_command(root, packages)?,
         root,
         &log,
-        COMPILER_TIMEOUT,
+        COMPILER_TIMEOUT
+            .checked_sub(started.elapsed())
+            .context("strict compiler budget exhausted")?,
     );
     // The supervisor has reaped the process group before this bounded read.
     let metadata = fs::symlink_metadata(&log)?;
@@ -107,6 +110,30 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         )
     })?;
     admit_clippy_diagnostic(&diagnostic)?;
+    let catalog = crate::bazel::targets(root)?;
+    let labels = packages
+        .iter()
+        .map(|package| {
+            catalog
+                .iter()
+                .find(|target| {
+                    !target.test
+                        && target.package == package.name
+                        && target.source == Path::new(package.source)
+                })
+                .map(|target| target.label.clone())
+                .context("configured strict Clippy producer required")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::bazel::admit_clippy_outputs(
+        root,
+        &strict_target_dir(root, packages),
+        &labels,
+        true,
+        COMPILER_TIMEOUT
+            .checked_sub(started.elapsed())
+            .context("strict compiler budget exhausted")?,
+    )?;
     println!(
         "platform kernel compiler boundary: {} strict crates",
         packages.len()
@@ -141,11 +168,8 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
         .current_dir(root)
         .arg("build");
     crate::bazel::configuration_arguments(&mut command);
-    command.args([
-        "--aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect",
-        "--output_groups=clippy_checks",
-        "--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml",
-    ]);
+    crate::bazel::clippy_arguments(&mut command);
+    command.arg("--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml");
     for package in packages {
         let matches = catalog
             .iter()

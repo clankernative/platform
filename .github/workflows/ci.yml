@@ -86,7 +86,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -153,7 +153,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -315,7 +315,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
@@ -427,7 +427,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require the selected complete preparation pipeline
         run: test "$PARALLEL" = success
@@ -508,7 +508,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -577,7 +577,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require security checks and complete verification
         run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS:$MAC" = success:success:success:success:success
@@ -681,7 +681,7 @@ jobs:
           bazelisk-cache: true
           repository-cache: true
           disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
-          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')) }}
       - name: Compile and install the current verifier with Bazel
         run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

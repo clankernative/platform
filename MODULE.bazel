@@ -11,6 +11,7 @@ single_version_override(
         "//build/bazel:patches/rules-rust-0.74.0-child-status.patch",
         "//build/bazel:patches/rules-rust-0.74.0-platform-profiles.patch",
         "//build/bazel:patches/rules-rust-0.74.0-build-script-inputs.patch",
+        "//build/bazel:patches/rules-rust-0.74.0-clippy-enforcement.patch",
     ],
     patch_strip = 1,
 )

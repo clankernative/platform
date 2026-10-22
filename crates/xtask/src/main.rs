@@ -827,6 +827,10 @@ fn main() -> Result<()> {
             );
             control_verify(&root)?;
         }
+        "lint" => {
+            ensure!(args.next().is_none(), "lint accepts no overrides");
+            bazel::lint(&root)?;
+        }
         "verify-fast" => {
             ensure!(args.next().is_none(), "verify-fast accepts no arguments");
             verification::execute(&root, "verify-fast")?;
