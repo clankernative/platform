@@ -90,9 +90,6 @@ impl RetainedEpochReads {
                     && self.selection == Digest::of(store)?,
                 "epoch_bootstrap_read_selection_changed"
             );
-            self.check(stage)?;
-            let same = stage.narrow_io_acquisition(store.max_lease_seconds)?;
-            self.acquisition.join_current_view(same)?;
             self.check(stage)
         })();
         if result.is_err() {
@@ -115,14 +112,10 @@ impl RetainedEpochReads {
             stage.check_selection(&self.policy, &self.store, self.purpose)?;
             // This child samples THIS actual stage's original domain; it
             // neither begins a new interval nor renews our retained owner.
-            let mut same_stage = stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
-            let supplied = same_stage.sample()?;
-            let sample = self.acquisition.sample()?;
-            ensure!(
-                supplied.domain == sample.domain,
-                "epoch_retained_read_stage_replaced"
-            );
+            let same_stage = stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
+            self.acquisition.join_current_view(same_stage)?;
             self.process.check(&mut self.acquisition)?;
+            let sample = self.acquisition.sample()?;
             self.owner.check(stage)?;
             Ok(sample)
         })();
@@ -152,6 +145,36 @@ impl RetainedEpochReads {
             )?;
             self.check(stage)?;
             Ok(observed)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// The fixed slot observation stays read-only and requires the SAME actual
+    /// stage before and after its coherent provider read and rollback.
+    pub(in crate::security_epoch) fn read_slot(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        selection: &EpochStore,
+        core: &crate::security_epoch::control_slot::LogicalCore,
+    ) -> Result<crate::security_epoch::control_slot_io::SlotObservation> {
+        let result = (|| {
+            ensure!(
+                self.selection == Digest::of(selection)?,
+                "epoch_retained_read_selection_changed"
+            );
+            self.check(stage)?;
+            let budget = self.acquisition.budget()?;
+            let slot = crate::security_epoch::control_slot_io::read_with_budget(
+                selection,
+                core,
+                &mut CurrentReadPort { owner: self, stage },
+                budget,
+            )?;
+            self.check(stage)?;
+            Ok(slot)
         })();
         if result.is_err() {
             self.refuse();

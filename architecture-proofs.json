@@ -739,6 +739,13 @@
             "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
             "module": "retained"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+            "module": "writer"
+          }
         }
       ],
       "methods": [

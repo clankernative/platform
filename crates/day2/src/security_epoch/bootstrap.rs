@@ -430,18 +430,22 @@ impl AppStorageBootstrap {
             )?;
             let holder = self.storage.first_holder_data()?;
             let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
-            phase.await_known(stage)?;
-            // The Controller's signed result only unblocks a fresh coherent
-            // provider read. It is not itself an activation/serving receipt.
-            let names = request_names(&self.store, &request)?;
+            // Authenticate read-only material while the Controller performs its
+            // fixed operation. This does not observe the epoch or acknowledge
+            // anything; both provider observations still follow actual Known.
             let mut reads = super::AuthenticatedReads::acquire(
                 &self.policy,
                 &self.store,
                 day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
                 stage,
-            )?;
-            let observed = reads.read(&self.store, &names)?;
-            let slot = reads.read_slot(&self.store, &core)?;
+            )?
+            .retain_current()?;
+            phase.await_known(stage)?;
+            // The Controller's signed result only unblocks a fresh coherent
+            // provider read. It is not itself an activation/serving receipt.
+            let names = request_names(&self.store, &request)?;
+            let observed = reads.read(stage, &self.store, &names)?;
+            let slot = reads.read_slot(stage, &self.store, &core)?;
             validate_after(
                 action,
                 &self.store,
