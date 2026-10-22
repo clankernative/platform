@@ -129,7 +129,9 @@ fn trusted_developer_root(selected: &Path) -> Result<PathBuf> {
         .strip_prefix("Xcode_")
         .and_then(|name| name.strip_suffix(".app"))
         .is_some_and(|version| {
-            !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
         });
     ensure!(
         selected.file_name() == Some(std::ffi::OsStr::new("Developer"))
@@ -292,6 +294,8 @@ mod tests {
         assert!(!build_host(&job, &touch)?.arg(&denied).status()?.success());
         assert!(!denied.exists());
 
+        let curl = job.join("curl");
+        fs::copy("/usr/bin/curl", &curl)?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = format!("http://{}/", listener.local_addr()?);
@@ -318,8 +322,6 @@ mod tests {
             }
             Ok(())
         });
-        let curl = job.join("curl");
-        fs::copy("/usr/bin/curl", &curl)?;
         let arguments = [
             "--noproxy",
             "*",

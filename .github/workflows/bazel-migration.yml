@@ -38,6 +38,12 @@ jobs:
           cache-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/build/bazel-platform-migration' }}
       - name: Analyze the complete workspace with parameter files
         run: bazel aquery --lockfile_mode=update --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib //cli/checks:lib))' > /tmp/day2-bazel-actions.json
+      - name: Retain actual dependency extension lock immediately after resolution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bazel-resolved-lock-${{ runner.os }}-${{ runner.arch }}
+          path: MODULE.bazel.lock
+          if-no-files-found: error
       - name: Check normal and build-tool feature context selection
         run: bazel build --config=${{ matrix.config }} //build/bazel:context_controls
       - name: Check production normal and build-tool context selection
@@ -116,7 +122,7 @@ jobs:
           disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
           cache-save: true
       - name: Install the current diagnostic verifier
-        run: bazel --batch run --config=ci-mac //crates/xtask:xtask -- install-verifier
+        run: bazel --batch run --lockfile_mode=update --config=ci-mac //crates/xtask:xtask -- install-verifier
       - name: Bootstrap the unchanged current native compiler inputs
         run: build-out/bin/xtask bootstrap
       - name: Execute the existing real private-build case through the Roc probe recipe
