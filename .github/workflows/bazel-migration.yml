@@ -57,6 +57,12 @@ jobs:
       - name: Execute actual verifier installation identity controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=tests::cli_install_ --test_arg=--nocapture //crates/xtask:unit_xtask
+      - name: Execute source capture and worker ABI seed controls
+        run: |
+          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build::platform_ //crates/day2-control:control_integration
+      - name: Execute actual policy and CI source mutation refusal
+        run: |
+          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build::architecture_policy_changes_invalidate_the_platform_and_materialization --test_arg=--exact //crates/day2-control:control_integration
       - name: Execute build input identity controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
