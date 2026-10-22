@@ -35,6 +35,58 @@ struct Catalog {
     targets: Vec<Target>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyInputs {
+    format: u32,
+    inputs: BTreeMap<String, String>,
+    models: BTreeMap<String, String>,
+}
+
+/// Refuse stale hand-reviewed feature models after dependency inputs change.
+/// This binds source predictions; hosted actions still qualify their behavior.
+pub(crate) fn dependency_inputs(root: &Path) -> Result<()> {
+    let descriptor: DependencyInputs = day2::json::decode(&configuration_bytes(
+        &root.join("build/bazel/cargo-context-inputs.json"),
+    )?)?;
+    ensure!(descriptor.format == 1, "dependency context binding format");
+    let mut expected = BTreeSet::from(["Cargo.toml".to_owned(), "Cargo.lock".to_owned()]);
+    for target in targets(root)? {
+        expected.insert(
+            target
+                .directory
+                .join("Cargo.toml")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    ensure!(
+        descriptor.inputs.keys().cloned().collect::<BTreeSet<_>>() == expected,
+        "complete manifest and lockfile context binding required"
+    );
+    ensure!(
+        descriptor
+            .models
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            == BTreeSet::from([
+                "build/bazel/cargo_contexts.bzl",
+                "build/bazel/cargo_production_contexts.bzl",
+            ]),
+        "both verification and production feature models required"
+    );
+    for (name, expected) in descriptor.inputs.iter().chain(&descriptor.models) {
+        ensure!(
+            expected.len() == 64
+                && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && day2::digest(&configuration_bytes(&root.join(name))?) == *expected,
+            "dependency context source changed; review and refresh the native feature models: {name}"
+        );
+    }
+    Ok(())
+}
+
 fn relative(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path
@@ -153,7 +205,7 @@ impl Profile {
         match self {
             Self::Development => {}
             Self::Release => {
-                command.arg("--config=release");
+                command.args(["--config=release", "--config=production"]);
             }
             Self::Distribution => {
                 command.arg("--config=distribution");
@@ -299,6 +351,7 @@ fn build_profile(
     isolated_job: Option<&Path>,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let started = std::time::Instant::now();
+    dependency_inputs(root)?;
     ensure!(!selected.is_empty(), "nonempty Bazel build required");
     let expected = selected
         .iter()
@@ -455,6 +508,7 @@ pub(crate) fn programs(root: &Path, packages: &[&str]) -> Result<()> {
 
 pub(crate) fn lint(root: &Path) -> Result<()> {
     let started = std::time::Instant::now();
+    dependency_inputs(root)?;
     let budget = Duration::from_secs(12_600);
     let selected = targets(root)?;
     let labels = selected
@@ -465,6 +519,7 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
     command.arg("build");
     configuration_arguments(&mut command);
     clippy_arguments(&mut command);
+    command.arg("--output_groups=clippy_checks,clippy_output");
     command.arg("--@rules_rust//rust/settings:clippy_flag=-Dwarnings");
     // Filegroup roots do not traverse srcs in the Clippy aspect.
     command.args(&labels);
@@ -483,7 +538,6 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
 pub(crate) fn clippy_arguments(command: &mut Command) {
     command.args([
         "--aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect",
-        "--output_groups=clippy_checks,clippy_output",
         "--@rules_rust//rust/settings:clippy_output_diagnostics=true",
     ]);
 }
@@ -524,7 +578,9 @@ pub(crate) fn admit_clippy_outputs(
         .collect::<BTreeSet<_>>();
     ensure!(
         paths.len() == labels.len(),
-        "complete distinct Clippy diagnostic inventory required"
+        "complete distinct Clippy diagnostic inventory required: {} outputs for {} producers",
+        paths.len(),
+        labels.len()
     );
     for name in paths {
         ensure!(
@@ -937,6 +993,71 @@ fn build_command(root: &Path, verb: &str, isolated_job: Option<&Path>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_contexts_refuse_stale_manifests_models_and_uncovered_inputs() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path();
+        fs::create_dir_all(root.join("build/bazel"))?;
+        fs::create_dir_all(root.join("crates/example/src"))?;
+        fs::write(root.join("crates/example/src/main.rs"), "fn main() {}")?;
+        fs::write(
+            root.join(CATALOG),
+            serde_json::to_vec(&serde_json::json!({
+                "format":1,
+                "targets":[{"package":"example","directory":"crates/example","target":"example",
+                    "kind":["bin"],"label":"//crates/example:example","test":false,
+                    "source":"crates/example/src/main.rs"}]
+            }))?,
+        )?;
+        let inputs = ["Cargo.toml", "Cargo.lock", "crates/example/Cargo.toml"];
+        let models = [
+            "build/bazel/cargo_contexts.bzl",
+            "build/bazel/cargo_production_contexts.bzl",
+        ];
+        for name in inputs.iter().chain(&models) {
+            fs::write(root.join(name), b"reviewed dependency source")?;
+        }
+        let pins = |names: &[&str]| -> Result<BTreeMap<String, String>> {
+            names
+                .iter()
+                .map(|name| {
+                    Ok((
+                        (*name).to_owned(),
+                        day2::digest(&fs::read(root.join(name))?),
+                    ))
+                })
+                .collect()
+        };
+        let mut binding =
+            serde_json::json!({"format":1,"inputs":pins(&inputs)?,"models":pins(&models)?});
+        let path = root.join("build/bazel/cargo-context-inputs.json");
+        fs::write(&path, serde_json::to_vec(&binding)?)?;
+        dependency_inputs(root)?;
+        for name in [
+            "Cargo.lock",
+            "crates/example/Cargo.toml",
+            models[0],
+            models[1],
+        ] {
+            fs::write(
+                root.join(name),
+                b"changed without reviewing native feature contexts",
+            )?;
+            assert!(
+                dependency_inputs(root).is_err(),
+                "stale context admitted: {name}"
+            );
+            fs::write(root.join(name), b"reviewed dependency source")?;
+        }
+        binding["inputs"]["unreviewed/Cargo.toml"] = serde_json::json!("00".repeat(32));
+        fs::write(&path, serde_json::to_vec(&binding)?)?;
+        assert!(
+            dependency_inputs(root).is_err(),
+            "extra dependency source binding admitted"
+        );
+        Ok(())
+    }
 
     fn workspace() -> Result<tempfile::TempDir> {
         let root = tempfile::tempdir()?;

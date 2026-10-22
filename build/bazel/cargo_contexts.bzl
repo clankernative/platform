@@ -7,6 +7,26 @@ Only the three declared native host architectures are supported.
 
 CARGO_CONTEXTS = {
     "linux_aarch64": {
+        "cookie@0.18.2": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [
+                    "@crates__version_check-0.9.5//:version_check"
+                ],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__time-0.3.55//:time"
+                ],
+                "features": [
+                    "percent-encode",
+                    "percent-encoding"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "errno@0.3.14": {
             "target": {
                 "aliases": {},
@@ -18,6 +38,23 @@ CARGO_CONTEXTS = {
                 ],
                 "features": [
                     "default",
+                    "std"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "getrandom@0.3.4": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__cfg-if-1.0.4//:cfg_if",
+                    "@crates__libc-0.2.189//:libc"
+                ],
+                "features": [
                     "std"
                 ],
                 "proc_macro_deps": []
@@ -86,6 +123,26 @@ CARGO_CONTEXTS = {
                     "equivalent",
                     "inline-more",
                     "raw-entry"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "idna@1.1.0": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__idna_adapter-1.2.2//:idna_adapter",
+                    "@crates__smallvec-1.16.0//:smallvec",
+                    "@crates__utf8_iter-1.0.4//:utf8_iter"
+                ],
+                "features": [
+                    "alloc",
+                    "compiled_data",
+                    "default",
+                    "std"
                 ],
                 "proc_macro_deps": []
             }
@@ -311,6 +368,101 @@ CARGO_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
+        "regex_syntax@0.8.11": {
+            "host": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            },
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "reqwest@0.12.28": {
+            "target": {
+                "aliases": {
+                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                },
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__base64-0.22.1//:base64",
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie_store-0.22.1//:cookie_store",
+                    "@crates__futures-channel-0.3.34//:futures_channel",
+                    "@crates__futures-core-0.3.34//:futures_core",
+                    "@crates__futures-util-0.3.34//:futures_util",
+                    "@crates__http-1.5.0//:http",
+                    "@crates__http-body-1.1.0//:http_body",
+                    "@crates__http-body-util-0.1.5//:http_body_util",
+                    "@crates__hyper-1.11.1//:hyper",
+                    "@crates__hyper-rustls-0.27.9//:hyper_rustls",
+                    "@crates__hyper-util-0.1.20//:hyper_util",
+                    "@crates__log-0.4.34//:log",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__rustls-0.23.46//:rustls",
+                    "@crates__rustls-pki-types-1.15.1//:rustls_pki_types",
+                    "@crates__serde-1.0.229//:serde",
+                    "@crates__serde_json-1.0.151//:serde_json",
+                    "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
+                    "@crates__sync_wrapper-1.0.2//:sync_wrapper",
+                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-rustls-0.26.5//:tokio_rustls",
+                    "@crates__tower-0.5.3//:tower",
+                    "@crates__tower-http-0.6.11//:tower_http",
+                    "@crates__tower-service-0.3.3//:tower_service",
+                    "@crates__url-2.5.8//:url",
+                    "@crates__webpki-roots-1.0.10//:webpki_roots"
+                ],
+                "features": [
+                    "__rustls",
+                    "__rustls-ring",
+                    "__tls",
+                    "blocking",
+                    "cookies",
+                    "json",
+                    "rustls-tls",
+                    "rustls-tls-webpki-roots",
+                    "rustls-tls-webpki-roots-no-provider"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "rustix@1.1.5": {
             "host": {
                 "aliases": {},
@@ -511,10 +663,72 @@ CARGO_CONTEXTS = {
                     "visit"
                 ],
                 "proc_macro_deps": []
+            }
+        },
+        "tokio@1.53.1": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__libc-0.2.189//:libc",
+                    "@crates__mio-1.2.3//:mio",
+                    "@crates__parking_lot-0.12.5//:parking_lot",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__signal-hook-registry-1.4.8//:signal_hook_registry",
+                    "@crates__socket2-0.6.5//:socket2"
+                ],
+                "features": [
+                    "bytes",
+                    "default",
+                    "fs",
+                    "io-util",
+                    "libc",
+                    "macros",
+                    "mio",
+                    "net",
+                    "parking_lot",
+                    "process",
+                    "rt",
+                    "rt-multi-thread",
+                    "signal",
+                    "signal-hook-registry",
+                    "socket2",
+                    "sync",
+                    "test-util",
+                    "time",
+                    "tokio-macros",
+                    "windows-sys"
+                ],
+                "proc_macro_deps": [
+                    "@crates__tokio-macros-2.7.2//:tokio_macros"
+                ]
             }
         }
     },
     "linux_x86_64": {
+        "cookie@0.18.2": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [
+                    "@crates__version_check-0.9.5//:version_check"
+                ],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__time-0.3.55//:time"
+                ],
+                "features": [
+                    "percent-encode",
+                    "percent-encoding"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "errno@0.3.14": {
             "target": {
                 "aliases": {},
@@ -526,6 +740,23 @@ CARGO_CONTEXTS = {
                 ],
                 "features": [
                     "default",
+                    "std"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "getrandom@0.3.4": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__cfg-if-1.0.4//:cfg_if",
+                    "@crates__libc-0.2.189//:libc"
+                ],
+                "features": [
                     "std"
                 ],
                 "proc_macro_deps": []
@@ -594,6 +825,26 @@ CARGO_CONTEXTS = {
                     "equivalent",
                     "inline-more",
                     "raw-entry"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "idna@1.1.0": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__idna_adapter-1.2.2//:idna_adapter",
+                    "@crates__smallvec-1.16.0//:smallvec",
+                    "@crates__utf8_iter-1.0.4//:utf8_iter"
+                ],
+                "features": [
+                    "alloc",
+                    "compiled_data",
+                    "default",
+                    "std"
                 ],
                 "proc_macro_deps": []
             }
@@ -819,6 +1070,101 @@ CARGO_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
+        "regex_syntax@0.8.11": {
+            "host": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            },
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "reqwest@0.12.28": {
+            "target": {
+                "aliases": {
+                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                },
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__base64-0.22.1//:base64",
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie_store-0.22.1//:cookie_store",
+                    "@crates__futures-channel-0.3.34//:futures_channel",
+                    "@crates__futures-core-0.3.34//:futures_core",
+                    "@crates__futures-util-0.3.34//:futures_util",
+                    "@crates__http-1.5.0//:http",
+                    "@crates__http-body-1.1.0//:http_body",
+                    "@crates__http-body-util-0.1.5//:http_body_util",
+                    "@crates__hyper-1.11.1//:hyper",
+                    "@crates__hyper-rustls-0.27.9//:hyper_rustls",
+                    "@crates__hyper-util-0.1.20//:hyper_util",
+                    "@crates__log-0.4.34//:log",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__rustls-0.23.46//:rustls",
+                    "@crates__rustls-pki-types-1.15.1//:rustls_pki_types",
+                    "@crates__serde-1.0.229//:serde",
+                    "@crates__serde_json-1.0.151//:serde_json",
+                    "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
+                    "@crates__sync_wrapper-1.0.2//:sync_wrapper",
+                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-rustls-0.26.5//:tokio_rustls",
+                    "@crates__tower-0.5.3//:tower",
+                    "@crates__tower-http-0.6.11//:tower_http",
+                    "@crates__tower-service-0.3.3//:tower_service",
+                    "@crates__url-2.5.8//:url",
+                    "@crates__webpki-roots-1.0.10//:webpki_roots"
+                ],
+                "features": [
+                    "__rustls",
+                    "__rustls-ring",
+                    "__tls",
+                    "blocking",
+                    "cookies",
+                    "json",
+                    "rustls-tls",
+                    "rustls-tls-webpki-roots",
+                    "rustls-tls-webpki-roots-no-provider"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "rustix@1.1.5": {
             "host": {
                 "aliases": {},
@@ -1020,9 +1366,71 @@ CARGO_CONTEXTS = {
                 ],
                 "proc_macro_deps": []
             }
+        },
+        "tokio@1.53.1": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__libc-0.2.189//:libc",
+                    "@crates__mio-1.2.3//:mio",
+                    "@crates__parking_lot-0.12.5//:parking_lot",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__signal-hook-registry-1.4.8//:signal_hook_registry",
+                    "@crates__socket2-0.6.5//:socket2"
+                ],
+                "features": [
+                    "bytes",
+                    "default",
+                    "fs",
+                    "io-util",
+                    "libc",
+                    "macros",
+                    "mio",
+                    "net",
+                    "parking_lot",
+                    "process",
+                    "rt",
+                    "rt-multi-thread",
+                    "signal",
+                    "signal-hook-registry",
+                    "socket2",
+                    "sync",
+                    "test-util",
+                    "time",
+                    "tokio-macros",
+                    "windows-sys"
+                ],
+                "proc_macro_deps": [
+                    "@crates__tokio-macros-2.7.2//:tokio_macros"
+                ]
+            }
         }
     },
     "macos_aarch64": {
+        "cookie@0.18.2": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [
+                    "@crates__version_check-0.9.5//:version_check"
+                ],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__time-0.3.55//:time"
+                ],
+                "features": [
+                    "percent-encode",
+                    "percent-encoding"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "errno@0.3.14": {
             "host": {
                 "aliases": {},
@@ -1045,6 +1453,23 @@ CARGO_CONTEXTS = {
                 ],
                 "features": [
                     "default",
+                    "std"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "getrandom@0.3.4": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    ":build_script_build",
+                    "@crates__cfg-if-1.0.4//:cfg_if",
+                    "@crates__libc-0.2.189//:libc"
+                ],
+                "features": [
                     "std"
                 ],
                 "proc_macro_deps": []
@@ -1113,6 +1538,26 @@ CARGO_CONTEXTS = {
                     "equivalent",
                     "inline-more",
                     "raw-entry"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "idna@1.1.0": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__idna_adapter-1.2.2//:idna_adapter",
+                    "@crates__smallvec-1.16.0//:smallvec",
+                    "@crates__utf8_iter-1.0.4//:utf8_iter"
+                ],
+                "features": [
+                    "alloc",
+                    "compiled_data",
+                    "default",
+                    "std"
                 ],
                 "proc_macro_deps": []
             }
@@ -1297,6 +1742,101 @@ CARGO_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
+        "regex_syntax@0.8.11": {
+            "host": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            },
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [],
+                "features": [
+                    "default",
+                    "std",
+                    "unicode",
+                    "unicode-age",
+                    "unicode-bool",
+                    "unicode-case",
+                    "unicode-gencat",
+                    "unicode-perl",
+                    "unicode-script",
+                    "unicode-segment"
+                ],
+                "proc_macro_deps": []
+            }
+        },
+        "reqwest@0.12.28": {
+            "target": {
+                "aliases": {
+                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                },
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__base64-0.22.1//:base64",
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie_store-0.22.1//:cookie_store",
+                    "@crates__futures-channel-0.3.34//:futures_channel",
+                    "@crates__futures-core-0.3.34//:futures_core",
+                    "@crates__futures-util-0.3.34//:futures_util",
+                    "@crates__http-1.5.0//:http",
+                    "@crates__http-body-1.1.0//:http_body",
+                    "@crates__http-body-util-0.1.5//:http_body_util",
+                    "@crates__hyper-1.11.1//:hyper",
+                    "@crates__hyper-rustls-0.27.9//:hyper_rustls",
+                    "@crates__hyper-util-0.1.20//:hyper_util",
+                    "@crates__log-0.4.34//:log",
+                    "@crates__percent-encoding-2.3.2//:percent_encoding",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__rustls-0.23.46//:rustls",
+                    "@crates__rustls-pki-types-1.15.1//:rustls_pki_types",
+                    "@crates__serde-1.0.229//:serde",
+                    "@crates__serde_json-1.0.151//:serde_json",
+                    "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
+                    "@crates__sync_wrapper-1.0.2//:sync_wrapper",
+                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-rustls-0.26.5//:tokio_rustls",
+                    "@crates__tower-0.5.3//:tower",
+                    "@crates__tower-http-0.6.11//:tower_http",
+                    "@crates__tower-service-0.3.3//:tower_service",
+                    "@crates__url-2.5.8//:url",
+                    "@crates__webpki-roots-1.0.10//:webpki_roots"
+                ],
+                "features": [
+                    "__rustls",
+                    "__rustls-ring",
+                    "__tls",
+                    "blocking",
+                    "cookies",
+                    "json",
+                    "rustls-tls",
+                    "rustls-tls-webpki-roots",
+                    "rustls-tls-webpki-roots-no-provider"
+                ],
+                "proc_macro_deps": []
+            }
+        },
         "rustix@1.1.5": {
             "host": {
                 "aliases": {
@@ -1503,6 +2043,48 @@ CARGO_CONTEXTS = {
                     "visit"
                 ],
                 "proc_macro_deps": []
+            }
+        },
+        "tokio@1.53.1": {
+            "target": {
+                "aliases": {},
+                "build_aliases": {},
+                "build_deps": [],
+                "build_proc_macro_deps": [],
+                "deps": [
+                    "@crates__bytes-1.12.1//:bytes",
+                    "@crates__libc-0.2.189//:libc",
+                    "@crates__mio-1.2.3//:mio",
+                    "@crates__parking_lot-0.12.5//:parking_lot",
+                    "@crates__pin-project-lite-0.2.17//:pin_project_lite",
+                    "@crates__signal-hook-registry-1.4.8//:signal_hook_registry",
+                    "@crates__socket2-0.6.5//:socket2"
+                ],
+                "features": [
+                    "bytes",
+                    "default",
+                    "fs",
+                    "io-util",
+                    "libc",
+                    "macros",
+                    "mio",
+                    "net",
+                    "parking_lot",
+                    "process",
+                    "rt",
+                    "rt-multi-thread",
+                    "signal",
+                    "signal-hook-registry",
+                    "socket2",
+                    "sync",
+                    "test-util",
+                    "time",
+                    "tokio-macros",
+                    "windows-sys"
+                ],
+                "proc_macro_deps": [
+                    "@crates__tokio-macros-2.7.2//:tokio_macros"
+                ]
             }
         }
     }

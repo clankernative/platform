@@ -27,7 +27,7 @@ variable "enabled" {
 }
 
 variable "desired_status" {
-  description = "RUNNING or TERMINATED. Stop the VM between qualification runs without losing its disk (Docker build cache, cargo registry)."
+  description = "RUNNING or TERMINATED. Stop the VM between qualification runs without losing its disk (Docker and Bazel build caches)."
   type        = string
   default     = "RUNNING"
 

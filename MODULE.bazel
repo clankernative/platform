@@ -137,4 +137,46 @@ crate.annotation(
     patch_args = ["-p1"],
 )
 
+crate.annotation(
+    crate = "cookie",
+    version = "0.18.2",
+    patches = ["//build/bazel:patches/cookie-0.18.2-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+crate.annotation(
+    crate = "getrandom",
+    version = "0.3.4",
+    patches = ["//build/bazel:patches/getrandom-0.3.4-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+crate.annotation(
+    crate = "idna",
+    version = "1.1.0",
+    patches = ["//build/bazel:patches/idna-1.1.0-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+crate.annotation(
+    crate = "regex-syntax",
+    version = "0.8.11",
+    patches = ["//build/bazel:patches/regex-syntax-0.8.11-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+crate.annotation(
+    crate = "reqwest",
+    version = "0.12.28",
+    patches = ["//build/bazel:patches/reqwest-0.12.28-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+crate.annotation(
+    crate = "tokio",
+    version = "1.53.1",
+    patches = ["//build/bazel:patches/tokio-1.53.1-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
 use_repo(crate, "crates")

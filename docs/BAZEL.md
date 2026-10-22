@@ -64,10 +64,21 @@ panic/profile policy; build tools keep their separate build-override profile.
 The distribution image additionally strips executable symbols as before.
 
 The reviewed dependency contexts distinguish native Linux x86_64, Linux ARM64
-and Apple Silicon targets from build tools. Their source model is checked
-against actual configured actions. Cross compilation is not qualified by a
+and Apple Silicon targets from build tools. Verification uses the complete
+all-target feature graph. `--config=production` excludes development dependencies
+and their feature additions; the native archive and distribution commands select
+it together with the release compiler profile. Release test harnesses still
+unwind panics. Their source models are checked against actual configured actions.
+Cross compilation is not qualified by a
 successful native build. Cargo metadata alone does not establish compiler,
 build-script dynamic-value or runtime equivalence.
+
+Dependency changes require reviewing both native feature contexts, updating the
+crate_universe lock and refreshing `build/bazel/cargo-context-inputs.json` only
+after the derived declarations have been reviewed. That descriptor binds every
+workspace manifest, Cargo.lock and both context tables. The verifier refuses a
+changed, missing or extra input rather than silently using stale feature data.
+Refreshing checksums alone does not establish that a feature model is correct.
 
 The private Mac builder receives only the pinned standalone Bazel binary,
 byte/mode-pinned source inputs and prefetched repositories. Its ordinary

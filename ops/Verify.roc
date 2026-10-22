@@ -81,7 +81,7 @@ Verify :: [].{
 	all! = |host!| {
 		_ = inputs!(host!)?
 		_ = Simulation.campaign!(3_664_912_422, 32, host!)?
-		# One Cargo invocation covers the former all-runtime and control package sets.
+		# One declared Bazel build covers the former all-runtime and control package sets.
 		# Tests remain serial; the combined allowance preserves their former 9000s + 3600s ceilings.
 		_ =
 			Capability.call!(

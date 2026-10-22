@@ -8,6 +8,7 @@ than selecting their features after the exec transition.
 load("@rules_rust//cargo:defs.bzl", _cargo_build_script = "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", _rust_library = "rust_library")
 load(":cargo_contexts.bzl", "CARGO_CONTEXTS")
+load(":cargo_production_contexts.bzl", "CARGO_PRODUCTION_CONTEXTS")
 
 _PLATFORMS = ["linux_x86_64", "linux_aarch64", "macos_aarch64"]
 
@@ -22,9 +23,10 @@ def _variants(name, version):
     key = name + "@" + version
     result = []
     for platform in _PLATFORMS:
-        if key in CARGO_CONTEXTS[platform]:
-            for context, values in CARGO_CONTEXTS[platform][key].items():
-                result.append((platform + "_" + context, values))
+        for suffix, models in [("", CARGO_CONTEXTS), ("_production", CARGO_PRODUCTION_CONTEXTS)]:
+            if key in models[platform]:
+                for context, values in models[platform][key].items():
+                    result.append((platform + suffix + "_" + context, values))
     if not result:
         fail("No reviewed native Cargo dependency context for " + key)
     return result

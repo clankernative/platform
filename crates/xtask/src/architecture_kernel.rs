@@ -169,6 +169,7 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
         .arg("build");
     crate::bazel::configuration_arguments(&mut command);
     crate::bazel::clippy_arguments(&mut command);
+    command.arg("--output_groups=clippy_checks,clippy_output");
     command.arg("--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml");
     for package in packages {
         let matches = catalog

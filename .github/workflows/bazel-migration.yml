@@ -40,6 +40,10 @@ jobs:
         run: bazel aquery --lockfile_mode=update --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib))' > /tmp/day2-bazel-actions.json
       - name: Check normal and build-tool feature context selection
         run: bazel build --config=${{ matrix.config }} //build/bazel:context_controls
+      - name: Check production normal and build-tool context selection
+        run: bazel build --config=${{ matrix.config }} --config=release --config=production //build/bazel:context_controls
+      - name: Analyze production binaries without test dependency features
+        run: bazel aquery --config=${{ matrix.config }} --config=release --config=production --include_param_files --output=jsonproto 'deps(//:all_programs)' > /tmp/day2-bazel-production-actions.json
       - name: Compile the converted verifier and its controls
         run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //crates/xtask:xtask //crates/xtask:unit_xtask //crates/day2-control:control_integration
       - name: Execute actual build process and evidence controls
@@ -57,11 +61,15 @@ jobs:
       - name: Execute actual dependency and coverage controls
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_dependencies::tests:: --nocapture
-      - name: Check current manifest and actual Bazel dependency coverage
+      - name: Check every manifest default target against the Bazel catalog
         run: build-out/bin/xtask architecture-dependencies
       - name: Check real compiler-backed architectural refusals
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_kernel::tests:: --test-threads=1 --nocapture
+      - name: Enforce current architecture roles, effects and native proofs
+        run: build-out/bin/xtask architecture-check
+      - name: Enforce whole-workspace all-target Clippy
+        run: build-out/bin/xtask lint
       - name: Retain exact graph, lockfile and build outcome
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -69,6 +77,7 @@ jobs:
           name: bazel-migration-${{ runner.os }}-${{ runner.arch }}
           path: |
             /tmp/day2-bazel-actions.json
+            /tmp/day2-bazel-production-actions.json
             /tmp/day2-bazel-build.json
             /tmp/day2-bazel-architecture-inventory.json
             MODULE.bazel.lock

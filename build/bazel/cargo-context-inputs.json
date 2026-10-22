@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "inputs": {
+    "Cargo.lock": "3972f3a6d4774573d044792b323efec235aadf98d1ba00db7949dfe279c756c5",
+    "Cargo.toml": "ebbe85d5f24d9b30af903899e0149ed985dc036cfd7570ac7b0d85b8c1c0f910",
+    "cli/checks/Cargo.toml": "a5e5872d548a9c32bbfcc9867934b9a5d2d1b4fa4994363dcddc089606523b01",
+    "crates/day2-assets/Cargo.toml": "9ef1888fc4a0ff3483c90fd36f0182a376a7c40f5a79725f60fcfef996b7e1ae",
+    "crates/day2-capabilities/Cargo.toml": "0d9916493bcaacc484579530f33625184320b2e29d7a28781f9df895de11c01c",
+    "crates/day2-contracts/Cargo.toml": "3dfc7584df543b818d9b4847c108c61fc6cca980325965fdc4f891a53198ab09",
+    "crates/day2-control/Cargo.toml": "f8080ed989e49887730d8b35f70340e2b7d75cce4de344dfe36fdff9c9db4b86",
+    "crates/day2-kernel/Cargo.toml": "98e6408b79530d7e32318f68d5b2bfe604306c54d2a2008782fc9b5ac25dcb69",
+    "crates/day2-ops/Cargo.toml": "fc4a9ccfbd1cb32b9b579329c258e30805e15c82a523d467c34a8ead5fba4593",
+    "crates/day2-sandbox/Cargo.toml": "406d79e4c203c2d60af9bf050c42bf9df1ef3af295c86dd4cbc109f6586f75c4",
+    "crates/day2/Cargo.toml": "8559b006c1f10df9880752de1379ffe86ab2f25af4e3803d3bef24e453e9be06",
+    "crates/durable-temporal/Cargo.toml": "ecb59eb5f8426f40ed90c1e136e7678eab40536917242d7f940167e0b9cbc174",
+    "crates/worker/Cargo.toml": "b8e2f551cc92785726ac6133da2ef8afdd397b7c1a05ec4acf47f070f812ee67",
+    "crates/xtask/Cargo.toml": "afa6dd07d472f03d0b8a31475bc907dabc13904275a53584ce7fbc344de588a7"
+  },
+  "models": {
+    "build/bazel/cargo_contexts.bzl": "60158f8ab7d46d1f6d700c0efa6dc28b8b4534feb5f8ddf74c64a70c2fc9e61c",
+    "build/bazel/cargo_production_contexts.bzl": "2c11a294e1cfc605d849b2593af7d8e3b1f87e806524b7fcb0d78b00c1416a64"
+  }
+}

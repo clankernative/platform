@@ -4,6 +4,7 @@ common --lockfile_mode=error
 common --enable_platform_specific_config
 build --jobs=2
 build --define=DAY2_PLATFORM_JOBS=2
+build --define=DAY2_PLATFORM_FEATURE_SCOPE=verification
 build --local_resources=cpu=2
 build --local_resources=memory=4096
 build --compilation_mode=fastbuild
@@ -33,8 +34,10 @@ build:ci-mac --local_resources=cpu=3
 # Distribution builds preserve the former release panic/profile policy.
 build:release --compilation_mode=opt
 build:release --define=DAY2_PLATFORM_RUST_PROFILE=release
+build:production --define=DAY2_PLATFORM_FEATURE_SCOPE=production
 
 # The Linux runtime previously selected release strip=symbols. Native worker
 # archives use release without this final-executable distribution setting.
 build:distribution --config=release
+build:distribution --config=production
 build:distribution --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols

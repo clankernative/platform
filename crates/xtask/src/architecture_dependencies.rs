@@ -489,6 +489,7 @@ fn compare_bazel(
 
 pub fn check(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
+    crate::bazel::dependency_inputs(&root)?;
     let policy = read_policy(&root)?;
     compare(&policy, &metadata(&root, true)?)?;
     compare_bazel(

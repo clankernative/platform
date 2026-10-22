@@ -2234,7 +2234,6 @@ pub fn diagnose(
                     "--cgroupns=private".into(),
                     "--cap-drop=ALL".into(),
                     "--security-opt=no-new-privileges:true".into(),
-                    "--env=CARGO_INCREMENTAL=0".into(),
                 ];
                 for (host, native) in &artifacts {
                     arguments.extend([
@@ -2306,7 +2305,6 @@ pub fn diagnose(
                 runtime.docker_with_budget(
                     &[
                         "exec".into(),
-                        "--env=CARGO_INCREMENTAL=0".into(),
                         container.clone(),
                         "build-out/bin/xtask".into(),
                         "linux-test-suite".into(),

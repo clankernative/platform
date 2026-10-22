@@ -48,7 +48,7 @@ def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], ow
         env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "build-out/bin/" + program.rsplit(":", 1)[-1]
     attributes = _attributes(crate_name, internal_deps, linux_deps, own_library, True, env)
     # Keep current Linux harness LLVM partitioning and no-LTO memory behavior.
-    attributes["rustc_flags"] = attributes["rustc_flags"] + select({
+    attributes["rustc_flags"] = attributes["rustc_flags"] + ["-Cpanic=unwind"] + select({
         "@platforms//os:linux": ["-Ccodegen-units=256", "-Clto=off"],
         "//conditions:default": [],
     })

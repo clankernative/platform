@@ -341,6 +341,7 @@ fn main() -> Result<()> {
                 args.next().is_none(),
                 "verifier installation accepts no overrides"
             );
+            bazel::dependency_inputs(&root)?;
         }
         "verify-linux-context" => {
             ensure!(args.next().is_none(), "CI context accepts no overrides");
