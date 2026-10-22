@@ -27,9 +27,9 @@
 //! strictly stronger than "did not error": an action that errors identically
 //! against two different worlds has not demonstrated a world at all.
 //!
-//! Scope: this covers transport simulations and the Workspace Directory native
-//! capture/page pipeline. Four native/synthetic providers and local delegation
-//! still need adapter/callee harnesses and remain pending here.
+//! Scope: this covers transport simulations and the Workspace Directory and
+//! live Carta native capture/read pipelines. Three native/synthetic providers
+//! and local delegation still need adapter/callee harnesses and remain pending.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -126,8 +126,6 @@ fn demonstration(action: Action) -> Demonstration {
         Action::NotificationsResolve
         | Action::NotificationsLatest
         | Action::NotificationsSend
-        | Action::CartaSnapshot
-        | Action::CartaRecord
         | Action::GoogleDirectorySnapshot
         | Action::GoogleDirectoryRecord
         | Action::GoogleDirectoryCreateUser
@@ -145,6 +143,9 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
         | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
+        // The live capture pipeline against Carta's own wire world, then a
+        // local read of the published capture.
+        Action::CartaSnapshot | Action::CartaRecord => Demonstration::NativeAdapterRead,
     }
 }
 
@@ -180,18 +181,6 @@ const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
     PendingDebt {
         action: Action::NotificationsSend,
         owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::CartaSnapshot,
-        owner: "platform Carta capture adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::CartaRecord,
-        owner: "platform Carta capture adapter",
         reason: ADAPTER_REASON,
         remove_when: ADAPTER_REMOVAL,
     },
@@ -373,6 +362,10 @@ fn fixture(variant: Variant) -> SimulatedFixture {
         Variant::A => ("/Engineering", "engineering"),
         Variant::B => ("/Research", "research"),
     };
+    let (holder, plan_name) = match variant {
+        Variant::A => ("holder-ada", "Alpha plan"),
+        Variant::B => ("holder-grace", "Beta plan"),
+    };
     SimulatedFixture {
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: Default::default(),
@@ -489,8 +482,31 @@ fn fixture(variant: Variant) -> SimulatedFixture {
                     "orgUnitPath":directory_path,"parentOrgUnitId":"root","parentOrgUnitPath":"/"}
             ]}),
         },
+        // The stakeholder and grant plan differ, so both the capture identity and
+        // the first record move with the world.
+        carta: Some(crate::integrations::simulated::CartaWireWorld {
+            issuer_id: CARTA_ISSUER.into(),
+            token: json!({"access_token":"coverage-token","token_type":"Bearer","expires_in":3600}),
+            stakeholder_pages: vec![json!({"stakeholders":[{"id":holder,"issuerId":CARTA_ISSUER,
+                "fullName":owner_name,"email":format!("{holder}@coverage.test"),"relationship":"EMPLOYEE",
+                "entityType":"INDIVIDUAL"}]})],
+            grant_pages: vec![
+                json!({"optionGrants":[{"id":"grant-1","issuerId":CARTA_ISSUER,"stakeholderId":holder,
+                "equityIncentivePlanName":plan_name,"issueDate":{"value":"2024-01-01"},
+                "vestingStartDate":{"value":"2024-01-01"},"boardApprovalDate":{"value":"2023-12-15"},
+                "grantExpirationDate":{"value":"2034-01-01"},"isoNsoSplit":false,"stockOptionType":"ISO",
+                "quantity":{"value":"1000"},"outstandingQuantity":{"value":"1000"},"vestedQuantity":{"value":"0"},
+                "exercisedQuantity":{"value":"0"},"exercisePrice":{"currencyCode":{"value":"USD"},"amount":{"value":"0.25"}},
+                "securityLabel":"ES-1","earlyExercisable":false,
+                "vestingSchedule":{"name":"4y","lastModifiedDate":{"value":"2024-01-01"},
+                    "startDate":{"value":"2024-01-01"},"endDate":{"value":"2028-01-01"}},
+                "lastModifiedDatetime":{"value":"2026-01-01T00:00:00Z"}}]}),
+            ],
+        }),
     }
 }
+
+const CARTA_ISSUER: &str = "4242";
 
 fn reference() -> VersionRef {
     VersionRef {
@@ -989,6 +1005,61 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     })
 }
 
+fn observe_native_carta(action: Action, variant: Variant) -> Result<Observed> {
+    use day2_capabilities::{integrations::CartaEnvironment, resources::CartaChildren};
+    ensure!(
+        matches!(action, Action::CartaSnapshot | Action::CartaRecord),
+        "not a live Carta read"
+    );
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    seed(&database, SCOPE, &fixture(variant))?;
+    let before = worlds(&database)?;
+    let plan = crate::carta_live::CapturePlan::authorize(
+        SCOPE,
+        &reference(),
+        &LiveConnection::Carta {
+            credential_ref: reference(),
+            client_id: "coverage-client".into(),
+            environment: CartaEnvironment::Playground,
+            max_pages_per_collection: 2,
+        },
+        CARTA_ISSUER,
+        CartaChildren::Include,
+        true,
+    )?;
+    let mut port = crate::carta_live::SimulatedCartaPort::new(&database, SCOPE, CARTA_ISSUER)?;
+    let complete = crate::carta_live::collect_complete(
+        &plan,
+        &mut port,
+        crate::carta_live::MAX_PAGE_RESPONSE_BYTES,
+    )
+    .0?;
+    let store = database.with_file_name(crate::carta_live::STORE);
+    crate::carta_live::publish(&store, &complete, 1_700_000_000, 1_700_000_001)?;
+    let result = if action == Action::CartaSnapshot {
+        serde_json::to_string(complete.snapshot())?
+    } else {
+        let instruction = crate::protocol::Instruction {
+            kind: "observe".into(),
+            model: action.capability().into(),
+            data: json!({"handle":"opaque","snapshot_id":complete.snapshot().id,"cursor":0})
+                .to_string(),
+            ..Default::default()
+        };
+        crate::carta_live::read_record(
+            &store,
+            &crate::carta_live::RecordRead::authorize(&plan, &instruction)?,
+        )?
+    };
+    let after = worlds(&database)?;
+    Ok(Observed {
+        result,
+        before,
+        after,
+    })
+}
+
 fn check(
     action: Action,
     observe: impl Fn(Variant) -> Result<Observed>,
@@ -1001,10 +1072,15 @@ fn check(
     match demonstration(action) {
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::NativeAdapterRead => {
-            let first = observe_native_directory(action, Variant::A)
-                .map_err(|error| format!("{action:?}: {error:#}"))?;
-            let second = observe_native_directory(action, Variant::B)
-                .map_err(|error| format!("{action:?}: {error:#}"))?;
+            let native = if action.provider() == Provider::Carta {
+                observe_native_carta
+            } else {
+                observe_native_directory
+            };
+            let first =
+                native(action, Variant::A).map_err(|error| format!("{action:?}: {error:#}"))?;
+            let second =
+                native(action, Variant::B).map_err(|error| format!("{action:?}: {error:#}"))?;
             if first.result != second.result
                 && first.changed().is_empty()
                 && second.changed().is_empty()
@@ -1012,7 +1088,7 @@ fn check(
                 Ok(())
             } else {
                 Err(format!(
-                    "{action:?} must reflect its scoped Workspace Directory world without mutating it; results differ={}, changed={:?}/{:?}",
+                    "{action:?} must reflect its scoped native world without mutating it; results differ={}, changed={:?}/{:?}",
                     first.result != second.result,
                     first.changed(),
                     second.changed()
@@ -1159,6 +1235,66 @@ fn workspace_directory_native_read_rejects_wrong_scope_actor_customer_and_world(
 }
 
 #[test]
+fn live_carta_read_rejects_wrong_scope_issuer_and_world() -> Result<()> {
+    use day2_capabilities::{integrations::CartaEnvironment, resources::CartaChildren};
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("app.sqlite");
+    seed(&database, SCOPE, &fixture(Variant::A))?;
+    let plan = |issuer: &str| {
+        crate::carta_live::CapturePlan::authorize(
+            SCOPE,
+            &reference(),
+            &LiveConnection::Carta {
+                credential_ref: reference(),
+                client_id: "coverage-client".into(),
+                environment: CartaEnvironment::Playground,
+                max_pages_per_collection: 2,
+            },
+            issuer,
+            CartaChildren::Include,
+            true,
+        )
+    };
+    assert!(
+        crate::carta_live::SimulatedCartaPort::new(&database, "another-app", CARTA_ISSUER).is_err()
+    );
+    let mut foreign = crate::carta_live::SimulatedCartaPort::new(&database, SCOPE, "4343")?;
+    assert_eq!(
+        crate::carta_live::collect_complete(
+            &plan("4343")?,
+            &mut foreign,
+            crate::carta_live::MAX_PAGE_RESPONSE_BYTES
+        )
+        .0
+        .err()
+        .context("a foreign issuer must be refused")?
+        .to_string(),
+        "carta_scope_denied"
+    );
+    let provider_path = database.with_file_name(crate::simulations::simulation(Provider::Carta));
+    std::fs::rename(
+        &provider_path,
+        database.with_file_name("unrelated-carta.sqlite"),
+    )?;
+    assert_eq!(
+        crate::carta_live::SimulatedCartaPort::new(&database, SCOPE, CARTA_ISSUER)
+            .err()
+            .context("the declared world is gone")?
+            .to_string(),
+        "simulated_provider_unconfigured"
+    );
+    assert!(
+        !provider_path.exists(),
+        "wrong world seeded the declared world"
+    );
+    assert!(
+        !database.with_file_name(crate::carta_live::STORE).exists(),
+        "no failed capture publishes"
+    );
+    Ok(())
+}
+
+#[test]
 fn every_action_demonstrates_its_own_declared_world() -> Result<()> {
     let coverage = current_coverage();
     validate_pending_debt(&coverage, REVIEWED_PENDING_DEBT)?;
@@ -1187,7 +1323,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 16);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 14);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 

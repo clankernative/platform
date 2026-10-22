@@ -159,6 +159,10 @@ pub(crate) struct AdapterOutcome {
 pub(crate) enum ExchangePhase {
     IdentityCheck,
     Operation,
+    /// Carta's client-credentials exchange at the fixed token endpoint.
+    CartaToken,
+    CartaStakeholders,
+    CartaOptionGrants,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +172,13 @@ pub(crate) struct ExchangeCorrelation {
     pub(crate) http_status: Option<u16>,
     pub(crate) request_id: Option<String>,
     pub(crate) statement_handle: Option<String>,
+    /// Zero-based page of a paginated capture. Absent for single exchanges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) page: Option<u16>,
+    /// A rate-limited reply's Retry-After, recorded for the operator. No
+    /// adapter sleeps on it or retries automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retry_after_seconds: Option<u32>,
 }
 
 fn correlation_identifier(value: &str) -> Option<String> {
@@ -529,6 +540,8 @@ fn transmit(
                     None
                 },
                 statement_handle,
+                page: None,
+                retry_after_seconds: None,
             });
             if response.body.len() as u64 > remaining {
                 outcome.result = Err(AdapterError::ResponseTooLarge);
@@ -550,6 +563,8 @@ fn transmit(
                     None
                 },
                 statement_handle: None,
+                page: None,
+                retry_after_seconds: None,
             });
             outcome.result = Err(error.kind);
             None

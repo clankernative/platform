@@ -43,7 +43,8 @@ simulated!(Notifications => LocalNotifications, "notifications.sqlite");
 // real would make a caller's determinism depend on a callee's state, which is
 // the coupling delegation exists to make visible rather than to hide.
 simulated!(Delegation => LocalDelegation, "delegation.simulated.sqlite");
-simulated!(Carta => SyntheticCarta, "carta.synthetic.sqlite");
+// Synthetic captures and the live adapter's wire world share Carta's one store.
+simulated!(Carta => Carta, "carta.synthetic.sqlite");
 simulated!(GoogleDirectory => SyntheticGoogleDirectory, "google_directory.synthetic.sqlite");
 simulated!(WorkspaceDirectory => WorkspaceDirectory, "workspace_directory.simulated.sqlite");
 simulated!(Linear => SyntheticLinear, "linear.synthetic.sqlite");
@@ -68,7 +69,7 @@ pub const fn simulation(provider: Provider) -> &'static str {
     match provider {
         Provider::LocalNotifications => Notifications::WORLD,
         Provider::LocalDelegation => Delegation::WORLD,
-        Provider::SyntheticCarta => Carta::WORLD,
+        Provider::Carta => Carta::WORLD,
         Provider::SyntheticGoogleDirectory => GoogleDirectory::WORLD,
         Provider::WorkspaceDirectory => WorkspaceDirectory::WORLD,
         Provider::SyntheticLinear => Linear::WORLD,
@@ -107,7 +108,8 @@ pub const fn simulation(provider: Provider) -> &'static str {
 pub enum Supply {
     /// `integrations::simulated::seed`, from a `SimulatedFixture` field.
     SimulatedFixture,
-    /// `carta::seed_synthetic`, from an operator-provided capture.
+    /// `carta::seed_synthetic`, from an operator-provided capture. The live
+    /// adapter's wire world is an optional `SimulatedFixture` field beside it.
     CartaCapture,
     /// `people_providers::seed_synthetic`.
     SyntheticPeople,
@@ -118,7 +120,7 @@ pub enum Supply {
 pub const fn supply(provider: Provider) -> Supply {
     match provider {
         Provider::LocalNotifications => Supply::CreatedOnDemand,
-        Provider::SyntheticCarta => Supply::CartaCapture,
+        Provider::Carta => Supply::CartaCapture,
         Provider::SyntheticGoogleDirectory
         | Provider::SyntheticLinear
         | Provider::SyntheticOperatorAlerts => Supply::SyntheticPeople,

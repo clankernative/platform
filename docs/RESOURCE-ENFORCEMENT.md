@@ -24,7 +24,7 @@ connection and budget versions. Execution never resolves mutable catalog names.
 Editing desired configuration cannot remap an active handle.
 
 Targets include an invoking actor's notification mailbox with explicitly selected
-topics, prefix or all-topic scope; a particular synthetic Carta issuer; and the
+topics, prefix or all-topic scope; a particular Carta issuer; and the
 reviewed Slack, Snowflake and OpenAI profiles described in [live integrations](LIVE-INTEGRATIONS.md). Notification
 access still cannot select another recipient. Carta issuer selection happens in
 the provider query before records are returned. Discovery, record reads and sending
