@@ -321,6 +321,7 @@
     "crates/day2/src/security_epoch/control_slot_io.rs",
     "crates/day2/src/security_epoch/control_slot_tests.rs",
     "crates/day2/src/security_epoch/controller.rs",
+    "crates/day2/src/security_epoch/controller/bootstrap_timing.rs",
     "crates/day2/src/security_epoch/controller/evidence.rs",
     "crates/day2/src/security_epoch/controller/health.rs",
     "crates/day2/src/security_epoch/controller/preparation_timing.rs",

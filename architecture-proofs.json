@@ -2054,7 +2054,7 @@
       "type_name": "NativeVolumeContinuity",
       "owning_children": [],
       "methods": [
-        "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentVolumePhase < 'volume , 'role > >",
+        "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "fn begin_phase < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , purpose : StagePurpose) -> Result < CurrentVolumePhase < 'volume , 'role > >",
@@ -2077,7 +2077,7 @@
         },
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         },
         {
           "owner": "NativeVolumeContinuity",
@@ -2114,7 +2114,7 @@
         },
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         },
         {
           "owner": "NativeVolumeContinuity",
@@ -2180,7 +2180,7 @@
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
@@ -2672,7 +2672,7 @@
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >"
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request , trace : & BootstrapTiming) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >"
         }
       ],
       "material_uses": [
@@ -2721,7 +2721,7 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
-        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >",
+        "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request , trace : & BootstrapTiming) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >",
         "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
@@ -2746,7 +2746,7 @@
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >"
+          "signature": "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request , trace : & BootstrapTiming) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >"
         },
         {
           "owner": "InitialStorageContinuity",
@@ -3101,7 +3101,7 @@
         "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn check_bootstrap (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",
-        "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (ControllerEpochReads , ProviderEpochReads) >",
+        "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < (ControllerEpochReads , ProviderEpochReads) >",
         "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "pub (in crate :: security_epoch) fn read_slot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < crate :: security_epoch :: control_slot_io :: SlotObservation >",
@@ -3137,7 +3137,7 @@
         },
         {
           "owner": "RetainedEpochReads",
-          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
+          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
         },
         {
           "owner": "RetainedEpochReads",
@@ -3967,7 +3967,7 @@
       "owning_children": [],
       "methods": [
         "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
-        "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
         "pub (in crate :: security_epoch :: storage_authority) fn acquire_first_holder < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
         "fn acquire_phase < 'role > (self , stage : EnrolledRoleStage < 'role > , initial : bool) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
       ],
@@ -3988,7 +3988,7 @@
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_authenticated < 'role > (self , stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
@@ -4026,7 +4026,7 @@
       "factories": [
         {
           "owner": "RetainedEpochReads",
-          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
+          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
         }
       ],
       "material_uses": [
@@ -4076,7 +4076,7 @@
       "factories": [
         {
           "owner": "RetainedEpochReads",
-          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
+          "signature": "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < (ControllerEpochReads , ProviderEpochReads) >"
         }
       ],
       "material_uses": [
