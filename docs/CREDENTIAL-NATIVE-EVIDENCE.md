@@ -148,9 +148,12 @@ refusal.
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
 ordinary artifact/instance admission, role-stage exchange, complete Controller
-authentication and selected provider-metadata checks under the same original
-five-second current-role interval. Attachment checks remain strict: a detached
-or changed disk refuses. It opens neither `/state` nor a block-device descriptor,
+authentication and three fresh rounds of selected provider-metadata checks under
+one original five-second current-role interval. All rounds share the same
+genuine authenticated reader; none starts another stage or renews its acquisition.
+Each round validates the current claim, volume, node, disk and instance responses.
+Attachment checks remain strict: a detached or changed disk refuses. It opens
+neither `/state` nor a block-device descriptor,
 and performs no mount acquisition or current-volume checks. It returns before seed,
 private-directory, initial-file, first-holder, bootstrap or serving construction.
 It never opens the existing native SQLite file or writes provider/control state.
@@ -164,15 +167,23 @@ once-across-restarts or hard OS scheduling guarantee; forced replacement or
 letting the hold expire can cause Kubernetes to start another process.
 
 Its `preparation_read_only_observed` record contains the fixed
-`frontier: "auth_provider_metadata"`, `completed` and `timing`. Completion means
-the authentication and provider-metadata calls returned; it establishes no
-filesystem observation, readiness or current permission. A failed read-only run
-instead emits the ordinary single refusal
-with its original boundary and timing. An export failure remains terminal and
-does not replace an earlier native error. The ordinary executor instead caches
-the same preparation summary into its existing first-holder or first refusal
-record (including a later listener/holder refusal). The twelve-record and 2048-byte bounds remain unchanged; logging
-does not run inside the measured original phase.
+`frontier: "auth_three_provider_rounds"`, `completed: true`, `expected_rounds: 3`
+and a `bootstrap` snapshot with `scope: "provider_read_only_current"` and
+`provider_rounds: [3, 3]`. Completion requires all three rounds and the final
+reader/guard postchecks to return successfully. It establishes no filesystem
+observation, bootstrap completion, readiness or current permission. It excludes
+App concurrency, physical/file checks, fsync, peer exchange and writer work, so
+it supplies no complete-path timing margin.
+
+The first failed round stops the command and emits the ordinary single refusal
+with its original boundary, request tuple when present, and scoped snapshot of
+attempted versus fully validated rounds. It never restarts authentication or
+repeats that failed round. An export failure remains terminal and does not
+replace an earlier native error. Separately, ordinary initial preparation caches
+its own preparation summary into its existing first-holder or first refusal
+record, including a later listener/holder refusal. The twelve-record and
+2,048-byte bounds remain unchanged; logging does not run inside the measured
+original phase.
 
 Each timing row is `[fixed_operation, [calls, total_us, max_us]]`. Durations come
 from separate diagnostic Linux boot-clock reads, never from cached successful
