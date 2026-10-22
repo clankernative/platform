@@ -262,15 +262,24 @@ fn validly_signed_short_bootstrap_and_metadata_grants_fail_the_ordinary_current_
         data: issuer_data,
     };
     certificate.verify(&selected).unwrap();
-    for purpose in [
-        StagePurpose::CurrentRole,
-        StagePurpose::InitialFirstHolder,
-        StagePurpose::StorageBootstrap,
-        StagePurpose::StorageMetadataObservation,
+    for (purpose, role) in [
+        (StagePurpose::CurrentRole, NativeRole::AppHost),
+        (StagePurpose::CurrentRole, NativeRole::EpochController),
+        (StagePurpose::InitialFirstHolder, NativeRole::AppHost),
+        (
+            StagePurpose::InitialFirstHolder,
+            NativeRole::EpochController,
+        ),
+        (StagePurpose::StorageBootstrap, NativeRole::AppHost),
+        (StagePurpose::StorageBootstrap, NativeRole::EpochController),
+        (
+            StagePurpose::StorageMetadataObservation,
+            NativeRole::EpochController,
+        ),
     ] {
         for seconds in [1_u64, 5] {
-            let role = NativeRole::EpochController;
             purpose.require_role(role).unwrap();
+            let workload = selected.workload(role);
             let data = StageData {
                 issuer: certificate.digest().unwrap(),
                 policy: selected.digest().unwrap(),
@@ -282,12 +291,12 @@ fn validly_signed_short_bootstrap_and_metadata_grants_fail_the_ordinary_current_
                 process: process(selected.code(role).clone()),
                 runtime: RuntimeBinding {
                     container: crate::security_epoch::runtime_profile::ContainerFacts {
-                        pod_name: "controller".into(),
-                        pod_uid: "controller-uid".into(),
-                        node_name: "node-one".into(),
-                        container_name: "controller".into(),
+                        pod_name: workload.workload.name.clone(),
+                        pod_uid: format!("purpose-test-{role:?}"),
+                        node_name: selected.runtime.node_name.clone(),
+                        container_name: workload.container.name.clone(),
                         container_id: "a".repeat(64),
-                        image: Digest::new(b"controller-image"),
+                        image: workload.container.image.clone(),
                         restart_count: 0,
                     },
                     node_uid: "node-uid".into(),
