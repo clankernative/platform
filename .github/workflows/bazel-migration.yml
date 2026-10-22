@@ -38,6 +38,8 @@ jobs:
           cache-save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/build/bazel-platform-migration' }}
       - name: Analyze the complete workspace with parameter files
         run: bazel aquery --lockfile_mode=update --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib))' > /tmp/day2-bazel-actions.json
+      - name: Check normal and build-tool feature context selection
+        run: bazel build --config=${{ matrix.config }} //build/bazel:context_controls
       - name: Compile the converted verifier and its controls
         run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //crates/xtask:xtask //crates/xtask:unit_xtask //crates/day2-control:control_integration
       - name: Execute actual build process and evidence controls
@@ -46,8 +48,10 @@ jobs:
       - name: Execute build input identity controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
+      - name: Install the verifier through its authenticated configured producer
+        run: bazel --batch run --config=${{ matrix.config }} //crates/xtask:xtask -- install-verifier
       - name: Collect current source effect inventory for review
-        run: bazel --batch run --config=${{ matrix.config }} //crates/xtask:xtask -- architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
+        run: build-out/bin/xtask architecture-inventory > /tmp/day2-bazel-architecture-inventory.json
       - name: Retain exact graph, lockfile and build outcome
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

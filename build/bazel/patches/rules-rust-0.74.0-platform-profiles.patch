@@ -1,21 +1,63 @@
 --- a/rust/private/rustc.bzl
 +++ b/rust/private/rustc.bzl
-@@ -1264,6 +1264,18 @@
-     compilation_mode = get_compilation_mode_opts(ctx, toolchain)
-     rustc_flags.add(compilation_mode.opt_level, format = "--codegen=opt-level=%s")
+@@ -1266,6 +1266,20 @@
      rustc_flags.add(compilation_mode.debug_info, format = "--codegen=debuginfo=%s")
      rustc_flags.add(compilation_mode.strip_level, format = "--codegen=strip=%s")
-+
-+    # Platform's former Cargo dev profile applies to build tools too: Bazel's
-+    # exec configuration must not silently turn off assertions or optimize at 3.
-+    # Workspace target flags below retain opt-level 1; dependencies use 2.
+
++    # Preserve the platform's dependency and build-tool profiles explicitly.
++    # Defines propagate through Bazel's exec transition; COMPILATION_MODE alone
++    # would silently optimize development build tools at release settings.
 +    platform_release = ctx.var.get("DAY2_PLATFORM_RUST_PROFILE", "dev") == "release"
-+    rustc_flags.add("-Copt-level=3" if platform_release else "-Copt-level=2")
++    platform_tool = ctx.configuration.is_tool_configuration() or crate_info.type == "proc-macro"
++    rustc_flags.add("-Copt-level=%s" % ("0" if platform_tool else "3") if platform_release else "-Copt-level=2")
 +    rustc_flags.add("-Cdebug-assertions=off" if platform_release else "-Cdebug-assertions=on")
 +    rustc_flags.add("-Coverflow-checks=off" if platform_release else "-Coverflow-checks=on")
 +    if not _will_emit_object_file(emit):
-+        rustc_flags.add("-Ccodegen-units=16" if platform_release else "-Ccodegen-units=256")
++        units = "256" if platform_tool else ctx.var.get("DAY2_PLATFORM_CODEGEN_UNITS", "16")
++        rustc_flags.add("-Ccodegen-units=%s" % units)
 +    if platform_release:
-+        rustc_flags.add("-Cpanic=abort")
- 
++        rustc_flags.add("-Cpanic=unwind" if platform_tool or crate_info.is_test else "-Cpanic=abort")
++
      # For determinism to help with build distribution and such
+     if remap_path_prefix != None:
+         # `--remap-path-prefix` flags are applied in reverse order. We need to
+--- a/cargo/private/cargo_build_script.bzl
++++ b/cargo/private/cargo_build_script.bzl
+@@ -413,7 +413,12 @@
+     flags_out = ctx.actions.declare_file(ctx.label.name + ".flags")
+     link_flags = ctx.actions.declare_file(ctx.label.name + ".linkflags")
+     link_search_paths = ctx.actions.declare_file(ctx.label.name + ".linksearchpaths")  # rustc-link-search, propagated from transitive dependencies
+-    compilation_mode_opt_level = get_compilation_mode_opts(ctx, toolchain).opt_level
++    platform_release = ctx.var.get("DAY2_PLATFORM_RUST_PROFILE", "dev") == "release"
++    platform_tool = ctx.configuration.is_tool_configuration()
++    compilation_mode_opt_level = ("0" if platform_tool else "3") if platform_release else "2"
++    platform_jobs = ctx.var.get("DAY2_PLATFORM_JOBS", "2")
++    if platform_jobs not in ["1", "2", "3"]:
++        fail("Unreviewed platform build-script job count")
+
+     script_data = []
+     for target in ctx.attr.data:
+@@ -464,7 +469,7 @@
+         "CARGO_MANIFEST_DIR": manifest_dir,
+         "CARGO_PKG_NAME": pkg_name,
+         "HOST": toolchain.exec_triple.str,
+-        "NUM_JOBS": "1",
++        "NUM_JOBS": platform_jobs,
+         "OPT_LEVEL": compilation_mode_opt_level,
+         "RUSTC": toolchain.rustc.path,
+         "RUSTDOC": toolchain.rust_doc.path,
+@@ -472,10 +477,11 @@
+         # OUT_DIR is set by the runner itself, rather than on the action.
+     })
+
+-    # This isn't exactly right, but Bazel doesn't have exact views of "debug" and "release", so...
++    # Both platform profiles disable debug information. Keep build-script
++    # inputs independent of Bazel's implicit optimized exec configuration.
+     env.update({
+-        "DEBUG": {"dbg": "true", "fastbuild": "true", "opt": "false"}.get(ctx.var["COMPILATION_MODE"], "true"),
+-        "PROFILE": {"dbg": "debug", "fastbuild": "debug", "opt": "release"}.get(ctx.var["COMPILATION_MODE"], "unknown"),
++        "DEBUG": "false",
++        "PROFILE": "release" if platform_release else "debug",
+     })
+
+     if ctx.attr.version:

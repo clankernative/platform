@@ -51,6 +51,12 @@ crate.from_cargo(
 
 # Explicit target/build-tool dependency contexts, with locked source inputs.
 crate.annotation(
+    crate = "errno",
+    version = "0.3.14",
+    patches = ["//build/bazel:patches/errno-0.3.14-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
     crate = "getrandom",
     version = "0.4.3",
     patches = ["//build/bazel:patches/getrandom-0.4.3-cargo-context.patch"],

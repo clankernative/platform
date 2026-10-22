@@ -3,6 +3,7 @@ load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", 
 package(default_visibility = ["//visibility:public"])
 
 COMPILE_INPUTS = [
+    "//:.bazelrc",
     "//:.github/workflows/ci.yml",
     "//:architecture/clippy.toml",
     "//:fixtures/authority-policies/reports.json",

@@ -1,4 +1,4 @@
-"""Explicit dependency contexts for the Linux build graph.
+"""Explicit native dependency contexts for the platform build graph.
 
 Build-script executables run in the exec configuration, but their features
 belong to the crate being built. Keep those owner variants separate rather
@@ -9,8 +9,7 @@ load("@rules_rust//cargo:defs.bzl", _cargo_build_script = "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", _rust_library = "rust_library")
 load(":cargo_contexts.bzl", "CARGO_CONTEXTS")
 
-_HOST = "@@//build/bazel:linux_exec_context"
-_TARGET = "@@//build/bazel:linux_target_context"
+_PLATFORMS = ["linux_x86_64", "linux_aarch64", "macos_aarch64"]
 
 def _context_impl(ctx):
     return [config_common.FeatureFlagInfo(
@@ -19,95 +18,61 @@ def _context_impl(ctx):
 
 cargo_dependency_context = rule(implementation = _context_impl)
 
-def _model(name, version):
+def _variants(name, version):
     key = name + "@" + version
-    if key not in CARGO_CONTEXTS:
-        fail("No reviewed Cargo dependency context for " + key)
-    return CARGO_CONTEXTS[key]
+    result = []
+    for platform in _PLATFORMS:
+        if key in CARGO_CONTEXTS[platform]:
+            for context, values in CARGO_CONTEXTS[platform][key].items():
+                result.append((platform + "_" + context, values))
+    if not result:
+        fail("No reviewed native Cargo dependency context for " + key)
+    return result
 
 def cargo_context_rust_library(name, version, crate_features, deps = [], proc_macro_deps = [], aliases = {}, visibility = None, **kwargs):
     crate_name = kwargs.pop("crate_name", name)
-    model = _model(crate_name, version)
-    for context in ["target", "host"]:
+    actual = {}
+    for context, model in _variants(crate_name, version):
+        variant = name + "__cargo_" + context
         _rust_library(
-            name = name + "__cargo_" + context,
+            name = variant,
             crate_name = crate_name,
             version = version,
-            crate_features = model[context]["features"],
-            deps = model[context]["deps"],
-            proc_macro_deps = model[context]["proc_macro_deps"],
-            aliases = model[context]["aliases"],
+            crate_features = model["features"],
+            deps = model["deps"],
+            proc_macro_deps = model["proc_macro_deps"],
+            aliases = model["aliases"],
             visibility = ["//visibility:private"],
             **kwargs
         )
-    _rust_library(
-        name = name + "__generated",
-        crate_name = crate_name,
-        version = version,
-        crate_features = crate_features,
-        deps = deps,
-        proc_macro_deps = proc_macro_deps,
-        aliases = aliases,
-        visibility = ["//visibility:private"],
-        **kwargs
-    )
-    native.alias(
-        name = name,
-        actual = select({
-            _HOST: ":" + name + "__cargo_host",
-            _TARGET: ":" + name + "__cargo_target",
-            "//conditions:default": ":" + name + "__generated",
-        }),
-        visibility = visibility,
-    )
+        actual["@@//build/bazel:" + context] = ":" + variant
+    # No generated feature-union fallback: an unmodeled platform/role refuses.
+    native.alias(name = name, actual = select(actual), visibility = visibility)
 
 def cargo_context_build_script(name, pkg_name, version, crate_features, deps = [], proc_macro_deps = [], aliases = {}, visibility = None, **kwargs):
-    model = _model(pkg_name.replace("-", "_"), version)
     if name != "_bs":
         fail("Unreviewed generated build-script name: " + name)
-    # The pinned wrapper derives CARGO_CRATE_NAME from name_to_pkg_name(name).
-    # Its generated `_bs` name maps to the empty string. Preserve that value
-    # before introducing owner-variant labels; keep explicit caller values.
+    # Preserve the generated `_bs` compiler's original empty crate-name input.
     env = dict(kwargs.pop("rustc_env", {}))
     if "CARGO_CRATE_NAME" not in env:
         env["CARGO_CRATE_NAME"] = ""
     kwargs["rustc_env"] = env
-    # Each call passes literal owner features to both build-script compilation
-    # and execution. Its build dependencies still take the normal exec edge.
-    for context in ["target", "host"]:
+    actual = {}
+    for context, model in _variants(pkg_name.replace("-", "_"), version):
+        variant = name + "__cargo_" + context
         _cargo_build_script(
-            name = name + "__cargo_" + context,
+            name = variant,
             pkg_name = pkg_name,
             version = version,
-            crate_features = model[context]["features"],
-            deps = model[context]["build_deps"],
-            proc_macro_deps = model[context]["build_proc_macro_deps"],
-            aliases = model[context]["build_aliases"],
+            crate_features = model["features"],
+            deps = model["build_deps"],
+            proc_macro_deps = model["build_proc_macro_deps"],
+            aliases = model["build_aliases"],
             visibility = ["//visibility:private"],
             **kwargs
         )
-    # Other platforms retain the original generated rule. This Linux experiment
-    # provides no feature-equivalence or runtime qualification for those hosts.
-    _cargo_build_script(
-        name = name + "__generated",
-        pkg_name = pkg_name,
-        version = version,
-        crate_features = crate_features,
-        deps = deps,
-        proc_macro_deps = proc_macro_deps,
-        aliases = aliases,
-        visibility = ["//visibility:private"],
-        **kwargs
-    )
-    native.alias(
-        name = name,
-        actual = select({
-            _HOST: ":" + name + "__cargo_host",
-            _TARGET: ":" + name + "__cargo_target",
-            "//conditions:default": ":" + name + "__generated",
-        }),
-        visibility = visibility,
-    )
+        actual["@@//build/bazel:" + context] = ":" + variant
+    native.alias(name = name, actual = select(actual), visibility = visibility)
 
 _ContextProof = provider(fields = ["context", "selected"])
 

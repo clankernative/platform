@@ -297,6 +297,23 @@ fn main() -> Result<()> {
         }
     }
     match action.as_str() {
+        "build-tooling-image" => {
+            ensure!(
+                args.next().is_none(),
+                "tooling image compilation accepts no overrides"
+            );
+            bazel::programs(
+                &root,
+                &["day2", "day2-control", "day2-sandbox", "xtask", "day2-ops"],
+            )?;
+        }
+        "build-runtime-image-programs" | "build-enrollment-image-programs" => {
+            ensure!(
+                args.next().is_none(),
+                "runtime image compilation accepts no overrides"
+            );
+            bazel::image_programs(&root, action == "build-enrollment-image-programs")?;
+        }
         "install-verifier" => {
             ensure!(
                 args.next().is_none(),

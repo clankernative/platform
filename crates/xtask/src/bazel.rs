@@ -141,6 +141,27 @@ pub(crate) fn test_output(target: &Target) -> PathBuf {
     ))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Development,
+    Release,
+    Distribution,
+}
+
+impl Profile {
+    fn configure(self, command: &mut Command) {
+        match self {
+            Self::Development => {}
+            Self::Release => {
+                command.arg("--config=release");
+            }
+            Self::Distribution => {
+                command.arg("--config=distribution");
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Files {
@@ -188,7 +209,7 @@ fn producer(target: &Target, output: &Files) -> Result<()> {
 fn descriptors(
     root: &Path,
     selected: &[Target],
-    release: bool,
+    profile: Profile,
     isolated_job: Option<&Path>,
     budget: Duration,
 ) -> Result<Vec<Files>> {
@@ -209,9 +230,7 @@ fn descriptors(
         "--output=starlark",
         "--starlark:file=build/bazel/outputs.cquery",
     ]);
-    if release {
-        query.arg("--config=release");
-    }
+    profile.configure(&mut query);
     query.arg(expression);
     let output = capture_query(root, &mut query, budget, MAX_CATALOG_BYTES)?;
     let mut observed = BTreeSet::new();
@@ -245,17 +264,21 @@ pub(crate) fn production_dependencies(root: &Path) -> Result<BTreeMap<String, Ve
         .into_iter()
         .filter(|target| !target.test)
         .collect::<Vec<_>>();
-    Ok(
-        descriptors(root, &selected, false, None, Duration::from_secs(600))?
-            .into_iter()
-            .map(|record| {
-                (
-                    normalize_label(&record.label).to_owned(),
-                    record.dependencies,
-                )
-            })
-            .collect(),
-    )
+    Ok(descriptors(
+        root,
+        &selected,
+        Profile::Development,
+        None,
+        Duration::from_secs(600),
+    )?
+    .into_iter()
+    .map(|record| {
+        (
+            normalize_label(&record.label).to_owned(),
+            record.dependencies,
+        )
+    })
+    .collect())
 }
 
 /// Resolve only successfully built targets. Missing, duplicate or foreign
@@ -265,14 +288,14 @@ pub(crate) fn build(
     selected: &[Target],
     budget: Duration,
 ) -> Result<BTreeMap<String, PathBuf>> {
-    build_profile(root, selected, budget, false, None)
+    build_profile(root, selected, budget, Profile::Development, None)
 }
 
 fn build_profile(
     root: &Path,
     selected: &[Target],
     budget: Duration,
-    release: bool,
+    profile: Profile,
     isolated_job: Option<&Path>,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let started = std::time::Instant::now();
@@ -286,15 +309,13 @@ fn build_profile(
         "duplicate requested Bazel target"
     );
     let mut build = build_command(root, "build", isolated_job)?;
-    if release {
-        build.arg("--config=release");
-    }
+    profile.configure(&mut build);
     build.args(&expected);
     crate::build_capture::run(root, &mut build, budget)?;
     let remaining = budget
         .checked_sub(started.elapsed())
         .context("Bazel build budget exhausted")?;
-    let records = descriptors(root, selected, release, isolated_job, remaining)?;
+    let records = descriptors(root, selected, profile, isolated_job, remaining)?;
     let output_root = match isolated_job {
         Some(job) => job.join("bazel-output"),
         None => root.join(".cache/bazel-executor"),
@@ -325,7 +346,11 @@ fn build_profile(
         let destination = if target.test {
             root.join(test_output(target))
         } else if target.kind == ["bin"] {
-            program(root, &target.target)
+            if profile == Profile::Development {
+                program(root, &target.target)
+            } else {
+                root.join("build-out/release/bin").join(&target.target)
+            }
         } else {
             root.join("build-out/lib")
                 .join(path.file_name().context("Rust output name")?)
@@ -427,7 +452,7 @@ pub(crate) fn worker_archive(root: &Path, isolated_job: Option<&Path>) -> Result
         root,
         &selected,
         Duration::from_secs(600),
-        true,
+        Profile::Release,
         isolated_job,
     )?;
     Ok(root.join(
@@ -731,6 +756,45 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn configured_output_refuses_another_source_target_name_test_or_crate_kind() -> Result<()> {
+        let target = Target {
+            package: "example".to_owned(),
+            directory: "crates/example".into(),
+            target: "example".to_owned(),
+            kind: vec!["bin".to_owned()],
+            label: "//crates/example:example".to_owned(),
+            test: false,
+            source: "crates/example/src/main.rs".into(),
+        };
+        let valid = || Files {
+            label: "@@//crates/example:example".to_owned(),
+            files: vec!["bazel-out/config/bin/crates/example/example".into()],
+            source: target.source.clone(),
+            crate_name: "example".to_owned(),
+            crate_type: "bin".to_owned(),
+            test: false,
+            dependencies: vec![],
+        };
+        producer(&target, &valid())?;
+        let mut changed = valid();
+        changed.label = "@@//crates/foreign:example".to_owned();
+        assert!(producer(&target, &changed).is_err());
+        let mut changed = valid();
+        changed.source = "crates/example/src/unreviewed.rs".into();
+        assert!(producer(&target, &changed).is_err());
+        let mut changed = valid();
+        changed.crate_name = "another".to_owned();
+        assert!(producer(&target, &changed).is_err());
+        let mut changed = valid();
+        changed.test = true;
+        assert!(producer(&target, &changed).is_err());
+        let mut changed = valid();
+        changed.crate_type = "rlib".to_owned();
+        assert!(producer(&target, &changed).is_err());
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn build_configuration_refuses_aliased_inputs() -> Result<()> {
@@ -768,4 +832,46 @@ pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<
         Duration::from_secs(600),
         16 * 1024 * 1024,
     )
+}
+
+/// One closed image compilation operation; Docker retains image assembly order.
+pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
+    let names: &[&str] = if enrollment_only {
+        &["day2-native-enrollment", "day2-native-enrollment-qualify"]
+    } else {
+        &[
+            "day2-health",
+            "day2-inspect",
+            "day2-security-shell",
+            "day2-native-enrollment",
+            "day2-epoch-controller",
+            "day2-serve",
+            "day2-sandbox",
+            "day2-sandbox-probe",
+            "day2-backup",
+            "day2-provision-credentials",
+        ]
+    };
+    let selected = targets(root)?
+        .into_iter()
+        .filter(|target| {
+            !target.test && target.kind == ["bin"] && names.contains(&target.target.as_str())
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        selected.len() == names.len(),
+        "complete fixed runtime-image program set required"
+    );
+    build_profile(
+        root,
+        &selected,
+        Duration::from_secs(12600),
+        if enrollment_only {
+            Profile::Release
+        } else {
+            Profile::Distribution
+        },
+        None,
+    )?;
+    Ok(())
 }

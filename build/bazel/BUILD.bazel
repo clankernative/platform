@@ -1,6 +1,6 @@
 load(":cargo_context.bzl", "cargo_context_controls", "cargo_context_probe", "cargo_dependency_context")
 
-exports_files(["outputs.cquery","toolchain.json",
+exports_files(["outputs.cquery",
     "rust.bzl",
     "cargo_context.bzl",
     "cargo_contexts.bzl",
@@ -12,15 +12,43 @@ cargo_dependency_context(
 )
 
 config_setting(
-    name = "linux_exec_context",
+    name = "linux_x86_64_host",
     constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
     flag_values = {":dependency_context": "host"},
     visibility = ["//visibility:public"],
 )
 
 config_setting(
-    name = "linux_target_context",
+    name = "linux_x86_64_target",
     constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "target"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_host",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_target",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "target"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_host",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_target",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
     flag_values = {":dependency_context": "target"},
     visibility = ["//visibility:public"],
 )
@@ -29,9 +57,12 @@ cargo_context_probe(
     name = "normal_context_probe",
     expected = "target",
     selected = select({
-        ":linux_exec_context": ["host"],
-        ":linux_target_context": ["target"],
-        "//conditions:default": [],
+        ":linux_x86_64_host": ["host"],
+        ":linux_x86_64_target": ["target"],
+        ":linux_aarch64_host": ["host"],
+        ":linux_aarch64_target": ["target"],
+        ":macos_aarch64_host": ["host"],
+        ":macos_aarch64_target": ["target"],
     }),
     tags = ["manual"],
 )
@@ -40,9 +71,12 @@ cargo_context_probe(
     name = "exec_context_probe",
     expected = "host",
     selected = select({
-        ":linux_exec_context": ["host"],
-        ":linux_target_context": ["target"],
-        "//conditions:default": [],
+        ":linux_x86_64_host": ["host"],
+        ":linux_x86_64_target": ["target"],
+        ":linux_aarch64_host": ["host"],
+        ":linux_aarch64_target": ["target"],
+        ":macos_aarch64_host": ["host"],
+        ":macos_aarch64_target": ["target"],
     }),
     tags = ["manual"],
 )
@@ -59,4 +93,4 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["toolchain.json","targets.json"])
+exports_files(["toolchain.json", "targets.json"])
