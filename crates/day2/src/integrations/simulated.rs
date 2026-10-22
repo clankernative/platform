@@ -703,7 +703,7 @@ pub fn delegated_status(
                 "unknown"
             };
             world.calls.push(id.to_owned());
-            Ok(serde_json::json!({"id":id,"status":status}).to_string())
+            Ok(serde_json::json!({"id":id,"status":status,"output":""}).to_string())
         },
     )
 }

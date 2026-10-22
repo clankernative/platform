@@ -775,6 +775,9 @@ fn fixture_build(
         "verification-actors" => {
             FixtureBuild::plain(root, "fixtures/verification-actor-conformance")
         }
+        "verification-setup" => {
+            FixtureBuild::plain(root, "fixtures/verification-setup-conformance")
+        }
         "owned-probe" => FixtureBuild::overlay(
             root,
             "fixtures/row-authority-web-conformance",
@@ -1459,6 +1462,10 @@ fn configure_tests(
             "verification-actors",
             "DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT",
         ),
+        (
+            "verification-setup",
+            "DAY2_TEST_VERIFICATION_SETUP_ARTIFACT",
+        ),
     ] {
         command.env_remove(variable);
         if let Some(path) = fixtures.get(fixture) {
@@ -1517,6 +1524,7 @@ fn receipt(
         let reports_probe = artifact("reports-probe")?;
         let repeated_field = artifact("repeated-field")?;
         let verification_actors = artifact("verification-actors")?;
+        let verification_setup = artifact("verification-setup")?;
         let artifact_id =
             |path: &Path| format!("sha256:{}", path.file_name().unwrap().to_string_lossy());
         let mut report = serde_json::json!({
@@ -1572,6 +1580,10 @@ fn receipt(
         report.insert(
             "verification_actors".into(),
             serde_json::Value::String(artifact_id(&verification_actors)),
+        );
+        report.insert(
+            "verification_setup".into(),
+            serde_json::Value::String(artifact_id(&verification_setup)),
         );
         report.insert(
             "input_snapshot".into(),
@@ -1665,6 +1677,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-relational",
             "build-lifecycle",
             "build-verification-actors",
+            "build-verification-setup",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -2136,6 +2149,7 @@ mod tests {
             "build-relational",
             "build-lifecycle",
             "build-verification-actors",
+            "build-verification-setup",
             "build-collection",
             "build-relational-next",
             "build-http",

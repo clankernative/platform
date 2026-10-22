@@ -149,6 +149,8 @@ fn routes() -> Result<routing::Catalog> {
         output_type: String::new(),
         live: false,
         live_refresh_ms: 0,
+        preparation: vec![],
+        prepare_failure_operation: String::new(),
         failure_page: String::new(),
     })
     .collect();

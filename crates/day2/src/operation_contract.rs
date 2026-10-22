@@ -436,7 +436,7 @@ fn supported_output(shape: &crate::output_schema::Type) -> bool {
         | T::Unsigned(_)
         | T::Boolean => true,
         T::Record(fields) => fields.values().all(supported_output),
-        T::List(item) => supported_output(item),
+        T::List(item) | T::CollectionPage(item) | T::IdPage(item) => supported_output(item),
         _ => false,
     }
 }
@@ -478,7 +478,7 @@ mod tests {
             "request_example":"{}","response_example":"{}","deprecated":false,
             "export_version":export_version,
             "execution":{"internal":false,"model":"","id_field":"","version_field":"","effects":[]},
-            "errors":[],"required_all_rows":[]
+            "errors":[],"required_all_rows":[],"verification_setup":[],"verification_delegation":[]
         })
     }
 
@@ -700,6 +700,37 @@ mod tests {
         )
         .unwrap();
         assert!(resolve_type_closure([&first, &second]).is_err());
+    }
+
+    #[test]
+    fn exported_collection_page_is_bounded_and_structural() {
+        use crate::output_schema::{MAX_PAGE_ITEMS, Type as T};
+        let page = T::CollectionPage(Box::new(T::Record(BTreeMap::from([
+            ("active".into(), T::Boolean),
+            ("name".into(), T::String),
+        ]))));
+        assert!(supported_output(&page));
+        let id_page = T::IdPage(Box::new(T::String));
+        assert!(supported_output(&id_page));
+        id_page
+            .validate_value(&json!({"items":["Ada"],"has_more":false,"next_after":""}))
+            .unwrap();
+        assert!(id_page.validate_value(&json!({"items":vec!["Ada";MAX_PAGE_ITEMS + 1],"has_more":false,"next_after":""})).is_err());
+        assert!(!supported_output(&T::CollectionPage(Box::new(
+            T::ModelReference {
+                roc_type: "PersonId".into(),
+                prefix: "per_".into(),
+            }
+        ))));
+        let valid =
+            json!({"items":[{"active":true,"name":"Ada"}],"has_more":false,"next_after":"0"});
+        page.validate_value(&valid).unwrap();
+        let oversized = json!({"items":vec![json!({"active":true,"name":"Ada"}); MAX_PAGE_ITEMS + 1],"has_more":false,"next_after":"0"});
+        assert!(page.validate_value(&oversized).is_err());
+        let malformed =
+            json!({"items":[{"active":"yes","name":"Ada"}],"has_more":false,"next_after":"0"});
+        assert!(page.validate_value(&malformed).is_err());
+        assert!(supported_output(&T::List(Box::new(T::String))));
     }
 
     #[test]

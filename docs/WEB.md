@@ -349,6 +349,47 @@ Apps choose routes but supply no HTTP server or router implementation. Queries
 remain independently invocable as JSON through the CLI and receive only
 transactional read capabilities.
 
+### Ordered GET preparation
+
+A page can explicitly prepare local state before its normal GET query:
+
+```roc
+launcher = Page.route(
+    { title: "Launcher", path: "/", template: Templates.launcher },
+    Reads.launcher,
+).before_read(Commands.resolve_membership)
+ .before_read(Commands.refresh_directory)
+ .on_prepare_failure(Reads.launcher_unavailable)
+```
+
+Each command has fixed empty input; the host supplies the authenticated actor,
+clock and invocation identity. Admission permits at most four distinct registered
+public commands with create/update-only effects and no credential issuance,
+external writes, child-command requests, restore or deletion. Runtime effect
+checks still apply. The fallback must be a registered query with exactly the
+primary query's input and output handles.
+
+The adapter validates page input and preflights every required operation before
+preparation I/O. It invokes commands in declaration order as separate ordinary
+transactions, then runs the read-only query. Earlier committed preparation is
+not retried or rolled back when a later stage fails. An authorized successful
+fallback receives the original page input and renders the normal template with
+HTTP 503. Authority/input failures remain denials; fallback failure never becomes
+a successful page. Authority, appearance and session bindings are rechecked at
+delivery.
+
+Preparation applies to normal page GETs, not POST/action rendering, live/SSE
+reads, HEAD or OPTIONS. It runs only when browser Fetch Metadata identifies a
+real top-level document navigation (`Sec-Fetch-Mode: navigate`,
+`Sec-Fetch-Dest: document`) and either `Sec-Fetch-User: ?1` indicates a user
+activation or `Sec-Fetch-Site: none` identifies browser-initiated navigation.
+This admits direct entry from an external site and extension navigation. An
+explicit same-origin HTML refresh is also admitted when `Sec-Fetch-Site` is
+`same-origin`, mode is `cors` or `same-origin`, destination is `empty`, user
+metadata is absent, and Accept includes `text/html`. Cross-site fetches, speculative requests, duplicated
+or missing metadata remain refused. Declaring preparation grants no operation or
+resource authority; normal session and admission checks still apply.
+
 The actual output types inferred from registered operation callbacks generate the Roc
 `Outputs` module and JSON shape contract from compiler metadata. App developers
 do not write a parallel JSON schema. The query result must match its typed

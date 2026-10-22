@@ -18,6 +18,13 @@ use std::{
 };
 
 pub(in super::super) const PATH: &str = "artifacts/ci-mac-compatibility.json";
+const FIXTURES: &[&str] = &[
+    "reports",
+    "reports-probe",
+    "relational",
+    "oauth-calendar",
+    "verification-setup",
+];
 const CASES: &[(&str, &str, &str, &str, bool)] = &[
     (
         "day2",
@@ -363,17 +370,11 @@ pub(super) struct Proof {
 }
 
 fn preparation_effects() -> BTreeSet<String> {
-    [
-        "cli",
-        "build-reports",
-        "build-reports-probe",
-        "build-relational",
-        "build-oauth-calendar",
-        "test-binaries",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    ["cli", "test-binaries"]
+        .into_iter()
+        .map(String::from)
+        .chain(FIXTURES.iter().map(|fixture| format!("build-{fixture}")))
+        .collect()
 }
 
 fn required_cases() -> Vec<(String, String, String, String, bool)> {
@@ -612,13 +613,7 @@ pub(super) fn admit(
             && p.passed == preparation_effects()
             && p.timings_ms.keys().cloned().collect::<BTreeSet<_>>() == p.passed
             && p.fixtures.keys().cloned().collect::<BTreeSet<_>>()
-                == [
-                    "reports".into(),
-                    "reports-probe".into(),
-                    "relational".into(),
-                    "oauth-calendar".into()
-                ]
-                .into(),
+                == FIXTURES.iter().copied().map(String::from).collect(),
         "missing/foreign/incomplete same-source native Mac preparation"
     );
     ensure!(
@@ -747,9 +742,9 @@ pub(super) mod tests {
         prepared.identity.workspace = "/Users/runner/work/platform/platform".into();
         prepared.identity.snapshot = "mac-snapshot".into();
         prepared.auxiliaries.clear();
-        prepared.fixtures.retain(|name, _| {
-            ["reports", "reports-probe", "relational", "oauth-calendar"].contains(&name.as_str())
-        });
+        prepared
+            .fixtures
+            .retain(|name, _| FIXTURES.contains(&name.as_str()));
         prepared.passed = preparation_effects();
         prepared.timings_ms = prepared.passed.iter().map(|s| (s.clone(), 100)).collect();
         let mut native_compiler: BuildIdentity =
@@ -794,6 +789,37 @@ pub(super) mod tests {
             native_elapsed_ms: 100,
             campaigns,
         })
+    }
+
+    #[test]
+    fn focused_preparation_inventory_matches_the_roc_recipe() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
+        let mut prepared = BTreeSet::new();
+        day2::automation::run(
+            &crate::workflows::build(&root)?,
+            &["verify-mac"],
+            |request| {
+                match request.action.as_str() {
+                    "verify-cli" => {
+                        prepared.insert("cli".into());
+                    }
+                    "verify-build" => {
+                        let input: BTreeMap<String, String> = request.decode()?;
+                        prepared.insert(format!("build-{}", input["fixture"]));
+                    }
+                    "verify-test-build" => {
+                        prepared.insert("test-binaries".into());
+                    }
+                    _ => {}
+                }
+                Ok(serde_json::json!({}))
+            },
+        )?;
+        assert_eq!(prepared, preparation_effects());
+        assert!(prepared.contains("build-verification-setup"));
+        Ok(())
     }
 
     #[test]

@@ -39,6 +39,7 @@ mod operation_catalog;
 mod output_schema;
 mod owned_runtime;
 mod owned_web;
+mod page_preparation_http;
 mod page_sdk;
 mod pagination;
 mod presentation_record_projection;
@@ -58,6 +59,7 @@ mod schedule_sweep;
 mod schema;
 mod template_routes;
 mod templates;
+mod verification_setup;
 mod web;
 mod web_resources;
 

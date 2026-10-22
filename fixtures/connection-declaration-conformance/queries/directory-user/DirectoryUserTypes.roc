@@ -1,0 +1,3 @@
+DirectoryUserTypes :: [].{
+	Input : {}
+}

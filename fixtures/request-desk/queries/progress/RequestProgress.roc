@@ -22,7 +22,7 @@ RequestProgress :: [].{
 		| ImportedContracts.stock_ledger_reserve_status({ id: input.receipt }).map(
 			|status| match status {
 				Pending => "pending"
-				Success => "success"
+				Success(_) => "success"
 				Refused => "refused"
 				Blocked => "blocked"
 				Unknown => "unknown"

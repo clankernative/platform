@@ -142,6 +142,7 @@ fn demonstration(action: Action) -> Demonstration {
         // the delegation harness can stand up a second application.
         | Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus => Demonstration::PendingAdapterSeam,
         Action::WorkspaceDirectoryCapture
+        | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
         | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
     }
@@ -920,6 +921,7 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         matches!(
             action,
             Action::WorkspaceDirectoryCapture
+                | Action::WorkspaceDirectoryUserPath
                 | Action::WorkspaceDirectoryHierarchy
                 | Action::WorkspaceDirectoryPage
         ),
@@ -943,6 +945,17 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
         actor: "directory-reader@coverage.test".into(),
         captured_at,
     };
+    if action == Action::WorkspaceDirectoryUserPath {
+        let result = serde_json::to_string(&crate::workspace_directory::collect_user_path(
+            input, &mut port,
+        )?)?;
+        let after = worlds(&database)?;
+        return Ok(Observed {
+            result,
+            before,
+            after,
+        });
+    }
     let complete = if action == Action::WorkspaceDirectoryHierarchy {
         crate::workspace_directory::collect_hierarchy(input, &mut port)?
     } else {
