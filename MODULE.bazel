@@ -1,0 +1,131 @@
+module(name = "day2_platform", version = "0.0.0")
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# Numeric child-status diagnostics; upstream source and version stay pinned.
+single_version_override(
+    module_name = "rules_rust",
+    version = "0.74.0",
+    patches = [
+        "//build/bazel:patches/rules-rust-0.74.0-child-status.patch",
+    ],
+    patch_strip = 1,
+)
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.98.1"],
+    extra_target_triples = [],
+    opt_level = {"fastbuild": "2", "dbg": "2", "opt": "3"},
+    extra_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
+    extra_exec_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+            "//:Cargo.toml",
+            "//crates/worker:Cargo.toml",
+            "//crates/xtask:Cargo.toml",
+            "//crates/day2:Cargo.toml",
+            "//crates/day2-assets:Cargo.toml",
+            "//crates/day2-contracts:Cargo.toml",
+            "//crates/day2-control:Cargo.toml",
+            "//crates/day2-kernel:Cargo.toml",
+            "//crates/day2-capabilities:Cargo.toml",
+            "//crates/durable-temporal:Cargo.toml",
+            "//crates/day2-ops:Cargo.toml",
+            "//crates/day2-sandbox:Cargo.toml",
+            "//cli/checks:Cargo.toml"
+    ],
+    supported_platform_triples = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "aarch64-unknown-linux-gnu"],
+    skip_cargo_lockfile_overwrite = True,
+)
+
+# Explicit target/build-tool dependency contexts, with locked source inputs.
+crate.annotation(
+    crate = "getrandom",
+    version = "0.4.3",
+    patches = ["//build/bazel:patches/getrandom-0.4.3-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "hashbrown",
+    version = "0.17.1",
+    patches = ["//build/bazel:patches/hashbrown-0.17.1-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "indexmap",
+    version = "2.14.2",
+    patches = ["//build/bazel:patches/indexmap-2.14.2-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "libc",
+    version = "0.2.189",
+    patches = ["//build/bazel:patches/libc-0.2.189-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "linux-raw-sys",
+    version = "0.12.1",
+    patches = ["//build/bazel:patches/linux-raw-sys-0.12.1-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "log",
+    version = "0.4.34",
+    patches = ["//build/bazel:patches/log-0.4.34-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "phf",
+    version = "0.14.0",
+    patches = ["//build/bazel:patches/phf-0.14.0-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "regex-automata",
+    version = "0.4.18",
+    patches = ["//build/bazel:patches/regex-automata-0.4.18-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "rustix",
+    version = "1.1.5",
+    patches = ["//build/bazel:patches/rustix-1.1.5-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "serde",
+    version = "1.0.229",
+    patches = ["//build/bazel:patches/serde-1.0.229-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "serde_core",
+    version = "1.0.229",
+    patches = ["//build/bazel:patches/serde_core-1.0.229-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "serde_json",
+    version = "1.0.151",
+    patches = ["//build/bazel:patches/serde_json-1.0.151-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+crate.annotation(
+    crate = "syn",
+    version = "2.0.119",
+    patches = ["//build/bazel:patches/syn-2.0.119-cargo-context.patch"],
+    patch_args = ["-p1"],
+)
+
+use_repo(crate, "crates")

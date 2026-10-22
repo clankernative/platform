@@ -1,0 +1,53 @@
+name: Bazel migration qualification
+
+on:
+  push:
+    branches: [build/bazel-platform-migration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bazel-migration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  graph:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            config: ci-linux
+          - os: macos-15
+            config: ci-mac
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Log exact source
+        run: git show -s --format=fuller HEAD
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
+          cache-save: false
+      - name: Analyze the complete workspace with parameter files
+        run: bazel aquery --config=${{ matrix.config }} --include_param_files --output=jsonproto 'deps(set(//:all_programs //:test_binaries //crates/worker:lib))' > /tmp/day2-bazel-actions.json
+      - name: Build the complete workspace and every harness
+        run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //:all_programs //:test_binaries //crates/worker:lib
+      - name: Retain exact graph, lockfile and build outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bazel-migration-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            /tmp/day2-bazel-actions.json
+            /tmp/day2-bazel-build.json
+            MODULE.bazel.lock
+            build/bazel/targets.json
+          if-no-files-found: error

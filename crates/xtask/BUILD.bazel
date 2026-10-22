@@ -1,0 +1,50 @@
+load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", "platform_rust_test", "platform_rust_static_library")
+
+package(default_visibility = ["//visibility:public"])
+
+COMPILE_INPUTS = [
+    "//:.github/workflows/ci.yml",
+    "//:architecture/clippy.toml",
+    "//:fixtures/authority-policies/reports.json",
+    "//:rust-toolchain.toml",
+    "//:toolchain.json",
+    "//:toolchains/linux-aarch64.json",
+    "//:toolchains/linux-x86_64.json",
+    "//:tools/roc-compiler/glue-layouts.patch",
+    "//crates/day2-control:src/release.rs",
+    "//crates/day2:src/structural_proofs.rs",
+    "//crates/xtask:src/architecture.rs"
+]
+
+INTERNAL_DEPS = [
+    "//crates/day2-assets:lib",
+    "//crates/day2-contracts:lib",
+    "//crates/day2:lib",
+    "//crates/day2-control:lib",
+    "//crates/day2-ops:lib"
+]
+
+DEV_INTERNAL_DEPS = []
+
+platform_rust_binary(
+    name = "xtask",
+    crate_name = "xtask",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+)
+
+platform_rust_test(
+    name = "unit_xtask",
+    crate_name = "xtask",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+)
+
+exports_files([
+    "Cargo.toml",
+    "src/architecture.rs"
+])

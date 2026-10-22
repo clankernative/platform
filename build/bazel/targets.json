@@ -1,0 +1,808 @@
+{
+  "format": 1,
+  "targets": [
+    {
+      "package": "day2-roc-worker",
+      "directory": "crates/worker",
+      "target": "day2_roc_worker",
+      "kind": [
+        "staticlib"
+      ],
+      "label": "//crates/worker:lib",
+      "test": false,
+      "source": "crates/worker/src/lib.rs"
+    },
+    {
+      "package": "day2-roc-worker",
+      "directory": "crates/worker",
+      "target": "day2_roc_worker",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/worker:unit_lib",
+      "test": true,
+      "source": "crates/worker/src/lib.rs"
+    },
+    {
+      "package": "xtask",
+      "directory": "crates/xtask",
+      "target": "xtask",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/xtask:xtask",
+      "test": false,
+      "source": "crates/xtask/src/main.rs"
+    },
+    {
+      "package": "xtask",
+      "directory": "crates/xtask",
+      "target": "xtask",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/xtask:unit_xtask",
+      "test": true,
+      "source": "crates/xtask/src/main.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2:lib",
+      "test": false,
+      "source": "crates/day2/src/lib.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2:unit_lib",
+      "test": true,
+      "source": "crates/day2/src/lib.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2",
+      "test": false,
+      "source": "crates/day2/src/main.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2",
+      "test": true,
+      "source": "crates/day2/src/main.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-epoch-controller",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-epoch-controller",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-epoch-controller.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-epoch-controller",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_epoch_controller",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-epoch-controller.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-health",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-health",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-health.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-health",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_health",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-health.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-inspect",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-inspect",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-inspect.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-inspect",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_inspect",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-inspect.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-native-enrollment",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-native-enrollment",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-native-enrollment.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-native-enrollment",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_native_enrollment",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-native-enrollment.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-native-enrollment-qualify",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-native-enrollment-qualify",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-native-enrollment-qualify.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-native-enrollment-qualify",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_native_enrollment_qualify",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-native-enrollment-qualify.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-package",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-package",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-package.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-package",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_package",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-package.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-security-shell",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:day2-security-shell",
+      "test": false,
+      "source": "crates/day2/src/bin/day2-security-shell.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2-security-shell",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_day2_security_shell",
+      "test": true,
+      "source": "crates/day2/src/bin/day2-security-shell.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "sandbox_probe",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:sandbox_probe",
+      "test": false,
+      "source": "crates/day2/src/bin/sandbox_probe.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "sandbox_probe",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2:unit_sandbox_probe",
+      "test": true,
+      "source": "crates/day2/src/bin/sandbox_probe.rs"
+    },
+    {
+      "package": "day2",
+      "directory": "crates/day2",
+      "target": "day2_integration",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2:day2_integration",
+      "test": true,
+      "source": "crates/day2/tests/main.rs"
+    },
+    {
+      "package": "day2-assets",
+      "directory": "crates/day2-assets",
+      "target": "day2_assets",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-assets:lib",
+      "test": false,
+      "source": "crates/day2-assets/src/lib.rs"
+    },
+    {
+      "package": "day2-assets",
+      "directory": "crates/day2-assets",
+      "target": "day2_assets",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-assets:unit_lib",
+      "test": true,
+      "source": "crates/day2-assets/src/lib.rs"
+    },
+    {
+      "package": "day2-contracts",
+      "directory": "crates/day2-contracts",
+      "target": "day2_contracts",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-contracts:lib",
+      "test": false,
+      "source": "crates/day2-contracts/src/lib.rs"
+    },
+    {
+      "package": "day2-contracts",
+      "directory": "crates/day2-contracts",
+      "target": "day2_contracts",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-contracts:unit_lib",
+      "test": true,
+      "source": "crates/day2-contracts/src/lib.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2_control",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-control:lib",
+      "test": false,
+      "source": "crates/day2-control/src/lib.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2_control",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-control:unit_lib",
+      "test": true,
+      "source": "crates/day2-control/src/lib.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "control",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:control",
+      "test": false,
+      "source": "crates/day2-control/src/bin/control.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "control",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:unit_control",
+      "test": true,
+      "source": "crates/day2-control/src/bin/control.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-app-keygen",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:day2-app-keygen",
+      "test": false,
+      "source": "crates/day2-control/src/bin/day2-app-keygen.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-app-keygen",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:unit_day2_app_keygen",
+      "test": true,
+      "source": "crates/day2-control/src/bin/day2-app-keygen.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-gke-release",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:day2-gke-release",
+      "test": false,
+      "source": "crates/day2-control/src/bin/day2-gke-release.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-gke-release",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:unit_day2_gke_release",
+      "test": true,
+      "source": "crates/day2-control/src/bin/day2-gke-release.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-serve",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:day2-serve",
+      "test": false,
+      "source": "crates/day2-control/src/bin/day2-serve.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-serve",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:unit_day2_serve",
+      "test": true,
+      "source": "crates/day2-control/src/bin/day2-serve.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-serving-snapshot",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:day2-serving-snapshot",
+      "test": false,
+      "source": "crates/day2-control/src/bin/day2-serving-snapshot.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "day2-serving-snapshot",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-control:unit_day2_serving_snapshot",
+      "test": true,
+      "source": "crates/day2-control/src/bin/day2-serving-snapshot.rs"
+    },
+    {
+      "package": "day2-control",
+      "directory": "crates/day2-control",
+      "target": "control_integration",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-control:control_integration",
+      "test": true,
+      "source": "crates/day2-control/tests/main.rs"
+    },
+    {
+      "package": "day2-kernel",
+      "directory": "crates/day2-kernel",
+      "target": "day2_kernel",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-kernel:lib",
+      "test": false,
+      "source": "crates/day2-kernel/src/lib.rs"
+    },
+    {
+      "package": "day2-kernel",
+      "directory": "crates/day2-kernel",
+      "target": "day2_kernel",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-kernel:unit_lib",
+      "test": true,
+      "source": "crates/day2-kernel/src/lib.rs"
+    },
+    {
+      "package": "day2-kernel",
+      "directory": "crates/day2-kernel",
+      "target": "build_state",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-kernel:build_state",
+      "test": true,
+      "source": "crates/day2-kernel/tests/build_state.rs"
+    },
+    {
+      "package": "day2-capabilities",
+      "directory": "crates/day2-capabilities",
+      "target": "day2_capabilities",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-capabilities:lib",
+      "test": false,
+      "source": "crates/day2-capabilities/src/lib.rs"
+    },
+    {
+      "package": "day2-capabilities",
+      "directory": "crates/day2-capabilities",
+      "target": "day2_capabilities",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-capabilities:unit_lib",
+      "test": true,
+      "source": "crates/day2-capabilities/src/lib.rs"
+    },
+    {
+      "package": "durable-temporal",
+      "directory": "crates/durable-temporal",
+      "target": "durable_temporal",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/durable-temporal:lib",
+      "test": false,
+      "source": "crates/durable-temporal/src/lib.rs"
+    },
+    {
+      "package": "durable-temporal",
+      "directory": "crates/durable-temporal",
+      "target": "durable_temporal",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/durable-temporal:unit_lib",
+      "test": true,
+      "source": "crates/durable-temporal/src/lib.rs"
+    },
+    {
+      "package": "durable-temporal",
+      "directory": "crates/durable-temporal",
+      "target": "persistence",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/durable-temporal:persistence",
+      "test": true,
+      "source": "crates/durable-temporal/tests/persistence.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2_ops",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-ops:lib",
+      "test": false,
+      "source": "crates/day2-ops/src/lib.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2_ops",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-ops:unit_lib",
+      "test": true,
+      "source": "crates/day2-ops/src/lib.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-backup",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:day2-backup",
+      "test": false,
+      "source": "crates/day2-ops/src/bin/day2-backup.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-backup",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:unit_day2_backup",
+      "test": true,
+      "source": "crates/day2-ops/src/bin/day2-backup.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-host",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:day2-host",
+      "test": false,
+      "source": "crates/day2-ops/src/main.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-host",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:unit_day2_host",
+      "test": true,
+      "source": "crates/day2-ops/src/main.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-provision-credentials",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:day2-provision-credentials",
+      "test": false,
+      "source": "crates/day2-ops/src/bin/day2-provision-credentials.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "day2-provision-credentials",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-ops:unit_day2_provision_credentials",
+      "test": true,
+      "source": "crates/day2-ops/src/bin/day2-provision-credentials.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "backup_scale",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-ops:backup_scale",
+      "test": true,
+      "source": "crates/day2-ops/tests/backup_scale.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "local_dev",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-ops:local_dev",
+      "test": true,
+      "source": "crates/day2-ops/tests/local_dev.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "local_dev_cli",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-ops:local_dev_cli",
+      "test": true,
+      "source": "crates/day2-ops/tests/local_dev_cli.rs"
+    },
+    {
+      "package": "day2-ops",
+      "directory": "crates/day2-ops",
+      "target": "reports",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-ops:reports",
+      "test": true,
+      "source": "crates/day2-ops/tests/reports.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2_sandbox",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-sandbox:lib",
+      "test": false,
+      "source": "crates/day2-sandbox/src/lib.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2_sandbox",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-sandbox:unit_lib",
+      "test": true,
+      "source": "crates/day2-sandbox/src/lib.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-compiler-sandbox",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:day2-compiler-sandbox",
+      "test": false,
+      "source": "crates/day2-sandbox/src/bin/day2-compiler-sandbox.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-compiler-sandbox",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:unit_day2_compiler_sandbox",
+      "test": true,
+      "source": "crates/day2-sandbox/src/bin/day2-compiler-sandbox.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-sandbox",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:day2-sandbox",
+      "test": false,
+      "source": "crates/day2-sandbox/src/main.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-sandbox",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:unit_day2_sandbox",
+      "test": true,
+      "source": "crates/day2-sandbox/src/main.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-sandbox-probe",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:day2-sandbox-probe",
+      "test": false,
+      "source": "crates/day2-sandbox/src/bin/day2-sandbox-probe.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "day2-sandbox-probe",
+      "kind": [
+        "bin"
+      ],
+      "label": "//crates/day2-sandbox:unit_day2_sandbox_probe",
+      "test": true,
+      "source": "crates/day2-sandbox/src/bin/day2-sandbox-probe.rs"
+    },
+    {
+      "package": "day2-sandbox",
+      "directory": "crates/day2-sandbox",
+      "target": "isolation",
+      "kind": [
+        "test"
+      ],
+      "label": "//crates/day2-sandbox:isolation",
+      "test": true,
+      "source": "crates/day2-sandbox/tests/isolation.rs"
+    },
+    {
+      "package": "day2-cli-checks",
+      "directory": "cli/checks",
+      "target": "day2_cli_checks",
+      "kind": [
+        "lib"
+      ],
+      "label": "//cli/checks:lib",
+      "test": false,
+      "source": "cli/checks/src/lib.rs"
+    },
+    {
+      "package": "day2-cli-checks",
+      "directory": "cli/checks",
+      "target": "day2_cli_checks",
+      "kind": [
+        "lib"
+      ],
+      "label": "//cli/checks:unit_lib",
+      "test": true,
+      "source": "cli/checks/src/lib.rs"
+    }
+  ]
+}

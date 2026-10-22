@@ -45,3 +45,5 @@ instance.json
 **/.idea
 **/.vscode
 infra/local.json
+
+bazel-*

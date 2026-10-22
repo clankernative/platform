@@ -1,0 +1,171 @@
+--- a/util/process_wrapper/main.rs
++++ b/util/process_wrapper/main.rs
+@@ -52,6 +52,37 @@
+         // Otherwise it's some unexpected signal
+         None => 1,
+     }
++}
++
++// This fixed numeric advisory never includes command arguments, paths, or environment values.
++// A requested metadata kill is not evidence that the kill succeeded or caused termination.
++fn status_code_with_diagnostic(
++    status: ExitStatus,
++    was_killed: bool,
++    diagnostic: &mut impl io::Write,
++) -> i32 {
++    let code = status_code(status, was_killed);
++    if code != 0 {
++        let child_code = status.code();
++        #[cfg(unix)]
++        let signal = {
++            use std::os::unix::process::ExitStatusExt;
++            status.signal()
++        };
++        #[cfg(not(unix))]
++        let signal: Option<i32> = None;
++        // Diagnostic I/O failure must not replace the original mapped child status.
++        let _ = writeln!(
++            diagnostic,
++            "RR_CHILD_V1 code_present={} code={} signal_present={} signal={} metadata_kill_requested={}",
++            u8::from(child_code.is_some()),
++            child_code.unwrap_or(0),
++            u8::from(signal.is_some()),
++            signal.unwrap_or(0),
++            u8::from(was_killed),
++        );
++    }
++    code
+ }
+ 
+ #[derive(Debug)]
+@@ -207,7 +238,7 @@
+         .wait()
+         .map_err(|e| ProcessWrapperError(format!("failed to wait for child process: {}", e)))?;
+     // If the child process is rustc and is killed after metadata generation, that's also a success.
+-    let code = status_code(status, was_killed);
++    let code = status_code_with_diagnostic(status, was_killed, &mut io::stderr().lock());
+     let success = code == 0;
+     if success {
+         if let Some(tf) = opts.touch_file {
+@@ -371,4 +402,120 @@
+         assert!(metadata_emitted);
+         Ok(())
+     }
+-}
++
++    fn child_status_fixture_command(mode: &str) -> Command {
++        let mut command = Command::new(std::env::current_exe().unwrap());
++        command
++            .args([
++                "--exact",
++                "test::test_child_status_fixture",
++                "--nocapture",
++                "--skip",
++                "RR_PRIVATE_ARGUMENT_SENTINEL",
++            ])
++            .env("RULES_RUST_CHILD_STATUS_FIXTURE", mode)
++            .env("RR_PRIVATE_ENV_SENTINEL", "RR_PRIVATE_VALUE_SENTINEL")
++            .stdout(Stdio::null())
++            .stderr(Stdio::null());
++        command
++    }
++
++    // Re-enter this test binary to obtain genuine OS child statuses without a shell.
++    // The ordinary whole test run has no fixture mode and simply returns.
++    #[test]
++    fn test_child_status_fixture() {
++        match std::env::var("RULES_RUST_CHILD_STATUS_FIXTURE").as_deref() {
++            Ok("exit0") => exit(0),
++            Ok("exit2") => exit(2),
++            Ok("wait") => loop {
++                std::thread::park();
++            },
++            Err(std::env::VarError::NotPresent) => {}
++            _ => panic!("invalid fixed child status fixture mode"),
++        }
++    }
++
++    #[test]
++    fn test_child_status_success_is_silent() {
++        let status = child_status_fixture_command("exit0").status().unwrap();
++        assert_eq!(status.code(), Some(0));
++        let mut diagnostic = Vec::new();
++        assert_eq!(status_code_with_diagnostic(status, false, &mut diagnostic), 0);
++        assert!(diagnostic.is_empty());
++    }
++
++    #[test]
++    fn test_child_status_exit_code_request_mapping_and_numeric_privacy() {
++        let status = child_status_fixture_command("exit2").status().unwrap();
++        assert_eq!(status.code(), Some(2));
++        let mut diagnostic = Vec::new();
++        assert_eq!(status_code_with_diagnostic(status, false, &mut diagnostic), 2);
++        assert_eq!(
++            diagnostic,
++            b"RR_CHILD_V1 code_present=1 code=2 signal_present=0 signal=0 metadata_kill_requested=0\n"
++        );
++        assert!(diagnostic.len() < 128);
++        diagnostic.clear();
++        let code = status_code_with_diagnostic(status, true, &mut diagnostic);
++        #[cfg(not(windows))]
++        {
++            assert_eq!(code, 2);
++            assert_eq!(
++                diagnostic,
++                b"RR_CHILD_V1 code_present=1 code=2 signal_present=0 signal=0 metadata_kill_requested=1\n"
++            );
++        }
++        #[cfg(windows)]
++        {
++            assert_eq!(code, 0);
++            assert!(diagnostic.is_empty());
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn test_child_status_real_signal_and_metadata_request_mapping() {
++        use std::os::unix::process::ExitStatusExt;
++
++        let mut child = child_status_fixture_command("wait").spawn().unwrap();
++        let kill_result = child.kill();
++        let status = child.wait().unwrap();
++        kill_result.unwrap();
++        assert_eq!(status.code(), None);
++        let signal = status.signal().expect("the controlled child was signalled");
++        assert!(signal > 0);
++        let mut diagnostic = Vec::new();
++        assert_eq!(status_code_with_diagnostic(status, false, &mut diagnostic), 1);
++        assert_eq!(
++            diagnostic,
++            format!(
++                "RR_CHILD_V1 code_present=0 code=0 signal_present=1 signal={} metadata_kill_requested=0\n",
++                signal
++            ).as_bytes()
++        );
++        diagnostic.clear();
++        assert_eq!(status_code_with_diagnostic(status, true, &mut diagnostic), 0);
++        assert!(diagnostic.is_empty());
++    }
++
++    #[test]
++    fn test_child_status_advisory_write_failure_preserves_exit_code() {
++        struct FailedWriter(usize);
++        impl io::Write for FailedWriter {
++            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
++                self.0 += 1;
++                Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixed test failure"))
++            }
++
++            fn flush(&mut self) -> io::Result<()> {
++                Ok(())
++            }
++        }
++
++        let status = child_status_fixture_command("exit2").status().unwrap();
++        assert_eq!(status.code(), Some(2));
++        let mut diagnostic = FailedWriter(0);
++        assert_eq!(status_code_with_diagnostic(status, false, &mut diagnostic), 2);
++        assert_eq!(diagnostic.0, 1);
++    }
++}

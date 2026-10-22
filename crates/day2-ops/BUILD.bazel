@@ -1,0 +1,143 @@
+load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", "platform_rust_test", "platform_rust_static_library")
+
+package(default_visibility = ["//visibility:public"])
+
+COMPILE_INPUTS = [
+    "//:deploy/gke/k8s/maintenance-pod.yaml",
+    "//:deploy/gke/stacks/day2-app/tests/oauth-instance.json"
+]
+
+INTERNAL_DEPS = [
+    "//crates/day2-assets:lib",
+    "//crates/day2-contracts:lib",
+    "//crates/day2:lib",
+    "//crates/day2-capabilities:lib"
+]
+
+DEV_INTERNAL_DEPS = []
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_ops",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+)
+
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_ops",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+)
+
+platform_rust_binary(
+    name = "day2-backup",
+    crate_name = "day2_backup",
+    crate_root = "src/bin/day2-backup.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_backup",
+    crate_name = "day2_backup",
+    crate_root = "src/bin/day2-backup.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-host",
+    crate_name = "day2_host",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_host",
+    crate_name = "day2_host",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-provision-credentials",
+    crate_name = "day2_provision_credentials",
+    crate_root = "src/bin/day2-provision-credentials.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_provision_credentials",
+    crate_name = "day2_provision_credentials",
+    crate_root = "src/bin/day2-provision-credentials.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "backup_scale",
+    crate_name = "backup_scale",
+    crate_root = "tests/backup_scale.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-ops:day2-backup", "//crates/day2-ops:day2-host", "//crates/day2-ops:day2-provision-credentials"],
+)
+
+platform_rust_test(
+    name = "local_dev",
+    crate_name = "local_dev",
+    crate_root = "tests/local_dev.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-ops:day2-backup", "//crates/day2-ops:day2-host", "//crates/day2-ops:day2-provision-credentials"],
+)
+
+platform_rust_test(
+    name = "local_dev_cli",
+    crate_name = "local_dev_cli",
+    crate_root = "tests/local_dev_cli.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-ops:day2-backup", "//crates/day2-ops:day2-host", "//crates/day2-ops:day2-provision-credentials"],
+)
+
+platform_rust_test(
+    name = "reports",
+    crate_name = "reports",
+    crate_root = "tests/reports.rs",
+    srcs = glob(["src/**/*.rs", "tests/**/*.rs"]),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-ops:day2-backup", "//crates/day2-ops:day2-host", "//crates/day2-ops:day2-provision-credentials"],
+)
+
+exports_files([
+    "Cargo.toml"
+])
