@@ -867,6 +867,7 @@
         "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >",
         "pub (super) fn exchange_current_views (& mut self , other : & mut Self) -> Result < () >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
+        "pub (super) fn historical_interval_observation (& self) -> (Digest , Duration , Duration , Duration)",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
         "pub (super) fn join_current_view (& mut self , mut current : Self) -> Result < () >",
         "pub (super) fn last_checked_elapsed_micros (& self) -> Option < u32 >",
@@ -910,6 +911,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn exchange_current_views (& mut self , other : & mut Self) -> Result < () >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn historical_interval_observation (& self) -> (Digest , Duration , Duration , Duration)"
         },
         {
           "owner": "NativeAcquisition",

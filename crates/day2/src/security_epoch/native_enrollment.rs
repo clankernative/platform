@@ -12,6 +12,8 @@ mod birth;
 mod channel;
 #[cfg(any(target_os = "linux", test))]
 mod executable_bytes;
+#[cfg(any(target_os = "linux", test))]
+mod handshake;
 pub(in crate::security_epoch) mod issuer_costs;
 #[cfg(target_os = "linux")]
 mod issuer_peer;

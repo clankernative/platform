@@ -1,6 +1,9 @@
 //! One bounded sequence-packet exchange. No FD adoption or raw ancillary API is
 //! exposed to a caller. The private birth owner is the only socketpair creator.
 
+use super::handshake::{
+    Actor, Direction, Frame, Observation, Protocol, Transcript, Transport, TransportDecision,
+};
 use super::issuer_costs::HashCosts;
 use super::peer_idle::{IdleRequest, PeerChannel};
 use crate::security_epoch::native_clock::NativeAcquisition;
@@ -26,10 +29,100 @@ pub(super) use storage::{StorageListener, StorageSender};
 pub(super) struct Channel {
     socket: File,
     refused: bool,
+    // None only for the private issuer birth socket and kernel DATA fixtures.
+    // Every production enrollment/storage/serving channel installs a transcript.
+    transcript: Option<Transcript>,
     local: PhantomData<Rc<()>>,
 }
 
 impl Channel {
+    fn observation(acquisition: &NativeAcquisition) -> Observation {
+        let (domain, origin, deadline, now) = acquisition.historical_interval_observation();
+        Observation {
+            domain,
+            origin,
+            deadline,
+            now,
+        }
+    }
+
+    fn begin_packet(
+        &mut self,
+        direction: Direction,
+        frame: Option<Frame>,
+        acquisition: &NativeAcquisition,
+    ) -> Result<()> {
+        if let Some(transcript) = &mut self.transcript {
+            if direction == Direction::Send && transcript.next().map(|(_, next)| next) != frame {
+                transcript.refuse();
+                anyhow::bail!("native_handshake_send_order");
+            }
+            transcript.begin(direction, Self::observation(acquisition))?;
+        }
+        Ok(())
+    }
+
+    fn packet_delivered(
+        &mut self,
+        frame: Option<Frame>,
+        acquisition: &NativeAcquisition,
+    ) -> Result<()> {
+        if let Some(transcript) = &mut self.transcript {
+            let frame = frame.ok_or_else(|| anyhow::anyhow!("native_handshake_packet_kind"))?;
+            transcript.delivered(frame, Self::observation(acquisition))?;
+        }
+        Ok(())
+    }
+
+    fn transport(
+        &mut self,
+        transport: Transport,
+        events: PollFlags,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let decision = match &mut self.transcript {
+            Some(transcript) => transcript.transport(transport, Self::observation(acquisition))?,
+            None => match transport {
+                Transport::WouldBlock => TransportDecision::Wait,
+                Transport::Interrupted | Transport::Ready => TransportDecision::Retry,
+                Transport::Failed => anyhow::bail!("native_handshake_transport"),
+            },
+        };
+        if decision == TransportDecision::Wait {
+            wait(&self.socket, events, acquisition)?;
+            if let Some(transcript) = &mut self.transcript {
+                transcript.transport(Transport::Ready, Self::observation(acquisition))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refuse(&mut self) {
+        self.refused = true;
+        if let Some(transcript) = &mut self.transcript {
+            transcript.refuse();
+        }
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn begin_current_handshake(
+        &mut self,
+        sequence: u64,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.refused, "native_handshake_channel_refused");
+            self.transcript
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("native_handshake_transcript_required"))?
+                .begin_current(sequence)
+        })();
+        if result.is_err() {
+            self.refuse();
+            acquisition.refuse();
+        }
+        result
+    }
+
     /// A single nonblocking wakeup on this retained socket. It carries only
     /// untrusted sequence DATA, never an old stage or an action permission.
     /// Any uncertain/partial send is terminal; no retry or replacement occurs.
@@ -54,7 +147,7 @@ impl Channel {
             idle_open(&self.socket)
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
         }
         result
     }
@@ -94,7 +187,7 @@ impl Channel {
             Ok(())
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -117,6 +210,7 @@ impl Channel {
         Ok(Self {
             socket: File::from(socket),
             refused: false,
+            transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Client)),
             local: PhantomData,
         })
     }
@@ -137,6 +231,7 @@ impl Channel {
             Self {
                 socket: File::from(parent),
                 refused: false,
+                transcript: None,
                 local: PhantomData,
             },
             child,
@@ -158,6 +253,7 @@ impl Channel {
         Ok(Self {
             socket: File::from(fd),
             refused: false,
+            transcript: None,
             local: PhantomData,
         })
     }
@@ -174,6 +270,7 @@ impl Channel {
                 !bytes.is_empty() && bytes.len() <= MAX_PACKET,
                 "native_enrollment_packet_bound"
             );
+            self.begin_packet(Direction::Send, packet.frame(), acquisition)?;
             loop {
                 acquisition.remaining()?;
                 match net::send(
@@ -185,16 +282,21 @@ impl Channel {
                         ensure!(count == bytes.len(), "native_enrollment_partial_packet");
                         break;
                     }
-                    Err(Errno::AGAIN) => wait(&self.socket, PollFlags::OUT, acquisition)?,
-                    Err(Errno::INTR) => continue,
+                    Err(Errno::AGAIN) => {
+                        self.transport(Transport::WouldBlock, PollFlags::OUT, acquisition)?;
+                    }
+                    Err(Errno::INTR) => {
+                        self.transport(Transport::Interrupted, PollFlags::OUT, acquisition)?
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
             acquisition.remaining()?;
+            self.packet_delivered(packet.frame(), acquisition)?;
             Ok(())
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -237,10 +339,11 @@ impl Channel {
             };
             let process = MessageProcess::receive(received, expected_code, acquisition, costs)?;
             acquisition.remaining()?;
+            self.packet_delivered(packet.frame(), acquisition)?;
             Ok((packet, process))
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -253,10 +356,11 @@ impl Channel {
         let result = (|| {
             let (packet, received) = self.receive_kernel(acquisition)?;
             let receipt = super::issuer_peer::IssuerReceipt::receive(received, acquisition)?;
+            self.packet_delivered(packet.frame(), acquisition)?;
             Ok((packet, receipt))
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -269,14 +373,18 @@ impl Channel {
         let result = (|| {
             ensure!(!self.refused, "native_enrollment_channel_refused");
             let mut bytes = [0_u8; MAX_PACKET];
+            acquisition.remaining()?;
+            self.begin_packet(Direction::Receive, None, acquisition)?;
             let received = loop {
                 acquisition.remaining()?;
                 match net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut bytes)]) {
                     Ok(packet) => break packet,
                     Err(RecvPidfdError::Io(Errno::AGAIN)) => {
-                        wait(&self.socket, PollFlags::IN, acquisition)?
+                        self.transport(Transport::WouldBlock, PollFlags::IN, acquisition)?;
                     }
-                    Err(RecvPidfdError::Io(Errno::INTR)) => continue,
+                    Err(RecvPidfdError::Io(Errno::INTR)) => {
+                        self.transport(Transport::Interrupted, PollFlags::IN, acquisition)?
+                    }
                     Err(error) => return Err(error.into()),
                 }
             };
@@ -285,7 +393,7 @@ impl Channel {
             Ok((packet, received))
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -390,6 +498,7 @@ impl Listener {
                 Channel {
                     socket: File::from(socket),
                     refused: false,
+                    transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Issuer)),
                     local: PhantomData,
                 },
                 acquisition,
@@ -408,20 +517,20 @@ fn configure(fd: &impl AsFd) -> Result<()> {
 }
 
 fn wait(fd: &File, events: PollFlags, acquisition: &mut NativeAcquisition) -> Result<()> {
+    use super::handshake::{PollObservation, poll_decision};
     loop {
         let timeout = rustix::event::Timespec::try_from(acquisition.remaining()?)?;
         let mut fds = [PollFd::new(fd, events)];
-        match rustix::event::poll(&mut fds, Some(&timeout)) {
-            Ok(count) => {
-                ensure!(count != 0, "native_enrollment_socket_poll_timeout");
-                ensure!(
-                    count == 1 && fds[0].revents() == events,
-                    "native_enrollment_socket_unexpected_events"
-                );
-                break;
-            }
-            Err(Errno::INTR) => continue,
+        let observation = match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(0) => PollObservation::Timeout,
+            Ok(1) if fds[0].revents() == events => PollObservation::Ready,
+            Ok(_) => PollObservation::UnexpectedEvents,
+            Err(Errno::INTR) => PollObservation::Interrupted,
             Err(error) => return Err(error.into()),
+        };
+        match poll_decision(observation)? {
+            TransportDecision::Wait => continue,
+            TransportDecision::Retry => break,
         }
     }
     acquisition.remaining()?;
@@ -441,6 +550,7 @@ mod tests {
             Channel {
                 socket: File::from(right),
                 refused: false,
+                transcript: None,
                 local: PhantomData,
             },
         )

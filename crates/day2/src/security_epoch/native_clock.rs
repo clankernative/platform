@@ -146,6 +146,17 @@ impl NativeAcquisition {
             .and_then(|elapsed| elapsed.as_micros().try_into().ok())
     }
 
+    /// Historical DATA only, for the packet decision reducer after actual
+    /// native pre/postchecks. Never samples, renews or reconstructs this owner.
+    pub(super) fn historical_interval_observation(&self) -> (Digest, Duration, Duration, Duration) {
+        (
+            self.domain.clone(),
+            self.origin,
+            self.deadline,
+            self.observation.get().latest,
+        )
+    }
+
     pub(super) fn refuse(&mut self) {
         self.valid = false;
         self.observation.set(OriginalObservation {

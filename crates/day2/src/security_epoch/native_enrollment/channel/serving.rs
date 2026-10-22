@@ -1,7 +1,7 @@
 //! The fixed Shell/Controller serving endpoint and per-message sender handles. No
 //! caller path, descriptor adoption, weaker credentials or renewed clock.
 
-use super::{Channel, configure, wait};
+use super::{Actor, Channel, Direction, Protocol, Transcript, Transport, configure, wait};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
@@ -49,6 +49,7 @@ impl Channel {
             Ok(Self {
                 socket: File::from(socket),
                 refused: false,
+                transcript: Some(Transcript::new(Protocol::InitialServing, Actor::Shell)),
                 local: PhantomData,
             })
         })();
@@ -70,7 +71,7 @@ impl Channel {
             stage.check_serving_acquisition(acquisition)
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -90,6 +91,7 @@ impl Channel {
                 !bytes.is_empty() && bytes.len() <= MAX_PACKET,
                 "serving_peer_packet_bound"
             );
+            self.begin_packet(Direction::Send, Some(message.body.frame()), acquisition)?;
             loop {
                 self.check_serving_open(stage, acquisition)?;
                 match net::send(
@@ -101,15 +103,20 @@ impl Channel {
                         ensure!(count == bytes.len(), "serving_peer_partial_packet");
                         break;
                     }
-                    Err(Errno::AGAIN) => wait(&self.socket, PollFlags::OUT, acquisition)?,
-                    Err(Errno::INTR) => continue,
+                    Err(Errno::AGAIN) => {
+                        self.transport(Transport::WouldBlock, PollFlags::OUT, acquisition)?;
+                    }
+                    Err(Errno::INTR) => {
+                        self.transport(Transport::Interrupted, PollFlags::OUT, acquisition)?
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
-            self.check_serving_open(stage, acquisition)
+            self.check_serving_open(stage, acquisition)?;
+            self.packet_delivered(Some(message.body.frame()), acquisition)
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -125,14 +132,17 @@ impl Channel {
             self.check_serving_open(stage, acquisition)?;
             let expected_code = stage.serving_peer_code()?;
             let mut bytes = [0_u8; MAX_PACKET];
+            self.begin_packet(Direction::Receive, None, acquisition)?;
             let received = loop {
                 self.check_serving_open(stage, acquisition)?;
                 match net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut bytes)]) {
                     Ok(received) => break received,
                     Err(RecvPidfdError::Io(Errno::AGAIN)) => {
-                        wait(&self.socket, PollFlags::IN, acquisition)?
+                        self.transport(Transport::WouldBlock, PollFlags::IN, acquisition)?;
                     }
-                    Err(RecvPidfdError::Io(Errno::INTR)) => continue,
+                    Err(RecvPidfdError::Io(Errno::INTR)) => {
+                        self.transport(Transport::Interrupted, PollFlags::IN, acquisition)?
+                    }
                     Err(error) => return Err(error.into()),
                 }
             };
@@ -154,10 +164,11 @@ impl Channel {
                 NativeRole::AppHost => anyhow::bail!("serving_peer_app_role_refused"),
             };
             self.check_serving_open(stage, acquisition)?;
+            self.packet_delivered(Some(message.body.frame()), acquisition)?;
             Ok((message, process))
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
             acquisition.refuse();
         }
         result
@@ -241,6 +252,7 @@ impl ServingListener {
             Ok(Channel {
                 socket: File::from(socket),
                 refused: false,
+                transcript: Some(Transcript::new(Protocol::InitialServing, Actor::Controller)),
                 local: PhantomData,
             })
         })();
@@ -298,7 +310,7 @@ impl Channel {
             Ok(ready)
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refuse();
         }
         result
     }
