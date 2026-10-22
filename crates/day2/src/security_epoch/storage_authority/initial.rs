@@ -235,8 +235,13 @@ impl InitialStorageContinuity {
             request,
         )?;
         let pending = self.file.begin_pending_initial_phase()?;
-        let rendezvous = self.peer.prepare_current(&mut stage)?;
-        let mut file = pending.acquire(stage)?;
+        let rendezvous = self
+            .peer
+            .prepare_current(&mut stage)
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapReady, error))?;
+        let mut file = pending
+            .acquire(stage)
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFile, error))?;
         ensure!(
             file.projection()? == expected,
             "initial_storage_file_projection_changed"
@@ -244,15 +249,19 @@ impl InitialStorageContinuity {
         // The historical establishment is not a current configuration lease.
         // Rejoin/check and synchronize under THIS already-spent fresh stage,
         // before the new peer transcript can advertise a bootstrap phase.
-        file.check_initial_durability()?;
-        let peer = rendezvous.accept_current(file.controller_stage()?, Some(&binding))?;
+        file.check_initial_durability()
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapDurability, error))?;
+        let peer = (|| rendezvous.accept_current(file.controller_stage()?, Some(&binding)))()
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapPeer, error))?;
         let mut phase = CurrentStorageBootstrapPhase {
             file,
             peer,
             continuation: &mut self.ready,
             request: request.clone(),
         };
-        phase.check()?;
+        phase
+            .check()
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapPeerCheck, error))?;
         Ok(phase)
     }
 
