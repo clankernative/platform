@@ -148,6 +148,12 @@ jobs:
         run: test -d /Applications/Xcode_16.4.app/Contents/Developer
       - name: Require the fixed system Xcode license-state file to exist
         run: test -f /Library/Preferences/com.apple.dt.Xcode.plist
+      - name: Record actual trusted SDK loader dependencies for this public witness
+        run: /usr/bin/otool -L /Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/CoreDevice
+      - name: Record actual relocated Apple MobileDevice dependencies
+        run: /usr/bin/otool -L /Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/MobileDevice
+      - name: Record actual relocated Apple Mercury dependencies
+        run: /usr/bin/otool -L /Library/Apple/System/Library/PrivateFrameworks/Mercury.framework/Versions/A/Mercury
       - name: Establish public Rust compilation and linking outside confinement
         working-directory: ${{ runner.temp }}/public-rust-probe/platform
         run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/public-rust-probe/home' TMPDIR='${{ runner.temp }}/public-rust-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null '${{ runner.temp }}/public-rust-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/public-rust-probe/bazel-output' build --lockfile_mode=update --config=release --config=production --define=DAY2_PUBLIC_PROBE=outside //:hello
