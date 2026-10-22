@@ -63,8 +63,13 @@ impl RoleGuard<'_, '_, '_> {
     ) -> Result<Vec<u8>> {
         self.check()?;
         let result = http.request(route, authorization, body, acquisition);
-        self.check()?;
-        result
+        // Always retain the original postcheck and its terminal refusal. If
+        // BOTH failed, report the first request failure, including its bounded
+        // request-window DATA, rather than the later spent-stage consequence.
+        let checked = self.check();
+        let bytes = result?;
+        checked?;
+        Ok(bytes)
     }
 }
 
