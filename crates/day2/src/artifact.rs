@@ -866,7 +866,7 @@ impl LoadedArtifact {
                     crate::web_templates::validate_routed_bindings(
                         &directory,
                         &contract.templates,
-                        &page.template,
+                        page,
                         &context,
                         &contract.assets,
                         routes,

@@ -1807,12 +1807,13 @@ fn real_http_mpa_datastar_queries_forms_and_redacted_audit() -> Result<()> {
     let page = server.page(&client)?;
     assert!(page.contains("&lt;script&gt;"));
     let parsed = Html::parse_document(&page);
-    assert_eq!(parsed.select(&selector("script")).count(), 3);
+    assert_eq!(parsed.select(&selector("script")).count(), 4);
     assert!(parsed.select(&selector("script")).all(|script| {
         script.value().attr("type") == Some("module")
             && script.value().attr("src").is_some_and(|src| {
                 src == "/assets/platform/datastar-1.0.1.js"
                     || src == "/assets/platform/forms.js"
+                    || src == "/assets/platform/reactive-queries.js"
                     || (src.starts_with("/assets/ui/") && src.ends_with("/app.js"))
             })
             && script.text().collect::<String>().trim().is_empty()

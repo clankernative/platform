@@ -373,8 +373,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 )?;
                 run_with_budget(
                     root,
-                    Command::new("node")
-                        .args(["--test", "crates/day2/tests/chart_live_navigation.test.mjs"]),
+                    Command::new("node").args([
+                        "--test",
+                        "crates/day2/tests/chart_live_navigation.test.mjs",
+                        "crates/day2/tests/reactive_queries.test.mjs",
+                        "crates/day2/tests/reactive_query_forms.test.mjs",
+                    ]),
                     Duration::from_secs(60),
                 )?;
                 "browser-navigation".into()
@@ -715,6 +719,9 @@ fn fixture_build(
             "examples/reports",
             "fixtures/command-target-adversaries",
         ),
+        "reports-search" => {
+            FixtureBuild::overlay(root, "examples/reports", "fixtures/reactive-query-search")
+        }
         "http" => FixtureBuild::overlay(
             root,
             "fixtures/row-authority-web-conformance",
@@ -1348,6 +1355,12 @@ fn configure_tests(
         }
     }
     command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
+    if !fixtures.contains_key("reports-search") {
+        command.args([
+            "--skip",
+            "reports_http::checked_report_search_uses_native_get_and_preserves_owner_scoped_reads",
+        ]);
+    }
     if !fixtures.contains_key("chart-live") {
         for test in [
             "web::presentation_delivery_tests::http_delivery_rechecks_revocation_after_render",
@@ -1432,6 +1445,7 @@ fn configure_tests(
         ("reports", "DAY2_TEST_REPORTS_ARTIFACT"),
         ("reports", "DAY2_TEST_REPORTS_API_ARTIFACT"),
         ("reports-probe", "DAY2_TEST_REPORTS_PROBE_ARTIFACT"),
+        ("reports-search", "DAY2_TEST_REPORTS_SEARCH_ARTIFACT"),
         ("relational", "DAY2_TEST_RELATIONAL_ARTIFACT"),
         ("lifecycle", "DAY2_TEST_LIFECYCLE_ARTIFACT"),
         ("collection", "DAY2_TEST_COLLECTION_ARTIFACT"),
@@ -1657,6 +1671,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "test-parallel-runtime",
             "build-reports",
             "build-reports-probe",
+            "build-reports-search",
             "build-owned",
             "build-owned-probe",
             "build-repeated-field",
@@ -1756,6 +1771,9 @@ mod tests {
             "examples/chart-live/App.roc",
             "examples/chart-live/ui/app.js",
             "crates/day2/tests/navigation.test.mjs",
+            "crates/day2/tests/reactive_queries.test.mjs",
+            "crates/day2/tests/reactive_query_forms.test.mjs",
+            "assets/reactive-queries.js",
         ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap())?;
@@ -2154,6 +2172,7 @@ mod tests {
             "build-relational-next",
             "build-http",
             "build-reports-probe",
+            "build-reports-search",
             "build-owned-probe",
             "build-repeated-field",
             "build-chart-live",
