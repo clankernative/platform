@@ -82,6 +82,7 @@ run! = |args| match args {
 	["verify-shard", shard] => Verify.shard!(shard, call!)
 	["verify-compose"] => Verify.compose!(call!)
 	["verify-mac"] => Verify.mac!(call!)
+	["verify-private-build-probe"] => Verify.private_build_probe!(call!)
 	["verify-queue-find"] => Verify.queue_find!(call!)
 	["verify-queue-admit"] => Verify.queue_admit!(call!)
 	["qualify-linux"] => Linux.run!(call!)

@@ -36,6 +36,14 @@ bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration comma
 bazel run //crates/xtask:xtask -- build-rust-test //crates/day2:unit_lib
 ```
 
+For a focused Apple Silicon private-builder diagnosis after bootstrap, use
+`bazel run //crates/xtask:xtask -- verify-private-build-probe`. The Roc recipe
+prepares the normal CLI and executes the existing real isolated-build case in
+its current integration harness. It uses the ordinary pinned offline builder,
+sandbox and admission, and publishes no full verification receipt. Compiler
+failure messages expose only fixed observations and bounded numeric child
+statuses; free-form app/SDK diagnostics remain protected local evidence.
+
 The second command only compiles and prints the admitted executable path. It
 runs no cases. The first accepts declared test labels and bounded libtest
 filters/options. It does not prepare missing native fixtures or turn ignored
@@ -95,7 +103,10 @@ concurrently changing filesystem.
 ## CI cache and measurements
 
 The commit-pinned setup-bazel action persists Bazel action/repository caches in
-GitHub Actions storage. Each runner restores its OS/architecture partition into
+GitHub Actions storage. Compiled-output snapshots use source-derived keys with
+same-role and OS/architecture fallbacks, so a Rust-only edit can save new actions
+without discarding reusable prior actions. Only the native preparation builders
+and Mac job write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
 the local content-addressed disk cache. Trusted main/merge-group runs may save
 shared outputs. PRs can read trusted base caches and save only their own
 GitHub-isolated pull-request cache scope; they cannot seed the main branch. There is no new cache server, bucket

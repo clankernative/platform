@@ -97,3 +97,25 @@ jobs:
             MODULE.bazel.lock
             build/bazel/targets.json
           if-no-files-found: error
+
+  private-build-probe:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Retain exact focused private-builder source
+        run: git show -s --format=fuller HEAD
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
+          cache-save: true
+      - name: Install the current diagnostic verifier
+        run: bazel --batch run --config=ci-mac //crates/xtask:xtask -- install-verifier
+      - name: Bootstrap the unchanged current native compiler inputs
+        run: build-out/bin/xtask bootstrap
+      - name: Execute the existing real private-build case through the Roc probe recipe
+        run: build-out/bin/xtask verify-private-build-probe

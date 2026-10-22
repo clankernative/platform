@@ -244,7 +244,7 @@ impl TestCampaign {
                 12600
             }
             "control" => 3600,
-            "isolated-build" | "installation-build" => 1800,
+            "isolated-build" | "installation-build" | "isolated-build-probe" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
         };
         ensure!(
@@ -796,6 +796,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare-join"
         | "verify-compose"
         | "verify-mac"
+        | "verify-private-build-probe"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -1168,6 +1169,14 @@ fn test_selection(suite: &str) -> Result<TestSelection> {
                 Vec::new(),
                 Vec::new(),
             ),
+            "isolated-build-probe" => (
+                vec!["day2-control"],
+                false,
+                vec!["control_integration"],
+                vec![
+                    "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
+                ],
+            ),
             "isolated-build" => (
                 full,
                 false,
@@ -1306,7 +1315,13 @@ struct PrivateBuildInputs {
 }
 
 fn prepare_private_build_inputs(root: &Path, suite: &str) -> Result<Option<PrivateBuildInputs>> {
-    if !["isolated-build", "installation-build"].contains(&suite) {
+    if ![
+        "isolated-build",
+        "installation-build",
+        "isolated-build-probe",
+    ]
+    .contains(&suite)
+    {
         return Ok(None);
     }
     let bazel = crate::bazel::standalone(root)?;

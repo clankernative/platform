@@ -61,13 +61,16 @@ pub(crate) struct Failure {
     pub(crate) process: Outcome,
     capture: Option<&'static str>,
     retained: bool,
+    observations: BTreeSet<&'static str>,
+    children: BTreeSet<ChildStatus>,
+    child_statuses_truncated: bool,
 }
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}",
+            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}; observations={:?}; children={:?}; child_statuses_truncated={}",
             if self.process.category == "success" {
                 "capture"
             } else {
@@ -77,7 +80,10 @@ impl std::fmt::Display for Failure {
             self.process.signal,
             self.process.os_error,
             self.capture,
-            self.retained
+            self.retained,
+            self.observations,
+            self.children,
+            self.child_statuses_truncated
         )
     }
 }
@@ -171,6 +177,33 @@ fn child_statuses(bytes: &[u8]) -> BTreeSet<ChildStatus> {
         .collect()
 }
 
+/// Advisory fixed markers only. Never export a diagnostic line, source text,
+/// path, argument or environment value, and never attribute a kill or OOM.
+fn diagnostic_observations(bytes: &[u8]) -> BTreeSet<&'static str> {
+    let text = String::from_utf8_lossy(bytes);
+    [
+        ("No such file or directory", "missing_path"),
+        ("Permission denied", "os_access_refused"),
+        ("Operation not permitted", "os_access_refused"),
+        ("Read-only file system", "read_only_output"),
+        ("sandbox_init", "sandbox_initialization"),
+        ("sandbox_apply", "sandbox_initialization"),
+        ("download is disabled", "offline_download_refused"),
+        ("lockfile is no longer up-to-date", "module_lock_changed"),
+        ("no such package", "package_not_found"),
+        ("no such target", "target_not_found"),
+        ("error[E0432]", "rust_unresolved_import"),
+        ("error[E0433]", "rust_unresolved_module"),
+        ("error[E0463]", "rust_missing_crate"),
+        ("error[E0786]", "rust_invalid_metadata"),
+        ("error: linking with", "native_link_failed"),
+        ("library not found for", "link_library_not_found"),
+    ]
+    .into_iter()
+    .filter_map(|(marker, observation)| text.contains(marker).then_some(observation))
+    .collect()
+}
+
 fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut options = fs::OpenOptions::new();
@@ -239,7 +272,7 @@ fn report(
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
         let bytes = events.as_ref().map(Vec::as_slice).unwrap_or_default();
-        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"cause_attribution":false,"cgroup_memory_at_failure":memory(Path::new("/sys/fs/cgroup")),"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
+        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"diagnostic_observations":diagnostic_observations(log),"cause_attribution":false,"cgroup_memory_at_failure":memory(Path::new("/sys/fs/cgroup")),"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
         private_write(
             &directory.join("events.jsonl"),
             &bytes[..bytes.len().min(MAX_CAPTURE)],
@@ -254,10 +287,15 @@ fn report(
         )?;
         Ok(())
     })();
+    let children = child_statuses(log);
+    let child_statuses_truncated = children.len() > 8;
     Err(Failure {
         process,
         capture,
         retained: retain.is_ok(),
+        observations: diagnostic_observations(log),
+        children: children.into_iter().take(8).collect(),
+        child_statuses_truncated,
     }
     .into())
 }
@@ -297,6 +335,38 @@ pub(crate) fn run(root: &Path, command: &mut Command, budget: Duration) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_diagnostics_export_only_fixed_markers_and_bounded_numeric_children() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut log = b"PRIVATE-SDK Permission denied /PRIVATE/ENV=SECRET\n".to_vec();
+        for code in 1..=12 {
+            log.extend_from_slice(format!("RR_CHILD_V1 code_present=1 code={code} signal_present=0 signal=0 metadata_kill_requested=0\n").as_bytes());
+        }
+        let error = report(root.path(), failed(), Ok(success_events()), &log).unwrap_err();
+        let display = error.to_string();
+        assert!(display.contains("os_access_refused"));
+        assert!(display.contains("child_statuses_truncated=true"));
+        assert!(!display.contains("PRIVATE") && !display.contains("SECRET"));
+        let failure = error.downcast_ref::<Failure>().unwrap();
+        assert_eq!(failure.children.len(), 8);
+        assert_eq!(failure.process.code, Some(7));
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_private_diagnostics_do_not_create_a_cause_or_escape_the_allowlist() {
+        assert!(diagnostic_observations(b"PRIVATE-SDK PRIVATE-ENV PRIVATE-ARGS").is_empty());
+        assert_eq!(
+            diagnostic_observations(b"PRIVATE sandbox_apply: Operation not permitted"),
+            BTreeSet::from(["os_access_refused", "sandbox_initialization"])
+        );
+        assert_eq!(
+            diagnostic_observations(b"error[E0432]: unresolved import PRIVATE"),
+            BTreeSet::from(["rust_unresolved_import"])
+        );
+    }
+
     fn failed() -> Outcome {
         Outcome {
             category: "exit",

@@ -246,7 +246,10 @@ fn executable_permissions(path: &Path) -> Result<u32> {
 
 fn admit_executable(path: &Path, expected: &str, permissions: u32) -> Result<()> {
     ensure!(
-        fs::symlink_metadata(path)?.file_type().is_file(),
+        fs::symlink_metadata(path)
+            .with_context(|| format!("prepared executable missing: {}", path.display()))?
+            .file_type()
+            .is_file(),
         "compiler executable must be a regular file"
     );
     ensure!(
