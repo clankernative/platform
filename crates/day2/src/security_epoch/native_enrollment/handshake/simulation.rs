@@ -289,9 +289,10 @@ impl<M: Machine> World<M> {
                 Outcome::Accepted
             }
             Event::BeginCurrent { endpoint, sequence } => {
-                if !self.endpoints[endpoint].alive || self.endpoints[endpoint].refused {
-                    self.refuse(endpoint)
-                } else if self.endpoints[endpoint].machine.current(sequence).is_err() {
+                if !self.endpoints[endpoint].alive
+                    || self.endpoints[endpoint].refused
+                    || self.endpoints[endpoint].machine.current(sequence).is_err()
+                {
                     self.refuse(endpoint)
                 } else {
                     self.endpoints[endpoint].clock = Observation {
@@ -679,13 +680,13 @@ fn exchange(protocol: Protocol, sequence: u64, random: &mut u64) -> Vec<Event> {
             Event::Call { endpoint: receiver },
             Event::Begin { endpoint: sender },
         ]);
-        if next(random) % 2 == 0 {
+        if next(random).is_multiple_of(2) {
             events.push(Event::Transport {
                 endpoint: sender,
                 observation: Transport::Interrupted,
             });
         }
-        if next(random) % 2 == 0 {
+        if next(random).is_multiple_of(2) {
             events.extend([
                 Event::Transport {
                     endpoint: sender,
