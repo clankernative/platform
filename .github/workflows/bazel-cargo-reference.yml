@@ -28,7 +28,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Log exact source
+      - name: Trust the checked-out reference repository
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Log exact source identity
         run: git show -s --format=fuller HEAD
       - name: Log pinned compiler
         run: rustc --version --verbose
@@ -53,6 +55,9 @@ jobs:
             Cargo.lock
           if-no-files-found: error
   mac:
+    # Completed on the original product-identical reference commit. This repair
+    # reruns only the Linux lane that stopped before compilation.
+    if: ${{ false }}
     runs-on: macos-15
     timeout-minutes: 120
     env:
