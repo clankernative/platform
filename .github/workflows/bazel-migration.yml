@@ -33,9 +33,30 @@ jobs:
         run: cp .bazelrc '${{ runner.temp }}/private-bazel-probe/platform/.bazelrc'
       - name: Stage the empty public workspace descriptor
         run: cp .github/bazel-private-probe.MODULE '${{ runner.temp }}/private-bazel-probe/platform/MODULE.bazel'
-      - name: Exercise the unchanged private profile with no app or SDK inputs
+      - name: Create a public outside-root refusal witness
+        run: cp .github/bazel-private-probe.MODULE '${{ runner.temp }}/private-bazel-outside-marker'
+      - name: Establish the outside witness is actually readable
+        run: /bin/cat '${{ runner.temp }}/private-bazel-outside-marker'
+      - name: Exercise only the required power-notification client with no app or SDK inputs
         working-directory: ${{ runner.temp }}/private-bazel-probe/platform
         run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' version
+
+      - name: Require outside-root reads to remain refused
+        id: outside_read
+        continue-on-error: true
+        run: /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' /bin/cat '${{ runner.temp }}/private-bazel-outside-marker'
+      - name: Require outside-root writes to remain refused
+        id: outside_write
+        continue-on-error: true
+        run: /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' /usr/bin/touch '${{ runner.temp }}/private-bazel-outside-marker'
+      - name: Establish the public network witness is reachable outside confinement
+        run: /usr/bin/curl --silent --show-error --fail --max-time 10 https://github.com/robots.txt --output '${{ runner.temp }}/private-bazel-probe/network-witness'
+      - name: Require network access to remain refused
+        id: network
+        continue-on-error: true
+        run: /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' /usr/bin/curl --silent --show-error --fail --max-time 5 https://github.com/robots.txt --output '${{ runner.temp }}/private-bazel-probe/network-negative'
+      - name: Admit only actual startup and all three actual refusals
+        run: test '${{ steps.outside_read.outcome }}:${{ steps.outside_write.outcome }}:${{ steps.network.outcome }}' = failure:failure:failure
 
   configured-tool:
     if: ${{ inputs.probe == 'linux-tool' }}

@@ -9,5 +9,6 @@
         (allow process-fork)
         (allow process-exec (subpath (param "PRIVATE_JOB")) (subpath "/usr/bin") (subpath "/bin")
             (subpath "/Library/Developer") (subpath "/Applications/Xcode.app"))
+        (allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))
         (allow sysctl-read)
         (allow mach-lookup (global-name "com.apple.system.logger"))
