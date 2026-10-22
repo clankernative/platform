@@ -6,6 +6,7 @@ use super::{
     AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
+    authenticated_reads::{AuthenticatedReads, RetainedEpochReads},
     controller::{
         evidence::{PreparationFailure, PreparationStep},
         preparation_timing::{Operation, Timings},
@@ -18,7 +19,13 @@ use crate::security_epoch::{
     },
 };
 use anyhow::{Result, ensure};
-use day2_capabilities::{Digest, security_epoch::EpochStore};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{
+        EpochStore,
+        bootstrap::{InitialBootstrapPolicy, NativeRole},
+    },
+};
 
 /// Failure retains the actual file/volume owners, including an uncertain
 /// exchange or synchronization. There is no retry/adoption conversion.
@@ -222,9 +229,13 @@ impl InitialStorageContinuity {
     pub(in crate::security_epoch) fn begin_bootstrap<'storage, 'role>(
         &'storage mut self,
         mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
         selection: &EpochStore,
         request: &Request,
-    ) -> Result<CurrentStorageBootstrapPhase<'storage, 'role>> {
+    ) -> Result<(
+        CurrentStorageBootstrapPhase<'storage, 'role>,
+        RetainedEpochReads,
+    )> {
         ensure!(self.ready, "initial_storage_continuation_refused");
         self.ready = false;
         let expected = self.peer.initial_projection().clone();
@@ -239,6 +250,16 @@ impl InitialStorageContinuity {
             .peer
             .prepare_current(&mut stage)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapReady, error))?;
+        // Read-only authentication overlaps the App's fresh role acquisition
+        // after the real Ready message. It retains THIS already-spent original
+        // stage; neither these reads nor their material can dispatch a write.
+        // The fixed writer is installed only after the file and peer join below.
+        let reads =
+            AuthenticatedReads::acquire(policy, selection, NativeRole::EpochController, &mut stage)
+                .and_then(AuthenticatedReads::retain_current)
+                .map_err(|error| {
+                    PreparationFailure::at(PreparationStep::BootstrapTransport, error)
+                })?;
         let mut file = pending
             .acquire(stage)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFile, error))?;
@@ -262,7 +283,7 @@ impl InitialStorageContinuity {
         phase
             .check()
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapPeerCheck, error))?;
-        Ok(phase)
+        Ok((phase, reads))
     }
 
     pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {

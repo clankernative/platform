@@ -2,7 +2,7 @@
 //! authenticated peer phase throughout each request; read credentials or parsed
 //! policy DATA alone cannot install this port.
 
-use super::AuthenticatedReads;
+use super::RetainedEpochReads;
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
     credential_material::CredentialMaterial,
@@ -14,10 +14,7 @@ use crate::security_epoch::{
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     Digest,
-    security_epoch::{
-        EpochStore,
-        bootstrap::{InitialBootstrapPolicy, NativeRole},
-    },
+    security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy},
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -46,19 +43,15 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         owner: Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        mut reads: RetainedEpochReads,
     ) -> Result<Self> {
         let result = (|| {
             let mut phase = owner.try_borrow_mut()?;
-            let mut reads = AuthenticatedReads::acquire(
-                policy,
-                store,
-                NativeRole::EpochController,
-                phase.controller_stage()?,
-            )?;
-            reads.sample()?;
-            // These are the credentials, transport, process and original narrow
-            // clock JUST acquired under the same actual Controller stage.
-            let AuthenticatedReads {
+            reads.check_bootstrap(phase.controller_stage()?, policy, store)?;
+            // Move the actual read-only material acquired before the peer
+            // join. The SAME original role/clock/material is checked above;
+            // only THIS genuine file/peer owner installs the fixed writer.
+            let RetainedEpochReads {
                 http,
                 credential,
                 acquisition,

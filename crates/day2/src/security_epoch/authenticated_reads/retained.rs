@@ -27,11 +27,13 @@ pub(crate) struct RetainedEpochReads {
     policy: InitialBootstrapPolicy,
     purpose: NativeRole,
     store: EpochStore,
-    http: NativeHttp,
-    credential: CredentialMaterial,
-    acquisition: NativeAcquisition,
-    process: NativeProcessObservation,
-    selection: Digest,
+    // Movable only inside the private authenticated-reads implementation. No
+    // transport/credential accessor or ownerless writer factory is exposed.
+    pub(super) http: NativeHttp,
+    pub(super) credential: CredentialMaterial,
+    pub(super) acquisition: NativeAcquisition,
+    pub(super) process: NativeProcessObservation,
+    pub(super) selection: Digest,
     valid: bool,
 }
 
@@ -67,6 +69,34 @@ impl AuthenticatedReads<'_, '_> {
 }
 
 impl RetainedEpochReads {
+    /// The fixed writer must consume the SAME original read material after
+    /// the actual current file/peer join, never a later stage of the same owner.
+    pub(super) fn check_bootstrap(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<()> {
+        let result = (|| {
+            stage.check_selection(policy, store, NativeRole::EpochController)?;
+            ensure!(
+                self.purpose == NativeRole::EpochController
+                    && self.policy == *policy
+                    && self.store == *store
+                    && self.selection == Digest::of(store)?,
+                "epoch_bootstrap_read_selection_changed"
+            );
+            self.check(stage)?;
+            let same = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+            self.acquisition.join_current_view(same)?;
+            self.check(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,

@@ -132,6 +132,37 @@ impl NativeAcquisition {
         Ok((self.origin, self.deadline))
     }
 
+    /// Join an actual current-role view into retained read material before
+    /// the fixed bootstrap writer consumes it. Both are the SAME original
+    /// interval; the retained ceiling may only be shorter. Consume the actual
+    /// current child and retain its latest sample, never a caller timestamp or
+    /// max that could hide a rewind. This cannot extend a five-second stage.
+    pub(super) fn join_current_view(&mut self, mut current: Self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.valid
+                    && current.valid
+                    && self.domain == current.domain
+                    && self.process == current.process
+                    && self.origin == current.origin
+                    && self.deadline <= current.deadline
+                    && self.deadline > self.origin
+                    && current.deadline > current.origin
+                    && current.deadline - current.origin <= MAX_ACQUISITION,
+                "epoch_native_current_read_clock_changed"
+            );
+            let sample = current.sample()?;
+            self.observe(sample.elapsed)?;
+            self.sample()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            current.refuse();
+            self.refuse();
+        }
+        result
+    }
+
     /// Consume this actual successful authentication child, retaining its last
     /// observation before the parent can continue. No scalar DATA can advance
     /// this clock, replace its origin, widen a deadline or revive a refusal.
@@ -275,6 +306,130 @@ mod tests {
         );
         assert!(acquisition.observe(Duration::from_secs(105)).is_err());
         assert!(acquisition.observe(Duration::from_secs(101)).is_err());
+    }
+
+    #[test]
+    fn bootstrap_read_handoff_preserves_spent_time_and_shorter_original_ceiling() {
+        for retained_seconds in [4, 5] {
+            let origin = Duration::from_secs(100);
+            let mut retained = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(retained_seconds),
+            );
+            let mut current = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let now = origin + Duration::from_millis(retained_seconds * 1000 - 100);
+            retained.fixture_time = Some(now);
+            current.fixture_time = Some(now);
+            let expected = (retained.domain.clone(), retained.origin, retained.deadline);
+            retained.join_current_view(current).unwrap();
+            assert_eq!(
+                (retained.domain.clone(), retained.origin, retained.deadline),
+                expected
+            );
+            assert_eq!(retained.remaining().unwrap(), Duration::from_millis(100));
+            retained.fixture_time = Some(retained.deadline);
+            assert!(retained.remaining().is_err());
+            retained.fixture_time = Some(now);
+            assert!(retained.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn bootstrap_read_handoff_refuses_replacement_wider_or_initial_interval() {
+        for changed in 0..8 {
+            let origin = Duration::from_secs(100);
+            let mut retained = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let mut current = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            match changed {
+                0 => current.domain = Digest::new(b"later-stage-same-owner"),
+                1 => current.origin += Duration::from_millis(1),
+                2 => current.process = current.process.wrapping_add(1),
+                3 => current.deadline -= Duration::from_millis(1),
+                4 => retained.refuse(),
+                5 => current.refuse(),
+                6 => current.deadline = origin + INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+                7 => retained.deadline = origin,
+                _ => unreachable!(),
+            }
+            assert!(
+                retained.join_current_view(current).is_err(),
+                "case {changed}"
+            );
+            retained.fixture_time = Some(origin);
+            assert!(retained.remaining().is_err(), "case {changed}");
+        }
+    }
+
+    #[test]
+    fn bootstrap_read_handoff_cannot_mask_current_to_retained_rewind() {
+        let origin = Duration::from_secs(100);
+        let mut retained = NativeAcquisition::fixture(
+            Digest::new(b"same-current"),
+            std::process::id(),
+            origin,
+            Duration::from_secs(5),
+        );
+        let mut current = NativeAcquisition::fixture(
+            Digest::new(b"same-current"),
+            std::process::id(),
+            origin,
+            Duration::from_secs(5),
+        );
+        retained.fixture_time = Some(Duration::from_millis(104_000));
+        current.fixture_time = Some(Duration::from_millis(104_500));
+        assert!(retained.join_current_view(current).is_err());
+        assert_eq!(retained.latest, Duration::from_millis(104_500));
+        retained.fixture_time = Some(Duration::from_millis(104_750));
+        assert!(retained.remaining().is_err());
+    }
+
+    #[test]
+    fn bootstrap_read_handoff_refuses_equality_in_either_actual_interval() {
+        for expire_retained in [false, true] {
+            let origin = Duration::from_secs(100);
+            let mut retained = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            let mut current = NativeAcquisition::fixture(
+                Digest::new(b"same-current"),
+                std::process::id(),
+                origin,
+                Duration::from_secs(5),
+            );
+            retained.fixture_time = Some(if expire_retained {
+                retained.deadline
+            } else {
+                origin
+            });
+            current.fixture_time = Some(if expire_retained {
+                origin
+            } else {
+                current.deadline
+            });
+            assert!(retained.join_current_view(current).is_err());
+            retained.fixture_time = Some(origin);
+            assert!(retained.remaining().is_err());
+        }
     }
 
     #[test]

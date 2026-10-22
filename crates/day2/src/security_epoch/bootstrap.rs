@@ -80,12 +80,12 @@ pub(super) fn run_phase(
         )
     })()
     .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapCore, error))?;
-    let phase = storage
-        .begin_bootstrap(stage, selection, request)
+    let (phase, reads) = storage
+        .begin_bootstrap(stage, policy, selection, request)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFilePeer, error))?;
     let owner = Rc::new(RefCell::new(phase));
     let result = (|| {
-        let mut transport = ControllerPort::acquire(Rc::clone(&owner), policy, selection)
+        let mut transport = ControllerPort::acquire(Rc::clone(&owner), policy, selection, reads)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
         let names = Names::new(
