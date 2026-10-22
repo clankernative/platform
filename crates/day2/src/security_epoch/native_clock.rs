@@ -674,7 +674,9 @@ mod tests {
                 "origin" => child.origin += Duration::from_millis(1),
                 "process" => child.process = child.process.wrapping_add(1),
                 "longer_child" => child.deadline = Duration::from_secs(106),
-                "parent_ahead" => original.observe(Duration::from_millis(104_500)).unwrap(),
+                "parent_ahead" => {
+                    original.observe(Duration::from_millis(104_500)).unwrap();
+                }
                 _ => unreachable!(),
             }
             assert!(
