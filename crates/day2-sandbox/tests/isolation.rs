@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -37,6 +37,154 @@ fn bounded_wait(child: &mut Child) -> std::io::Result<std::process::ExitStatus> 
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+const BUSY_OBSERVATION: &[u8] = b"day2 sandbox waiting for executable writers\n";
+
+/// Own/reap the actual probe and join its bounded stderr reader on every path.
+struct BusyProbe {
+    child: Child,
+    first_line: std::sync::mpsc::Receiver<Vec<u8>>,
+    stderr: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+}
+
+impl BusyProbe {
+    fn start(path: &Path) -> anyhow::Result<Self> {
+        let mut child = launcher(path).spawn()?;
+        let stderr = child.stderr.take().unwrap();
+        let (first, first_line) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::Builder::new()
+            .name("sandbox-handoff-observation".into())
+            .spawn(move || {
+                let mut source = BufReader::new(stderr).take(4096);
+                let mut bytes = Vec::new();
+                source.read_until(b'\n', &mut bytes)?;
+                let _ = first.send(bytes.clone());
+                source.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            });
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            child,
+            first_line,
+            stderr: Some(reader),
+        })
+    }
+
+    fn await_busy(&mut self) -> anyhow::Result<()> {
+        let line = self.first_line.recv_timeout(Duration::from_secs(8))?;
+        anyhow::ensure!(line == BUSY_OBSERVATION, "not a text-busy handoff");
+        anyhow::ensure!(self.child.try_wait()?.is_none(), "handoff already exited");
+        Ok(())
+    }
+
+    fn finish(&mut self) -> anyhow::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+        let status = bounded_wait(&mut self.child)?;
+        let mut stdout = Vec::new();
+        self.child
+            .stdout
+            .take()
+            .unwrap()
+            .take(256)
+            .read_to_end(&mut stdout)?;
+        let stderr = self.stderr.take().unwrap().join().expect("stderr reader")?;
+        Ok((status, stdout, stderr))
+    }
+}
+
+impl Drop for BusyProbe {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.stderr.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn held_executable() -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut writer = tempfile::NamedTempFile::new()?;
+    writer.write_all(&std::fs::read(env!("CARGO_BIN_EXE_day2-sandbox-probe"))?)?;
+    writer
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o500))?;
+    Ok(writer)
+}
+
+#[test]
+fn a_released_executable_writer_hands_off_once_in_the_same_confined_process() -> anyhow::Result<()>
+{
+    let writer = held_executable()?;
+    let mut probe = BusyProbe::start(writer.path())?;
+    let pid = probe.child.id();
+    let mut input = probe.child.stdin.take().unwrap();
+    writeln!(input, "qualify\npid\nexit")?;
+    drop(input);
+    probe.await_busy()?;
+    // Release the actual write description only after the child observes the
+    // kernel refusal. Keeping the TempPath also keeps the exact image alive.
+    let executable = writer.into_temp_path();
+    let (status, stdout, stderr) = probe.finish()?;
+    anyhow::ensure!(status.success(), "released handoff did not execute");
+    anyhow::ensure!(
+        stdout
+            == [
+                day2_sandbox::QUALIFIED,
+                b"\n",
+                pid.to_string().as_bytes(),
+                b"\n"
+            ]
+            .concat(),
+        "handoff did not execute once in the original confined process"
+    );
+    anyhow::ensure!(stderr == BUSY_OBSERVATION, "unexpected handoff observation");
+    drop(executable);
+    Ok(())
+}
+
+#[test]
+fn a_retained_executable_writer_expires_without_executing_the_probe() -> anyhow::Result<()> {
+    let writer = held_executable()?;
+    let mut probe = BusyProbe::start(writer.path())?;
+    let mut input = probe.child.stdin.take().unwrap();
+    writeln!(input, "pid\nexit")?;
+    drop(input);
+    probe.await_busy()?;
+    let (status, stdout, stderr) = probe.finish()?;
+    anyhow::ensure!(status.code() == Some(77) && stdout.is_empty());
+    let stderr = String::from_utf8(stderr)?;
+    anyhow::ensure!(
+        stderr
+            .matches(std::str::from_utf8(BUSY_OBSERVATION)?)
+            .count()
+            == 1
+    );
+    anyhow::ensure!(stderr.contains("worker exec handoff deadline expired"));
+    drop(writer);
+    Ok(())
+}
+
+#[test]
+fn another_exec_error_never_enters_the_writer_wait() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut writer = tempfile::NamedTempFile::new()?;
+    writer.write_all(b"not an executable image")?;
+    writer
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o500))?;
+    let executable = writer.into_temp_path();
+    let output = launcher(&executable).output()?;
+    anyhow::ensure!(output.status.code() == Some(77) && output.stdout.is_empty());
+    anyhow::ensure!(!String::from_utf8(output.stderr)?.contains("waiting for executable writers"));
+    Ok(())
 }
 
 #[test]

@@ -127,6 +127,7 @@
     "crates/day2-ops/tests/reports.rs",
     "crates/day2-sandbox/src/bin/day2-compiler-sandbox.rs",
     "crates/day2-sandbox/src/bin/day2-sandbox-probe.rs",
+    "crates/day2-sandbox/src/handoff.rs",
     "crates/day2-sandbox/src/lib.rs",
     "crates/day2-sandbox/src/linux.rs",
     "crates/day2-sandbox/src/main.rs",
