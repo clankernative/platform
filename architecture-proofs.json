@@ -739,13 +739,6 @@
             "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
             "module": "retained"
           }
-        },
-        {
-          "source": "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
-          "registration": {
-            "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
-            "module": "writer"
-          }
         }
       ],
       "methods": [
@@ -2819,7 +2812,7 @@
       ]
     },
     {
-      "source": "crates/day2/src/security_epoch/authenticated_reads/writer.rs",
+      "source": "crates/day2/src/security_epoch/authenticated_reads/retained/writer.rs",
       "type_name": "ControllerPort",
       "owning_children": [],
       "methods": [
@@ -3036,7 +3029,15 @@
     {
       "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
       "type_name": "RetainedEpochReads",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+            "module": "writer"
+          }
+        }
+      ],
       "methods": [
         "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",

@@ -6,7 +6,7 @@ use super::RetainedEpochReads;
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
     credential_material::CredentialMaterial,
-    firestore::{EpochReply, Port, Sample},
+    firestore::{Budget, EpochReply, Port, Sample},
     native_clock::NativeAcquisition,
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
@@ -104,7 +104,7 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         result
     }
 
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<super::super::firestore::Budget> {
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
         self.sample()?;
         self.acquisition.budget()
     }
@@ -184,7 +184,7 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
         self.owner.context_interval(owner, selection)
     }
 
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<super::super::firestore::Budget> {
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
         self.owner.budget()
     }
 }

@@ -24,10 +24,8 @@ use std::{collections::BTreeMap, io::Read, time::Duration};
 use zeroize::Zeroizing;
 
 mod retained;
-pub(crate) use retained::RetainedEpochReads;
-mod writer;
-pub(in crate::security_epoch) use writer::ControllerBorrow;
-pub(crate) use writer::ControllerPort;
+pub(in crate::security_epoch) use retained::ControllerBorrow;
+pub(crate) use retained::{ControllerPort, RetainedEpochReads};
 
 pub(crate) struct AuthenticatedReads<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,

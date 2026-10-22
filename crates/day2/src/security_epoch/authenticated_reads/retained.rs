@@ -22,18 +22,22 @@ use day2_capabilities::{
 };
 use std::time::Duration;
 
+// The fixed writer is a lexical child so it can consume this material while
+// every field stays private. No credential/HTTP getter or raw-parts factory.
+mod writer;
+pub(in crate::security_epoch) use writer::ControllerBorrow;
+pub(crate) use writer::ControllerPort;
+
 pub(crate) struct RetainedEpochReads {
     owner: SameEnrolledOwner,
     policy: InitialBootstrapPolicy,
     purpose: NativeRole,
     store: EpochStore,
-    // Movable only inside the private authenticated-reads implementation. No
-    // transport/credential accessor or ownerless writer factory is exposed.
-    pub(super) http: NativeHttp,
-    pub(super) credential: CredentialMaterial,
-    pub(super) acquisition: NativeAcquisition,
-    pub(super) process: NativeProcessObservation,
-    pub(super) selection: Digest,
+    http: NativeHttp,
+    credential: CredentialMaterial,
+    acquisition: NativeAcquisition,
+    process: NativeProcessObservation,
+    selection: Digest,
     valid: bool,
 }
 
@@ -71,7 +75,7 @@ impl AuthenticatedReads<'_, '_> {
 impl RetainedEpochReads {
     /// The fixed writer must consume the SAME original read material after
     /// the actual current file/peer join, never a later stage of the same owner.
-    pub(super) fn check_bootstrap(
+    fn check_bootstrap(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         policy: &InitialBootstrapPolicy,
