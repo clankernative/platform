@@ -1,10 +1,16 @@
 name: Bazel migration qualification
 on:
   workflow_dispatch:
+    inputs:
+      probe:
+        type: choice
+        options: [mac-bootstrap, linux-tool]
+        default: mac-bootstrap
 permissions:
   contents: read
 jobs:
   private-bootstrap:
+    if: ${{ inputs.probe != 'linux-tool' }}
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -30,3 +36,41 @@ jobs:
       - name: Exercise the unchanged private profile with no app or SDK inputs
         working-directory: ${{ runner.temp }}/private-bazel-probe/platform
         run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/private-bazel-probe/home' TMPDIR='${{ runner.temp }}/private-bazel-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/private-bazel-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/private-bazel-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/private-bazel-probe/bazel-output' version
+
+  configured-tool:
+    if: ${{ inputs.probe == 'linux-tool' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private
+      volumes:
+        - /usr/bin/gh:/usr/local/bin/gh:ro
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: git show -s --format=fuller HEAD
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download the pinned Linux Bazel launcher
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-probe-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the exact launcher
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-probe-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned launcher
+        run: install -m 0555 /tmp/day2-bazel-probe-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Populate only the toolchain action cache in an owned donor context
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-probe-donor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-repositories" @rules_rust//rust/toolchain:current_rustc_files
+      - name: Remove only the disposable donor output base
+        run: rm -rf "$GITHUB_WORKSPACE/.cache/bazel-probe-donor"
+      - name: Restore the configured tool into an empty consumer output base
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" build --config=ci-linux --disk_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-actions" --repository_cache="$GITHUB_WORKSPACE/.cache/bazel-probe-repositories" @rules_rust//rust/toolchain:current_rustc_files
+      - name: Retain actual configured tool output paths
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" cquery --config=ci-linux --output=files @rules_rust//rust/toolchain:current_rustc_files
+      - name: Retain the actual consumer execution root
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" info --config=ci-linux execution_root
+      - name: Inspect only the configured tool symlink
+        run: ls -l bazel-bin/external/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/rustc
+      - name: Execute that selected official tool after cache relocation
+        run: bazel-bin/external/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/rustc --version
