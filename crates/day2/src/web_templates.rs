@@ -854,18 +854,18 @@ impl Analysis<'_> {
                     .filter(|path| self.root_fields.contains(&path.0[0]));
                 let mut projected = Vec::new();
                 for mut variant in variants {
-                    if let Some(path) = &path {
-                        if !constrain(&mut variant.cases, path.clone(), true) {
-                            continue;
-                        }
+                    if let Some(path) = &path
+                        && !constrain(&mut variant.cases, path.clone(), true)
+                    {
+                        continue;
                     }
                     projected.push(variant);
                 }
                 for mut variant in else_variants {
-                    if let Some(path) = &path {
-                        if !constrain(&mut variant.cases, path.clone(), false) {
-                            continue;
-                        }
+                    if let Some(path) = &path
+                        && !constrain(&mut variant.cases, path.clone(), false)
+                    {
+                        continue;
                     }
                     projected.push(variant);
                 }

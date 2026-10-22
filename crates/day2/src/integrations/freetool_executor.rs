@@ -333,12 +333,14 @@ mod tests {
     }
 
     fn decode_hex(value: &str) -> Option<Vec<u8>> {
-        if value.len() % 2 != 0 {
+        if !value.len().is_multiple_of(2) {
             return None;
         }
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digit = |byte: u8| match byte {
                     b'0'..=b'9' => Some(byte - b'0'),

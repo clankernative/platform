@@ -5051,8 +5051,7 @@ pub(crate) fn effect(
         request,
         instruction,
         context,
-        request.observations.len(),
-        0,
+        (request.observations.len(), 0),
     )
 }
 
@@ -5063,9 +5062,9 @@ fn effect_at(
     request: &Request,
     instruction: &Instruction,
     context: EffectContext<'_>,
-    sequence: usize,
-    row_index: usize,
+    location: (usize, usize),
 ) -> Result<String> {
+    let (sequence, row_index) = location;
     let EffectContext {
         scope: context_scope,
         policy,
@@ -5266,8 +5265,7 @@ fn effect_at(
                             operation,
                             entropy,
                         },
-                        sequence,
-                        index,
+                        (sequence, index),
                     )?;
                     created.push(serde_json::from_str::<Value>(&response)?);
                 }

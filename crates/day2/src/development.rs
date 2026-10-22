@@ -1014,7 +1014,7 @@ fn local_model_grant(
         } else if command {
             declared
                 .iter()
-                .filter(|effect| effect.kind == "update")
+                .filter(|effect| matches!(effect.kind.as_str(), "update" | "update_created"))
                 .flat_map(|effect| effect.fields.iter().cloned())
                 .collect()
         } else {
@@ -2344,6 +2344,16 @@ mod people_resource_tests {
         assert_eq!(target.update_fields, BTreeSet::from(["name".into()]));
         let history = local_model_grant(true, "history", &record, &effects);
         assert!(history.create && history.update_fields.is_empty());
+        let update_created = local_model_grant(
+            true,
+            "items",
+            &record,
+            &[effect("update_created", "items", &["owner"])],
+        );
+        assert_eq!(
+            update_created.update_fields,
+            BTreeSet::from(["owner".into()])
+        );
         for (command, name) in [(false, "items"), (true, "unrelated")] {
             let grant = local_model_grant(command, name, &record, &effects);
             assert!(grant.read && !grant.create && grant.update_fields.is_empty());
