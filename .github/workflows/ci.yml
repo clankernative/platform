@@ -80,7 +80,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -147,7 +158,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -309,7 +331,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -421,7 +454,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -502,7 +546,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -571,7 +626,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true
@@ -675,7 +741,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Restore the pinned Bazel tool and remote compilation cache
+      - name: Download the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        if: ${{ runner.os == 'Linux' }}
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        if: ${{ runner.os == 'Linux' }}
+        run: install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - name: Restore Bazel compilation and repository caches
         uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-cache: true

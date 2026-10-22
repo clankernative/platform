@@ -760,6 +760,8 @@ mod tests {
             "outputs.cquery",
             "cargo_context.bzl",
             "cargo_contexts.bzl",
+            "cargo_production_contexts.bzl",
+            "cargo-context-inputs.json",
             "BUILD.bazel",
             "rust.bzl",
             "toolchain.json",
