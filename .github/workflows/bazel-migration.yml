@@ -142,6 +142,10 @@ jobs:
       - run: cp .github/bazel-private-rust-inside.rs '${{ runner.temp }}/public-rust-probe/platform/inside.rs'
       - name: Stage only the four actual pinned compiler rule patches
         run: cp build/bazel/patches/rules-rust-0.74.0-child-status.patch build/bazel/patches/rules-rust-0.74.0-platform-profiles.patch build/bazel/patches/rules-rust-0.74.0-build-script-inputs.patch build/bazel/patches/rules-rust-0.74.0-clippy-enforcement.patch '${{ runner.temp }}/public-rust-probe/platform/'
+      - name: Record the fixed trusted OS developer selection for this public witness
+        run: /usr/bin/xcode-select --print-path
+      - name: Require the already observed selected Xcode installation
+        run: test -d /Applications/Xcode_16.4.app/Contents/Developer
       - name: Establish public Rust compilation and linking outside confinement
         working-directory: ${{ runner.temp }}/public-rust-probe/platform
         run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/public-rust-probe/home' TMPDIR='${{ runner.temp }}/public-rust-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null '${{ runner.temp }}/public-rust-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/public-rust-probe/bazel-output' build --lockfile_mode=update --config=release --config=production --define=DAY2_PUBLIC_PROBE=outside //:hello
