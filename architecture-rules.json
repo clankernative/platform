@@ -311,6 +311,7 @@
     "crates/day2/src/security_admission.rs",
     "crates/day2/src/security_epoch/authenticated_reads.rs",
     "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+    "crates/day2/src/security_epoch/authenticated_reads/retained/provider.rs",
     "crates/day2/src/security_epoch/authenticated_reads/retained/writer.rs",
     "crates/day2/src/security_epoch/bootstrap.rs",
     "crates/day2/src/security_epoch/bootstrap/app_serving.rs",
