@@ -80,8 +80,13 @@ impl BusyProbe {
 
     fn await_busy(&mut self) -> anyhow::Result<()> {
         let line = self.first_line.recv_timeout(Duration::from_secs(8))?;
-        anyhow::ensure!(line == BUSY_OBSERVATION, "not a text-busy handoff");
-        anyhow::ensure!(self.child.try_wait()?.is_none(), "handoff already exited");
+        let status = self.child.try_wait()?;
+        anyhow::ensure!(
+            line == BUSY_OBSERVATION,
+            "not a text-busy handoff: first bounded stderr {:?}; observed child status {status:?}",
+            String::from_utf8_lossy(&line)
+        );
+        anyhow::ensure!(status.is_none(), "handoff already exited");
         Ok(())
     }
 
