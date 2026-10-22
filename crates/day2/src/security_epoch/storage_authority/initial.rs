@@ -6,7 +6,9 @@ use super::{
     AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
+    authenticated_reads::{AuthenticatedReads, ControllerEpochReads},
     controller::{
+        bootstrap_timing::BootstrapTiming,
         evidence::{PreparationFailure, PreparationStep},
         preparation_timing::{Operation, Timings},
     },
@@ -18,7 +20,13 @@ use crate::security_epoch::{
     },
 };
 use anyhow::{Result, ensure};
-use day2_capabilities::{Digest, security_epoch::EpochStore};
+use day2_capabilities::{
+    Digest,
+    security_epoch::{
+        EpochStore,
+        bootstrap::{InitialBootstrapPolicy, NativeRole},
+    },
+};
 
 /// Failure retains the actual file/volume owners, including an uncertain
 /// exchange or synchronization. There is no retry/adoption conversion.
@@ -222,9 +230,14 @@ impl InitialStorageContinuity {
     pub(in crate::security_epoch) fn begin_bootstrap<'storage, 'role>(
         &'storage mut self,
         mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
         selection: &EpochStore,
         request: &Request,
-    ) -> Result<CurrentStorageBootstrapPhase<'storage, 'role>> {
+        trace: &BootstrapTiming,
+    ) -> Result<(
+        CurrentStorageBootstrapPhase<'storage, 'role>,
+        ControllerEpochReads,
+    )> {
         ensure!(self.ready, "initial_storage_continuation_refused");
         self.ready = false;
         let expected = self.peer.initial_projection().clone();
@@ -235,25 +248,60 @@ impl InitialStorageContinuity {
             request,
         )?;
         let pending = self.file.begin_pending_initial_phase()?;
-        let rendezvous = self.peer.prepare_current(&mut stage)?;
-        let mut file = pending.acquire(stage)?;
+        let rendezvous = trace
+            .measure(Operation::BootstrapReady, || {
+                self.peer.prepare_current(&mut stage)
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapReady, error))?;
+        // Read-only authentication overlaps the App's fresh role acquisition
+        // after the real Ready message. It retains THIS already-spent original
+        // stage; neither these reads nor their material can dispatch a write.
+        // The fixed writer is installed only after the file and peer join below.
+        let (reads, provider) = trace.measure(Operation::BootstrapAuthentication, || {
+            let retained = AuthenticatedReads::acquire(
+                policy,
+                selection,
+                NativeRole::EpochController,
+                &mut stage,
+            )
+            .and_then(AuthenticatedReads::retain_current)
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
+            retained
+                .into_controller(&mut stage, policy, selection, trace.timings())
+                .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))
+        })?;
+        let mut file = trace
+            .measure(Operation::BootstrapFile, || {
+                pending.acquire_authenticated(stage, provider, trace)
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFile, error))?;
         ensure!(
-            file.projection()? == expected,
+            trace.measure(Operation::BootstrapProjection, || file.projection())? == expected,
             "initial_storage_file_projection_changed"
         );
         // The historical establishment is not a current configuration lease.
         // Rejoin/check and synchronize under THIS already-spent fresh stage,
         // before the new peer transcript can advertise a bootstrap phase.
-        file.check_initial_durability()?;
-        let peer = rendezvous.accept_current(file.controller_stage()?, Some(&binding))?;
+        trace
+            .measure(Operation::BootstrapDurability, || {
+                file.check_initial_durability()
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapDurability, error))?;
+        let peer = trace
+            .measure(Operation::BootstrapPeer, || {
+                rendezvous.accept_current(file.controller_stage()?, Some(&binding))
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapPeer, error))?;
         let mut phase = CurrentStorageBootstrapPhase {
             file,
             peer,
             continuation: &mut self.ready,
             request: request.clone(),
         };
-        phase.check()?;
-        Ok(phase)
+        trace
+            .measure(Operation::BootstrapPeerCheck, || phase.check())
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapPeerCheck, error))?;
+        Ok((phase, reads))
     }
 
     pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {
@@ -361,6 +409,14 @@ fn request_binding(
 }
 
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
+    pub(in crate::security_epoch) fn check_authenticated_reads(
+        &mut self,
+        reads: &ControllerEpochReads,
+    ) -> Result<()> {
+        self.check()?;
+        self.file.check_authenticated_reads(reads)
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             ensure!(

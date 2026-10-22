@@ -116,6 +116,14 @@ identify `original_retention_before`, `original_retention_owner` or
 The progress is emitted only with the existing refusal after unwinding; there is
 no extra in-phase log I/O or successful-preparation receipt.
 
+When an HTTP send fails, optional `request` is
+`[last_sampled_elapsed_us, selected_timeout_us, is_timeout]`. The elapsed sample
+and timeout were already selected before that send; exporting them reads no
+clock or private error text. The first element can be `null`. These historical
+values do not prove transmission, remote effects or exact expiry. The native
+postcheck still runs, and its refusal remains terminal even when the original
+request failure takes precedence in the diagnostic.
+
 Categories are a fixed allowlist: clock expired or rewound, acquisition refused,
 transport unavailable, response status or bound, admission rejected, known OS
 error categories, or `other`. The combined response category does not reveal or
@@ -139,9 +147,14 @@ refusal.
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
-ordinary artifact/instance admission, role-stage exchange and selected provider,
-device and mount acquisition, followed by exactly sixteen current-volume checks
-under that same original interval. It returns unconditionally before seed,
+ordinary artifact/instance admission, role-stage exchange, complete Controller
+authentication and three fresh rounds of selected provider-metadata checks under
+one original five-second current-role interval. All rounds share the same
+genuine authenticated reader; none starts another stage or renews its acquisition.
+Each round validates the current claim, volume, node, disk and instance responses.
+Attachment checks remain strict: a detached or changed disk refuses. It opens
+neither `/state` nor a block-device descriptor,
+and performs no mount acquisition or current-volume checks. It returns before seed,
 private-directory, initial-file, first-holder, bootstrap or serving construction.
 It never opens the existing native SQLite file or writes provider/control state.
 Run it only with the actual source/image/profile bindings and preserve any first
@@ -153,14 +166,24 @@ readiness failing and stop/scale it to zero before that hold ends. There is no
 once-across-restarts or hard OS scheduling guarantee; forced replacement or
 letting the hold expire can cause Kubernetes to start another process.
 
-Its `preparation_read_only_observed` record contains `completed` and `timing`.
-Completion means the fixed read-only calls returned, not readiness or a current
-permission. A failed read-only run instead emits the ordinary single refusal
-with its original boundary and timing. An export failure remains terminal and
-does not replace an earlier native error. The ordinary executor instead caches
-the same preparation summary into its existing first-holder or first refusal
-record (including a later listener/holder refusal). The twelve-record and 2048-byte bounds remain unchanged; logging
-does not run inside the measured original phase.
+Its `preparation_read_only_observed` record contains the fixed
+`frontier: "auth_three_provider_rounds"`, `completed: true`, `expected_rounds: 3`
+and a `bootstrap` snapshot with `scope: "provider_read_only_current"` and
+`provider_rounds: [3, 3]`. Completion requires all three rounds and the final
+reader/guard postchecks to return successfully. It establishes no filesystem
+observation, bootstrap completion, readiness or current permission. It excludes
+App concurrency, physical/file checks, fsync, peer exchange and writer work, so
+it supplies no complete-path timing margin.
+
+The first failed round stops the command and emits the ordinary single refusal
+with its original boundary, request tuple when present, and scoped snapshot of
+attempted versus fully validated rounds. It never restarts authentication or
+repeats that failed round. An export failure remains terminal and does not
+replace an earlier native error. Separately, ordinary initial preparation caches
+its own preparation summary into its existing first-holder or first refusal
+record, including a later listener/holder refusal. The twelve-record and
+2,048-byte bounds remain unchanged; logging does not run inside the measured
+original phase.
 
 Each timing row is `[fixed_operation, [calls, total_us, max_us]]`. Durations come
 from separate diagnostic Linux boot-clock reads, never from cached successful
@@ -172,6 +195,36 @@ spends the original deadline; no diagnostic value feeds an acquisition, issuer,
 budget, retry or renewal. Later serving phases disable collection. The final
 retention guard is deliberately not wrapped in an ending clock read: it remains
 the last I/O before the infallible owner transfer.
+
+## Current bootstrap timing
+
+Each of the six bootstrap steps starts a separate diagnostic collector for its
+actual Current attempt. Entering that step clears the cached first-holder
+summary. A refusal there can carry `bootstrap` with the fixed
+`scope: "bootstrap_current"`, `last_step`, `returned`, `provider_rounds` and
+`timing`; it never reuses the earlier preparation `timing` field.
+
+`last_step` and `returned` describe the last **measured operation**, not the
+outcome of the whole Current attempt. `returned` is `true` or `false` for that
+operation's native result, or `null` if it has not returned. Some later
+counter/slot reobservations and acknowledgement work are not separately timed;
+the closed `preparation.step` remains the reported native failure boundary.
+No successful measurement establishes activation, serving or an accepted write.
+
+`provider_rounds` is `[attempted, fully_validated]` for the fresh provider
+observations in this attempt. A failed second or third round increments only
+the attempted count. Overflow is `null`, not zero or a completed observation.
+The timing rows retain the same inclusive and missing-value rules as preparation
+timing; authentication guard measurements can be nested inside file, provider
+and durability measurements and must not be added to their parents.
+
+The snapshot is retained only after the actual stage/file/port operation has
+returned or unwound, and exported only in its existing refusal record. It
+changes no native call order, check, original deadline or retry rule. Sampling
+or export failure cannot replace the first native error or its failed-request
+tuple. The 2,048-byte and twelve-record ceilings remain unchanged.
+
+## Earlier infrastructure measurements
 
 On 2026-10-21, separate native Rust controls ran ten times on the selected
 oauthcalendar node and retained disk, with its actual Controller KSA for metadata

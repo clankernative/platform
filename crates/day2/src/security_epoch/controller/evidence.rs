@@ -1,10 +1,12 @@
 //! Bounded historical observations from the real Controller executor. Nothing
 //! accepts these records as a native owner, permission, readiness or replay.
+use super::bootstrap_timing::Snapshot as BootstrapSnapshot;
 use super::preparation_timing::Summary;
 use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
     kernel::{Holder, Request, Snapshot},
     seed_core::OriginalSeedCore,
+    transport::FailedRequestWindow,
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{
@@ -47,6 +49,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     refused: bool,
     export_failed: bool,
     preparation_timing: Option<Summary>,
+    bootstrap_timing: Option<BootstrapSnapshot>,
     read_only_observed: bool,
 }
 
@@ -134,6 +137,32 @@ pub(in crate::security_epoch) enum PreparationStep {
     FirstAccepted,
     FirstDurability,
     FirstRetain,
+    BootstrapWaitApp,
+    BootstrapRole,
+    BootstrapCore,
+    BootstrapFilePeer,
+    BootstrapReady,
+    BootstrapFile,
+    BootstrapDurability,
+    BootstrapPeer,
+    BootstrapPeerCheck,
+    BootstrapTransport,
+    BootstrapNames,
+    BootstrapCounterBefore,
+    BootstrapSlotBefore,
+    BootstrapExecution,
+    BootstrapReservePrepare,
+    BootstrapReserveSend,
+    BootstrapDispatchPrepare,
+    BootstrapDispatchRecordSend,
+    BootstrapDispatchCounterSend,
+    BootstrapSettlePrepare,
+    BootstrapSettleSend,
+    BootstrapCounterAfter,
+    BootstrapSlotAfter,
+    BootstrapValidation,
+    BootstrapAnnouncement,
+    BootstrapRelease,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -210,6 +239,8 @@ pub(in crate::security_epoch) struct PreparationFailure {
     category: PreparationErrorCategory,
     #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<PreparationProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<FailedRequestWindow>,
 }
 
 impl std::fmt::Display for PreparationFailure {
@@ -232,6 +263,7 @@ impl PreparationFailure {
             step,
             category: preparation_error_category(&error),
             progress: None,
+            request: FailedRequestWindow::observe(&error),
         };
         error.context(context)
     }
@@ -260,6 +292,7 @@ impl PreparationFailure {
             step: PreparationStep::Unknown,
             category: preparation_error_category(error),
             progress: None,
+            request: FailedRequestWindow::observe(error),
         })
     }
 }
@@ -413,6 +446,12 @@ pub(in crate::security_epoch) enum ServingRole {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReadOnlyFrontier {
+    AuthThreeProviderRounds,
+}
+
+#[derive(Serialize)]
 struct Record<'a> {
     format: &'static str,
     sequence: u8,
@@ -432,8 +471,10 @@ enum Observation {
         timing: Option<Summary>,
     },
     PreparationReadOnlyObserved {
+        frontier: ReadOnlyFrontier,
         completed: bool,
-        timing: Summary,
+        expected_rounds: u8,
+        bootstrap: BootstrapSnapshot,
     },
     BootstrapCompleted {
         step: Step,
@@ -456,6 +497,8 @@ enum Observation {
         preparation: Option<PreparationFailure>,
         #[serde(skip_serializing_if = "Option::is_none")]
         timing: Option<Summary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bootstrap: Option<BootstrapSnapshot>,
     },
 }
 
@@ -482,6 +525,7 @@ impl<W: RecordOutput> Recorder<W> {
             refused: false,
             export_failed: false,
             preparation_timing: None,
+            bootstrap_timing: None,
             read_only_observed: false,
         }
     }
@@ -534,7 +578,7 @@ impl<W: RecordOutput> Recorder<W> {
         self.preparation_timing = Some(timing);
     }
 
-    pub(super) fn preparation_read_only(&mut self, timing: Summary, completed: bool) -> Result<()> {
+    pub(super) fn preparation_read_only(&mut self, bootstrap: BootstrapSnapshot) -> Result<()> {
         ensure!(
             self.incarnation.is_some()
                 && !self.first_holder
@@ -542,7 +586,16 @@ impl<W: RecordOutput> Recorder<W> {
                 && self.next == 0,
             "native_evidence_read_only_order"
         );
-        self.emit(Observation::PreparationReadOnlyObserved { completed, timing })?;
+        ensure!(
+            bootstrap.completed_provider_control(),
+            "native_evidence_three_provider_rounds_required"
+        );
+        self.emit(Observation::PreparationReadOnlyObserved {
+            frontier: ReadOnlyFrontier::AuthThreeProviderRounds,
+            completed: true,
+            expected_rounds: 3,
+            bootstrap,
+        })?;
         self.read_only_observed = true;
         Ok(())
     }
@@ -550,6 +603,17 @@ impl<W: RecordOutput> Recorder<W> {
     pub(in crate::security_epoch) fn enter_bootstrap(&mut self, request: &Request, action: Action) {
         let (_, at) = step(request, action);
         self.enter(at);
+        // The first-holder record already owns its historical preparation
+        // summary. It is not timing evidence about a new Current phase.
+        self.preparation_timing = None;
+        self.bootstrap_timing = None;
+    }
+
+    pub(in crate::security_epoch) fn bootstrap_timing(
+        &mut self,
+        snapshot: Option<BootstrapSnapshot>,
+    ) {
+        self.bootstrap_timing = snapshot;
     }
 
     pub(in crate::security_epoch) fn bootstrap(
@@ -618,11 +682,36 @@ impl<W: RecordOutput> Recorder<W> {
 
     pub(super) fn refuse(&mut self, error: Option<&anyhow::Error>) -> Result<()> {
         if !self.refused {
+            let current = matches!(
+                self.at,
+                FailurePhase::CreateReserve
+                    | FailurePhase::CreateDispatch
+                    | FailurePhase::CreateSettle
+                    | FailurePhase::ActivateReserve
+                    | FailurePhase::ActivateDispatch
+                    | FailurePhase::ActivateSettle
+            );
+            let provider_control = matches!(self.at, FailurePhase::Preparation)
+                && !self.first_holder
+                && self.next == 0
+                && self
+                    .bootstrap_timing
+                    .as_ref()
+                    .is_some_and(BootstrapSnapshot::is_provider_read_only);
+            // This closed field reports a failed native boundary, including
+            // counter preparation/send/reobservation. It never asserts that a
+            // failed bootstrap send had no remote effect or permits a retry.
             let preparation = if matches!(
                 self.at,
                 FailurePhase::Preparation
                     | FailurePhase::HolderListener
                     | FailurePhase::FirstHolder
+                    | FailurePhase::CreateReserve
+                    | FailurePhase::CreateDispatch
+                    | FailurePhase::CreateSettle
+                    | FailurePhase::ActivateReserve
+                    | FailurePhase::ActivateDispatch
+                    | FailurePhase::ActivateSettle
             ) {
                 error.map(PreparationFailure::observe)
             } else {
@@ -633,7 +722,16 @@ impl<W: RecordOutput> Recorder<W> {
                 preparation,
                 // This completed preparation DATA remains attributable if a
                 // later listener/holder phase refuses before first-holder log.
-                timing: self.preparation_timing.clone(),
+                timing: if current || provider_control {
+                    None
+                } else {
+                    self.preparation_timing.clone()
+                },
+                bootstrap: if current || provider_control {
+                    self.bootstrap_timing.clone()
+                } else {
+                    None
+                },
             })?;
             self.refused = true;
         }
@@ -931,16 +1029,14 @@ mod tests {
             .unwrap();
         recorder
             .preparation_read_only(
-                super::super::preparation_timing::Timings::maximal_summary_fixture(),
-                true,
+                super::super::bootstrap_timing::BootstrapTiming::maximal_provider_fixture(),
             )
             .unwrap();
         assert!(recorder.first_holder(&seed, &holder).is_err());
         assert!(
             recorder
                 .preparation_read_only(
-                    super::super::preparation_timing::Timings::new().summary(),
-                    true
+                    super::super::bootstrap_timing::BootstrapTiming::maximal_provider_fixture(),
                 )
                 .is_err()
         );
@@ -951,6 +1047,19 @@ mod tests {
         assert_eq!(
             rows[1]["observation"]["event"],
             "preparation_read_only_observed"
+        );
+        assert_eq!(
+            rows[1]["observation"]["frontier"],
+            "auth_three_provider_rounds"
+        );
+        assert_eq!(rows[1]["observation"]["expected_rounds"], 3);
+        assert_eq!(
+            rows[1]["observation"]["bootstrap"]["provider_rounds"],
+            serde_json::json!([3, 3])
+        );
+        assert_eq!(
+            rows[1]["observation"]["bootstrap"]["scope"],
+            "provider_read_only_current"
         );
         assert!(
             rows.iter()
@@ -1142,6 +1251,7 @@ mod tests {
                 step: PreparationStep::ClaimBinding,
                 category: PreparationErrorCategory::PermissionDenied,
                 progress: None,
+                request: None,
             }
         );
         assert_eq!(
@@ -1470,5 +1580,247 @@ mod tests {
         );
         assert_eq!(recorder.records, 1);
         assert!(!recorder.first_holder && !recorder.activated);
+    }
+    #[test]
+    fn bootstrap_refusal_exports_only_closed_inner_cause_after_unwind_and_stays_terminal() {
+        for (phase, name) in [
+            (FailurePhase::CreateReserve, "create_reserve"),
+            (FailurePhase::CreateDispatch, "create_dispatch"),
+            (FailurePhase::CreateSettle, "create_settle"),
+            (FailurePhase::ActivateReserve, "activate_reserve"),
+            (FailurePhase::ActivateDispatch, "activate_dispatch"),
+            (FailurePhase::ActivateSettle, "activate_settle"),
+        ] {
+            let cause =
+                anyhow::anyhow!("epoch_native_clock_rewind_or_expired").context(MustNotDisplay);
+            let error = PreparationFailure::at(PreparationStep::BootstrapPeer, cause);
+            let error = PreparationFailure::at(PreparationStep::BootstrapFilePeer, error);
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"epoch_native_clock_rewind_or_expired")
+            );
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(phase);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
+            recorder.refuse(Some(&error)).unwrap();
+            let count = recorder.records;
+            recorder
+                .refuse(Some(&anyhow::Error::new(MustNotDisplay)))
+                .unwrap();
+            assert_eq!(recorder.records, count);
+            let rows = records(&recorder.output);
+            assert_eq!(rows.len(), 2);
+            let observation = &rows[1]["observation"];
+            assert_eq!(observation["at"], name);
+            assert_eq!(
+                observation["preparation"],
+                serde_json::json!({
+                    "step":"bootstrap_peer", "category":"clock_expired_or_rewound"
+                })
+            );
+            assert!(observation.get("timing").is_none());
+            assert_eq!(observation["bootstrap"]["scope"], "bootstrap_current");
+            assert!(!recorder.first_holder && !recorder.activated);
+            let bytes = String::from_utf8(recorder.output).unwrap();
+            assert!(!bytes.contains("epoch_native_clock") && !bytes.contains("MustNotDisplay"));
+        }
+    }
+
+    #[test]
+    fn bootstrap_unknown_private_causes_never_become_exported_error_text() {
+        let private = "/SECRET/provider/body Bearer TOKEN nonce=private subject=private";
+        let cause = anyhow::Error::msg(private).context(MustNotDisplay);
+        let error = PreparationFailure::at(PreparationStep::BootstrapReserveSend, cause);
+        assert_eq!(error.downcast_ref::<&str>(), Some(&private));
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enter(FailurePhase::CreateReserve);
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(
+            rows[0]["observation"]["preparation"],
+            serde_json::json!({
+                "step":"bootstrap_reserve_send", "category":"other"
+            })
+        );
+        let bytes = String::from_utf8(recorder.output).unwrap();
+        for value in [
+            private,
+            "/SECRET",
+            "Bearer",
+            "TOKEN",
+            "nonce",
+            "subject",
+            "MustNotDisplay",
+        ] {
+            assert!(!bytes.contains(value));
+        }
+    }
+
+    #[test]
+    fn failed_request_window_keeps_first_boundary_and_fits_maximal_private_record() {
+        for timeout in [false, true] {
+            let window = FailedRequestWindow::maximal_fixture(timeout);
+            let native = anyhow::Error::new(window)
+                .context("epoch_native_transport_unavailable")
+                .context(MustNotDisplay);
+            let error =
+                PreparationFailure::at(PreparationStep::BootstrapDispatchCounterSend, native);
+            let error = PreparationFailure::with_progress(
+                PreparationStep::BootstrapFile,
+                error,
+                PreparationProgress {
+                    acquired_us: Some(u32::MAX),
+                    image_us: Some(u32::MAX),
+                    prepared_us: Some(u32::MAX),
+                    last_checked_us: Some(u32::MAX),
+                },
+            );
+            assert_eq!(FailedRequestWindow::observe(&error), Some(window));
+            let (mut recorder, _, _, _, _, _) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.preparation_timings(
+                super::super::preparation_timing::Timings::maximal_summary_fixture(),
+            );
+            recorder.enter(FailurePhase::ActivateDispatch);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
+            recorder.records = MAX_RECORDS - 1;
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            let preparation = &rows[1]["observation"]["preparation"];
+            assert_eq!(preparation["step"], "bootstrap_dispatch_counter_send");
+            assert_eq!(preparation["category"], "transport_unavailable");
+            assert_eq!(
+                preparation["request"],
+                serde_json::json!([u32::MAX, 5_000_000, timeout])
+            );
+            assert_eq!(rows[1]["sequence"], MAX_RECORDS);
+            assert!(recorder.refused && !recorder.activated);
+            let bytes = String::from_utf8(recorder.output).unwrap();
+            for value in [
+                "MustNotDisplay",
+                "epoch_native_transport_unavailable",
+                "https://",
+                "Bearer",
+            ] {
+                assert!(!bytes.contains(value));
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_annotations_cannot_export_details_from_other_lifecycle_phases() {
+        for phase in [
+            FailurePhase::Selection,
+            FailurePhase::Enrollment,
+            FailurePhase::Activation,
+            FailurePhase::ServingListener,
+            FailurePhase::AppPending,
+            FailurePhase::AppServing,
+            FailurePhase::ShellPending,
+            FailurePhase::ShellAccept,
+            FailurePhase::ShellServing,
+            FailurePhase::Health,
+        ] {
+            let (mut recorder, _, _, _, _, _) = fixture();
+            let error = PreparationFailure::at(
+                PreparationStep::BootstrapRole,
+                anyhow::Error::new(MustNotDisplay),
+            );
+            recorder.enter(phase);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert!(rows[0]["observation"].get("preparation").is_none());
+            assert!(rows[0]["observation"].get("bootstrap").is_none());
+            assert!(recorder.refused && !recorder.activated && !recorder.first_holder);
+            assert!(
+                !String::from_utf8(recorder.output)
+                    .unwrap()
+                    .contains("bootstrap_role")
+            );
+        }
+    }
+
+    #[test]
+    fn current_trace_replaces_initial_history_and_export_failure_keeps_first_native_cause() {
+        let (mut recorder, _, _, create, _, _) = fixture();
+        recorder.preparation_timings(
+            super::super::preparation_timing::Timings::maximal_summary_fixture(),
+        );
+        recorder.enter_bootstrap(&create, Action::Reserve);
+        assert!(recorder.preparation_timing.is_none() && recorder.bootstrap_timing.is_none());
+        recorder.bootstrap_timing(Some(
+            super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+        ));
+        let error = PreparationFailure::at(
+            PreparationStep::DiskBinding,
+            anyhow::Error::new(FailedRequestWindow::maximal_fixture(true))
+                .context("epoch_native_transport_unavailable")
+                .context(MustNotDisplay),
+        );
+        // The native result is retained even when a separate evidence export
+        // fails. No telemetry failure can turn it into success or replace it.
+        let result = crate::security_epoch::controller::preserve_native_failure(
+            Err(error),
+            Err(anyhow::anyhow!("native_evidence_export_failed")),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            FailedRequestWindow::observe(&error),
+            Some(FailedRequestWindow::maximal_fixture(true))
+        );
+        assert_eq!(
+            PreparationFailure::observe(&error).step,
+            PreparationStep::DiskBinding
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert!(rows[0]["observation"].get("timing").is_none());
+        assert_eq!(
+            rows[0]["observation"]["bootstrap"]["scope"],
+            "bootstrap_current"
+        );
+        assert!(recorder.refused && !recorder.activated);
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("MustNotDisplay")
+        );
+    }
+
+    #[test]
+    fn one_or_two_provider_rounds_cannot_emit_three_round_control_completion() {
+        use super::super::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation};
+        for rounds in [1, 2, 4] {
+            // Export DATA only; no native owner/observation/permission is built.
+            let (mut recorder, ..) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            let trace = BootstrapTiming::provider_read_only();
+            trace
+                .measure(Operation::VolumeAcquisition, || {
+                    for _ in 0..rounds {
+                        trace.provider_round(|| Ok(()))?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                recorder
+                    .preparation_read_only(trace.snapshot().unwrap())
+                    .is_err()
+            );
+            assert_eq!(records(&recorder.output).len(), 1);
+            assert!(!recorder.read_only_observed && !recorder.first_holder && !recorder.activated);
+        }
     }
 }

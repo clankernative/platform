@@ -36,9 +36,23 @@ pub(in crate::security_epoch) enum Operation {
     FirstReady,
     FirstFile,
     FirstExchange,
+    BootstrapReady,
+    BootstrapAuthentication,
+    BootstrapFile,
+    BootstrapProjection,
+    BootstrapDurability,
+    BootstrapPeer,
+    BootstrapPeerCheck,
+    BootstrapWriter,
+    BootstrapCounter,
+    BootstrapSlot,
+    BootstrapMutation,
+    BootstrapValidation,
+    BootstrapRelease,
+    AuthenticationCheck,
 }
 
-const OPERATIONS: [Operation; 28] = [
+const OPERATIONS: [Operation; 42] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -67,7 +81,66 @@ const OPERATIONS: [Operation; 28] = [
     Operation::FirstReady,
     Operation::FirstFile,
     Operation::FirstExchange,
+    Operation::BootstrapReady,
+    Operation::BootstrapAuthentication,
+    Operation::BootstrapFile,
+    Operation::BootstrapProjection,
+    Operation::BootstrapDurability,
+    Operation::BootstrapPeer,
+    Operation::BootstrapPeerCheck,
+    Operation::BootstrapWriter,
+    Operation::BootstrapCounter,
+    Operation::BootstrapSlot,
+    Operation::BootstrapMutation,
+    Operation::BootstrapValidation,
+    Operation::BootstrapRelease,
+    Operation::AuthenticationCheck,
 ];
+
+#[derive(Clone, Copy)]
+enum Scope {
+    Preparation,
+    Bootstrap,
+}
+
+impl Scope {
+    fn includes(self, operation: Operation) -> bool {
+        let bootstrap_only = matches!(
+            operation,
+            Operation::BootstrapReady
+                | Operation::BootstrapAuthentication
+                | Operation::BootstrapFile
+                | Operation::BootstrapProjection
+                | Operation::BootstrapDurability
+                | Operation::BootstrapPeer
+                | Operation::BootstrapPeerCheck
+                | Operation::BootstrapWriter
+                | Operation::BootstrapCounter
+                | Operation::BootstrapSlot
+                | Operation::BootstrapMutation
+                | Operation::BootstrapValidation
+                | Operation::BootstrapRelease
+                | Operation::AuthenticationCheck
+        );
+        match self {
+            Self::Preparation => !bootstrap_only,
+            Self::Bootstrap => {
+                bootstrap_only
+                    || matches!(
+                        operation,
+                        Operation::RoleStage
+                            | Operation::VolumeAcquisition
+                            | Operation::NativeCheck
+                            | Operation::Claim
+                            | Operation::Volume
+                            | Operation::Node
+                            | Operation::Disk
+                            | Operation::Instance
+                    )
+            }
+        }
+    }
+}
 
 /// [call count, inclusive total microseconds, maximum call microseconds].
 /// Null is sticky missing/rewound/overflowed measurement, never zero/success.
@@ -92,17 +165,32 @@ pub(in crate::security_epoch) struct Summary(Vec<(Operation, Measurement)>);
 /// Other current/serving phases use disabled(), with no allocation, clock
 /// reads, inherited observations or permission.
 #[derive(Clone)]
-pub(in crate::security_epoch) struct Timings(Option<Rc<RefCell<[Measurement; OPERATIONS.len()]>>>);
+pub(in crate::security_epoch) struct Timings(
+    Option<Rc<RefCell<[Measurement; OPERATIONS.len()]>>>,
+    Scope,
+);
 
 impl Timings {
     pub(in crate::security_epoch) fn new() -> Self {
-        Self(Some(Rc::new(RefCell::new(
-            [Measurement::EMPTY; OPERATIONS.len()],
-        ))))
+        Self(
+            Some(Rc::new(RefCell::new(
+                [Measurement::EMPTY; OPERATIONS.len()],
+            ))),
+            Scope::Preparation,
+        )
+    }
+
+    pub(in crate::security_epoch) fn bootstrap() -> Self {
+        Self(
+            Some(Rc::new(RefCell::new(
+                [Measurement::EMPTY; OPERATIONS.len()],
+            ))),
+            Scope::Bootstrap,
+        )
     }
 
     pub(in crate::security_epoch) fn disabled() -> Self {
-        Self(None)
+        Self(None, Scope::Preparation)
     }
 
     pub(in crate::security_epoch) fn measure<T>(
@@ -124,6 +212,9 @@ impl Timings {
         let Some(values) = &self.0 else {
             return call();
         };
+        if !self.1.includes(operation) {
+            return call();
+        }
         let before = clock();
         let result = call();
         let elapsed = before.zip(clock()).and_then(|(a, b)| b.checked_sub(a));
@@ -137,7 +228,7 @@ impl Timings {
                 .iter()
                 .copied()
                 .zip(*values.borrow())
-                .filter(|(_, value)| value.0 != Some(0))
+                .filter(|(operation, value)| self.1.includes(*operation) && value.0 != Some(0))
                 .collect()
         }))
     }
@@ -147,6 +238,23 @@ impl Timings {
         Summary(
             OPERATIONS
                 .into_iter()
+                .filter(|operation| Scope::Preparation.includes(*operation))
+                .map(|operation| {
+                    (
+                        operation,
+                        Measurement(Some(u32::MAX), Some(u32::MAX), Some(u32::MAX)),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn maximal_bootstrap_fixture() -> Summary {
+        Summary(
+            OPERATIONS
+                .into_iter()
+                .filter(|operation| Scope::Bootstrap.includes(*operation))
                 .map(|operation| {
                     (
                         operation,

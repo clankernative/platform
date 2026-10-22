@@ -12,7 +12,7 @@ use serde_json::Value;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PersistentDiskSelection {
+pub(in crate::security_epoch) struct PersistentDiskSelection {
     pub claim: KubernetesObjectSelection,
     pub volume: KubernetesObjectSelection,
     pub zone: Name,
@@ -73,7 +73,10 @@ impl PersistentDiskSelection {
         Digest::of(&("day2-gke-zonal-persistent-disk-v1", self))
     }
 
-    pub(super) fn validate(&self, policy: &InitialBootstrapPolicy) -> Result<()> {
+    pub(in crate::security_epoch) fn validate(
+        &self,
+        policy: &InitialBootstrapPolicy,
+    ) -> Result<()> {
         for object in [&self.claim, &self.volume, &self.node] {
             ensure!(
                 identifier(&object.name) && identifier(&object.uid),
