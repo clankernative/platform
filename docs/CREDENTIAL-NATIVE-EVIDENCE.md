@@ -185,6 +185,36 @@ budget, retry or renewal. Later serving phases disable collection. The final
 retention guard is deliberately not wrapped in an ending clock read: it remains
 the last I/O before the infallible owner transfer.
 
+## Current bootstrap timing
+
+Each of the six bootstrap steps starts a separate diagnostic collector for its
+actual Current attempt. Entering that step clears the cached first-holder
+summary. A refusal there can carry `bootstrap` with the fixed
+`scope: "bootstrap_current"`, `last_step`, `returned`, `provider_rounds` and
+`timing`; it never reuses the earlier preparation `timing` field.
+
+`last_step` and `returned` describe the last **measured operation**, not the
+outcome of the whole Current attempt. `returned` is `true` or `false` for that
+operation's native result, or `null` if it has not returned. Some later
+counter/slot reobservations and acknowledgement work are not separately timed;
+the closed `preparation.step` remains the reported native failure boundary.
+No successful measurement establishes activation, serving or an accepted write.
+
+`provider_rounds` is `[attempted, fully_validated]` for the fresh provider
+observations in this attempt. A failed second or third round increments only
+the attempted count. Overflow is `null`, not zero or a completed observation.
+The timing rows retain the same inclusive and missing-value rules as preparation
+timing; authentication guard measurements can be nested inside file, provider
+and durability measurements and must not be added to their parents.
+
+The snapshot is retained only after the actual stage/file/port operation has
+returned or unwound, and exported only in its existing refusal record. It
+changes no native call order, check, original deadline or retry rule. Sampling
+or export failure cannot replace the first native error or its failed-request
+tuple. The 2,048-byte and twelve-record ceilings remain unchanged.
+
+## Earlier infrastructure measurements
+
 On 2026-10-21, separate native Rust controls ran ten times on the selected
 oauthcalendar node and retained disk, with its actual Controller KSA for metadata
 reads. The complete eleven-request metadata sequence measured 600–1170 ms
