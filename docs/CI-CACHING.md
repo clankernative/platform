@@ -7,8 +7,10 @@ new bucket, paid storage setting, Cargo build cache or sccache wrapper.
 `.bazelversion`, `MODULE.bazel` and the reviewed toolchain/profile declarations
 bind compiler inputs. [Build commands and profiles](BAZEL.md) describe the graph.
 
-The disk cache is bounded by the source-controlled garbage-collection policy.
-Its OS/architecture partitions cannot supply another host's executables. Main
+The source-controlled disk-cache garbage-collection settings are size/age targets,
+not a hard per-snapshot bound; batch invocations do not establish that idle
+collection ran. Actual saved/restored bytes and repository eviction must be
+measured. OS/architecture partitions cannot supply another host's executables. Main
 pushes and merge-group workflows may publish shared caches. Pull requests may
 read their trusted base caches and save only under GitHub's isolated PR ref;
 those entries cannot seed main or another PR. Existing repository storage limits

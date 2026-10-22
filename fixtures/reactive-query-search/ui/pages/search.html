@@ -1,0 +1,19 @@
+<div id="reports-app">
+  <header class="app-header"><a class="brand" href="{{ routes.reports() }}"><img src="{{ asset('report') }}" width="24" height="24" alt="">Reports</a><span>{{ company.name }}</span><a href="{{ routes.search() }}">Search reports</a><a href="{{ platform.audit() }}">Audit log</a></header>
+  <main class="workspace detail">
+    <a class="back" href="{{ routes.reports() }}">All reports</a>
+    <h1>Search reports</h1>
+    <form id="report-search" data-page="search" data-query-on="input" data-query-results="report-search-results" data-query-status="report-search-status" data-query-debounce="150">
+      <label for="term">Title contains</label>
+      <input id="term" type="text" name="term" value="{{ search.term }}">
+      <button type="submit">Search</button>
+      <p id="report-search-status" role="status" aria-live="polite"></p>
+      <section id="report-search-results" aria-label="Matching reports">
+        {% for report in search.matches.items %}
+        <a class="report-row" href="{{ routes.report(report_id=report.id) }}"><div><strong>{{ report.title }}</strong><p>Revision {{ report.version }}</p></div>{% if report.ready %}<span class="status complete">Complete</span>{% else %}<span class="status pending">Awaiting result</span>{% endif %}</a>
+        {% else %}<p class="empty">No matching reports.</p>{% endfor %}
+        {% if not search.searched_all %}<p class="empty">Only the first 100 reports were searched. Refine the title or browse all reports.</p>{% endif %}
+      </section>
+    </form>
+  </main>
+</div>

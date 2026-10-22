@@ -89,6 +89,8 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
+    } else {
+        complete = false;
     }
     // Only compile-time vocabulary and counts leave the protected log directory.
     // Markers are advisory observations, never original kill/causal attribution.

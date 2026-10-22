@@ -82,7 +82,40 @@ pub enum LiveConnection {
         service_account: String,
         auth: WorkspaceDirectoryAuth,
     },
+    /// Carta's issuer API through OAuth client credentials. `client_id` is an
+    /// identifier reviewed with the profile; only the client secret is mounted.
+    /// The environment selects one of the adapter's fixed origin pairs, so no
+    /// URL is configurable and a profile cannot point the secret elsewhere.
+    Carta {
+        credential_ref: VersionRef,
+        client_id: String,
+        environment: CartaEnvironment,
+        /// Pages read per collection (stakeholders, then option grants) before
+        /// a remaining page token fails the capture rather than truncating it.
+        max_pages_per_collection: u16,
+    },
 }
+
+/// The two Carta deployments an operator may select. Closed: each names a fixed
+/// login/API origin pair inside the adapter.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CartaEnvironment {
+    Production,
+    Playground,
+}
+
+impl CartaEnvironment {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Playground => "playground",
+        }
+    }
+}
+
+/// The reviewed page ceiling for one Carta collection.
+pub const MAX_CARTA_PAGES_PER_COLLECTION: u16 = 100;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -103,6 +136,7 @@ impl LiveConnection {
             | Self::LinearWork { credential_ref, .. }
             | Self::GitHubActions { credential_ref, .. }
             | Self::GiteaActions { credential_ref, .. }
+            | Self::Carta { credential_ref, .. }
             | Self::OpenAi { credential_ref, .. } => Some(credential_ref),
             Self::WorkspaceDirectory { .. } => None,
         }
@@ -124,6 +158,7 @@ impl LiveConnection {
             | Self::ObjectStore { .. }
             | Self::LinearWork { .. }
             | Self::GitHubActions { .. }
+            | Self::Carta { .. }
             | Self::WorkspaceDirectory { .. } => None,
         }
     }
@@ -182,6 +217,12 @@ impl LiveConnection {
             Self::GitHubActions {
                 credential_ref,
                 endpoint: _,
+            } => vec![credential_ref],
+            Self::Carta {
+                credential_ref,
+                client_id: _,
+                environment: _,
+                max_pages_per_collection: _,
             } => vec![credential_ref],
         }
     }
@@ -306,6 +347,24 @@ impl LiveConnection {
                 if let WorkspaceDirectoryAuth::DomainWideDelegation { delegated_admin } = auth {
                     workspace_email(delegated_admin)?;
                 }
+                Ok(())
+            }
+            Self::Carta {
+                client_id,
+                max_pages_per_collection,
+                ..
+            } => {
+                ensure!(
+                    (1..=128).contains(&client_id.len())
+                        && client_id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+                    "invalid_carta_client_id"
+                );
+                ensure!(
+                    (1..=MAX_CARTA_PAGES_PER_COLLECTION).contains(max_pages_per_collection),
+                    "invalid_carta_page_limit"
+                );
                 Ok(())
             }
             Self::OpenAi {
@@ -611,5 +670,54 @@ mod tests {
         assert_eq!(profile.cost_microusd(1, 1).unwrap(), 2);
         assert!(profile.validate().is_ok());
         assert!(profile.cost_microusd(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn carta_profiles_pin_identifier_page_ceiling_and_closed_environment() {
+        let carta = |client_id: &str, pages: u16| LiveConnection::Carta {
+            credential_ref: VersionRef {
+                id: "carta-secret".into(),
+                revision: 1,
+            },
+            client_id: client_id.into(),
+            environment: CartaEnvironment::Playground,
+            max_pages_per_collection: pages,
+        };
+        let valid = carta("PLAYGROUND_client-1", 50);
+        assert!(valid.validate().is_ok());
+        assert_eq!(valid.credential_refs().len(), 1);
+        assert!(valid.verification_ref().is_none());
+        for (client_id, pages) in [
+            ("", 50),
+            ("client id", 50),
+            ("client:secret", 50),
+            ("client.id", 50),
+            (&"x".repeat(129) as &str, 50),
+            ("client", 0),
+            ("client", MAX_CARTA_PAGES_PER_COLLECTION + 1),
+        ] {
+            assert!(
+                carta(client_id, pages).validate().is_err(),
+                "{client_id}/{pages}"
+            );
+        }
+        let wire = serde_json::to_value(&valid).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"provider":"carta","credential_ref":{"id":"carta-secret","revision":1},
+                "client_id":"PLAYGROUND_client-1","environment":"playground","max_pages_per_collection":50})
+        );
+        // No origin, URL or unknown environment can be expressed.
+        for extra in [
+            serde_json::json!({"api_origin":"https://evil.example"}),
+            serde_json::json!({"environment":"staging"}),
+        ] {
+            let mut altered = wire.clone();
+            altered
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<LiveConnection>(altered).is_err());
+        }
     }
 }

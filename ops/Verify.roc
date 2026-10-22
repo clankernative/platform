@@ -70,6 +70,7 @@ Verify :: [].{
 			"repeated-field",
 			"reports",
 			"reports-probe",
+			"reports-search",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}

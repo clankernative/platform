@@ -237,7 +237,8 @@ fn main() -> Result<()> {
     if let Some(directory) = std::env::var_os("BUILD_WORKING_DIRECTORY") {
         std::env::set_current_dir(directory)?;
     }
-    let mut args = std::env::args().skip(1);
+    let invocation = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = invocation.iter().cloned();
     let action = args.next().unwrap_or_else(|| "build".into());
     let mut isolated_app = None;
     let root = if action == "build-isolated" {
@@ -295,7 +296,18 @@ fn main() -> Result<()> {
         let current = std::env::current_exe()?.canonicalize()?;
         if installed.canonicalize().ok().as_ref() != Some(&current) {
             fs::create_dir_all(installed.parent().context("verifier output directory")?)?;
-            install_cli_file(current, installed)?;
+            install_cli_file(&current, &installed)?;
+            if action != "install-verifier" {
+                // Bazel places package outputs in separate directories. Run
+                // operations from the admitted installation so native worker
+                // launcher discovery keeps its ordinary sibling boundary.
+                // Replacing this process preserves argv and cwd; the new entry
+                // acquires the same workspace lock rather than inheriting it.
+                drop(_lock);
+                use std::os::unix::process::CommandExt;
+                return Err(Command::new(&installed).args(&invocation).exec())
+                    .context("execute the installed verifier");
+            }
         }
     }
     match action.as_str() {

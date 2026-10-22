@@ -194,7 +194,7 @@ mod registry_golden {
 
     const EVERY_PROVIDER: &[Provider] = &[
         Provider::LocalNotifications,
-        Provider::SyntheticCarta,
+        Provider::Carta,
         Provider::SyntheticGoogleDirectory,
         Provider::SyntheticLinear,
         Provider::SyntheticOperatorAlerts,
@@ -270,7 +270,7 @@ mod registry_golden {
             Provider::LocalNotifications,
             ResourceKind::NotificationMailbox,
         ),
-        (Provider::SyntheticCarta, ResourceKind::CartaIssuer),
+        (Provider::Carta, ResourceKind::CartaIssuer),
         (
             Provider::SyntheticGoogleDirectory,
             ResourceKind::GoogleDirectory,
@@ -481,9 +481,11 @@ mod connections {
         match provider {
             // Served from local or synthetic worlds: no endpoint, no credential,
             // and a connection would be a claim that there is something to reach.
+            // Carta is also live-capable; `carta_accepts_exactly_its_two_modes`
+            // checks that mode, since this table names one connection per provider.
             Provider::LocalNotifications
             | Provider::LocalDelegation
-            | Provider::SyntheticCarta
+            | Provider::Carta
             | Provider::SyntheticGoogleDirectory
             | Provider::SyntheticLinear
             | Provider::SyntheticOperatorAlerts => None,
@@ -596,6 +598,166 @@ mod connections {
     }
 }
 
+/// Carta is the one provider with two legitimate modes: no connection reads
+/// explicitly seeded synthetic captures, a live connection captures the API.
+/// Neither mode accepts another provider's connection, and the live mode's
+/// issuer and child-record constraints are checked with their connection.
+mod carta_modes {
+    use super::*;
+    use crate::integrations::{CartaEnvironment, LiveConnection};
+
+    fn live() -> LiveConnection {
+        LiveConnection::Carta {
+            credential_ref: VersionRef {
+                id: "carta-secret".into(),
+                revision: 1,
+            },
+            client_id: "client".into(),
+            environment: CartaEnvironment::Playground,
+            max_pages_per_collection: 50,
+        }
+    }
+
+    fn catalog(live: Option<LiveConnection>, target: serde_json::Value) -> Result<Catalog> {
+        Ok(serde_json::from_value(json!({
+            "version":1,
+            "connections":{"carta":{"revision":1,"provider":"carta","live":live}},
+            "resources":{"issuer":{"revision":1,"connection":{"id":"carta","revision":1},"target":target}},
+            "policies":{"capture":{"revision":1,"owner":"owner","actors":["refresh"],"allowed_apps":["equity"],"max_duration_seconds":null,
+                "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],"actions":["carta_snapshot"],
+                    "limits":{"max_request_bytes":65536,"max_response_bytes":4194304,"max_calls_per_invocation":101}}}}}
+        }))?)
+    }
+
+    #[test]
+    fn carta_accepts_exactly_its_two_modes() {
+        assert!(validate_connection(Provider::Carta, None).is_ok());
+        assert!(validate_connection(Provider::Carta, Some(&live())).is_ok());
+        assert!(
+            validate_connection(
+                Provider::Carta,
+                Some(&LiveConnection::LinearWork {
+                    credential_ref: VersionRef {
+                        id: "wrong".into(),
+                        revision: 1
+                    },
+                    organization_id: "org".into(),
+                })
+            )
+            .is_err()
+        );
+        for provider in Provider::ALL {
+            if *provider != Provider::Carta {
+                assert!(
+                    validate_connection(*provider, Some(&live())).is_err(),
+                    "{} accepted a Carta connection",
+                    provider.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn include_children_keeps_the_existing_target_bytes() -> Result<()> {
+        let include = ResourceTarget::CartaIssuer {
+            issuer_id: "1234567".into(),
+            children: CartaChildren::Include,
+        };
+        assert_eq!(
+            serde_json::to_value(&include)?,
+            json!({"kind":"carta_issuer","issuer_id":"1234567"})
+        );
+        let decoded: ResourceTarget =
+            serde_json::from_value(json!({"kind":"carta_issuer","issuer_id":"1234567"}))?;
+        assert_eq!(decoded, include);
+        let omit: ResourceTarget = serde_json::from_value(
+            json!({"kind":"carta_issuer","issuer_id":"1234567","children":"omit"}),
+        )?;
+        assert_eq!(
+            serde_json::to_value(&omit)?,
+            json!({"kind":"carta_issuer","issuer_id":"1234567","children":"omit"})
+        );
+        assert!(
+            serde_json::from_value::<ResourceTarget>(
+                json!({"kind":"carta_issuer","issuer_id":"1234567","children":"some"})
+            )
+            .is_err()
+        );
+        // Narrowing preserves both fields: an attenuation cannot switch modes.
+        assert!(omit.is_subset_of(&omit));
+        assert!(!omit.is_subset_of(&include));
+        assert!(!include.is_subset_of(&omit));
+        Ok(())
+    }
+
+    #[test]
+    fn live_issuers_are_numeric_and_synthetic_captures_cannot_omit_children() -> Result<()> {
+        catalog(
+            Some(live()),
+            json!({"kind":"carta_issuer","issuer_id":"1234567","children":"omit"}),
+        )?
+        .validate()?;
+        catalog(
+            Some(live()),
+            json!({"kind":"carta_issuer","issuer_id":"1234567"}),
+        )?
+        .validate()?;
+        catalog(
+            None,
+            json!({"kind":"carta_issuer","issuer_id":"synthetic-issuer-1"}),
+        )?
+        .validate()?;
+        for (live, target) in [
+            (
+                Some(live()),
+                json!({"kind":"carta_issuer","issuer_id":"synthetic-issuer-1"}),
+            ),
+            (
+                Some(live()),
+                json!({"kind":"carta_issuer","issuer_id":"12/../34"}),
+            ),
+            (
+                Some(live()),
+                json!({"kind":"carta_issuer","issuer_id":"1".repeat(21)}),
+            ),
+            (
+                None,
+                json!({"kind":"carta_issuer","issuer_id":"synthetic-issuer-1","children":"omit"}),
+            ),
+        ] {
+            assert!(
+                catalog(live, target.clone())?.validate().is_err(),
+                "{target}"
+            );
+        }
+        let valid = catalog(
+            Some(live()),
+            json!({"kind":"carta_issuer","issuer_id":"1234567","children":"omit"}),
+        )?;
+        let resolved = valid.resolve(
+            "equity",
+            &serde_json::from_value::<Vec<Attachment>>(json!([{
+                "policy":{"id":"capture","revision":1},"operation":"equity.capture_import",
+                "bindings":{"carta":{"id":"issuer","revision":1}}}]))?,
+            1000,
+        )?;
+        let mut tampered = resolved.clone();
+        let grant = tampered
+            .operations
+            .get_mut("equity.capture_import")
+            .unwrap()
+            .get_mut("carta")
+            .unwrap();
+        grant.live = None;
+        assert!(resolved.validate().is_ok());
+        assert!(
+            tampered.validate().is_err(),
+            "a resolved omit grant without its live connection must not validate"
+        );
+        Ok(())
+    }
+}
+
 /// Grant narrowing, which decides whether a resource handle may be used at all.
 ///
 /// `ResourceTarget::is_subset_of` matches on pairs and ends in `_ => false`, so
@@ -619,6 +781,7 @@ mod narrowing {
             },
             ResourceKind::CartaIssuer => ResourceTarget::CartaIssuer {
                 issuer_id: "issuer-1".into(),
+                children: CartaChildren::Include,
             },
             ResourceKind::GoogleDirectory => ResourceTarget::GoogleDirectory {
                 customer_id: "C01".into(),
