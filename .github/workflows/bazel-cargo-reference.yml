@@ -21,7 +21,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_LTO: 'off'
       CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
-      RUSTC_WRAPPER: ''
+      RUSTC_WRAPPER: ${{ github.workspace }}/.cache/observe-rustc
+      DAY2_MEASURE_COMPILER_FIELDS: /tmp/day2-cargo-compiler-fields.jsonl
       RUSTC_WORKSPACE_WRAPPER: ''
       RUSTFLAGS: '-C link-arg=-fuse-ld=bfd'
     steps:
@@ -34,14 +35,18 @@ jobs:
         run: git show -s --format=fuller HEAD
       - name: Log pinned compiler
         run: rustc --version --verbose
+      - name: Build only the bounded public compiler-fields observer outside measurements
+        run: rustc --edition=2024 .github/rustc-fields.rs -o /tmp/day2-observe-rustc
+      - name: Create the owned observer installation directory
+        run: mkdir -p .cache
+      - name: Install the temporary compiler observer
+        run: install -m 0555 /tmp/day2-observe-rustc .cache/observe-rustc
       - name: Retain declared default targets
         run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
-      - name: Compile every verification target without executing cases
-        run: cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
-      - name: Compile production programs without development dependencies
-        run: cargo build --locked --workspace --bins --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-production.jsonl
-      - name: Compile the production native worker archive
-        run: cargo build --locked -p day2-roc-worker --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
+      - name: Compile every verification target from empty owned outputs without executing cases
+        run: /usr/bin/time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+      - name: Repeat the exact unchanged target build with local compiled outputs
+        run: /usr/bin/time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
       - name: Retain reference metadata only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -50,21 +55,19 @@ jobs:
           path: |
             /tmp/day2-cargo-targets.json
             /tmp/day2-cargo-verification.jsonl
-            /tmp/day2-cargo-production.jsonl
-            /tmp/day2-cargo-worker.jsonl
+            /tmp/day2-cargo-verification-warm.jsonl
+            /tmp/day2-cargo-compiler-fields.jsonl
             Cargo.lock
           if-no-files-found: error
   mac:
-    # Completed on the original product-identical reference commit. This repair
-    # reruns only the Linux lane that stopped before compilation.
-    if: ${{ false }}
     runs-on: macos-15
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_BUILD_JOBS: '3'
       CARGO_PROFILE_DEV_DEBUG: '0'
-      RUSTC_WRAPPER: ''
+      RUSTC_WRAPPER: ${{ github.workspace }}/.cache/observe-rustc
+      DAY2_MEASURE_COMPILER_FIELDS: /tmp/day2-cargo-compiler-fields.jsonl
       RUSTC_WORKSPACE_WRAPPER: ''
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -74,14 +77,18 @@ jobs:
         run: git show -s --format=fuller HEAD
       - name: Log pinned compiler
         run: rustc --version --verbose
+      - name: Build only the bounded public compiler-fields observer outside measurements
+        run: rustc --edition=2024 .github/rustc-fields.rs -o /tmp/day2-observe-rustc
+      - name: Create the owned observer installation directory
+        run: mkdir -p .cache
+      - name: Install the temporary compiler observer
+        run: install -m 0555 /tmp/day2-observe-rustc .cache/observe-rustc
       - name: Retain declared default targets
         run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
-      - name: Compile every verification target without executing cases
-        run: cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
-      - name: Compile production programs without development dependencies
-        run: cargo build --locked --workspace --bins --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-production.jsonl
-      - name: Compile the production native worker archive
-        run: cargo build --locked -p day2-roc-worker --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
+      - name: Compile every verification target from empty owned outputs without executing cases
+        run: /usr/bin/time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+      - name: Repeat the exact unchanged target build with local compiled outputs
+        run: /usr/bin/time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
       - name: Retain reference metadata only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -90,7 +97,7 @@ jobs:
           path: |
             /tmp/day2-cargo-targets.json
             /tmp/day2-cargo-verification.jsonl
-            /tmp/day2-cargo-production.jsonl
-            /tmp/day2-cargo-worker.jsonl
+            /tmp/day2-cargo-verification-warm.jsonl
+            /tmp/day2-cargo-compiler-fields.jsonl
             Cargo.lock
           if-no-files-found: error
