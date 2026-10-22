@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "c75bd5534559b91a9c0177f9f11c21e0",
+        "prefix": "act"
+      },
+      "table": "actor_states",
+      "roc_type": "Models.ActorState",
+      "retired": false
+    }
+  ]
+}

@@ -112,8 +112,16 @@ The network policy denies everything by default and allows only GFE health/proxy
 ranges to port 8080, kube-dns, the GKE metadata server (Workload Identity), and
 public IPv4 egress (including IAP's public signing keys); cluster ranges are
 excluded. Kubernetes NetworkPolicy cannot express an FQDN allowlist;
-companies needing narrower external egress must supply a controlled proxy. No
-pod service account token or cloud IAM role is granted to the runtime.
+companies needing narrower external egress must supply a controlled proxy. The
+runtime receives no Google identity unless explicitly selected. `runtime_identity`
+provides a basic keyless GKE workload identity and optional token-creator grants
+on only fully qualified, named service-account targets; it cannot be combined
+with `app_calls` or `oauth_runtime` and grants no platform readiness, secret, or
+app-call capability. The selected Google `serviceAccountTokenCreator` role also
+permits signing as each named target, not just access-token creation; review
+that authority explicitly. It is never granted project-wide. `image_pushers`
+grants Artifact Registry writer only on this app's image repository; it does
+not grant workload deployment or state access.
 
 ## Installation security origin
 
@@ -372,6 +380,13 @@ Run it on the target node pool with `kubectl apply -f PRIVATE_PROBE_FILE`, inspe
 its logs and require both sandbox qualification and cgroup preflight to pass.
 Landlock ABI 3, seccomp, cgroup v2 and private cgroup namespaces are mandatory.
 The reference cannot promise every current GKE kernel supplies them.
+
+Pass the operator-reviewed native Linux `Requirements` object as
+`security_requirements` when selecting evidence-bound security admission. The
+root checks its artifact and Linux profile, then preserves the object unchanged;
+native admission checks its complete evidence, platform inventory and executing
+supervisor/sandbox. A mocked Terraform plan is not qualification. Null keeps
+existing installations unchanged and does not claim security approval.
 
 Fill workload tfvars with the image digest, artifact ID, hosted domain, initial
 principals and the **complete authority policy for that artifact**. The template

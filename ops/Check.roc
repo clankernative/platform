@@ -51,6 +51,12 @@ Check :: [].{
 			samples : List(Sample)
 			samples = Json.parse(generated).map_err(|_| "invalid generated cases")?
 			for _sample in samples {
+				setup_raw = Capability.call!("dev-setups", "{}", host!)?
+				setups : List(Step)
+				setups = Json.parse(setup_raw).map_err(|_| "invalid declared verification setup")?
+				for setup in setups {
+					step!(setup, host!)?
+				}
 				prepared = Capability.call!("dev-prepare-sample", "{}", host!)?
 				step : Step
 				step = Json.parse(prepared).map_err(|_| "invalid prepared verification input")?

@@ -23,6 +23,11 @@ pub const MAX_CAPTURE_REQUEST_BYTES: u64 = 32 * 1024;
 pub const MAX_CAPTURE_RESPONSE_BYTES: u64 = (MAX_RESPONSE_BYTES + 4 * 16 * 1024 + 1) as u64;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_USER_RESPONSE_BYTES: usize = 16 * 1024;
+// Whole read reservation: metadata + identity/IAM/OAuth exchanges and the
+// directory response. Delegated auth is the largest path (four bounded
+// responses); reserve one extra byte for the oversize probe on the last read.
+pub const MAX_USER_LOOKUP_RESPONSE_BYTES: u64 = (4 * MAX_USER_RESPONSE_BYTES + 1) as u64;
+pub const MAX_USER_LOOKUP_REQUEST_BYTES: u64 = MAX_CAPTURE_REQUEST_BYTES;
 pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
 pub const USER_READ_SCOPE: &str = "https://www.googleapis.com/auth/admin.directory.user.readonly";
 pub const ORG_UNIT_READ_SCOPE: &str =
@@ -36,6 +41,7 @@ const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 pub enum CaptureMode {
     Membership,
     Hierarchy,
+    UserPath,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +87,7 @@ impl AuthenticationPlan {
         match mode {
             CaptureMode::Membership => vec![USER_READ_SCOPE, ORG_UNIT_READ_SCOPE],
             CaptureMode::Hierarchy => vec![ORG_UNIT_READ_SCOPE],
+            CaptureMode::UserPath => vec![USER_READ_SCOPE],
         }
     }
 
@@ -95,6 +102,32 @@ pub struct CaptureInput {
     pub connection_id: String,
     pub actor: String,
     pub captured_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserPath {
+    pub customer_id: String,
+    pub actor: String,
+    pub user_path: String,
+    pub captured_at: i64,
+}
+
+pub fn collect_user_path(
+    input: CaptureInput,
+    port: &mut dyn DirectoryReadPort,
+) -> Result<UserPath> {
+    validate_capture_input(&input)?;
+    let user_path = port
+        .user_org_unit_path(&input.actor)
+        .map_err(|_| anyhow::anyhow!("workspace_directory_user_lookup_failed"))?;
+    validate_path(&user_path)?;
+    Ok(UserPath {
+        customer_id: input.customer_id,
+        actor: input.actor,
+        user_path,
+        captured_at: input.captured_at,
+    })
 }
 
 /// Explicit ports for the reviewed provider calls. Implementations own HTTP,
@@ -251,6 +284,7 @@ fn collect_capture(
             CaptureKind::Membership { user_path }
         }
         CaptureMode::Hierarchy => CaptureKind::Hierarchy {},
+        CaptureMode::UserPath => anyhow::bail!("workspace_directory_mode_invalid"),
     };
     let user_path = kind.user_path();
     let result = port
@@ -1908,11 +1942,19 @@ mod tests {
     fn direct_and_delegated_http_adapters_use_fixed_google_routes_and_real_response_shapes()
     -> Result<()> {
         use std::{net::TcpListener, thread};
-        for (delegated, cached) in [(false, false), (true, false), (false, true)] {
+        for (delegated, cached, user_only) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
             let listener = TcpListener::bind(("127.0.0.1", 0))?;
             let origin = format!("http://{}", listener.local_addr()?);
             let server = thread::spawn(move || -> Result<()> {
-                let count = if delegated {
+                let count = if user_only {
+                    if delegated { 4 } else { 3 }
+                } else if delegated {
                     5
                 } else if cached {
                     3
@@ -1940,10 +1982,13 @@ mod tests {
                             .context("request body missing")?
                             .1;
                         let input: serde_json::Value = serde_json::from_str(body)?;
+                        let scopes = if user_only {
+                            serde_json::json!([USER_READ_SCOPE])
+                        } else {
+                            serde_json::json!([USER_READ_SCOPE, ORG_UNIT_READ_SCOPE])
+                        };
                         ensure!(
-                            input["scope"]
-                                == serde_json::json!([USER_READ_SCOPE, ORG_UNIT_READ_SCOPE])
-                                && input["lifetime"] == "3600s",
+                            input["scope"] == scopes && input["lifetime"] == "3600s",
                             "direct scopes invalid"
                         );
                         (r#"{"accessToken":"directory-token","expireTime":"2030-01-01T00:00:00Z"}"#.to_owned(), false)
@@ -1967,7 +2012,11 @@ mod tests {
                                 && claims["iat"] == 100
                                 && claims["exp"] == 400
                                 && claims["scope"]
-                                    == format!("{USER_READ_SCOPE} {ORG_UNIT_READ_SCOPE}"),
+                                    == if user_only {
+                                        USER_READ_SCOPE.to_owned()
+                                    } else {
+                                        format!("{USER_READ_SCOPE} {ORG_UNIT_READ_SCOPE}")
+                                    },
                             "delegated claims invalid"
                         );
                         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1997,6 +2046,7 @@ mod tests {
                         );
                         (r#"{"customerId":"customer-1","orgUnitPath":"/Engineering","primaryEmail":"alias@example.test","kind":"admin#directory#user"}"#.to_owned(), false)
                     } else if request.contains("/customer/customer-1/orgunits?") {
+                        ensure!(!user_only, "user-only lookup attempted a hierarchy read");
                         let target = request
                             .lines()
                             .next()
@@ -2037,6 +2087,23 @@ mod tests {
                     service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
                 }
             };
+            if user_only {
+                let mut port = NativeDirectoryPort::transport_fixture(
+                    plan,
+                    "customer-1",
+                    100,
+                    CaptureMode::UserPath,
+                    [origin.as_str(); 4],
+                )?;
+                let observed = collect_user_path(capture_input("alice@example.test"), &mut port);
+                server.join().expect("fixture server panicked")?;
+                let observed = observed?;
+                assert_eq!(observed.actor, "alice@example.test");
+                assert_eq!(observed.customer_id, "customer-1");
+                assert_eq!(observed.user_path, "/Engineering");
+                assert_eq!(observed.captured_at, 100);
+                continue;
+            }
             let directory = tempfile::tempdir()?;
             let mut db = open_store(&directory.path().join("directory.sqlite"))?;
             if cached {
@@ -2214,6 +2281,73 @@ mod tests {
         );
         assert!(ensure_store_within_bound(&db, MAX_STORE_BYTES).is_ok());
         Ok(())
+    }
+
+    #[test]
+    fn user_path_is_a_single_user_read_and_never_requires_hierarchy() -> Result<()> {
+        struct UserOnly {
+            path: Result<String>,
+            lookups: usize,
+            hierarchies: usize,
+        }
+
+        impl DirectoryReadPort for UserOnly {
+            fn user_org_unit_path(&mut self, _actor: &str) -> Result<String> {
+                self.lookups += 1;
+                match &self.path {
+                    Ok(path) => Ok(path.clone()),
+                    Err(_) => anyhow::bail!("provider details must not escape"),
+                }
+            }
+
+            fn list_org_units(&mut self) -> Result<ProviderPage> {
+                self.hierarchies += 1;
+                anyhow::bail!("hierarchy must not be fetched")
+            }
+        }
+
+        let input = CaptureInput {
+            customer_id: "customer-1".into(),
+            connection_id: "directory@3".into(),
+            actor: "person@example.test".into(),
+            captured_at: 100,
+        };
+        let mut port = UserOnly {
+            path: Ok("/".into()),
+            lookups: 0,
+            hierarchies: 0,
+        };
+        let observed = collect_user_path(input.clone(), &mut port)?;
+        assert_eq!(observed.user_path, "/");
+        assert_eq!((port.lookups, port.hierarchies), (1, 0));
+
+        let mut port = UserOnly {
+            path: Err(anyhow::anyhow!("secret provider response")),
+            lookups: 0,
+            hierarchies: 0,
+        };
+        let error = collect_user_path(input, &mut port).unwrap_err().to_string();
+        assert_eq!(error, "workspace_directory_user_lookup_failed");
+        assert_eq!((port.lookups, port.hierarchies), (1, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn user_path_reserves_whole_authentication_envelope_and_user_only_scope() {
+        assert_eq!(MAX_USER_LOOKUP_REQUEST_BYTES, MAX_CAPTURE_REQUEST_BYTES);
+        assert_eq!(
+            MAX_USER_LOOKUP_RESPONSE_BYTES,
+            (4 * MAX_USER_RESPONSE_BYTES + 1) as u64
+        );
+        let direct = AuthenticationPlan::DirectServiceAccount {
+            service_account: "svc@example.test".into(),
+        };
+        let delegated = AuthenticationPlan::DomainWideDelegation {
+            service_account: "svc@example.test".into(),
+            delegated_admin: "admin@example.test".into(),
+        };
+        assert_eq!(direct.scopes(CaptureMode::UserPath), [USER_READ_SCOPE]);
+        assert_eq!(delegated.scopes(CaptureMode::UserPath), [USER_READ_SCOPE]);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use super::{
     credential_material::CredentialMaterial,
-    firestore::{self, EpochObservation, EpochReply, Names, Port, Sample},
+    firestore::Sample,
     identity_protocol,
     native_clock::NativeAcquisition,
     native_enrollment::EnrolledRoleStage,
@@ -20,14 +20,16 @@ use day2_capabilities::{
         bootstrap::{InitialBootstrapPolicy, NativeRole, WorkloadKind},
     },
 };
-use std::{collections::BTreeMap, io::Read, time::Duration};
+use std::{collections::BTreeMap, io::Read};
 use zeroize::Zeroizing;
 
 mod retained;
-pub(crate) use retained::RetainedEpochReads;
-mod writer;
-pub(in crate::security_epoch) use writer::ControllerBorrow;
-pub(crate) use writer::ControllerPort;
+pub(in crate::security_epoch) use retained::ControllerBorrow;
+pub(in crate::security_epoch) use retained::RefusalGuard;
+pub(in crate::security_epoch) use retained::StorageMetadataRead;
+pub(crate) use retained::{
+    ControllerEpochReads, ControllerPort, ProviderEpochReads, RetainedEpochReads,
+};
 
 pub(crate) struct AuthenticatedReads<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,
@@ -36,6 +38,8 @@ pub(crate) struct AuthenticatedReads<'stage, 'role> {
     store: EpochStore,
     http: NativeHttp,
     credential: CredentialMaterial,
+    source: CredentialMaterial,
+    kubernetes: CredentialMaterial,
     acquisition: NativeAcquisition,
     process: NativeProcessObservation,
     selection: Digest,
@@ -65,8 +69,13 @@ impl RoleGuard<'_, '_, '_> {
     ) -> Result<Vec<u8>> {
         self.check()?;
         let result = http.request(route, authorization, body, acquisition);
-        self.check()?;
-        result
+        // Always retain the original postcheck and its terminal refusal. If
+        // BOTH failed, report the first request failure, including its bounded
+        // request-window DATA, rather than the later spent-stage consequence.
+        let checked = self.check();
+        let bytes = result?;
+        checked?;
+        Ok(bytes)
     }
 }
 
@@ -268,6 +277,8 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             store: selection.clone(),
             http,
             credential,
+            source,
+            kubernetes: api,
             acquisition,
             process,
             selection: Digest::of(selection)?,
@@ -276,55 +287,6 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         reads.process.check(&mut reads.acquisition)?;
         reads.stage.check_selection(policy, selection, purpose)?;
         Ok(reads)
-    }
-
-    pub(super) fn read(
-        &mut self,
-        selection: &EpochStore,
-        names: &Names,
-    ) -> Result<EpochObservation> {
-        let result = (|| {
-            ensure!(
-                self.valid && self.selection == Digest::of(selection)?,
-                "epoch_native_read_selection_changed"
-            );
-            ensure!(
-                names.matches_selection(selection),
-                "epoch_native_read_names_selection_changed"
-            );
-            let budget = self.acquisition.budget()?;
-            firestore::read_with_budget(&mut ReadPort { owner: self }, names, budget)
-        })();
-        if result.is_err() {
-            self.valid = false;
-            self.acquisition.refuse();
-        }
-        result
-    }
-    pub(super) fn read_slot(
-        &mut self,
-        selection: &EpochStore,
-        core: &super::control_slot::LogicalCore,
-    ) -> Result<super::control_slot_io::SlotObservation> {
-        let result = (|| {
-            ensure!(
-                self.selection == Digest::of(selection)?,
-                "epoch_native_read_selection_changed"
-            );
-            self.sample()?;
-            let budget = self.acquisition.budget()?;
-            super::control_slot_io::read_with_budget(
-                selection,
-                core,
-                &mut ReadPort { owner: self },
-                budget,
-            )
-        })();
-        if result.is_err() {
-            self.valid = false;
-            self.acquisition.refuse();
-        }
-        result
     }
 
     fn sample(&mut self) -> Result<Sample> {
@@ -343,81 +305,5 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             self.acquisition.refuse();
         }
         result
-    }
-
-    fn post(
-        &mut self,
-        url: &str,
-        body: &[u8],
-        timeout: Duration,
-        max_bytes: usize,
-    ) -> Result<EpochReply> {
-        let result = (|| {
-            ensure!(
-                self.valid
-                    && max_bytes == 65_536
-                    && !timeout.is_zero()
-                    && timeout <= Duration::from_secs(5),
-                "epoch_native_read_budget"
-            );
-            // Only the two fixed read-only transaction routes exist here. This
-            // adapter cannot dispatch the counter writer or construct its permit.
-            let route = if url.ends_with("/documents:batchGet") {
-                Route::EpochRead
-            } else if url.ends_with("/documents:rollback") {
-                Route::EpochRollback
-            } else {
-                anyhow::bail!("epoch_native_read_write_or_route_refused")
-            };
-            ensure!(
-                self.http.matches(&route, url)?,
-                "epoch_native_read_route_mismatch"
-            );
-            self.stage
-                .check_selection(&self.policy, &self.store, self.purpose)?;
-            self.process.check(&mut self.acquisition)?;
-            let bytes = self.http.request_with_ceiling(
-                route,
-                &self.credential.authorization()?,
-                Some(body),
-                &mut self.acquisition,
-                timeout,
-            )?;
-            self.process.check(&mut self.acquisition)?;
-            self.stage
-                .check_selection(&self.policy, &self.store, self.purpose)?;
-            Ok(EpochReply {
-                status: 200,
-                body: bytes,
-            })
-        })();
-        if result.is_err() {
-            self.valid = false;
-            self.acquisition.refuse();
-        }
-        result
-    }
-}
-
-/// This short-lived I/O borrow has no constructor outside the owning read
-/// method and cannot outlive the opaque acquisition. The owning material does
-/// not implement callback/transport traits or gain their default APIs.
-struct ReadPort<'a, 'stage, 'role> {
-    owner: &'a mut AuthenticatedReads<'stage, 'role>,
-}
-
-impl Port for ReadPort<'_, '_, '_> {
-    fn sample(&mut self) -> Result<Sample> {
-        self.owner.sample()
-    }
-
-    fn post(
-        &mut self,
-        url: &str,
-        body: &[u8],
-        timeout: Duration,
-        max_bytes: usize,
-    ) -> Result<EpochReply> {
-        self.owner.post(url, body, timeout, max_bytes)
     }
 }

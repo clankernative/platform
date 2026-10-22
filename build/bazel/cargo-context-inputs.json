@@ -10,7 +10,7 @@
     "crates/day2-control/Cargo.toml": "sha256:f8080ed989e49887730d8b35f70340e2b7d75cce4de344dfe36fdff9c9db4b86",
     "crates/day2-kernel/Cargo.toml": "sha256:98e6408b79530d7e32318f68d5b2bfe604306c54d2a2008782fc9b5ac25dcb69",
     "crates/day2-ops/Cargo.toml": "sha256:fc4a9ccfbd1cb32b9b579329c258e30805e15c82a523d467c34a8ead5fba4593",
-    "crates/day2-sandbox/Cargo.toml": "sha256:406d79e4c203c2d60af9bf050c42bf9df1ef3af295c86dd4cbc109f6586f75c4",
+    "crates/day2-sandbox/Cargo.toml": "sha256:41d0856a9386b1e0914e14b7ff87a171df6f5b350eeca3508e19ad3df0a4cba5",
     "crates/day2/Cargo.toml": "sha256:8559b006c1f10df9880752de1379ffe86ab2f25af4e3803d3bef24e453e9be06",
     "crates/durable-temporal/Cargo.toml": "sha256:ecb59eb5f8426f40ed90c1e136e7678eab40536917242d7f940167e0b9cbc174",
     "crates/worker/Cargo.toml": "sha256:b8e2f551cc92785726ac6133da2ef8afdd397b7c1a05ec4acf47f070f812ee67",

@@ -244,7 +244,7 @@ impl TestCampaign {
                 12600
             }
             "control" => 3600,
-            "isolated-build" | "installation-build" => 1800,
+            "isolated-build" | "installation-build" | "isolated-build-probe" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
         };
         ensure!(
@@ -743,6 +743,9 @@ fn fixture_build(
         "verification-actors" => {
             FixtureBuild::plain(root, "fixtures/verification-actor-conformance")
         }
+        "verification-setup" => {
+            FixtureBuild::plain(root, "fixtures/verification-setup-conformance")
+        }
         "owned-probe" => FixtureBuild::overlay(
             root,
             "fixtures/row-authority-web-conformance",
@@ -796,6 +799,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare-join"
         | "verify-compose"
         | "verify-mac"
+        | "verify-private-build-probe"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -951,10 +955,10 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
     }
     sources.extend(crate::bazel::configuration(&root)?);
     let executable = std::env::current_exe()?.canonicalize()?;
-    // Capture before rebuilding can atomically replace this installed pathname.
-    // A new producer must not relabel a previously running verifier's identity.
+    // Compare the actual configured producer without installing over the
+    // running inode. A mismatch refuses cache reuse and preserves the verifier
+    // needed for fresh native artifact admission.
     let executing = digest(&fs::read(&executable)?);
-    crate::bazel::programs(&root, &["xtask"])?;
     let compiled = crate::bazel::configured_output(&root, "//crates/xtask:xtask")?;
     ensure!(
         executing == digest(&fs::read(&compiled)?),
@@ -1168,6 +1172,14 @@ fn test_selection(suite: &str) -> Result<TestSelection> {
                 Vec::new(),
                 Vec::new(),
             ),
+            "isolated-build-probe" => (
+                vec!["day2-control"],
+                false,
+                vec!["control_integration"],
+                vec![
+                    "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
+                ],
+            ),
             "isolated-build" => (
                 full,
                 false,
@@ -1306,7 +1318,13 @@ struct PrivateBuildInputs {
 }
 
 fn prepare_private_build_inputs(root: &Path, suite: &str) -> Result<Option<PrivateBuildInputs>> {
-    if !["isolated-build", "installation-build"].contains(&suite) {
+    if ![
+        "isolated-build",
+        "installation-build",
+        "isolated-build-probe",
+    ]
+    .contains(&suite)
+    {
         return Ok(None);
     }
     let bazel = crate::bazel::standalone(root)?;
@@ -1463,6 +1481,10 @@ fn configure_tests(
             "verification-actors",
             "DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT",
         ),
+        (
+            "verification-setup",
+            "DAY2_TEST_VERIFICATION_SETUP_ARTIFACT",
+        ),
     ] {
         command.env_remove(variable);
         if let Some(path) = fixtures.get(fixture) {
@@ -1523,6 +1545,7 @@ fn receipt(
         let reports_probe = artifact("reports-probe")?;
         let repeated_field = artifact("repeated-field")?;
         let verification_actors = artifact("verification-actors")?;
+        let verification_setup = artifact("verification-setup")?;
         let artifact_id =
             |path: &Path| format!("sha256:{}", path.file_name().unwrap().to_string_lossy());
         let mut report = serde_json::json!({
@@ -1578,6 +1601,10 @@ fn receipt(
         report.insert(
             "verification_actors".into(),
             serde_json::Value::String(artifact_id(&verification_actors)),
+        );
+        report.insert(
+            "verification_setup".into(),
+            serde_json::Value::String(artifact_id(&verification_setup)),
         );
         report.insert(
             "input_snapshot".into(),
@@ -1671,6 +1698,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-relational",
             "build-lifecycle",
             "build-verification-actors",
+            "build-verification-setup",
             "build-collection",
             "build-relational-next",
             "test-isolated-build",
@@ -2112,6 +2140,7 @@ mod tests {
             "build-relational",
             "build-lifecycle",
             "build-verification-actors",
+            "build-verification-setup",
             "build-collection",
             "build-relational-next",
             "build-http",

@@ -145,6 +145,7 @@ providers! {
         world: "workspace_directory.simulated.sqlite",
         actions: {
             WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read),
+            WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read),
             WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read),
             WorkspaceDirectoryPage => "workspace_directory.page.v1" (read),
         },

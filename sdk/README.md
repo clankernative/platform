@@ -59,8 +59,9 @@ The requirements also appear in generated docs and OpenAPI. See the
 
 Chain `.observes("workspace_directory.hierarchy.v1")` onto a command or query
 definition to declare a read dependency for disposable verification. Declare
-`workspace_directory.page.v1` when paging the capture, or
-`workspace_directory.capture.v1` when establishing membership. Build verification
+`workspace_directory.page.v1` when paging the capture,
+`workspace_directory.user_path.v1` for an independent current-actor user lookup,
+or `workspace_directory.capture.v1` for the combined user/hierarchy capture. Build verification
 and local development derive synthetic Directory bindings from these declarations,
 independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See

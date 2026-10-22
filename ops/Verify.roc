@@ -62,6 +62,7 @@ Verify :: [].{
 			"relational",
 			"lifecycle",
 			"verification-actors",
+			"verification-setup",
 			"relational-next",
 			"collection",
 			"owned",
@@ -144,11 +145,22 @@ Verify :: [].{
 		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
 	}
 
+	# One real private build for diagnosis. This publishes no full verification receipt.
+	private_build_probe! : (Str => Try(Str, Str)) => Try(Str, Str)
+	private_build_probe! = |host!| {
+		_ = Capability.call!("verify-cli", "{}", host!)?
+		Capability.call!(
+			"verify-tests",
+			Json.to_str({ suite: "isolated-build-probe", budget_seconds: 1800.U64 }),
+			host!,
+		)
+	}
+
 	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
 	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
 	mac! = |host!| {
 		_ = Capability.call!("verify-cli", "{}", host!)?
-		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar", "verification-setup"] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
 		_ = Capability.call!("verify-test-build", "{}", host!)?

@@ -36,6 +36,14 @@ bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration comma
 bazel run //crates/xtask:xtask -- build-rust-test //crates/day2:unit_lib
 ```
 
+For a focused Apple Silicon private-builder diagnosis after bootstrap, use
+`bazel run //crates/xtask:xtask -- verify-private-build-probe`. The Roc recipe
+prepares the normal CLI and executes the existing real isolated-build case in
+its current integration harness. It uses the ordinary pinned offline builder,
+sandbox and admission, and publishes no full verification receipt. Compiler
+failure messages expose only fixed observations and bounded numeric child
+statuses; free-form app/SDK diagnostics remain protected local evidence.
+
 The second command only compiles and prints the admitted executable path. It
 runs no cases. The first accepts declared test labels and bounded libtest
 filters/options. It does not prepare missing native fixtures or turn ignored
@@ -57,8 +65,10 @@ record's source, name, type and test identity before output installation.
 
 Development workspace crates use optimization level 1; dependencies and build
 tools use level 2, with assertions and overflow checks enabled and debug info
-disabled. Linux CI preserves the existing test codegen partitioning and disabled
-LTO. Linux selects the existing GNU binutils linker instead of Bazel's
+disabled. Native non-incremental builds leave codegen partitioning at the
+compiler default; Linux CI applies its existing explicit256 and disabled-LTO
+test settings to target units while build tools retain their own defaults.
+Debug-disabled compilation strips debug information as before. Linux selects the existing GNU binutils linker instead of Bazel's
 default deprecated gold selection. Release programs and native worker archives retain the previous release
 panic/profile policy; build tools keep their separate build-override profile.
 The distribution image additionally strips executable symbols as before.
@@ -81,7 +91,9 @@ changed, missing or extra input rather than silently using stale feature data.
 Refreshing checksums alone does not establish that a feature model is correct.
 
 The private Mac builder receives only the pinned standalone Bazel binary,
-byte/mode-pinned source inputs and prefetched repositories. Its ordinary
+byte/mode-pinned source inputs and prefetched repositories. The selected system Xcode bundle or CommandLineTools directory is resolved through
+the fixed OS selector and validated before granting its trusted dependency-builder
+read/execute access; other application paths remain refused. Its ordinary
 filesystem/network confinement and native admission still apply. It receives
 neither operator build caches nor credentials; no Linux production builder port
 is introduced. Preparation omits Bazel's generated output-base bridge and copies
@@ -95,7 +107,12 @@ concurrently changing filesystem.
 ## CI cache and measurements
 
 The commit-pinned setup-bazel action persists Bazel action/repository caches in
-GitHub Actions storage. Each runner restores its OS/architecture partition into
+GitHub Actions storage. Compiled-output snapshots use exact checkout commit keys with
+same-role and OS/architecture fallbacks, so a Rust-only edit can save new actions
+without discarding reusable prior actions. Valid compiled actions may be saved
+after a later fresh-runtime failure, while cancelled runs do not save them.
+Only the native preparation builders
+and Mac job write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
 the local content-addressed disk cache. Trusted main/merge-group runs may save
 shared outputs. PRs can read trusted base caches and save only their own
 GitHub-isolated pull-request cache scope; they cannot seed the main branch. There is no new cache server, bucket

@@ -47,9 +47,7 @@ def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], ow
     for program in program_data:
         env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "build-out/bin/" + program.rsplit(":", 1)[-1]
     attributes = _attributes(crate_name, internal_deps, linux_deps, own_library, True, env)
-    # Keep current Linux harness LLVM partitioning and no-LTO memory behavior.
-    attributes["rustc_flags"] = attributes["rustc_flags"] + ["-Cpanic=unwind"] + select({
-        "@platforms//os:linux": ["-Ccodegen-units=256", "-Clto=off"],
-        "//conditions:default": [],
-    })
+    # Harnesses unwind. The selected CI target profile, not the host OS alone,
+    # supplies Linux LLVM partitioning/LTO overrides in the reviewed toolchain.
+    attributes["rustc_flags"] = attributes["rustc_flags"] + ["-Cpanic=unwind"]
     rust_test(name = name, data = program_data, size = "large", **dict(attributes, **kwargs))

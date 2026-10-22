@@ -1058,6 +1058,8 @@ mod tests {
             errors: Vec::new(),
             required_all_rows: Vec::new(),
             observations: Vec::new(),
+            verification_setup: Vec::new(),
+            verification_delegation: Vec::new(),
         };
         let mut command_intent = intent;
         command_intent.target.operation = "gallery.save".into();
@@ -1073,6 +1075,8 @@ mod tests {
             errors: vec!["gallery:invalid_item".into()],
             required_all_rows: Vec::new(),
             observations: Vec::new(),
+            verification_setup: Vec::new(),
+            verification_delegation: Vec::new(),
         };
         let error = crate::app_contract::Failure {
             code: "gallery:invalid_item".into(),
@@ -1081,6 +1085,7 @@ mod tests {
             operation: command.intent.target.clone(),
             additional_operations: Vec::new(),
             verification_actors: Vec::new(),
+            verification_delegations: Vec::new(),
         };
         let template_bytes =
             b"<form data-command=\"gallery.save\"><input name=\"limit\" type=\"number\"></form>";
@@ -1142,6 +1147,8 @@ mod tests {
                     output_type: "Output".into(),
                     live: true,
                     live_refresh_ms: 0,
+                    preparation: vec![],
+                    prepare_failure_operation: String::new(),
                     failure_page: String::new(),
                 },
                 Page {
@@ -1155,6 +1162,8 @@ mod tests {
                     output_type: "Output".into(),
                     live: false,
                     live_refresh_ms: 0,
+                    preparation: vec![],
+                    prepare_failure_operation: String::new(),
                     failure_page: String::new(),
                 },
             ],
