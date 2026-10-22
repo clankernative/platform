@@ -6,11 +6,13 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus,
 };
 use nix::libc;
+use nix::poll::ppoll;
 use nix::sys::{
     prctl,
     resource::{Resource, setrlimit},
     signal::Signal,
     stat::{SFlag, fstat, makedev},
+    time::TimeSpec,
 };
 use nix::unistd::{close, getpid, getppid};
 use seccompiler::{
@@ -23,8 +25,10 @@ use std::{
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 
+use crate::handoff::{ExecFailure, ExecHandoff};
 use crate::{OPEN_FILES, profile_for_limits};
 
 fn runtime_files() -> Result<BTreeSet<PathBuf>> {
@@ -216,6 +220,7 @@ fn syscall_filter() -> Result<BpfProgram> {
 }
 
 pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -> Result<()> {
+    let origin = Instant::now();
     ensure!(
         parent >= 1 && parent <= i32::MAX as u32,
         "invalid supervisor identity"
@@ -225,6 +230,7 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
         "supervisor exited before sandbox setup"
     );
     let profile = profile_for_limits(memory_bytes, cpu_seconds)?;
+    let mut handoff = ExecHandoff::new(profile, origin)?;
     prctl::set_pdeathsig(Some(Signal::SIGKILL))?;
     ensure!(
         getppid().as_raw() == parent as i32,
@@ -286,10 +292,36 @@ pub fn launch(worker: &Path, parent: u32, memory_bytes: u64, cpu_seconds: u64) -
     if let Some(argument) = profile.worker_argument() {
         command.arg(argument);
     }
-    let error = command
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .exec();
-    Err(error).with_context(|| format!("execute isolated worker (pid {})", getpid()))
+    command.env_clear().env("LANG", "C").env("LC_ALL", "C");
+    loop {
+        handoff.before_exec(Instant::now())?;
+        // Success replaces this exact process and never returns. ETXTBSY is a
+        // pre-execution refusal: a concurrent fork can still hold an inherited
+        // writer even after the supervisor closed its own temporary-file fd.
+        // Keep this child, image, pipes and one original wall ceiling; never
+        // replay a worker/frame or wait after any other execution failure.
+        let error = command.exec();
+        let failure = if error.raw_os_error() == Some(libc::ETXTBSY) {
+            ExecFailure::TextBusy
+        } else {
+            ExecFailure::Other
+        };
+        let first = handoff
+            .failed_exec(failure, Instant::now())
+            .map_err(|refusal| {
+                anyhow::Error::new(error)
+                    .context(refusal)
+                    .context(format!("execute isolated worker (pid {})", getpid()))
+            })?;
+        if first {
+            // One fixed observation only. The supervisor still discards child
+            // stderr; controlled launcher tests use it as a readiness barrier.
+            eprintln!("day2 sandbox waiting for executable writers");
+        }
+        let duration = handoff.before_poll(Instant::now())?;
+        match ppoll(&mut [], Some(TimeSpec::from(duration)), None) {
+            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(error).context("wait for executable handoff"),
+        }
+    }
 }

@@ -18,6 +18,34 @@ const MAX_BYTES: usize = 65_536;
 const COMPUTE_INSTANCE_FIELDS: &str =
     "id,name,selfLink,status,disks(source,deviceName,type,mode,boot)";
 
+/// Failure-only DATA: [last sampled elapsed microseconds, selected request
+/// timeout microseconds, reqwest timeout classification]. Both time values
+/// already exist before send; this adds no clock read or deadline change.
+/// A timeout is not proof of stage expiry, transmission or a remote no-effect.
+/// The compact fixed tuple keeps even a maximal Controller record below its
+/// unchanged byte bound. No URL, credential, body or reqwest error is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(in crate::security_epoch) struct FailedRequestWindow(Option<u32>, u32, bool);
+
+impl std::fmt::Display for FailedRequestWindow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native request did not complete")
+    }
+}
+
+impl std::error::Error for FailedRequestWindow {}
+
+impl FailedRequestWindow {
+    pub(in crate::security_epoch) fn observe(error: &anyhow::Error) -> Option<Self> {
+        error.downcast_ref::<Self>().copied()
+    }
+
+    #[cfg(test)]
+    pub(in crate::security_epoch) fn maximal_fixture(timeout: bool) -> Self {
+        Self(Some(u32::MAX), 5_000_000, timeout)
+    }
+}
+
 pub(super) enum Route<'a> {
     TokenReview,
     Namespace(&'a str),
@@ -347,6 +375,8 @@ impl NativeHttp {
                 );
             }
             let remaining = request_timeout(acquisition.remaining()?, ceiling)?;
+            let sampled_us = acquisition.last_checked_elapsed_micros();
+            let limit_us = u32::try_from(remaining.as_micros())?;
             let client: &Client = if kube { &self.kubernetes } else { &self.google };
             let mut request = client
                 .request(method, address)
@@ -357,9 +387,14 @@ impl NativeHttp {
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(body.to_vec());
             }
-            let response = request
-                .send()
-                .map_err(|_| anyhow::anyhow!("epoch_native_transport_unavailable"))?;
+            let response = request.send().map_err(|error| {
+                anyhow::Error::new(FailedRequestWindow(
+                    sampled_us,
+                    limit_us,
+                    error.is_timeout(),
+                ))
+                .context("epoch_native_transport_unavailable")
+            })?;
             acquisition.remaining()?;
             ensure!(
                 response.status().is_success()

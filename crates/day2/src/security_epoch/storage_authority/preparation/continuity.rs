@@ -9,6 +9,8 @@ use super::{
 use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
+    authenticated_reads::{ControllerEpochReads, ProviderEpochReads},
+    controller::bootstrap_timing::BootstrapTiming,
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
@@ -328,6 +330,34 @@ impl<'file> PendingPhysicalFilePhase<'file> {
 }
 
 impl<'file> PendingPreparedFilePhase<'file> {
+    pub(in crate::security_epoch::storage_authority) fn acquire_authenticated<'role>(
+        self,
+        stage: EnrolledRoleStage<'role>,
+        authentication: ProviderEpochReads,
+        trace: &BootstrapTiming,
+    ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
+        let guard = authentication.arm_refusal()?;
+        self.disposition.check()?;
+        let phase = self
+            .volume
+            .begin_authenticated(stage, authentication, trace)?;
+        let mut current = CurrentPreparedFilePhase {
+            phase,
+            selection: self.selection,
+            directory: self.directory,
+            anchor: self.anchor,
+            file: self.file,
+            identity: self.identity,
+            layout: self.layout,
+            process: self.process,
+            thread: self.thread,
+            disposition: self.disposition,
+        };
+        current.check()?;
+        guard.complete()?;
+        Ok(current)
+    }
+
     pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
         self,
         stage: EnrolledRoleStage<'role>,
@@ -371,6 +401,14 @@ impl<'file> PendingPreparedFilePhase<'file> {
 }
 
 impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
+    pub(in crate::security_epoch::storage_authority) fn check_authenticated_reads(
+        &mut self,
+        reads: &ControllerEpochReads,
+    ) -> Result<()> {
+        self.check()?;
+        self.phase.check_authenticated_reads(reads)
+    }
+
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.disposition.check()?;

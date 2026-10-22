@@ -3,9 +3,13 @@
 //! creates the initial file nor turns a JSON reply into a P3/writer permission.
 
 use super::{DirectoryIdentity, directory_identity, persistent_disk::PersistentDiskSelection};
+use crate::security_epoch::controller::bootstrap_timing::BootstrapTiming;
 use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
 use crate::security_epoch::controller::preparation_timing::{Operation, Timings};
 use crate::security_epoch::{
+    authenticated_reads::{
+        ControllerEpochReads, ProviderEpochReads, RefusalGuard, StorageMetadataRead,
+    },
     credential_material::CredentialMaterial,
     identity_protocol,
     native_clock::NativeAcquisition,
@@ -27,12 +31,22 @@ struct ProviderReader<'role> {
     policy: InitialBootstrapPolicy,
     store: EpochStore,
     profile: PersistentDiskSelection,
+    authentication: ProviderAuthentication,
+    acquisition: NativeAcquisition,
+    timings: Timings,
+    bootstrap: BootstrapTiming,
+}
+
+enum ProviderAuthentication {
+    Acquired(Box<AcquiredProviderAuthentication>),
+    Retained(ProviderEpochReads),
+}
+
+struct AcquiredProviderAuthentication {
     http: NativeHttp,
     source: CredentialMaterial,
     controller: CredentialMaterial,
     kubernetes: CredentialMaterial,
-    acquisition: NativeAcquisition,
-    timings: Timings,
 }
 
 pub(super) struct NativeVolumeObservation<'role> {
@@ -233,57 +247,149 @@ impl<'role> ProviderReader<'role> {
             policy: policy.clone(),
             store: store.clone(),
             profile: selected,
-            http,
-            source,
-            controller,
-            kubernetes,
+            authentication: ProviderAuthentication::Acquired(Box::new(
+                AcquiredProviderAuthentication {
+                    http,
+                    source,
+                    controller,
+                    kubernetes,
+                },
+            )),
             acquisition,
             timings,
+            bootstrap: BootstrapTiming::disabled(),
         })
     }
 
+    fn acquire_authenticated(
+        mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        timings: Timings,
+        mut authentication: ProviderEpochReads,
+        bootstrap: BootstrapTiming,
+    ) -> Result<Self> {
+        // The actual read-only GKE probe took 3.168939s, including 0.714994s
+        // of repeated provider authentication. Reuse ONLY its genuine full
+        // same-stage material, not a previous provider observation. All live
+        // profile/provider/physical/durability checks and Current's original
+        // five-second ceiling remain; this is not a measured margin claim.
+        let guard = authentication.arm_refusal()?;
+        stage.require_purpose(StagePurpose::CurrentRole)?;
+        stage.check_selection(policy, store, NativeRole::EpochController)?;
+        let mut acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+        authentication.check(&mut stage, policy, store, &mut acquisition)?;
+        let selected = profile(&mut acquisition)
+            .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
+        selected
+            .validate(policy)
+            .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
+        authentication.check(&mut stage, policy, store, &mut acquisition)?;
+        let reader = Self {
+            stage,
+            policy: policy.clone(),
+            store: store.clone(),
+            profile: selected,
+            authentication: ProviderAuthentication::Retained(authentication),
+            acquisition,
+            timings,
+            bootstrap,
+        };
+        guard.complete()?;
+        Ok(reader)
+    }
+
+    fn refusal_guard(&self) -> Result<Option<RefusalGuard>> {
+        match &self.authentication {
+            ProviderAuthentication::Acquired(_) => Ok(None),
+            ProviderAuthentication::Retained(authentication) => {
+                authentication.arm_refusal().map(Some)
+            }
+        }
+    }
+
     fn check(&mut self) -> Result<()> {
-        self.stage
-            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
-        self.acquisition.remaining()?;
-        ensure!(
-            profile(&mut self.acquisition)
-                .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?
-                == self.profile,
-            "storage_native_profile_changed"
-        );
-        self.profile.validate(&self.policy)?;
-        self.stage
-            .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+        let guard = self.refusal_guard()?;
+        let result = (|| {
+            self.stage
+                .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+            if let ProviderAuthentication::Retained(authentication) = &mut self.authentication {
+                authentication.check(
+                    &mut self.stage,
+                    &self.policy,
+                    &self.store,
+                    &mut self.acquisition,
+                )?;
+            }
+            self.acquisition.remaining()?;
+            ensure!(
+                profile(&mut self.acquisition).map_err(|error| PreparationFailure::at(
+                    PreparationStep::StorageProfile,
+                    error
+                ))? == self.profile,
+                "storage_native_profile_changed"
+            );
+            self.profile.validate(&self.policy)?;
+            self.stage
+                .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
+            if let ProviderAuthentication::Retained(authentication) = &mut self.authentication {
+                authentication.check(
+                    &mut self.stage,
+                    &self.policy,
+                    &self.store,
+                    &mut self.acquisition,
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err()
+            && let ProviderAuthentication::Retained(authentication) = &mut self.authentication
+        {
+            authentication.refuse();
+            self.acquisition.refuse();
+        }
+        result?;
+        if let Some(guard) = guard {
+            guard.complete()?;
+        }
         Ok(())
     }
 
-    fn get(&mut self, route: Route<'_>) -> Result<Value> {
+    fn get(&mut self, read: StorageMetadataRead) -> Result<Value> {
+        let guard = self.refusal_guard()?;
         self.check()?;
-        let operation = match &route {
-            Route::PersistentVolumeClaim { .. } => Operation::Claim,
-            Route::PersistentVolume(_) => Operation::Volume,
-            Route::Node(_) => Operation::Node,
-            Route::ComputeDisk { .. } => Operation::Disk,
-            Route::ComputeInstance { .. } => Operation::Instance,
-            _ => anyhow::bail!("storage_provider_route_unavailable"),
+        let operation = match read {
+            StorageMetadataRead::Claim => Operation::Claim,
+            StorageMetadataRead::Volume => Operation::Volume,
+            StorageMetadataRead::Node => Operation::Node,
+            StorageMetadataRead::Disk => Operation::Disk,
+            StorageMetadataRead::Instance => Operation::Instance,
         };
-        let google = match route {
-            Route::ComputeDisk { .. } | Route::ComputeInstance { .. } => true,
-            Route::PersistentVolumeClaim { .. } | Route::PersistentVolume(_) | Route::Node(_) => {
-                false
-            }
-            _ => anyhow::bail!("storage_provider_route_unavailable"),
-        };
-        let authorization = if google {
-            self.source.authorization()?
-        } else {
-            self.kubernetes.authorization()?
-        };
-        let result = self.timings.measure(operation, || {
-            self.http
-                .request(route, &authorization, None, &mut self.acquisition)
-        });
+        let result = self
+            .timings
+            .measure(operation, || match &mut self.authentication {
+                ProviderAuthentication::Acquired(material) => {
+                    let authorization = if read.google() {
+                        material.source.authorization()?
+                    } else {
+                        material.kubernetes.authorization()?
+                    };
+                    material.http.request(
+                        read.route(&self.profile, &self.policy),
+                        &authorization,
+                        None,
+                        &mut self.acquisition,
+                    )
+                }
+                ProviderAuthentication::Retained(authentication) => authentication.get(
+                    &mut self.stage,
+                    &self.policy,
+                    &self.store,
+                    &self.profile,
+                    read,
+                    &mut self.acquisition,
+                ),
+            });
         // Always perform the original postcheck, including after a failed
         // request. Preserve the first request failure instead of replacing it
         // with the acquisition-refused consequence of that same failure.
@@ -292,24 +398,30 @@ impl<'role> ProviderReader<'role> {
         checked?;
         let value: Value = crate::json::decode(&bytes)?;
         ensure!(value.is_object(), "storage_provider_reply_object_required");
+        if let Some(guard) = guard {
+            guard.complete()?;
+        }
         Ok(value)
     }
 
     fn observe_provider(&mut self) -> Result<String> {
+        let trace = self.bootstrap.clone();
+        trace.provider_round(|| self.observe_provider_inner())
+    }
+
+    fn observe_provider_inner(&mut self) -> Result<String> {
+        let guard = self.refusal_guard()?;
         // Clone only desired DATA so no self-borrow is held during actual I/O.
         let profile = self.profile.clone();
         let policy = self.policy.clone();
         let claim = self
-            .get(Route::PersistentVolumeClaim {
-                namespace: &policy.app.namespace.name,
-                name: &profile.claim.name,
-            })
+            .get(StorageMetadataRead::Claim)
             .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
         profile
             .claim(&policy, &claim)
             .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
         let volume = self
-            .get(Route::PersistentVolume(&profile.volume.name))
+            .get(StorageMetadataRead::Volume)
             .map_err(|error| PreparationFailure::at(PreparationStep::VolumeBinding, error))?;
         profile
             .volume(&policy, &volume)
@@ -325,32 +437,61 @@ impl<'role> ProviderReader<'role> {
             .map_err(|error| PreparationFailure::at(PreparationStep::NodeBoot, error.into()))?
             .trim_end_matches('\n');
         let node = self
-            .get(Route::Node(&profile.node.name))
+            .get(StorageMetadataRead::Node)
             .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
         profile
             .node(&policy, boot, &node)
             .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
         let disk = self
-            .get(Route::ComputeDisk {
-                zone: profile.zone.as_str(),
-                name: profile.disk.as_str(),
-            })
+            .get(StorageMetadataRead::Disk)
             .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
         profile
             .disk(&policy, &disk)
             .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
         let instance = self
-            .get(Route::ComputeInstance {
-                zone: profile.zone.as_str(),
-                name: profile.instance.as_str(),
-            })
+            .get(StorageMetadataRead::Instance)
             .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
         let device = profile
             .instance(&policy, &instance)
             .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
         self.check()?;
+        if let Some(guard) = guard {
+            guard.complete()?;
+        }
         Ok(device)
     }
+}
+
+/// One authenticated provider-metadata frontier on the supplied original
+/// Current stage. No /state directory or block-device descriptor is opened,
+/// no mount is adopted, and no storage/file/peer/writer owner is returned.
+/// A detached or changed attachment must still refuse; its validation is not
+/// omitted just because this diagnostic returns only unit DATA.
+pub(super) fn observe_provider_read_only(
+    stage: EnrolledRoleStage<'_>,
+    policy: &InitialBootstrapPolicy,
+    store: &EpochStore,
+    trace: &BootstrapTiming,
+    authentication: ProviderEpochReads,
+) -> Result<()> {
+    let guard = authentication.arm_refusal()?;
+    let mut reader = ProviderReader::acquire_authenticated(
+        stage,
+        policy,
+        store,
+        trace.timings(),
+        authentication,
+        trace.clone(),
+    )?;
+    // Three successive fresh validations through ONE genuine authentication
+    // and original Current stage, matching the bootstrap's metadata-round
+    // count. First error returns immediately; no renew/retry, state/block
+    // descriptor, SQL, peer or writer exists in this closed diagnostic.
+    for _ in 0..3 {
+        reader.observe_provider()?;
+    }
+    reader.check()?;
+    guard.complete()
 }
 
 impl<'role> NativeVolumeObservation<'role> {
@@ -775,6 +916,31 @@ fn ext4_internal_journal(bytes: &[u8]) -> Result<()> {
 }
 
 impl NativeVolumeContinuity {
+    pub(super) fn begin_authenticated<'volume, 'role>(
+        &'volume mut self,
+        mut stage: EnrolledRoleStage<'role>,
+        authentication: ProviderEpochReads,
+        trace: &BootstrapTiming,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        let guard = authentication.arm_refusal()?;
+        let result = (|| {
+            stage.require_purpose(StagePurpose::CurrentRole)?;
+            ensure!(self.resources.valid, "storage_native_volume_refused");
+            self.owner.check(&mut stage)?;
+            ProviderReader::acquire_authenticated(
+                stage,
+                &self.policy,
+                &self.store,
+                trace.timings(),
+                authentication,
+                trace.clone(),
+            )
+        })();
+        let phase = self.finish_begin(result)?;
+        guard.complete()?;
+        Ok(phase)
+    }
+
     pub(super) fn begin_current<'volume, 'role>(
         &'volume mut self,
         stage: EnrolledRoleStage<'role>,
@@ -798,13 +964,22 @@ impl NativeVolumeContinuity {
             stage.require_purpose(purpose)?;
             ensure!(self.resources.valid, "storage_native_volume_refused");
             self.owner.check(&mut stage)?;
-            let mut reader = ProviderReader::acquire(
+            ProviderReader::acquire(
                 stage,
                 &self.policy,
                 &self.store,
                 Timings::disabled(),
                 purpose,
-            )?;
+            )
+        })();
+        self.finish_begin(result)
+    }
+
+    fn finish_begin<'volume, 'role>(
+        &'volume mut self,
+        result: Result<ProviderReader<'role>>,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        let result = result.and_then(|mut reader| {
             ensure!(
                 reader.profile == self.profile,
                 "storage_native_profile_changed"
@@ -818,7 +993,7 @@ impl NativeVolumeContinuity {
             self.resources.check_current(&mut reader)?;
             self.owner.check(&mut reader.stage)?;
             Ok(reader)
-        })();
+        });
         match result {
             Ok(reader) => Ok(CurrentVolumePhase {
                 resources: &mut self.resources,
@@ -833,6 +1008,15 @@ impl NativeVolumeContinuity {
 }
 
 impl CurrentVolumePhase<'_, '_> {
+    pub(super) fn check_authenticated_reads(&mut self, reads: &ControllerEpochReads) -> Result<()> {
+        self.reader.check()?;
+        ensure!(
+            matches!(&self.reader.authentication, ProviderAuthentication::Retained(provider) if provider.matches(reads)),
+            "epoch_writer_provider_authentication_changed"
+        );
+        Ok(())
+    }
+
     /// Observe the live selected filesystem contract, not omitted mountinfo
     /// defaults or desired fsType. This grants no standalone P3 permission.
     pub(super) fn check_durability_profile(&mut self) -> Result<()> {
