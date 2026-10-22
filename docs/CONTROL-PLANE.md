@@ -183,7 +183,7 @@ cross-execution recovery and the [secret-dependent release workflow](RELEASE-WOR
 Its corpus
 and generated schedules are separate evidence from the real-Temporal tests below.
 
-`cargo run --locked -p xtask -- control-verify` runs the capability suites, real
+`bazel run //crates/xtask:xtask -- control-verify` runs the capability suites, real
 persisted Temporal tests and the explicitly pinned native isolated-build smoke.
 Full `xtask verify` includes this gate, builds the relational, migration and HTTP
 conformance fixtures, and runs every runtime suite. Every required step must pass

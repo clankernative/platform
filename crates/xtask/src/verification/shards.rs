@@ -1,10 +1,10 @@
 //! Exact-run transport and admission for the Verify.roc hosted campaigns.
-//! Cargo builds its ordinary full package/target graph once. The recipes select
+//! Bazel builds its complete declared package/target graph once. The recipes select
 //! campaigns; this module admits their binaries and joins complete evidence.
 use super::{
-    WORKSPACE_TEST_ARGUMENTS, cached_fixture, configure_tests, required_steps, test_command,
+    WORKSPACE_TEST_PACKAGES, cached_fixture, configure_tests, required_steps, test_selection,
 };
-use crate::{CommandStatusError, command_status_with_budget, run_with_budget};
+use crate::run_with_budget;
 use anyhow::{Context, Result, ensure};
 use day2::digest;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,6 @@ const BINARIES: &str = "artifacts/ci-test-binaries.json";
 const BUILD_CACHE: &str = "artifacts/ci-test-build-cache.json";
 const PROGRAM_CACHE: &str = "artifacts/ci-test-programs";
 const RESULTS: &str = "artifacts/ci-results";
-const CARGO_FAILURE_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const SHARDS: &[&str] = &[
     "workspace-day2",
     "workspace-control",
@@ -35,369 +34,6 @@ const SHARDS: &[&str] = &[
 
 pub(super) mod mac;
 pub(super) mod reuse;
-
-#[derive(Clone, Debug, Serialize)]
-struct CargoProcessOutcome {
-    category: &'static str,
-    code: Option<i32>,
-    signal: Option<i32>,
-    os_error: Option<i32>,
-}
-
-impl CargoProcessOutcome {
-    fn observed(
-        outcome: std::result::Result<std::process::ExitStatus, CommandStatusError>,
-    ) -> Self {
-        match outcome {
-            Ok(status) => {
-                #[cfg(unix)]
-                let signal = {
-                    use std::os::unix::process::ExitStatusExt;
-                    status.signal()
-                };
-                #[cfg(not(unix))]
-                let signal = None;
-                Self {
-                    category: if status.success() { "success" } else { "exit" },
-                    code: status.code(),
-                    signal,
-                    os_error: None,
-                }
-            }
-            Err(CommandStatusError::Spawn(error)) => Self {
-                category: "spawn",
-                code: None,
-                signal: None,
-                os_error: error.raw_os_error(),
-            },
-            Err(CommandStatusError::Wait(error)) => Self {
-                category: "wait",
-                code: None,
-                signal: None,
-                os_error: error.raw_os_error(),
-            },
-            Err(CommandStatusError::Timeout) => Self {
-                category: "timeout",
-                code: None,
-                signal: None,
-                os_error: None,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct CargoCaptureProblem {
-    category: &'static str,
-    line: Option<usize>,
-    byte_offset: Option<usize>,
-    os_error: Option<i32>,
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum SccacheDiagnostic {
-    CompilerSignal { signal: u8 },
-    MissingCompilerStatus,
-}
-
-fn sccache_diagnostics(output: Option<&[u8]>) -> BTreeSet<SccacheDiagnostic> {
-    output
-        .into_iter()
-        .flat_map(|bytes| bytes.split(|byte| *byte == b'\n'))
-        .filter_map(|line| {
-            let line = std::str::from_utf8(line).ok()?;
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            if line == "sccache: Missing compiler exit status!" {
-                return Some(SccacheDiagnostic::MissingCompilerStatus);
-            }
-            // sccache 0.18 emits these outside the compiler's JSON protocol.
-            // Export only the fixed classification and bounded signal, never text.
-            let signal = [
-                "sccache: Compile terminated by signal ",
-                "sccache: Compiler killed by signal ",
-            ]
-            .iter()
-            .find_map(|prefix| line.strip_prefix(prefix))?;
-            if signal.len() > 2 || !signal.as_bytes().iter().all(u8::is_ascii_digit) {
-                return None;
-            }
-            let signal = signal.parse::<u8>().ok()?;
-            (1..=64)
-                .contains(&signal)
-                .then_some(SccacheDiagnostic::CompilerSignal { signal })
-        })
-        .collect()
-}
-
-#[derive(Debug, Serialize)]
-struct CargoMemoryDiagnostics {
-    limit_bytes: Option<u64>,
-    peak_bytes: Option<u64>,
-    oom_events: Option<u64>,
-    oom_kills: Option<u64>,
-}
-
-fn cargo_memory_diagnostics(directory: &Path) -> Option<CargoMemoryDiagnostics> {
-    let number = |name: &str| {
-        fs::read_to_string(directory.join(name))
-            .ok()?
-            .trim()
-            .parse::<u64>()
-            .ok()
-    };
-    let events = fs::read_to_string(directory.join("memory.events")).ok();
-    let event = |name: &str| {
-        events.as_deref()?.lines().find_map(|line| {
-            let (key, value) = line.split_once(' ')?;
-            if key == name {
-                value.parse::<u64>().ok()
-            } else {
-                None
-            }
-        })
-    };
-    let memory = CargoMemoryDiagnostics {
-        limit_bytes: number("memory.max"),
-        peak_bytes: number("memory.peak"),
-        oom_events: event("oom"),
-        oom_kills: event("oom_kill"),
-    };
-    (memory.limit_bytes.is_some()
-        || memory.peak_bytes.is_some()
-        || memory.oom_events.is_some()
-        || memory.oom_kills.is_some())
-    .then_some(memory)
-}
-
-#[derive(Debug)]
-struct CargoReportingFailure {
-    stage: &'static str,
-    process: CargoProcessOutcome,
-    capture: Option<CargoCaptureProblem>,
-    retained: bool,
-}
-
-impl std::fmt::Display for CargoReportingFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "Cargo {} failed: primary={}, cargo_exit={:?}, signal={:?}, errno={:?}; capture={}; evidence_retained={}",
-            self.stage,
-            if self.process.category == "success" {
-                "capture"
-            } else {
-                self.process.category
-            },
-            self.process.code,
-            self.process.signal,
-            self.process.os_error,
-            self.capture
-                .as_ref()
-                .map_or("valid", |problem| problem.category),
-            self.retained,
-        )
-    }
-}
-
-impl std::error::Error for CargoReportingFailure {}
-
-fn retain_cargo_failure(
-    root: &Path,
-    stage: &'static str,
-    process: &CargoProcessOutcome,
-    problem: &Option<CargoCaptureProblem>,
-    output: Option<&[u8]>,
-) -> Result<PathBuf> {
-    use std::io::Write;
-    // The raw spool is local operator evidence, never an Actions upload input.
-    // Unix tempdirs otherwise use 0777 subject to umask. Make this directory
-    // owner-only at creation, before any raw bytes; NamedTempFile uses 0600.
-    let mut builder = tempfile::Builder::new();
-    builder.prefix("ci-compiler-failure-");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(fs::Permissions::from_mode(0o700));
-    }
-    let directory = builder.tempdir_in(root.join("artifacts"))?;
-    let mut spool = tempfile::NamedTempFile::new_in(directory.path())?;
-    let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
-    if let Some(bytes) = retained {
-        spool.write_all(bytes)?;
-    }
-    spool.persist(directory.path().join("stdout.bin"))?;
-    write_cargo_failure_manifest(
-        directory.path(),
-        root,
-        stage,
-        process,
-        problem,
-        output,
-        &BTreeSet::new(),
-    )?;
-    Ok(directory.keep())
-}
-
-fn write_cargo_failure_manifest(
-    directory: &Path,
-    root: &Path,
-    stage: &'static str,
-    process: &CargoProcessOutcome,
-    problem: &Option<CargoCaptureProblem>,
-    output: Option<&[u8]>,
-    diagnostic_codes: &BTreeSet<String>,
-) -> Result<()> {
-    let retained = output.map(|bytes| &bytes[..bytes.len().min(CARGO_FAILURE_CAPTURE_BYTES)]);
-    let (evidence_identity, identity_status) = match cargo_failure_identity(root) {
-        Ok(identity) => (Some(identity), "bound"),
-        Err(_) => (None, "unavailable"),
-    };
-    let metadata = json!({
-        "format":1,
-        "stage":stage,
-        "identity":evidence_identity,
-        "identity_status":identity_status,
-        "diagnostic_only_not_a_preparation_or_runtime_receipt":true,
-        "log_pointer":{"job":std::env::var("GITHUB_JOB").ok(),"stage":stage,"channel":"Actions Cargo outcome metadata"},
-        "cargo_process":process,
-        "capture_problem":problem,
-        "capture_bytes":output.map(<[u8]>::len),
-        "capture_digest":output.map(digest),
-        "retained_bytes":retained.map(<[u8]>::len),
-        "retained_digest":retained.map(digest),
-        "complete":output.is_some_and(|bytes| bytes.len() <= CARGO_FAILURE_CAPTURE_BYTES),
-        "rust_diagnostic_codes":diagnostic_codes,
-        "sccache_diagnostics":sccache_diagnostics(output),
-        // Job-wide absolute counters, not proof that Cargo itself was OOM-killed.
-        "cgroup_memory_at_failure":cargo_memory_diagnostics(Path::new("/sys/fs/cgroup")),
-        "raw_retention":"private job-workspace spool only; not durable after runner disposal",
-        "cleanup_signal_is_not_original_exit":true,
-    });
-    fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec_pretty(&metadata)?,
-    )?;
-    Ok(())
-}
-
-fn cargo_failure_identity(root: &Path) -> Result<Identity> {
-    let snapshot = super::verification_snapshot(root, "verify")?;
-    identity(root, &snapshot)
-}
-
-fn report_cargo_capture(
-    root: &Path,
-    stage: &'static str,
-    process: CargoProcessOutcome,
-    output: std::io::Result<Vec<u8>>,
-) -> Result<Vec<serde_json::Value>> {
-    let (output, mut problem) = match output {
-        Ok(output) => (Some(output), None),
-        Err(error) => (
-            None,
-            Some(CargoCaptureProblem {
-                category: "read",
-                line: None,
-                byte_offset: None,
-                os_error: error.raw_os_error(),
-            }),
-        ),
-    };
-    let mut messages = Vec::new();
-    let mut offset = 0;
-    // Preserve failed-command evidence before any JSON decoding. A parser or
-    // evidence failure can add context, but cannot replace this process result.
-    let early_evidence = (process.category != "success")
-        .then(|| retain_cargo_failure(root, stage, &process, &problem, output.as_deref()));
-    if let Some(output) = &output {
-        for (index, line) in output.split(|byte| *byte == b'\n').enumerate() {
-            if !line.is_empty() {
-                match day2::json::decode::<serde_json::Value>(line) {
-                    Ok(value) => messages.push(value),
-                    Err(_) => {
-                        if problem.is_none() {
-                            problem = Some(CargoCaptureProblem {
-                                category: "json",
-                                line: Some(index + 1),
-                                byte_offset: Some(offset),
-                                os_error: None,
-                            });
-                        }
-                    }
-                }
-            }
-            offset += line.len() + 1;
-        }
-    }
-    if process.category != "success" || problem.is_some() {
-        let diagnostic_codes: BTreeSet<String> = messages
-            .iter()
-            .filter(|message| message["reason"] == "compiler-message")
-            .filter_map(|message| message["message"]["code"]["code"].as_str())
-            .filter(|code| {
-                code.len() == 5
-                    && code.starts_with('E')
-                    && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
-            })
-            .take(32)
-            .map(str::to_owned)
-            .collect();
-        let evidence = match early_evidence {
-            Some(result) => result,
-            None => retain_cargo_failure(root, stage, &process, &problem, output.as_deref()),
-        };
-        let retained = evidence
-            .and_then(|directory| {
-                write_cargo_failure_manifest(
-                    &directory,
-                    root,
-                    stage,
-                    &process,
-                    &problem,
-                    output.as_deref(),
-                    &diagnostic_codes,
-                )
-            })
-            .is_ok();
-        // Neither free-form compiler text nor malformed bytes enter the error.
-        // Registered-secret masking on the runner is not a private raw archive.
-        let failure = CargoReportingFailure {
-            stage,
-            process,
-            capture: problem,
-            retained,
-        };
-        eprintln!("{failure}");
-        eprintln!("Cargo diagnostic codes: {diagnostic_codes:?}");
-        eprintln!(
-            "Cargo sccache diagnostics: {:?}",
-            sccache_diagnostics(output.as_deref())
-        );
-        return Err(failure.into());
-    }
-    for message in &messages {
-        if message["reason"] == "compiler-message"
-            && let Some(rendered) = message["message"]["rendered"].as_str()
-        {
-            print!("{rendered}");
-        }
-    }
-    Ok(messages)
-}
-
-fn capture_cargo(
-    root: &Path,
-    stage: &'static str,
-    command: &mut Command,
-    budget: Duration,
-) -> Result<Vec<serde_json::Value>> {
-    let capture = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
-    command.stdout(capture.as_file().try_clone()?);
-    let process = CargoProcessOutcome::observed(command_status_with_budget(root, command, budget));
-    // Observe process status before reading or decoding its captured output.
-    report_cargo_capture(root, stage, process, fs::read(capture.path()))
-}
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -436,10 +72,10 @@ pub(super) struct BuildIdentity {
     host: String,
     architecture: String,
     rustc: String,
-    cargo: String,
+    bazel: String,
     cc: String,
     environment: String,
-    cargo_configuration: BTreeMap<String, Option<String>>,
+    bazel_configuration: BTreeMap<String, String>,
     ci_workflow: String,
 }
 
@@ -486,26 +122,38 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
             .any(|prefix| name.starts_with(prefix))
         })
         .collect();
-    let mut cargo_configuration = BTreeMap::new();
-    for name in [".cargo/config", ".cargo/config.toml"] {
-        let contents = match fs::read(root.join(name)) {
-            Ok(bytes) => Some(digest(&bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        cargo_configuration.insert(name.into(), contents);
-    }
+    let bazel_configuration = crate::bazel::configuration(root)?;
     Ok(BuildIdentity {
         snapshot: snapshot.into(),
         workflow: day2::automation::source_digest(),
         workspace: root.canonicalize()?,
         host: std::env::consts::OS.into(),
         architecture: std::env::consts::ARCH.into(),
-        rustc: version("rustc", true)?,
-        cargo: version("cargo", true)?,
+        rustc: {
+            let compiler = crate::bazel::tool(root, "rustc")?;
+            let output = Command::new(&compiler)
+                .args(["--version", "--verbose"])
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "configured Bazel Rust compiler required"
+            );
+            format!(
+                "{}\ncompiler-digest: {}",
+                String::from_utf8(output.stdout)?,
+                digest(&fs::read(compiler)?)
+            )
+        },
+        bazel: {
+            let mut command = crate::bazel::command();
+            command.args(["version", "--gnu_format"]);
+            let output = command.current_dir(root).output()?;
+            ensure!(output.status.success(), "actual Bazel version required");
+            String::from_utf8(output.stdout)?
+        },
         cc: version("cc", false)?,
         environment: digest(&serde_json::to_vec(&environment)?),
-        cargo_configuration,
+        bazel_configuration,
         ci_workflow: digest(&fs::read(root.join(".github/workflows/ci.yml"))?),
     })
 }
@@ -541,9 +189,9 @@ fn admit_build_cache(
                 "cached compiler target identity or package directory changed"
             );
             let directory = if programs {
-                "target/debug"
+                crate::bazel::PROGRAMS
             } else {
-                "target/debug/deps"
+                crate::bazel::TESTS
             };
             ensure!(
                 binary.executable.parent() == Some(Path::new(directory))
@@ -551,12 +199,12 @@ fn admit_build_cache(
                         .executable
                         .components()
                         .all(|part| matches!(part, std::path::Component::Normal(_))),
-                "cached executable outside ordinary Cargo output"
+                "cached executable outside declared Bazel output"
             );
             let path = if programs {
                 ensure!(
                     binary.executable == program_output(&binary.target),
-                    "ordinary Cargo program name required"
+                    "declared Bazel program name required"
                 );
                 root.join(PROGRAM_CACHE)
                     .join(binary.executable.file_name().context("program file name")?)
@@ -580,7 +228,7 @@ fn admit_build_cache(
 }
 
 fn program_output(target: &str) -> PathBuf {
-    Path::new("target/debug").join(format!("{target}{}", std::env::consts::EXE_SUFFIX))
+    Path::new(crate::bazel::PROGRAMS).join(format!("{target}{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn executable_permissions(path: &Path) -> Result<u32> {
@@ -614,10 +262,10 @@ fn admit_executable(path: &Path, expected: &str, permissions: u32) -> Result<()>
 }
 
 /// Copy only metadata-admitted normal programs, preserving executable permissions.
-/// Cache storage stays separate from ordinary Cargo outputs and run receipts.
+/// Cache storage stays separate from ordinary Bazel outputs and run receipts.
 fn copy_programs(root: &Path, programs: &[Binary], restoring: bool) -> Result<()> {
     let destination = root.join(if restoring {
-        "target/debug"
+        crate::bazel::PROGRAMS
     } else {
         PROGRAM_CACHE
     });
@@ -629,12 +277,12 @@ fn copy_programs(root: &Path, programs: &[Binary], restoring: bool) -> Result<()
     for program in programs {
         ensure!(
             program.executable == program_output(&program.target)
-                && program.executable.parent() == Some(Path::new("target/debug"))
+                && program.executable.parent() == Some(Path::new(crate::bazel::PROGRAMS))
                 && program
                     .executable
                     .components()
                     .all(|part| matches!(part, std::path::Component::Normal(_))),
-            "ordinary Cargo program path required"
+            "installed Bazel program path required"
         );
         let ordinary = root.join(&program.executable);
         let cached = root.join(PROGRAM_CACHE).join(
@@ -726,12 +374,7 @@ fn identity(root: &Path, snapshot: &str) -> Result<Identity> {
 }
 
 fn packages() -> BTreeSet<&'static str> {
-    WORKSPACE_TEST_ARGUMENTS
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| pair[1])
-        .collect()
+    WORKSPACE_TEST_PACKAGES.iter().copied().collect()
 }
 
 struct Targets {
@@ -782,10 +425,22 @@ fn validate_auxiliary_inventory(auxiliaries: &[Binary], host: &str) -> Result<()
     Ok(())
 }
 
+fn built_binary(root: &Path, target: &crate::bazel::Target, executable: PathBuf) -> Result<Binary> {
+    Ok(Binary {
+        package: target.package.clone(),
+        target: target.target.clone(),
+        kind: target.kind.clone(),
+        directory: target.directory.clone(),
+        digest: digest(&fs::read(root.join(&executable))?),
+        permissions: executable_permissions(&root.join(&executable))?,
+        executable,
+    })
+}
+
 fn build_auxiliaries(
     root: &Path,
     expected: &BTreeSet<(String, String, Vec<String>)>,
-    members: &BTreeMap<String, (String, PathBuf)>,
+    _members: &BTreeMap<String, (String, PathBuf)>,
 ) -> Result<Vec<Binary>> {
     if expected.is_empty() {
         return Ok(Vec::new());
@@ -794,61 +449,31 @@ fn build_auxiliaries(
         std::env::consts::OS == "linux",
         "native Linux launcher preparation required"
     );
-    let messages = capture_cargo(
-        root,
-        "auxiliaries",
-        Command::new("cargo").args([
-            "build",
-            "--locked",
-            "-p",
-            "day2-sandbox",
-            "--bins",
-            "--message-format=json-render-diagnostics",
-        ]),
-        Duration::from_secs(12600),
-    )?;
-    let mut binaries = Vec::new();
-    let mut finished = false;
-    for value in messages {
-        if value["reason"] == "build-finished" {
-            finished = value["success"] == true;
-        }
-        if value["reason"] != "compiler-artifact" || value["executable"].is_null() {
-            continue;
-        }
-        ensure!(
-            value["profile"]["test"] == false,
-            "ordinary launcher program required"
-        );
-        let (package, directory) = members
-            .get(
-                value["package_id"]
-                    .as_str()
-                    .context("launcher package ID")?,
+    let selected = crate::bazel::targets(root)?
+        .into_iter()
+        .filter(|target| {
+            !target.test
+                && expected.contains(&(
+                    target.package.clone(),
+                    target.target.clone(),
+                    target.kind.clone(),
+                ))
+        })
+        .collect::<Vec<_>>();
+    let outputs = crate::bazel::build(root, &selected, Duration::from_secs(12600))?;
+    let mut binaries = selected
+        .iter()
+        .map(|target| {
+            built_binary(
+                root,
+                target,
+                outputs
+                    .get(&target.label)
+                    .context("built launcher required")?
+                    .clone(),
             )
-            .context("launcher outside declared Cargo graph")?;
-        let target = value["target"]["name"]
-            .as_str()
-            .context("launcher target")?
-            .to_owned();
-        let executable = Path::new(
-            value["executable"]
-                .as_str()
-                .context("launcher executable")?,
-        )
-        .strip_prefix(root)?
-        .to_owned();
-        binaries.push(Binary {
-            package: package.clone(),
-            target,
-            kind: serde_json::from_value(value["target"]["kind"].clone())?,
-            directory: directory.clone(),
-            digest: digest(&fs::read(root.join(&executable))?),
-            permissions: executable_permissions(&root.join(&executable))?,
-            executable,
-        });
-    }
-    ensure!(finished, "Linux launcher build incomplete");
+        })
+        .collect::<Result<Vec<_>>>()?;
     binaries.sort_by(|a, b| a.target.cmp(&b.target));
     validate_auxiliary_inventory(&binaries, "linux")?;
     ensure!(
@@ -857,7 +482,7 @@ fn build_auxiliaries(
             .map(|b| (b.package.clone(), b.target.clone(), b.kind.clone()))
             .collect::<BTreeSet<_>>()
             == *expected,
-        "Linux launcher Cargo inventory changed"
+        "complete Linux launcher Bazel inventory required"
     );
     Ok(binaries)
 }
@@ -866,7 +491,7 @@ fn install_auxiliaries(root: &Path, auxiliaries: &[Binary]) -> Result<()> {
     validate_auxiliary_inventory(auxiliaries, std::env::consts::OS)?;
     for binary in auxiliaries {
         let source = root.join(&binary.executable);
-        let target = root.join("target/debug/deps").join(&binary.target);
+        let target = root.join(crate::bazel::TESTS).join(&binary.target);
         admit_executable(&source, &binary.digest, binary.permissions)?;
         crate::native_toolchain::verify_executable_target(
             crate::native_toolchain::load(root)?.target,
@@ -886,94 +511,47 @@ pub(super) fn prepare_linux_installation(root: &Path) -> Result<()> {
 }
 
 fn compiler_targets(root: &Path) -> Result<Targets> {
-    let metadata = Command::new("cargo")
-        .args(["metadata", "--locked", "--no-deps", "--format-version=1"])
-        .current_dir(root)
-        .output()?;
-    ensure!(metadata.status.success(), "Cargo test target metadata");
-    let metadata: serde_json::Value = day2::json::decode(&metadata.stdout)?;
+    let catalog = crate::bazel::targets(root)?;
     let mut expected = BTreeSet::new();
-    let mut expected_programs = BTreeSet::new();
+    let mut programs = BTreeSet::new();
     let mut auxiliaries = BTreeSet::new();
     let mut members = BTreeMap::new();
-    for package in metadata["packages"].as_array().context("Cargo packages")? {
-        let name = package["name"].as_str().context("package name")?;
-        let auxiliary = std::env::consts::OS == "linux" && name == "day2-sandbox";
-        if !packages().contains(name) && !auxiliary {
+    for target in &catalog {
+        let auxiliary = std::env::consts::OS == "linux" && target.package == "day2-sandbox";
+        if !packages().contains(target.package.as_str()) && !auxiliary {
             continue;
         }
-        let directory = Path::new(package["manifest_path"].as_str().context("manifest path")?)
-            .parent()
-            .context("package directory")?
-            .strip_prefix(root)?
-            .to_owned();
         members.insert(
-            package["id"].as_str().context("package ID")?.to_owned(),
-            (name.to_owned(), directory),
+            target.package.clone(),
+            (target.package.clone(), target.directory.clone()),
         );
-        let targets = package["targets"].as_array().context("Cargo targets")?;
+        let key = (
+            target.package.clone(),
+            target.target.clone(),
+            target.kind.clone(),
+        );
         if auxiliary {
-            for target in targets {
-                let kind: Vec<String> = serde_json::from_value(target["kind"].clone())?;
-                if kind == ["bin"] {
-                    ensure!(
-                        target.get("required-features").is_none(),
-                        "unreviewed launcher features"
-                    );
-                    auxiliaries.insert((
-                        name.to_owned(),
-                        target["name"]
-                            .as_str()
-                            .context("launcher target")?
-                            .to_owned(),
-                        kind,
-                    ));
-                }
+            if !target.test && target.kind == ["bin"] {
+                auxiliaries.insert(key);
             }
-            continue;
-        }
-        let integration_tests = targets.iter().any(|target| {
-            target["kind"]
-                .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "test"))
-        });
-        for target in targets {
-            let kind: Vec<String> = serde_json::from_value(target["kind"].clone())?;
-            if integration_tests && kind == ["bin"] {
-                ensure!(
-                    target["test"] == true && target.get("required-features").is_none(),
-                    "review feature-gated or harness-disabled supporting program partition"
-                );
-                expected_programs.insert((
-                    name.to_owned(),
-                    target["name"]
-                        .as_str()
-                        .context("program target name")?
-                        .to_owned(),
-                    kind.clone(),
-                ));
-            }
-            if target["test"] == true && !kind.iter().any(|kind| kind == "bench") {
-                ensure!(
-                    target.get("required-features").is_none(),
-                    "review feature-gated test target partition"
-                );
-                expected.insert((
-                    name.to_owned(),
-                    target["name"].as_str().context("target name")?.to_owned(),
-                    kind,
-                ));
-            }
+        } else if target.test {
+            expected.insert(key);
+        } else if target.kind == ["bin"]
+            && catalog
+                .iter()
+                .any(|other| other.package == target.package && other.kind == ["test"])
+        {
+            programs.insert(key);
         }
     }
     ensure!(
         members.len() == packages().len() + usize::from(std::env::consts::OS == "linux")
             && auxiliaries == auxiliary_targets(std::env::consts::OS),
-        "complete full-gate Cargo package graph required"
+        "complete full-gate Bazel package graph required"
     );
     Ok(Targets {
         tests: expected,
-        programs: expected_programs,
+        programs,
         auxiliaries,
         members,
     })
@@ -1024,79 +602,51 @@ pub(super) fn build(root: &Path, snapshot: &str) -> Result<()> {
             ),
         }
     }
-    // Capture Cargo's authoritative executable inventory, including empty
-    // binary harnesses. No package or target selection differs from `verify`.
-    let messages = capture_cargo(
-        root,
-        "tests",
-        Command::new("cargo")
-            .args([
-                "test",
-                "--locked",
-                "--no-run",
-                "--message-format=json-render-diagnostics",
-            ])
-            .args(WORKSPACE_TEST_ARGUMENTS),
-        Duration::from_secs(12600),
-    )?;
+    let selected = crate::bazel::targets(root)?
+        .into_iter()
+        .filter(|target| {
+            let key = (
+                target.package.clone(),
+                target.target.clone(),
+                target.kind.clone(),
+            );
+            if target.test {
+                expected.contains(&key)
+            } else {
+                expected_programs.contains(&key)
+            }
+        })
+        .collect::<Vec<_>>();
+    let outputs = crate::bazel::build(root, &selected, Duration::from_secs(12600))?;
     let mut binaries = Vec::new();
     let mut programs = Vec::new();
     let mut observed = BTreeSet::new();
     let mut observed_programs = BTreeSet::new();
-    let mut finished = false;
-    for message in messages {
-        if message["reason"] == "build-finished" {
-            finished = message["success"] == true;
-        }
-        if message["reason"] != "compiler-artifact" {
-            continue;
-        }
-        let test = message["profile"]["test"] == true;
-        let kind: Vec<String> = serde_json::from_value(message["target"]["kind"].clone())?;
-        if !test && (kind != ["bin"] || message["executable"].is_null()) {
-            continue;
-        }
-        let executable = message["executable"]
-            .as_str()
-            .context("compiler executable required")?;
-        let (package, directory) = members
-            .get(message["package_id"].as_str().context("artifact package")?)
-            .context("test binary outside full-gate package graph")?;
-        let target = message["target"]["name"]
-            .as_str()
-            .context("test target name")?
-            .to_owned();
-        ensure!(
-            (if test {
-                &mut observed
-            } else {
-                &mut observed_programs
-            })
-            .insert((package.clone(), target.clone(), kind.clone())),
-            "duplicate Cargo compiler target"
+    for target in &selected {
+        let key = (
+            target.package.clone(),
+            target.target.clone(),
+            target.kind.clone(),
         );
-        let executable = Path::new(executable).strip_prefix(root)?.to_owned();
-        ensure!(
-            if test {
-                executable.parent() == Some(Path::new("target/debug/deps"))
-            } else {
-                executable == program_output(&target)
-            },
-            "ordinary full-gate compiler output required"
-        );
-        (if test { &mut binaries } else { &mut programs }).push(Binary {
-            package: package.clone(),
-            target,
-            kind,
-            directory: directory.clone(),
-            digest: digest(&fs::read(root.join(&executable))?),
-            permissions: executable_permissions(&root.join(&executable))?,
-            executable,
-        });
+        let output = outputs
+            .get(&target.label)
+            .context("built default target required")?
+            .clone();
+        let binary = built_binary(root, target, output)?;
+        if target.test {
+            ensure!(observed.insert(key), "duplicate test target");
+            binaries.push(binary);
+        } else {
+            ensure!(
+                observed_programs.insert(key),
+                "duplicate supporting program"
+            );
+            programs.push(binary);
+        }
     }
     ensure!(
-        finished && observed == expected && observed_programs == expected_programs,
-        "Cargo compiler inventory does not cover every default target and supporting program"
+        observed == expected && observed_programs == expected_programs,
+        "Bazel inventory must cover every default target and supporting program"
     );
     binaries.sort_by(|left, right| left.executable.cmp(&right.executable));
     programs.sort_by(|left, right| left.executable.cmp(&right.executable));
@@ -1269,7 +819,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
         ensure!(
             binary.permissions & 0o111 != 0
                 && binary.permissions & !0o777 == 0
-                && binary.executable.starts_with("target/debug/deps")
+                && binary.executable.starts_with(crate::bazel::TESTS)
                 && !binary
                     .executable
                     .components()
@@ -1305,7 +855,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
                 && program.permissions & !0o777 == 0
                 && program.kind == ["bin"]
                 && program.executable == program_output(&program.target)
-                && program.executable.parent() == Some(Path::new("target/debug"))
+                && program.executable.parent() == Some(Path::new(crate::bazel::PROGRAMS))
                 && program
                     .executable
                     .components()
@@ -1381,7 +931,7 @@ pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
             auxiliary.permissions,
         )?;
         admit_executable(
-            &root.join("target/debug/deps").join(&auxiliary.target),
+            &root.join(crate::bazel::TESTS).join(&auxiliary.target),
             &auxiliary.digest,
             auxiliary.permissions,
         )?;
@@ -1438,12 +988,7 @@ pub(super) fn tests(
     } else {
         shard
     };
-    let cargo = test_command(suite)?;
-    let arguments: Vec<_> = cargo
-        .get_args()
-        .skip_while(|arg| *arg != "--")
-        .skip(1)
-        .collect();
+    let arguments = test_selection(suite)?.arguments;
     let started = Instant::now();
     let mut executed = BTreeSet::new();
     for binary in prepared
@@ -1454,8 +999,8 @@ pub(super) fn tests(
         let mut command = Command::new(root.join(&binary.executable));
         command.args(&arguments);
         configure_tests(root, suite, fixtures, &mut command)?;
-        // Cargo's package cwd is part of the harness contract. Compile-time
-        // CARGO_MANIFEST_DIR / CARGO_BIN_EXE paths are admitted by workspace identity.
+        // Manifest and supporting executable paths are workspace-relative and
+        // admitted by the current Bazel graph and prepared-byte identity.
         let remaining = budget
             .checked_sub(started.elapsed())
             .context("test campaign budget exhausted")?;
@@ -1463,7 +1008,7 @@ pub(super) fn tests(
             "Prepared test {} / {} ({shard})",
             binary.package, binary.target
         );
-        run_with_budget(&root.join(&binary.directory), &mut command, remaining)?;
+        run_with_budget(root, &mut command, remaining)?;
         ensure!(
             executed.insert(binary.executable.clone()),
             "duplicate test executable invocation"
@@ -1671,398 +1216,6 @@ pub(super) fn join(
 mod tests {
     use super::*;
 
-    fn cargo_capture_root() -> Result<tempfile::TempDir> {
-        let root = tempfile::tempdir()?;
-        fs::create_dir(root.path().join("artifacts"))?;
-        Ok(root)
-    }
-
-    fn cargo_failure_manifest(root: &Path) -> Result<(PathBuf, serde_json::Value)> {
-        let entries = fs::read_dir(root.join("artifacts"))?.collect::<std::io::Result<Vec<_>>>()?;
-        let directories: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("ci-compiler-failure-")
-            })
-            .collect();
-        ensure!(directories.len() == 1, "one current failure spool required");
-        let directory = directories[0].path();
-        let manifest = day2::json::decode(&fs::read(directory.join("manifest.json"))?)?;
-        Ok((directory, manifest))
-    }
-
-    fn cargo_control_command(mode: &str) -> Result<Command> {
-        let mut command = Command::new(std::env::current_exe()?);
-        command
-            .args([
-                "--exact",
-                "verification::shards::tests::cargo_failure_child",
-                "--nocapture",
-            ])
-            .env("DAY2_CARGO_CAPTURE_CONTROL", mode);
-        Ok(command)
-    }
-
-    // Subprocess helper, not an independent semantic control. The real child
-    // exercises the same spawn/timeout/wait and stdout path as Cargo.
-    #[test]
-    fn cargo_failure_child() {
-        let Ok(mode) = std::env::var("DAY2_CARGO_CAPTURE_CONTROL") else {
-            return;
-        };
-        println!("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT");
-        if mode == "timeout" {
-            std::thread::sleep(Duration::from_secs(10));
-        }
-        std::process::exit(if mode == "success" { 0 } else { 2 });
-    }
-
-    #[test]
-    fn cargo_nonzero_remains_primary_when_real_child_stdout_is_malformed() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let error = capture_cargo(
-            root.path(),
-            "tests",
-            &mut cargo_control_command("failure")?,
-            Duration::from_secs(3),
-        )
-        .unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.category, "exit");
-        assert_eq!(failure.process.code, Some(2));
-        assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
-        assert!(failure.retained);
-        assert!(!error.to_string().contains("PRIVATE-CARGO"));
-        let (directory, manifest) = cargo_failure_manifest(root.path())?;
-        let raw = fs::read(directory.join("stdout.bin"))?;
-        assert!(String::from_utf8_lossy(&raw).contains("PRIVATE-CARGO-CONTROL-INVALID-OUTPUT"));
-        assert_eq!(manifest["cargo_process"]["code"], 2);
-        assert_eq!(manifest["complete"], true);
-        assert_eq!(manifest["identity_status"], "unavailable");
-        assert!(manifest["identity"].is_null());
-        assert_eq!(
-            manifest["diagnostic_only_not_a_preparation_or_runtime_receipt"],
-            true
-        );
-        assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(directory.join("stdout.bin"))?
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-            assert_eq!(fs::metadata(directory)?.permissions().mode() & 0o777, 0o700);
-        }
-        assert!(!root.path().join(PREPARED).exists());
-        assert!(!root.path().join(BINARIES).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_success_with_real_malformed_output_cannot_be_admitted() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let error = capture_cargo(
-            root.path(),
-            "auxiliaries",
-            &mut cargo_control_command("success")?,
-            Duration::from_secs(3),
-        )
-        .unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.category, "success");
-        assert_eq!(failure.process.code, Some(0));
-        assert_eq!(failure.capture.as_ref().map(|p| p.category), Some("json"));
-        assert!(error.to_string().contains("primary=capture"));
-        assert!(!root.path().join(PREPARED).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_timeout_remains_primary_without_fabricating_an_original_signal() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let started = Instant::now();
-        let error = capture_cargo(
-            root.path(),
-            "tests",
-            &mut cargo_control_command("timeout")?,
-            Duration::from_millis(100),
-        )
-        .unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.category, "timeout");
-        assert_eq!(failure.process.code, None);
-        assert_eq!(failure.process.signal, None);
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(!error.to_string().contains("PRIVATE-CARGO"));
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_spawn_refusal_keeps_errno_without_exporting_the_command_path() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let mut command = Command::new(root.path().join("PRIVATE-CARGO-NONEXISTENT-COMMAND"));
-        let error =
-            capture_cargo(root.path(), "tests", &mut command, Duration::from_secs(1)).unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.category, "spawn");
-        assert!(failure.process.os_error.is_some());
-        assert_eq!(failure.process.code, None);
-        assert!(!error.to_string().contains("PRIVATE-CARGO"));
-        Ok(())
-    }
-
-    fn failed_cargo_outcome() -> CargoProcessOutcome {
-        CargoProcessOutcome {
-            category: "exit",
-            code: Some(2),
-            signal: None,
-            os_error: None,
-        }
-    }
-
-    #[test]
-    fn sccache_diagnostics_allow_only_exact_wrapper_status_and_bounded_signals() {
-        let output = b"sccache: Compile terminated by signal 9\r\nsccache: Compiler killed by signal 15\nsccache: Missing compiler exit status!\nsccache: Compile terminated by signal 9\n";
-        assert_eq!(
-            sccache_diagnostics(Some(output)),
-            BTreeSet::from([
-                SccacheDiagnostic::CompilerSignal { signal: 9 },
-                SccacheDiagnostic::CompilerSignal { signal: 15 },
-                SccacheDiagnostic::MissingCompilerStatus,
-            ])
-        );
-        for output in [
-            b"sccache: Compile terminated by signal 0".as_slice(),
-            b"sccache: Compile terminated by signal 65".as_slice(),
-            b"sccache: Compile terminated by signal -9".as_slice(),
-            b"sccache: Compile terminated by signal 999999999999999999999".as_slice(),
-            b"sccache: Compile terminated by signal 9 PRIVATE-CARGO".as_slice(),
-            b"sccache: Missing compiler exit status! PRIVATE-CARGO".as_slice(),
-            b"PRIVATE-CARGO sccache: Compile terminated by signal 9".as_slice(),
-            b"sccache: Compile terminated by signal \xff".as_slice(),
-            b"{\"rendered\":\"sccache: Compile terminated by signal 9\"}".as_slice(),
-        ] {
-            assert!(sccache_diagnostics(Some(output)).is_empty());
-        }
-        assert!(sccache_diagnostics(None).is_empty());
-    }
-
-    #[test]
-    fn cargo_wrapper_signal_is_durable_without_replacing_status_or_admitting_output() -> Result<()>
-    {
-        for process in [
-            CargoProcessOutcome {
-                code: Some(101),
-                ..failed_cargo_outcome()
-            },
-            CargoProcessOutcome {
-                category: "success",
-                code: Some(0),
-                ..failed_cargo_outcome()
-            },
-        ] {
-            let root = cargo_capture_root()?;
-            let original_code = process.code;
-            let output = b"PRIVATE-CARGO-INVALID\nsccache: Compile terminated by signal 9\nsccache: Compile terminated by signal 15 PRIVATE-CARGO\n{\"reason\":\"build-finished\",\"success\":false}\n";
-            let error = report_cargo_capture(root.path(), "tests", process, Ok(output.to_vec()))
-                .unwrap_err();
-            let failure = error
-                .downcast_ref::<CargoReportingFailure>()
-                .context("typed Cargo outcome")?;
-            assert_eq!(failure.process.code, original_code);
-            assert_eq!(failure.process.signal, None);
-            assert!(failure.capture.is_some());
-            let (_, manifest) = cargo_failure_manifest(root.path())?;
-            assert_eq!(
-                manifest["sccache_diagnostics"],
-                json!([{"kind":"compiler_signal","signal":9}])
-            );
-            assert_eq!(manifest["cargo_process"]["code"], json!(original_code));
-            assert!(manifest["cargo_process"]["signal"].is_null());
-            assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
-            assert!(!error.to_string().contains("PRIVATE-CARGO"));
-            assert!(!root.path().join(PREPARED).exists());
-            assert!(!root.path().join(BINARIES).exists());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_memory_diagnostics_are_optional_numeric_kernel_counters() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        assert!(cargo_memory_diagnostics(directory.path()).is_none());
-        fs::write(directory.path().join("memory.max"), "6442450944\n")?;
-        fs::write(directory.path().join("memory.peak"), "6442450944\n")?;
-        fs::write(
-            directory.path().join("memory.events"),
-            "low 0\noom 2\noom_kill 1\nPRIVATE-CARGO\n",
-        )?;
-        let memory =
-            cargo_memory_diagnostics(directory.path()).context("numeric memory evidence")?;
-        assert_eq!(memory.limit_bytes, Some(6442450944));
-        assert_eq!(memory.peak_bytes, Some(6442450944));
-        assert_eq!(memory.oom_events, Some(2));
-        assert_eq!(memory.oom_kills, Some(1));
-        assert!(!serde_json::to_string(&memory)?.contains("PRIVATE-CARGO"));
-        fs::write(directory.path().join("memory.max"), "max\n")?;
-        fs::write(directory.path().join("memory.peak"), "PRIVATE-CARGO\n")?;
-        fs::write(
-            directory.path().join("memory.events"),
-            "oom 1 PRIVATE-CARGO\noom_kill -1\n",
-        )?;
-        assert!(cargo_memory_diagnostics(directory.path()).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_later_valid_diagnostics_survive_an_earlier_malformed_record() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let mut output = b"PRIVATE-CARGO-INVALID\n".to_vec();
-        output.extend(serde_json::to_vec(&json!({
-            "reason":"compiler-message",
-            "message":{"code":{"code":"E0308"},"rendered":"PRIVATE-CARGO-RENDERED"}
-        }))?);
-        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
-            .unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.code, Some(2));
-        assert_eq!(failure.capture.as_ref().and_then(|p| p.line), Some(1));
-        let (_, manifest) = cargo_failure_manifest(root.path())?;
-        assert_eq!(manifest["rust_diagnostic_codes"], json!(["E0308"]));
-        assert!(!manifest.to_string().contains("PRIVATE-CARGO"));
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_valid_output_does_not_turn_a_failed_compile_into_success() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let output = serde_json::to_vec(&json!({"reason":"build-finished","success":false}))?;
-        let error = report_cargo_capture(
-            root.path(),
-            "auxiliaries",
-            failed_cargo_outcome(),
-            Ok(output),
-        )
-        .unwrap_err();
-        let failure = error
-            .downcast_ref::<CargoReportingFailure>()
-            .context("typed Cargo outcome")?;
-        assert_eq!(failure.process.code, Some(2));
-        assert!(failure.capture.is_none());
-        assert!(failure.retained);
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_evidence_write_and_capture_read_failures_stay_secondary() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        fs::write(root.path().join("artifacts"), b"not a directory")?;
-        for (output, category) in [
-            (Err(std::io::Error::from_raw_os_error(5)), "read"),
-            (Ok(b"PRIVATE-CARGO-INVALID".to_vec()), "json"),
-        ] {
-            let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), output)
-                .unwrap_err();
-            let failure = error
-                .downcast_ref::<CargoReportingFailure>()
-                .context("typed Cargo outcome")?;
-            assert_eq!(failure.process.code, Some(2));
-            assert_eq!(failure.capture.as_ref().map(|p| p.category), Some(category));
-            assert!(!failure.retained);
-            assert!(error.to_string().contains("primary=exit"));
-            assert!(!error.to_string().contains("PRIVATE-CARGO"));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_failure_spool_is_bounded_and_explicitly_incomplete() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let output = vec![b'x'; CARGO_FAILURE_CAPTURE_BYTES + 1];
-        let error = report_cargo_capture(root.path(), "tests", failed_cargo_outcome(), Ok(output))
-            .unwrap_err();
-        assert!(
-            error
-                .downcast_ref::<CargoReportingFailure>()
-                .context("typed Cargo outcome")?
-                .retained
-        );
-        let (directory, manifest) = cargo_failure_manifest(root.path())?;
-        assert_eq!(manifest["capture_bytes"], CARGO_FAILURE_CAPTURE_BYTES + 1);
-        assert_eq!(manifest["retained_bytes"], CARGO_FAILURE_CAPTURE_BYTES);
-        assert_eq!(manifest["complete"], false);
-        assert_eq!(
-            fs::metadata(directory.join("stdout.bin"))?.len(),
-            CARGO_FAILURE_CAPTURE_BYTES as u64
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_success_keeps_valid_messages_without_a_failure_spool() -> Result<()> {
-        let root = cargo_capture_root()?;
-        let message = json!({"reason":"build-finished","success":true});
-        let outcome = CargoProcessOutcome {
-            category: "success",
-            code: Some(0),
-            signal: None,
-            os_error: None,
-        };
-        let messages = report_cargo_capture(
-            root.path(),
-            "tests",
-            outcome,
-            Ok(serde_json::to_vec(&message)?),
-        )?;
-        assert_eq!(messages, vec![message]);
-        assert_eq!(fs::read_dir(root.path().join("artifacts"))?.count(), 0);
-        // Hosted controls also exercise the genuine source/run/snapshot path.
-        // Local unit runs without hosted run identity do not fabricate one.
-        if let (Ok(run), Ok(attempt)) = (
-            std::env::var("GITHUB_RUN_ID"),
-            std::env::var("GITHUB_RUN_ATTEMPT"),
-        ) {
-            let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .context("crates directory")?
-                .parent()
-                .context("workspace directory")?;
-            let binding = cargo_failure_identity(source_root)?;
-            assert_eq!(binding.run, run);
-            assert_eq!(binding.attempt, attempt);
-            assert_eq!(
-                binding.snapshot,
-                super::super::verification_snapshot(source_root, "verify")?
-            );
-            assert_eq!(
-                binding.source_identity,
-                super::super::verification_source_identity(source_root, "verify")?
-            );
-            assert_eq!(binding.workspace, source_root.canonicalize()?);
-            assert_eq!(binding.workflow, day2::automation::source_digest());
-            assert_eq!(binding.checkout.len(), 40);
-            assert_eq!(binding.tree.len(), 40);
-        }
-        Ok(())
-    }
-
     pub(super) fn sample_identity() -> Identity {
         Identity {
             checkout: "a".repeat(40),
@@ -2090,7 +1243,7 @@ mod tests {
                         target: package.into(),
                         kind: vec!["lib".into()],
                         directory: format!("crates/{package}").into(),
-                        executable: format!("target/debug/deps/{package}-test").into(),
+                        executable: format!("build-out/tests/{package}-test").into(),
                         digest: "binary".into(),
                         permissions: 0o755,
                     })
@@ -2185,8 +1338,8 @@ mod tests {
     fn completed_test_cache_rejects_changed_inputs_targets_paths_and_bytes() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let root = temporary.path().canonicalize()?;
-        fs::create_dir_all(root.join("target/debug/deps"))?;
-        let executable = PathBuf::from("target/debug/deps/example-test");
+        fs::create_dir_all(root.join(crate::bazel::TESTS))?;
+        let executable = PathBuf::from("build-out/tests/example-test");
         fs::write(root.join(&executable), b"compiled output")?;
         let identity = BuildIdentity {
             snapshot: "snapshot".into(),
@@ -2195,10 +1348,10 @@ mod tests {
             host: "macos".into(),
             architecture: "aarch64".into(),
             rustc: "rustc pinned".into(),
-            cargo: "cargo pinned".into(),
+            bazel: "bazel pinned".into(),
             cc: "cc pinned".into(),
             environment: "environment".into(),
-            cargo_configuration: BTreeMap::from([(".cargo/config.toml".into(), None)]),
+            bazel_configuration: BTreeMap::from([(".bazelrc".into(), "config".into())]),
             ci_workflow: "ci-workflow".into(),
         };
         let binary = Binary {
@@ -2375,7 +1528,7 @@ mod tests {
             "host",
             "architecture",
             "rustc",
-            "cargo",
+            "bazel",
             "cc",
             "environment",
             "ci_workflow",
@@ -2397,7 +1550,7 @@ mod tests {
             );
         }
         let mut value = serde_json::to_value(&cache)?;
-        value["identity"]["cargo_configuration"] = json!({".cargo/config.toml": "changed"});
+        value["identity"]["bazel_configuration"] = json!({".bazelrc": "changed"});
         let invalid = serde_json::from_value(value)?;
         assert!(
             admit_build_cache(
@@ -2504,8 +1657,8 @@ mod tests {
         let make_tests = || -> Result<Prepared> {
             let mut tests = sample_part("tests")?;
             for (target, kind, executable) in [
-                ("day2", "bin", "target/debug/deps/day2-harness"),
-                ("integration", "test", "target/debug/deps/integration"),
+                ("day2", "bin", "build-out/tests/day2-harness"),
+                ("integration", "test", "build-out/tests/integration"),
             ] {
                 tests.binaries.push(Binary {
                     package: "day2".into(),
@@ -2602,7 +1755,7 @@ mod tests {
                 target: "day2_integration".into(),
                 kind: vec!["test".into()],
                 directory: "crates/day2".into(),
-                executable: "target/debug/deps/day2_integration-test".into(),
+                executable: "build-out/tests/day2_integration-test".into(),
                 digest: "binary".into(),
                 permissions: 0o755,
             }],

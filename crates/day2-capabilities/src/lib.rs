@@ -209,8 +209,8 @@ pub enum BuildProvider {
         platform_root: String,
         toolchains: String,
         xtask: String,
-        rust: String,
-        registry: String,
+        bazel: String,
+        repositories: String,
     },
 }
 
@@ -308,10 +308,10 @@ impl InstallationControl {
                 platform_root,
                 toolchains,
                 xtask,
-                rust,
-                registry,
+                bazel,
+                repositories,
             } = provider;
-            for directory in [platform_root, toolchains, xtask, rust, registry] {
+            for directory in [platform_root, toolchains, xtask, bazel, repositories] {
                 absolute_directory(directory)?;
             }
         }

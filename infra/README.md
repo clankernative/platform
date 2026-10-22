@@ -23,7 +23,7 @@ per app. These are infrastructure metadata, not deployed application services.
 ./cli/day2 platform infra plan .cache/tofu.json /tmp/reports-infra-plan
 ```
 
-Run `cargo run --locked -p xtask -- configure-tofu` to record your installed
+Run `bazel run //crates/xtask:xtask -- configure-tofu` to record your installed
 OpenTofu 1.11.5 path, version and SHA-256 in ignored `.cache/tofu.json`.
 The host copies the verified engine into a fresh private directory,
 clears inherited provider/CLI environment, runs fixed commands with deadlines and

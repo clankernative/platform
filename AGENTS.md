@@ -49,9 +49,9 @@ new platform feature in a dedicated fixture overlay instead of growing Reports.
 Require app-owned properties, evaluate complete consistent bounded snapshots,
 and persist failed checks for artifact-bound replay. Never silently truncate
 verification state or replace the independent reference model with app assertions.
-Use `cargo run --locked -p xtask -- verify-fast` and scoped app builds while
+Use `bazel run //crates/xtask:xtask -- verify-fast` and scoped app builds while
 iterating. Do not edit covered sources during a full gate. Run
-`cargo run --locked -p xtask -- verify` before claiming verification.
+`bazel run //crates/xtask:xtask -- verify` before claiming verification.
 
 SDK source folders are assembled through crates/day2/src/sdk.rs; keep that explicit
 catalog, app exports and reserved module names consistent. Do not infer published

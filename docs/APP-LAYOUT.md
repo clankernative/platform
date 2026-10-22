@@ -152,9 +152,9 @@ For a selected instance checkout, platform tooling can inspect candidate exports
 and create an exact import lock without copying contract digests by hand:
 
 ```text
-cargo run --locked -p xtask -- catalog-candidate path/to/instance.json
-cargo run --locked -p xtask -- catalog-pin path/to/instance.json directory.lookup
-cargo run --locked -p xtask -- catalog-resolve path/to/instance.json path/to/import-lock.json
+bazel run //crates/xtask:xtask -- catalog-candidate path/to/instance.json
+bazel run //crates/xtask:xtask -- catalog-pin path/to/instance.json directory.lookup
+bazel run //crates/xtask:xtask -- catalog-resolve path/to/instance.json path/to/import-lock.json
 ```
 
 These commands verify the instance's selected artifacts. A lock names the
@@ -168,7 +168,7 @@ The supplied locks are not yet a complete release dependency inventory.
 The normal caller build can resolve that lock against the selected instance:
 
 ```text
-cargo run --locked -p xtask -- build path/to/caller-app --instance path/to/instance.json --imports path/to/import-lock.json
+bazel run //crates/xtask:xtask -- build path/to/caller-app --instance path/to/instance.json --imports path/to/import-lock.json
 ```
 
 Both options are required together. The build rejects a stale pin, another

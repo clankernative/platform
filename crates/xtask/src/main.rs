@@ -13,6 +13,8 @@ mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
 mod architecture_proofs;
+mod bazel;
+mod build_capture;
 mod build_native;
 mod control_simulation;
 mod formatter_bootstrap;
@@ -252,8 +254,9 @@ fn main() -> Result<()> {
         );
         root
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
+        std::env::var_os("BUILD_WORKSPACE_DIRECTORY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
             .canonicalize()?
     };
     // These closed native helpers read source evidence or addressed artifacts, or write only their
@@ -479,12 +482,7 @@ fn main() -> Result<()> {
                 "{action} accepts no source overrides"
             );
             let check = action == "fmt-check-reports";
-            let mut cargo = Command::new("cargo");
-            cargo.args(["fmt", "--all"]);
-            if check {
-                cargo.args(["--", "--check"]);
-            }
-            run(&root, &mut cargo)?;
+            bazel::format(&root, check)?;
             let mode = if check {
                 formatting::Mode::Check
             } else {
@@ -1030,12 +1028,7 @@ fn main() -> Result<()> {
 }
 
 fn format_sources(root: &Path, check: bool) -> Result<()> {
-    let mut cargo = Command::new("cargo");
-    cargo.args(["fmt", "--all"]);
-    if check {
-        cargo.args(["--", "--check"]);
-    }
-    run(root, &mut cargo)?;
+    bazel::format(root, check)?;
     let mode = if check {
         formatting::Mode::Check
     } else {
@@ -1091,39 +1084,19 @@ fn build_cli(root: &Path) -> Result<()> {
         let effect = match request.action.as_str() {
             "cli-native" => {
                 ensure!(args.is_empty(), "native build accepts no overrides");
-                run(
-                    root,
-                    Command::new("cargo").args([
-                        "build",
-                        "--locked",
-                        "-p",
-                        "day2-ops",
-                        "--bin",
-                        "day2-host",
-                    ]),
-                )?;
-                run(
-                    root,
-                    Command::new("cargo").args([
-                        "build",
-                        "--locked",
-                        "-p",
-                        "day2-sandbox",
-                        "--bins",
-                    ]),
-                )?;
+                bazel::programs(root, &["day2-ops", "day2-sandbox"])?;
                 for name in [
                     "day2-sandbox",
                     "day2-compiler-sandbox",
                     "day2-sandbox-probe",
                 ] {
                     install_cli_file(
-                        root.join("target/debug").join(name),
+                        root.join("build-out/bin").join(name),
                         root.join("cli").join(name),
                     )?;
                 }
                 install_cli_file(
-                    root.join("target/debug/day2-host"),
+                    root.join("build-out/bin/day2-host"),
                     root.join("cli/day2-host"),
                 )?;
                 install_cli_file(std::env::current_exe()?, root.join("cli/xtask"))?;
@@ -1204,9 +1177,7 @@ fn control_verify(root: &Path) -> Result<()> {
 }
 
 fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String>) -> Result<()> {
-    if directory == root.join("crates/worker/generated")
-        || directory == root.join("cli/build-dependencies")
-    {
+    if directory == root.join("cli/build-dependencies") {
         return Ok(());
     }
     for entry in fs::read_dir(directory)? {
@@ -1220,10 +1191,17 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
             hash_tree(root, &path, hashes)?;
         } else {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if ["rs", "roc", "toml", "mjs"].contains(&extension)
-                || ["assets", "deploy", "toolchains", "build-dependencies"]
-                    .iter()
-                    .any(|directory| path.starts_with(root.join(directory)))
+            if path.file_name().is_some_and(|name| name == "BUILD.bazel")
+                || ["rs", "roc", "toml", "mjs"].contains(&extension)
+                || [
+                    "assets",
+                    "deploy",
+                    "toolchains",
+                    "build-dependencies",
+                    "build/bazel",
+                ]
+                .iter()
+                .any(|directory| path.starts_with(root.join(directory)))
             {
                 hashes.insert(
                     path.strip_prefix(root)?.to_string_lossy().to_string(),

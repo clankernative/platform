@@ -10,7 +10,7 @@ private host custody. Both preserve an empty product database.
 Build it with the ordinary platform recipe:
 
 ```text
-cargo run --locked -p xtask -- build fixtures/oauth-calendar-canary
+bazel run //crates/xtask:xtask -- build fixtures/oauth-calendar-canary
 ```
 
 Keep company domains, identities, real Google client IDs, exact Secret Manager

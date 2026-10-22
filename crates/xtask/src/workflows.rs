@@ -8,18 +8,18 @@ use std::{
 };
 
 pub fn build(root: &Path) -> Result<PathBuf> {
-    let executable = root.join("target/debug/day2-workflows");
+    let executable = root.join("build-out/bin/day2-workflows");
     let pin = native_toolchain::load(root)?;
     let roc = pin.verified_compiler(root)?;
     ensure!(
         digest(&fs::read(root.join(pin.target.pin_path()))?)
             == day2::automation::toolchain_digest(),
-        "workflow compiler pin changed; rerun cargo"
+        "workflow compiler pin changed; rebuild xtask with Bazel"
     );
     for (name, expected) in day2::automation::SOURCES {
         ensure!(
             fs::read(root.join(name))? == *expected,
-            "workflow source changed during compilation; rerun cargo: {name}"
+            "workflow source changed during compilation; rebuild xtask with Bazel: {name}"
         );
     }
     if let Ok(checked) = day2::automation::checked_runner(&executable)
@@ -45,7 +45,7 @@ pub fn build(root: &Path) -> Result<PathBuf> {
     ensure!(
         digest(&fs::read(root.join(pin.target.pin_path()))?)
             == day2::automation::toolchain_digest(),
-        "workflow compiler pin changed while compiling; rerun cargo"
+        "workflow compiler pin changed while compiling; rebuild xtask with Bazel"
     );
     pin.verified_compiler(root)?;
     native_toolchain::verify_executable_target(pin.target, &executable)?;

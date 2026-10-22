@@ -17,10 +17,10 @@ Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Rust **1.98.1** 
 selected by `rust-toolchain.toml`. From this repository's root:
 
 ```console
-cargo run --locked -p xtask -- bootstrap
-cargo run --locked -p xtask -- bootstrap-formatter
-cargo run --locked -p xtask -- configure-tofu
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- bootstrap
+bazel run //crates/xtask:xtask -- bootstrap-formatter
+bazel run //crates/xtask:xtask -- configure-tofu
+bazel run //crates/xtask:xtask -- cli
 ./cli/day2 platform local-dev examples/reports --directory ../my-private-instance
 ```
 
@@ -40,8 +40,8 @@ ignored `.cache/tofu.json`; machine-specific paths are never source inputs.
 ## Develop and verify
 
 ```console
-cargo run --locked -p xtask -- verify-fast
-cargo run --locked -p xtask -- verify
+bazel run //crates/xtask:xtask -- verify-fast
+bazel run //crates/xtask:xtask -- verify
 ```
 
 `verify-fast` runs formatting, Clippy and fixture-free library checks. Full
@@ -55,11 +55,11 @@ discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.
 
 Both gates check the reviewed [platform structural rules](docs/PLATFORM-STRUCTURAL-RULES.md).
-Use `cargo run --locked -p xtask -- architecture-check` for focused feedback.
+Use `bazel run //crates/xtask:xtask -- architecture-check` for focused feedback.
 `architecture-inventory` prints source/effect facts without changing policy.
 
-Use `cargo run --locked -p xtask -- fmt` for authored Rust and Roc. Run
-`cargo run --locked -p xtask -- build /absolute/path/to/private-app` to build a
+Use `bazel run //crates/xtask:xtask -- fmt` for authored Rust and Roc. Run
+`bazel run //crates/xtask:xtask -- build /absolute/path/to/private-app` to build a
 separate app. Build outputs stay in ignored `artifacts/`; they can contain private
 application inputs and must not be uploaded as public release assets.
 

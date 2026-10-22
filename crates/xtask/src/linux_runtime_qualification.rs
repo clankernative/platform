@@ -447,7 +447,7 @@ impl RuntimeSession {
                 self.output.join("operator-output").display()
             ),
             "--entrypoint".into(),
-            "/workspace/platform/target/debug/xtask".into(),
+            "/workspace/platform/build-out/bin/xtask".into(),
             image.clone(),
             "linux-runtime-package".into(),
             native_artifact,
@@ -1278,7 +1278,7 @@ impl RuntimeSession {
     fn native_evidence(&mut self, index: usize, instance: &str) -> Result<Value> {
         serde_json::from_str(&self.native(
             index,
-            "/workspace/platform/target/debug/xtask",
+            "/workspace/platform/build-out/bin/xtask",
             &["linux-runtime-evidence", instance],
         )?)
         .context("native runtime evidence")
@@ -1702,7 +1702,7 @@ pub fn provision(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
                         parent.display(),
                         parent.display()
                     ),
-                    "--entrypoint=/workspace/platform/target/debug/xtask".into(),
+                    "--entrypoint=/workspace/platform/build-out/bin/xtask".into(),
                     field("tooling_image")?.into(),
                     "linux-provision-package".into(),
                     runtime.artifact.display().to_string(),
@@ -1793,7 +1793,7 @@ pub fn provision(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
                         "--rm",
                         "--no-deps",
                         "--entrypoint",
-                        "/workspace/platform/target/debug/xtask",
+                        "/workspace/platform/build-out/bin/xtask",
                         "--volume",
                         &instance_mount,
                         "provision-credentials",
@@ -1981,7 +1981,7 @@ pub fn strict(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
                 runtime.compose(0, &["create", "--no-build", "--pull", "never"])?;
                 runtime.native(
                     0,
-                    "/workspace/platform/target/debug/day2",
+                    "/workspace/platform/build-out/bin/day2",
                     &["init", INSTANCE, APP],
                 )?;
                 let activation = runtime.apply_desired(0, "strict-smoke-explicit-activation")?;
@@ -2026,9 +2026,9 @@ pub fn strict(root: &Path, qualified: &Path, output: &Path) -> Result<()> {
                     day2::digest(&fs::read(&sandbox)?) == field("runtime_sandbox")?,
                     "strict negative probe launcher differs from qualified launcher"
                 );
-                let result = runtime.native_with_mounts(0, "/workspace/platform/target/debug/xtask",
+                let result = runtime.native_with_mounts(0, "/workspace/platform/build-out/bin/xtask",
                     &["linux-strict-denial", INSTANCE], &[format!(
-                        "type=bind,source={},target=/workspace/platform/target/debug/day2-sandbox,readonly", sandbox.display())])?;
+                        "type=bind,source={},target=/workspace/platform/build-out/bin/day2-sandbox,readonly", sandbox.display())])?;
                 let proof: Value = serde_json::from_str(&result)?;
                 ensure!(
                     proof["code"] == "security_runtime_mismatch",
@@ -2275,7 +2275,7 @@ pub fn diagnose(
                 let proof: Value = serde_json::from_str(&runtime.docker(&[
                     "exec".into(),
                     container.clone(),
-                    "target/debug/xtask".into(),
+                    "build-out/bin/xtask".into(),
                     "linux-artifact-evidence".into(),
                     artifacts[index].1.clone(),
                 ])?)?;
@@ -2308,7 +2308,7 @@ pub fn diagnose(
                         "exec".into(),
                         "--env=CARGO_INCREMENTAL=0".into(),
                         container.clone(),
-                        "target/debug/xtask".into(),
+                        "build-out/bin/xtask".into(),
                         "linux-test-suite".into(),
                         suite.into(),
                         artifacts[0].1.clone(),

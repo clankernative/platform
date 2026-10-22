@@ -60,3 +60,5 @@ Thumbs.db
 # Bazel output links and local user configuration.
 /bazel-*
 /.bazelrc.local
+
+/build-out/

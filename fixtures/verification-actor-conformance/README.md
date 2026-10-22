@@ -20,7 +20,7 @@ denial with authorized command/query positive controls.
 From the platform root:
 
 ```sh
-cargo run --locked -p xtask -- build fixtures/verification-actor-conformance
+bazel run //crates/xtask:xtask -- build fixtures/verification-actor-conformance
 DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT=/absolute/path/to/admitted/artifact \
   cargo test --locked -p day2 --test day2_integration \
   app_contract::admitted_failure_principals_are_atomic_replayable_and_simulation_only -- --exact --nocapture

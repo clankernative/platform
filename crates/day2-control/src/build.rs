@@ -1,8 +1,8 @@
 //! Fixed local build recipe. The trusted runner is an operator capability, not app input.
 
-mod cargo_sources;
+mod bazel_sources;
 mod ui_assembly;
-use cargo_sources::OfflineCargoSources;
+use bazel_sources::OfflineBazelSources;
 use ui_assembly::{UiAssemblyInputs, validate_ui_activation};
 
 use crate::{
@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RECIPE: &str = "day2-local-build-v5:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:locked-offline-cargo-sources:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
+const RECIPE: &str = "day2-local-build-v5:roc-workflows:darwin-arm64:private-inputs:trusted-supervisor:per-stage-sandboxes:xtask-build-isolated:locked-offline-bazel-repositories:artifact-admission:empty-state-properties:examples-generators-replay:control-simulation-corpus-and-8-cases";
 const MAX_FILES: usize = 100_000;
 const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -35,7 +35,7 @@ pub fn recipe_digest() -> Digest {
             RECIPE.as_bytes(),
             include_bytes!("build.rs"),
             include_bytes!("build/ui_assembly.rs"),
-            include_bytes!("build/cargo_sources.rs"),
+            include_bytes!("build/bazel_sources.rs"),
             include_bytes!("simulation_campaign.rs"),
             day2::automation::source_digest().as_bytes(),
         ]
@@ -126,6 +126,11 @@ impl PlatformInputs {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".bazelrc",
+            ".bazelversion",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
             "architecture-proofs.json",
@@ -143,6 +148,7 @@ impl PlatformInputs {
         }
         for name in [
             "build-dependencies",
+            "build/bazel",
             "crates",
             "sdk",
             "tools",
@@ -158,9 +164,7 @@ impl PlatformInputs {
             let mut selected = BTreeMap::new();
             collect(&root, &root.join(name), &mut selected, &mut total, true)?;
             for (path, file) in selected {
-                if !path.starts_with("crates/worker/generated/") {
-                    files.insert(format!("platform/{path}"), file);
-                }
+                files.insert(format!("platform/{path}"), file);
             }
         }
         // CLI tests are a workspace member. Stage its authored sources explicitly,
@@ -229,9 +233,9 @@ pub struct TrustedRunner {
     workflow_pin: InputFile,
     supervisor_pin: InputFile,
     system_ssl: Option<InputFile>,
-    rust: PinnedTree,
-    registry: PinnedTree,
-    offline_sources: Option<OfflineCargoSources>,
+    bazel: PathBuf,
+    bazel_pin: InputFile,
+    repositories: OfflineBazelSources,
     ui_assembly: Option<UiAssemblyInputs>,
 }
 
@@ -372,32 +376,17 @@ impl TrustedRunner {
     pub fn capture(
         identity: Name,
         executable: &Path,
-        rust_toolchain: &Path,
-        cargo_registry: &Path,
+        bazel: &Path,
+        repositories: &Path,
     ) -> Result<Self> {
         let executable_pin = pin_file(executable)?;
         ensure!(
             executable_pin.executable,
             "runner executable permission required"
         );
-        let rust = PinnedTree::capture(rust_toolchain)?;
-        for name in ["bin/cargo", "bin/rustc"] {
-            ensure!(
-                rust.files.get(name).is_some_and(|file| file.executable),
-                "pinned Rust toolchain missing {name}"
-            );
-        }
-        validate_registry_layout(cargo_registry)?;
-        let registry = PinnedTree::capture(cargo_registry)?;
-        ensure!(
-            registry.files.keys().all(|name| {
-                ["cache/", "src/", "index/"]
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-                    || name == "CACHEDIR.TAG"
-            }),
-            "only the offline Cargo registry may be approved; credentials/config are forbidden"
-        );
+        let bazel_pin = pin_file(bazel)?;
+        ensure!(bazel_pin.executable, "standalone Bazel must be executable");
+        let repositories = OfflineBazelSources::capture(repositories)?;
         let workflow = day2::automation::runner()?;
         let workflow_pin = pin_file(&workflow)?;
         Ok(Self {
@@ -412,21 +401,31 @@ impl TrustedRunner {
             } else {
                 None
             },
-            rust,
-            registry,
-            offline_sources: None,
+            bazel: bazel.canonicalize()?,
+            bazel_pin,
+            repositories,
             ui_assembly: None,
         })
     }
 
-    /// Bind UI and all locked Cargo sources to the selected Platform installation.
+    /// Bind UI and the exact standalone Bazel tool to the selected installation.
     pub fn with_platform_inputs(mut self, platform_root: &Path) -> Result<Self> {
         self.ui_assembly = Some(UiAssemblyInputs::capture(platform_root)?);
-        self.offline_sources = Some(OfflineCargoSources::capture(
-            &self.rust.root.join("bin/cargo"),
-            &self.registry.root,
-            platform_root,
-        )?);
+        let pins: Value = serde_json::from_slice(&read_regular(
+            &platform_root.join("build/bazel/toolchain.json"),
+        )?)?;
+        let host = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let pin = &pins["hosts"][&host];
+        ensure!(
+            pins["version"] == "9.3.0"
+                && self.bazel_pin.digest.as_str()
+                    == format!(
+                        "sha256:{}",
+                        pin["sha256"].as_str().context("Bazel host checksum")?
+                    )
+                && Some(self.bazel_pin.bytes) == pin["bytes"].as_u64(),
+            "approved Bazel differs from platform checksum pin"
+        );
         Ok(self)
     }
 
@@ -434,15 +433,13 @@ impl TrustedRunner {
         let mut identity = json!({
             "recipe":recipe_digest(), "executable":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
             "simulation":crate::simulation::implementation_digest()?,
-            "rust":self.rust.digest(), "registry":self.registry.digest(),
+            "bazel":self.bazel_pin, "repositories":self.repositories.identity(),
             "containment":"macos-arm64-local-sandbox-v1", "system_tools":"trusted-host-OS-and-Xcode"
         });
         if let Some(ui) = &self.ui_assembly {
             identity["ui_assembly"] = ui.binding_identity()?;
         }
-        if let Some(sources) = &self.offline_sources {
-            identity["offline_cargo_sources"] = sources.identity();
-        }
+
         BindingRef::pin(self.identity.clone(), &identity)
     }
 
@@ -523,7 +520,7 @@ impl TrustedRunner {
             artifact: None, credential_presence: CredentialPresence::Unknown,
             checks: Vec::new(), log: Digest::new(b""), inputs: Digest::new(b""),
             properties: None, development: None, simulation: None, failure: None,
-            containment: "trusted local supervisor; separate macOS arm64 Cargo/compiler/worker sandboxes; trusted OS/Xcode; no production hostile-code containment or resource-quota claim".into(),
+            containment: "trusted local supervisor; separate macOS arm64 Bazel/compiler/worker sandboxes; trusted OS/Xcode; no production hostile-code containment or resource-quota claim".into(),
             verification_scope: "pinned build/admission, empty-state properties and optional pure examples/generators through real commands, replay and duplicate delivery; no claim of full state-machine/DST certification".into(),
         };
         let input_manifest = self.input_manifest(request, platform)?;
@@ -569,7 +566,7 @@ impl TrustedRunner {
             "source_commit":request.source.commit(),
             "source":request.source.files().iter().map(|(path,bytes)| (path,Digest::new(bytes))).collect::<BTreeMap<_,_>>(),
             "platform":platform.files(), "runner":self.executable_pin, "workflow":self.workflow_pin, "supervisor":self.supervisor_pin, "system_ssl":self.system_ssl,
-            "rust":self.rust.files(), "cargo_registry":self.registry.files()
+            "bazel":self.bazel_pin, "bazel_repositories":self.repositories.manifest()
         });
         if validate_ui_activation(&request.source, self.ui_assembly.as_ref())? {
             manifest["ui_assembly"] = self
@@ -578,9 +575,7 @@ impl TrustedRunner {
                 .context("UI capability disappeared")?
                 .input_manifest()?;
         }
-        if let Some(sources) = &self.offline_sources {
-            manifest["offline_cargo_sources"] = sources.manifest();
-        }
+
         Ok(serde_json::to_vec_pretty(&manifest)?)
     }
 
@@ -652,13 +647,9 @@ impl TrustedRunner {
                             .context("UI capability disappeared")?
                             .materialize(job)?;
                     }
-                    self.rust.materialize(&job.join("rust"))?;
-                    private_directory(&job.join("cargo"))?;
-                    if let Some(sources) = &self.offline_sources {
-                        sources.materialize(&job.join("cargo"))?;
-                    } else {
-                        self.registry.materialize(&job.join("cargo/registry"))?;
-                    }
+                    private_directory(&job.join("bazel"))?;
+                    write_pinned(&self.bazel, &job.join("bazel/bazel"), &self.bazel_pin)?;
+                    self.repositories.materialize(&job.join("repositories"))?;
                     write_pinned(&self.executable, &job.join("xtask"), &self.executable_pin)?;
                     for name in ["home", "tmp"] {
                         private_directory(&job.join(name))?;
@@ -672,7 +663,7 @@ impl TrustedRunner {
                 }
                 "ci-build" => {
                     ensure!(materialized && !built, "fresh pinned CI inputs required");
-                    // Registry files are read-only; Cargo's lock files belong only to the private home.
+                    // Approved repository files stay read-only. Bazel writes only within this private job.
                     let child_log = job.join("build.log");
                     let log = fs::OpenOptions::new()
                         .create_new(true)
@@ -690,13 +681,11 @@ impl TrustedRunner {
                         .env("TZ", "UTC")
                         .env("HOME", job.join("home"))
                         .env("TMPDIR", job.join("tmp"))
-                        .env("CARGO_HOME", job.join("cargo"))
-                        .env("CARGO_NET_OFFLINE", "true")
-                        .env("CARGO_TARGET_DIR", job.join("platform/target"))
-                        .env("RUSTC", job.join("rust/bin/rustc"))
+                        .env("DAY2_BAZEL_BINARY", job.join("bazel/bazel"))
+                        .env("DAY2_BAZEL_REPOSITORIES", job.join("repositories"))
                         .env(
                             "PATH",
-                            format!("{}:/usr/bin:/bin", job.join("rust/bin").display()),
+                            format!("{}:/usr/bin:/bin", job.join("bazel").display()),
                         )
                         .stdin(Stdio::null())
                         .stdout(log.try_clone()?)
@@ -1029,43 +1018,6 @@ fn relative(path: &Path) -> Result<String> {
     Ok(text.into())
 }
 
-fn validate_registry_layout(root: &Path) -> Result<()> {
-    fn visit(directory: &Path, depth: usize) -> Result<()> {
-        ensure!(
-            depth <= 32 && fs::symlink_metadata(directory)?.file_type().is_dir(),
-            "registry directory type/budget"
-        );
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("registry filename"))?;
-            ensure!(
-                ![".git", ".hg", ".svn", "credentials", "credentials.toml"]
-                    .contains(&name.as_str()),
-                "registry VCS metadata or credentials forbidden"
-            );
-            if depth == 0 {
-                ensure!(
-                    ["src", "cache", "index", "CACHEDIR.TAG"].contains(&name.as_str()),
-                    "only offline registry inputs are allowed"
-                );
-            }
-            let kind = entry.file_type()?;
-            ensure!(
-                kind.is_file() || kind.is_dir(),
-                "registry symlink or special file forbidden"
-            );
-            if kind.is_dir() {
-                visit(&entry.path(), depth + 1)?;
-            }
-        }
-        Ok(())
-    }
-    visit(root, 0)
-}
-
 /// Local credentials, Terraform providers/state and runtime outputs are never
 /// platform build inputs, even when an operator has initialized a public stack.
 pub fn local_platform_input(path: &Path) -> bool {
@@ -1078,6 +1030,7 @@ pub fn local_platform_input(path: &Path) -> bool {
         ".cache",
         ".state",
         ".git",
+        "build-out",
         "target",
         "secrets",
         "credentials",
@@ -1159,6 +1112,7 @@ fn collect_cli(
         if [
             ".git",
             ".cache",
+            "build-out",
             "target",
             "day2",
             "day2-host",

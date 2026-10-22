@@ -70,7 +70,7 @@ experimental component; normal UI bundles do not install it.
 ## Provisioning and deterministic adapters
 
 The path-free schema-2 lock pins the reviewed package bundled with the Platform
-CLI. Run normal CLI setup or `cargo run --locked -p xtask -- bootstrap-ui` before
+CLI. Run normal CLI setup or `bazel run //crates/xtask:xtask -- bootstrap-ui` before
 building; ordinary compilation stays offline and never restores dependencies.
 The builder owns the installed package/tool paths and checks the exact locked
 closure. Do not put `.ui-dependencies/` or other package implementation inside

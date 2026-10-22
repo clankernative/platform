@@ -96,7 +96,7 @@ x86_64 on an x86_64 Linux host — and selects the matching compiler pin in
 Landlock ruleset qualified under Rosetta or QEMU says nothing about the target.
 
 ```text
-cargo run --locked -p xtask -- qualify-linux artifacts/linux-qualification-NEW_RUN
+bazel run //crates/xtask:xtask -- qualify-linux artifacts/linux-qualification-NEW_RUN
 ```
 
 `ops/Linux.roc` captures the platform, Reports and GoLinks inputs, builds those captured
@@ -120,7 +120,7 @@ workflows.
 After a successful campaign, exercise explicit security admission separately:
 
 ```text
-cargo run --locked -p xtask -- strict-linux QUALIFICATION_DIRECTORY NEW_OUTPUT
+bazel run //crates/xtask:xtask -- strict-linux QUALIFICATION_DIRECTORY NEW_OUTPUT
 ```
 
 This private Roc recipe consumes the actual completed `qualification.json`, checks

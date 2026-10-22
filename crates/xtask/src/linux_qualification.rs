@@ -516,7 +516,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -557,7 +557,7 @@ impl Session {
                     Command::new("docker").args([
                         "exec",
                         &self.container,
-                        "target/debug/xtask",
+                        "build-out/bin/xtask",
                         "linux-build-probe",
                     ]),
                     1800,
@@ -603,7 +603,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -682,7 +682,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -711,7 +711,7 @@ impl Session {
                     Command::new("docker").args([
                         "exec",
                         &self.container,
-                        "target/debug/xtask",
+                        "build-out/bin/xtask",
                         command,
                     ]),
                     1800,
@@ -776,7 +776,7 @@ impl Session {
                     );
                     command.arg(format!("{variable}={}", path.display()));
                 }
-                command.args(["target/debug/xtask", "linux-test-delegation"]);
+                command.args(["build-out/bin/xtask", "linux-test-delegation"]);
                 logged(&self.output, &key, &mut command, 1800)?;
                 for (fixture, path) in paths {
                     let hash = Path::new(&path)
@@ -839,7 +839,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-test-suite",
                             suite,
                         ])

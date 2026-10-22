@@ -32,7 +32,7 @@ Use `xtask retire-model APP TABLE` when removing a model. A later new model does
 For an intentional source rename, preserve the identity before building:
 
 ```console
-cargo run --locked -p xtask -- rename-model ../my-app orders purchases Models.Purchase
+bazel run //crates/xtask:xtask -- rename-model ../my-app orders purchases Models.Purchase
 ```
 
 This updates registry metadata; update the Roc model/catalog names consistently.

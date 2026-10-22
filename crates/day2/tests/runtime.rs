@@ -464,7 +464,7 @@ fn seeded_state_machine_matches_reference_under_faults() {
 fn typed_additive_migration_preserves_rows_and_fails_closed() -> Result<()> {
     use day2::{artifact::LoadedArtifact, migration};
     let path = std::env::var_os("DAY2_TEST_RELATIONAL_NEXT_ARTIFACT")
-        .context("run cargo run --locked -p xtask -- verify to build the migration fixture")?;
+        .context("run bazel run //crates/xtask:xtask -- verify to build the migration fixture")?;
     let next = LoadedArtifact::load(Path::new(&path))?;
     let world = World::new()?;
     let plan = migration::plan(&world.runtime, &next)?;

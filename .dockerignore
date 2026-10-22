@@ -47,3 +47,5 @@ instance.json
 infra/local.json
 
 bazel-*
+
+build-out

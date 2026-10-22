@@ -275,13 +275,13 @@ interaction verification is implied by passing the Rust/HTTP verifier.
 From `platform/`:
 
 ```text
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- cli
 ./cli/day2 platform local-dev examples/reports
 ```
 
 Local development prints the origin, sign-in URL and managed instance path. It
 watches Reports, rebuilds changed source and preserves local data between sessions.
-Run `cargo run --locked -p xtask -- verify` for the platform's HTTP and relational
+Run `bazel run //crates/xtask:xtask -- verify` for the platform's HTTP and relational
 conformance suites. Verification evidence applies to the built artifact; current
 native-build blockers are recorded in [verification coverage](VERIFICATION-COVERAGE.md).
 

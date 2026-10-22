@@ -40,7 +40,7 @@ mod tests {
             );
             for name in ["day2-workflows", "day2-workflows.json"] {
                 let temporary = tempfile::NamedTempFile::new_in(&root).unwrap();
-                fs::copy(root.join("../target/debug").join(name), temporary.path())
+                fs::copy(root.join("../build-out/bin").join(name), temporary.path())
                     .expect("run xtask cli before CLI checks");
                 temporary.persist(root.join(name)).unwrap();
             }

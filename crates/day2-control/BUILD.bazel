@@ -13,7 +13,7 @@ COMPILE_INPUTS = [
     "//crates/day2-capabilities:src/lib.rs",
     "//crates/day2-control:Cargo.toml",
     "//crates/day2-control:src/build.rs",
-    "//crates/day2-control:src/build/cargo_sources.rs",
+    "//crates/day2-control:src/build/bazel_sources.rs",
     "//crates/day2-control:src/build/ui_assembly.rs",
     "//crates/day2-control:src/contracts.rs",
     "//crates/day2-control:src/engine.rs",
@@ -190,7 +190,7 @@ platform_rust_test(
 exports_files([
     "Cargo.toml",
     "src/build.rs",
-    "src/build/cargo_sources.rs",
+    "src/build/bazel_sources.rs",
     "src/build/ui_assembly.rs",
     "src/contracts.rs",
     "src/engine.rs",

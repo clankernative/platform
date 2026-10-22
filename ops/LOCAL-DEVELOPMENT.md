@@ -146,7 +146,7 @@ compiler failure, and verifies data, login and port preservation across rebuilds
 and restarts. Run it after building the CLI, with no other xtask build running:
 
 ```console
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- cli
 cargo test --locked -p day2-ops --test local_dev_cli -- --ignored
 ```
 

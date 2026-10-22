@@ -45,7 +45,7 @@ def platform_rust_binary(name, crate_name, internal_deps = [], linux_deps = [], 
 def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], own_library = None, rustc_env = {}, program_data = [], **kwargs):
     env = dict(rustc_env)
     for program in program_data:
-        env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "artifacts/bazel/bin/" + program.rsplit(":", 1)[-1]
+        env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "build-out/bin/" + program.rsplit(":", 1)[-1]
     attributes = _attributes(crate_name, internal_deps, linux_deps, own_library, True, env)
     # Keep current Linux harness LLVM partitioning and no-LTO memory behavior.
     attributes["rustc_flags"] = attributes["rustc_flags"] + select({

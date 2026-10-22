@@ -86,6 +86,11 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     for name in [
         "Cargo.toml",
         "Cargo.lock",
+        ".bazelrc",
+        ".bazelversion",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
         "architecture-proofs.json",
@@ -101,6 +106,7 @@ fn platform(directory: &Path) -> Result<PlatformInputs> {
     }
     for name in [
         "build-dependencies",
+        "build/bazel",
         "crates",
         "sdk",
         "tools",
@@ -212,23 +218,17 @@ fn architecture_policy_changes_invalidate_the_platform_and_materialization() -> 
 
 fn runner(directory: &Path) -> Result<TrustedRunner> {
     write(&directory.join("xtask"), b"pinned central executor", true)?;
-    for executable in ["cargo", "rustc"] {
-        write(
-            &directory.join("rust/bin").join(executable),
-            b"pinned Rust executable",
-            true,
-        )?;
-    }
+    write(&directory.join("bazel"), b"pinned Bazel executable", true)?;
     write(
-        &directory.join("registry/src/approved-crate/lib.rs"),
+        &directory.join("repositories/approved-crate/lib.rs"),
         b"approved dependency",
         false,
     )?;
     TrustedRunner::capture(
         name("local-runner"),
         &directory.join("xtask"),
-        &directory.join("rust"),
-        &directory.join("registry"),
+        &directory.join("bazel"),
+        &directory.join("repositories"),
     )
 }
 
@@ -422,23 +422,23 @@ fn build_request_cannot_mix_a_commit_platform_runner_or_recipe() -> Result<()> {
 }
 
 #[test]
-fn runner_binding_pins_its_dependency_cache_and_refuses_cargo_credentials() -> Result<()> {
+fn runner_binding_pins_its_dependency_cache_and_refuses_credentials() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let first = runner(directory.path())?;
     write(
-        &directory.path().join("registry/src/approved-crate/lib.rs"),
+        &directory.path().join("repositories/approved-crate/lib.rs"),
         b"different dependency",
         false,
     )?;
     let second = TrustedRunner::capture(
         name("local-runner"),
         &directory.path().join("xtask"),
-        &directory.path().join("rust"),
-        &directory.path().join("registry"),
+        &directory.path().join("bazel"),
+        &directory.path().join("repositories"),
     )?;
     assert_ne!(first.binding()?, second.binding()?);
     write(
-        &directory.path().join("registry/credentials.toml"),
+        &directory.path().join("repositories/credentials.toml"),
         b"must not reach a build",
         false,
     )?;
@@ -446,22 +446,22 @@ fn runner_binding_pins_its_dependency_cache_and_refuses_cargo_credentials() -> R
         TrustedRunner::capture(
             name("local-runner"),
             &directory.path().join("xtask"),
-            &directory.path().join("rust"),
-            &directory.path().join("registry")
+            &directory.path().join("bazel"),
+            &directory.path().join("repositories")
         )
         .is_err()
     );
-    fs::remove_file(directory.path().join("registry/credentials.toml"))?;
+    fs::remove_file(directory.path().join("repositories/credentials.toml"))?;
     write(
-        &directory.path().join("registry/index/legacy/.git/config"),
+        &directory.path().join("repositories/legacy/.git/config"),
         b"credential-bearing Git configuration must not be read",
         false,
     )?;
     let error = TrustedRunner::capture(
         name("local-runner"),
         &directory.path().join("xtask"),
-        &directory.path().join("rust"),
-        &directory.path().join("registry"),
+        &directory.path().join("bazel"),
+        &directory.path().join("repositories"),
     )
     .unwrap_err();
     assert!(error.to_string().contains("VCS metadata"));
@@ -491,8 +491,8 @@ fn a_fast_successful_process_cannot_bypass_the_log_budget_or_forge_verification(
     let runner = TrustedRunner::capture(
         name("flood-fixture"),
         &directory.path().join("flood"),
-        &directory.path().join("rust"),
-        &directory.path().join("registry"),
+        &directory.path().join("bazel"),
+        &directory.path().join("repositories"),
     )?;
     let request = request(&runner, &platform)?;
     let outputs = directory.path().join("outputs");
@@ -518,7 +518,7 @@ fn unsupported_build_hosts_fail_closed() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn cargo_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes() -> Result<()> {
+fn bazel_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let job = directory.path().join("job");
     fs::create_dir(&job)?;
@@ -572,16 +572,16 @@ fn cargo_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes() ->
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-#[ignore = "requires DAY2_TEST_BUILD_RUST for pinned native Cargo launch diagnostic"]
-fn cargo_stage_sandbox_starts_the_real_cargo_binary() -> Result<()> {
+#[ignore = "requires DAY2_TEST_BUILD_BAZEL for pinned native Bazel launch diagnostic"]
+fn bazel_stage_sandbox_starts_the_real_bazel_binary() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let cargo = directory.path().join("cargo");
-    let rust = std::env::var_os("DAY2_TEST_BUILD_RUST")
+    let bazel = directory.path().join("bazel");
+    let binary = std::env::var_os("DAY2_TEST_BUILD_BAZEL")
         .map(PathBuf::from)
-        .context("DAY2_TEST_BUILD_RUST")?;
-    fs::copy(rust.join("bin/cargo"), &cargo)?;
-    let output = day2::sandbox::build_host(directory.path(), &cargo)?
-        .arg("--version")
+        .context("DAY2_TEST_BUILD_BAZEL")?;
+    fs::copy(binary, &bazel)?;
+    let output = day2::sandbox::build_host(directory.path(), &bazel)?
+        .args(["--batch", "--version"])
         .current_dir(directory.path())
         .env_clear()
         .env("OPENSSL_CONF", "/dev/null")
@@ -593,7 +593,7 @@ fn cargo_stage_sandbox_starts_the_real_cargo_binary() -> Result<()> {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("cargo "));
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("bazel "));
     Ok(())
 }
 
@@ -611,8 +611,8 @@ fn real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt(
     let runner = TrustedRunner::capture(
         name("local-macos-runner"),
         &path("DAY2_TEST_BUILD_XTASK")?,
-        &path("DAY2_TEST_BUILD_RUST")?,
-        &path("DAY2_TEST_BUILD_REGISTRY")?,
+        &path("DAY2_TEST_BUILD_BAZEL")?,
+        &path("DAY2_TEST_BUILD_REPOSITORIES")?,
     )?;
     let runner = runner.with_platform_inputs(&root)?;
     let platform = PlatformInputs::capture(&root, &root.join("../.toolchains"))?;

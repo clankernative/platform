@@ -141,7 +141,7 @@ pub fn checked_runner(executable: &Path) -> Result<PathBuf> {
 }
 
 pub fn runner() -> Result<PathBuf> {
-    checked_runner(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/day2-workflows"))
+    checked_runner(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build-out/bin/day2-workflows"))
 }
 
 #[derive(Deserialize)]

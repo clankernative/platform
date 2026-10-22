@@ -232,7 +232,7 @@ version destruction, or recovery of a stopped retirement barrier.
 Build the pinned private Roc runner before invoking the native test suites:
 
 ```text
-cargo run --locked -p xtask -- workflows
+bazel run //crates/xtask:xtask -- workflows
 cargo test --locked -p day2-control --test control_integration -- runtime_secret:: secret_retirement::
 cargo test --locked -p day2-control --test control_integration -- durable_secret_retirement::
 cargo test --locked -p day2-control --test control_integration -- simulation_retirement:: simulation_generation::

@@ -13,4 +13,4 @@ effects with private transactional completion. Observe cannot write; Effects
 cannot access the database. Provider progress belongs to the platform journal,
 while report readiness belongs to the app. See ../../docs/COMMAND-RUNTIME.md.
 Do not import Temporal, source-control APIs, credentials, or arbitrary I/O.
-Run the platform repository root’s `cargo run --locked -p xtask -- verify`.
+Run the platform repository root’s `bazel run //crates/xtask:xtask -- verify`.

@@ -54,7 +54,7 @@ a platform regression.
 From the platform directory:
 
 ```text
-cargo run --locked -p xtask -- verify-reports
+bazel run //crates/xtask:xtask -- verify-reports
 ```
 
 The verifier builds ordinary and adversarial artifacts separately, then passes

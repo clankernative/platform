@@ -108,17 +108,17 @@ fn compiler_scoped(
     Ok(command)
 }
 
-/// Cargo's trusted platform dependencies run separately from the stricter Roc
+/// Bazel's trusted platform dependencies run separately from the stricter Roc
 /// compiler/worker sandboxes: macOS refuses nested sandbox initialization.
-pub fn build_host(job: &Path, cargo: &Path) -> Result<Command> {
+pub fn build_host(job: &Path, bazel: &Path) -> Result<Command> {
     ensure!(
         cfg!(all(target_os = "macos", target_arch = "aarch64")),
         "isolated host build is only supported on macOS arm64"
     );
     let root = quoted_path(job)?;
     ensure!(
-        cargo.canonicalize()?.starts_with(job.canonicalize()?),
-        "Cargo must belong to the private runner snapshot"
+        bazel.canonicalize()?.starts_with(job.canonicalize()?),
+        "Bazel must belong to the private runner snapshot"
     );
     let profile = format!(
         r#"(version 1)(deny default)
@@ -138,8 +138,7 @@ pub fn build_host(job: &Path, cargo: &Path) -> Result<Command> {
     let mut command = Command::new("/usr/bin/sandbox-exec");
     command
         .args(["-p", &profile])
-        .arg(cargo)
-        .env("CARGO_NET_OFFLINE", "true")
+        .arg(bazel)
         .env("OPENSSL_CONF", "/dev/null");
     Ok(command)
 }

@@ -124,10 +124,10 @@ patch from the still-proposed definition-order diagnostic. The application
 compiler and its semantic rules remain unchanged.
 
 ```text
-cargo run --locked -p xtask -- bootstrap-formatter
-cargo run --locked -p xtask -- fmt
-cargo run --locked -p xtask -- fmt-check
-cargo run --locked -p xtask -- verify
+bazel run //crates/xtask:xtask -- bootstrap-formatter
+bazel run //crates/xtask:xtask -- fmt
+bazel run //crates/xtask:xtask -- fmt-check
+bazel run //crates/xtask:xtask -- verify
 ```
 
 `fmt` formats authored Rust and Roc. `fmt-check` is read-only; `verify` includes

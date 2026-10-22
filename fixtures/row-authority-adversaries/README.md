@@ -17,6 +17,6 @@ the broader text rule explicitly. The stricter company-owned policy must still
 constrain their behavior. The app's revision guard remains mandatory under
 CurrentState policy too; policy cannot disable it.
 
-Build with `cargo run --locked -p xtask -- build-row-authority-adversaries`.
+Build with `bazel run //crates/xtask:xtask -- build-row-authority-adversaries`.
 `xtask verify` builds the positive control and this overlay separately; the
 `owned_runtime` tests exercise the resulting artifacts under the same policy.

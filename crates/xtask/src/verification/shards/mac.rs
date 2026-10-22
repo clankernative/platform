@@ -317,7 +317,7 @@ const CASES: &[(&str, &str, &str, &str, bool)] = &[
         "day2-control",
         "control_integration",
         "test",
-        "build::cargo_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes",
+        "build::bazel_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes",
         false,
     ),
     (
@@ -442,7 +442,7 @@ fn case_binary<'a>(
         .collect();
     ensure!(
         matches.len() == 1,
-        "exact focused Mac Cargo harness required: {package}/{target}"
+        "exact focused Mac Bazel harness required: {package}/{target}"
     );
     Ok(matches[0])
 }
@@ -455,11 +455,7 @@ fn list(root: &Path, binary: &Binary, name: &str, ignored: bool) -> Result<bool>
         command.arg("--ignored");
     }
     command.stdout(Stdio::from(file.reopen()?));
-    run_with_budget(
-        &root.join(&binary.directory),
-        &mut command,
-        Duration::from_secs(60),
-    )?;
+    run_with_budget(root, &mut command, Duration::from_secs(60))?;
     let output: &fs::File = file.as_file();
     ensure!(
         output.metadata()?.len() <= 1024 * 1024,
@@ -502,7 +498,7 @@ pub(in super::super) fn focused(
             .checked_sub(started.elapsed())
             .context("focused Mac native case allowance exhausted")?;
         let case_start = Instant::now();
-        run_with_budget(&root.join(&binary.directory), &mut command, remaining)?;
+        run_with_budget(root, &mut command, remaining)?;
         cases.push(Case {
             package: (*package).into(),
             target: (*target).into(),
@@ -628,12 +624,12 @@ pub(super) fn admit(
             && c.host == id.host
             && c.architecture == id.architecture
             && c.ci_workflow == compiler.ci_workflow
-            && c.cargo_configuration == compiler.cargo_configuration
+            && c.bazel_configuration == compiler.bazel_configuration
             && c.rustc.lines().next() == compiler.rustc.lines().next()
             && c.rustc
                 .lines()
                 .any(|line| line == "host: aarch64-apple-darwin")
-            && c.cargo.lines().next() == compiler.cargo.lines().next()
+            && c.bazel == compiler.bazel
             && !c.cc.trim().is_empty()
             && valid_digest(&c.environment),
         "Mac compiler/config/profile proof changed"
@@ -648,7 +644,7 @@ pub(super) fn admit(
             .collect();
         ensure!(
             observed == *expected && observed.len() == binaries.len(),
-            "incomplete Mac native Cargo graph"
+            "incomplete Mac native Bazel graph"
         );
         for b in binaries {
             ensure!(
@@ -664,9 +660,9 @@ pub(super) fn admit(
                         .all(|part| matches!(part, std::path::Component::Normal(_)))
                     && b.executable.parent()
                         == Some(Path::new(if programs {
-                            "target/debug"
+                            "build-out/bin"
                         } else {
-                            "target/debug/deps"
+                            "build-out/tests"
                         })),
                 "invalid Mac native executable identity"
             );
