@@ -127,6 +127,7 @@ impl PlatformInputs {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".github/workflows/ci.yml",
             ".bazelrc",
             ".bazelversion",
             "BUILD.bazel",
@@ -1026,22 +1027,31 @@ pub fn local_platform_input(path: &Path) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    [
-        ".terraform",
-        ".cache",
-        ".state",
-        ".git",
-        "build-out",
-        "target",
-        "secrets",
-        "credentials",
-        "instance.json",
-        "secrets.json",
-        "credentials.json",
-        "plan.bin",
-        ".DS_Store",
-    ]
-    .contains(&name)
+    // The reviewed ABI is an authored Bazel source input. Other files in this
+    // generated-output directory remain disposable and must never become inputs.
+    let worker_generated = Path::new("crates/worker/generated");
+    let mutable_worker_output = path
+        .ancestors()
+        .any(|parent| parent.ends_with(worker_generated))
+        && !path.ends_with(worker_generated)
+        && !path.ends_with(worker_generated.join("roc_platform_abi.rs"));
+    mutable_worker_output
+        || [
+            ".terraform",
+            ".cache",
+            ".state",
+            ".git",
+            "build-out",
+            "target",
+            "secrets",
+            "credentials",
+            "instance.json",
+            "secrets.json",
+            "credentials.json",
+            "plan.bin",
+            ".DS_Store",
+        ]
+        .contains(&name)
         || name == ".env"
         || name.starts_with(".env.") && !name.ends_with(".example")
         || name.ends_with(".tfvars")
