@@ -7,8 +7,9 @@ never arbitrary task callbacks or a second operational SDK.
 Put operational recipes in ops/*.roc, including step order and verification
 campaigns. The CLI, xtask and central CI execute those same recipes through
 ops/Runner.roc. Keep Rust capabilities small enough that they do not hide another
-recipe. Atomic native operations and mandatory admission/evidence guards remain
-Rust. Update the explicit automation::SOURCES catalog when adding a workflow;
+recipe. Provider qualification and other operator commands are recipes too;
+xtask never owns their step order. Atomic native operations and mandatory
+admission/evidence guards remain Rust. Update the explicit automation::SOURCES catalog when adding a workflow;
 the workflow source and executable pins are part of the CI build identity.
 Do not add shell, Python, Ruby, or JavaScript automation. The one exception is a
 VM first-boot script (a stack's GCE startup-script, today
@@ -42,6 +43,8 @@ Use docs/APP-LAYOUT.md for all applications, conformance apps and future app
 creation workflows. Reports is the canonical example. Each command and query owns its complete definition, contract and verification in its module;
 App.definition registers it once. Source overlays mirror the canonical paths.
 Do not introduce a global descriptions/checks inventory or a second app catalog.
+Many tests pin Reports' operations, counts and replay statistics. Demonstrate a
+new platform feature in a dedicated fixture overlay instead of growing Reports.
 
 Require app-owned properties, evaluate complete consistent bounded snapshots,
 and persist failed checks for artifact-bound replay. Never silently truncate
@@ -87,6 +90,13 @@ Use day2-capabilities for shared instance contracts, not a second company config
 Source/CI/secret provider authority is operator-owned, never automatically granted
 to apps. Local operator CLI assertions are not production authentication. Expose
 only redacted invocation metadata to users; raw replay evidence needs protected storage.
+Provider data stays bound to the exact reviewed connection that collected it
+(connection, client, environment, revision). Every later read, including in
+simulation, compares that identity and fails closed on a mismatch. Receipts and
+evidence record typed, allowlisted metadata, never provider-owned values, and
+failure paths follow the same rule. Meter the bytes a failed or truncated
+exchange already consumed. Each authorization or redaction boundary needs a
+negative regression: another connection, environment or malformed response.
 
 Use real SQLite for adapter conformance, seeded schedules and proptest for
 state-machine tests, and persist replay traces. Unknown schema shapes, policy
@@ -102,6 +112,10 @@ Browser JS is presentation code, not authored automation or server
 code. No npm, package installation or app build scripts. Admit executable
 resources and their complete import graph; pin and verify all served bytes.
 Dependency admission is supply-chain governance, not a sandbox for app JS.
+Platform browser JS must not read form metadata, controls or methods through
+named properties: an admitted field may be named action, method or elements.
+Admission rules about nested regions hold in both directions, so a status node
+may neither sit inside a result region nor contain results or controls.
 
 Generate Assets.roc from admitted images; normalize/rasterize untrusted sources
 and scope serving by installation/app/artifact. Escape dynamic HTML text and
