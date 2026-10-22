@@ -18,6 +18,8 @@ use super::{
 #[cfg(target_os = "linux")]
 use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
 #[cfg(target_os = "linux")]
+use crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT;
+#[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::storage_peer_wire::Body;
 use crate::security_epoch::native_enrollment::storage_peer_wire::{Exchange, StageStatement};
 use crate::security_epoch::{
@@ -264,7 +266,9 @@ impl InitialHolderListener {
         #[cfg(target_os = "linux")]
         {
             self.owner.check(stage)?;
-            let mut acquisition = stage.initial_first_holder_acquisition()?;
+            let mut acquisition = stage.initial_first_holder_acquisition(
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
+            )?;
             let mut channel = self
                 .listener
                 .accept(stage, &mut acquisition)
@@ -512,7 +516,9 @@ impl AuthenticatedInitialHolderOffer {
             connection.owner.check(stage)?;
             let local = stage.storage_statement()?;
             local.require_new_grant(&connection.setup_grant)?;
-            let mut acquisition = stage.initial_first_holder_acquisition()?;
+            let mut acquisition = stage.initial_first_holder_acquisition(
+                INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
+            )?;
             let mut channel = connection.channel;
             let (ready, process) = channel.receive_storage(stage, &mut acquisition)?;
             let (controller, controller_nonce) = match &ready.body {

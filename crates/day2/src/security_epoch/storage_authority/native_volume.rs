@@ -130,7 +130,7 @@ impl<'role> ProviderReader<'role> {
         let mut acquisition = match purpose {
             StagePurpose::CurrentRole => stage.narrow_io_acquisition(store.max_lease_seconds)?,
             StagePurpose::InitialFirstHolder => {
-                stage.initial_first_holder_file_acquisition(store.max_lease_seconds)?
+                stage.initial_first_holder_acquisition(store.max_lease_seconds)?
             }
         };
         let selected = profile(&mut acquisition)

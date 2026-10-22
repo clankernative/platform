@@ -364,28 +364,10 @@ impl EnrolledRoleStage<'_> {
         self.check()
     }
 
+    /// Every initial caller supplies its ceiling: peers use the fixed initial
+    /// limit and files retain their configured shorter cap. The actual parent
+    /// origin, signed ceiling, checks and permanent refusal stay unchanged.
     pub(in crate::security_epoch) fn initial_first_holder_acquisition(
-        &mut self,
-    ) -> Result<NativeAcquisition> {
-        let result = (|| {
-            self.require_purpose(StagePurpose::InitialFirstHolder)?;
-            let seconds = super::super::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
-                .as_secs()
-                .try_into()?;
-            let child = self.acquisition.narrow(seconds, self.deadline)?;
-            self.check()?;
-            Ok(child)
-        })();
-        if result.is_err() {
-            self.owner.refused = true;
-            self.acquisition.refuse();
-        }
-        result
-    }
-
-    /// The initial file still honors a shorter configured ceiling. Same
-    /// origin, signed ceiling, checks and permanent refusal as peer I/O.
-    pub(in crate::security_epoch) fn initial_first_holder_file_acquisition(
         &mut self,
         max_lease_seconds: u32,
     ) -> Result<NativeAcquisition> {

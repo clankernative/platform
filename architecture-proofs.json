@@ -1690,8 +1690,7 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_controller_statement (& mut self , statement : & StageStatement , kernel_process : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn check_storage_runtime_selection (& mut self , statement : & StageStatement , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
-        "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self) -> Result < NativeAcquisition >",
-        "pub (in crate :: security_epoch) fn initial_first_holder_file_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
         "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
@@ -1838,11 +1837,7 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self) -> Result < NativeAcquisition >"
-        },
-        {
-          "owner": "EnrolledRoleStage < '_ >",
-          "signature": "pub (in crate :: security_epoch) fn initial_first_holder_file_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+          "signature": "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
