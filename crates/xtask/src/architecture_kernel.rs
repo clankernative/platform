@@ -135,7 +135,7 @@ fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> 
     let config = root.join("architecture").canonicalize()?;
     let target = strict_target_dir(config.parent().context("strict workspace")?, packages);
     let catalog = crate::bazel::targets(root)?;
-    let mut command = crate::bazel::command();
+    let mut command = crate::bazel::command(root);
     command
         .arg(format!("--output_base={}", target.display()))
         .current_dir(root)
@@ -691,12 +691,18 @@ mod tests {
             directory.path().join(".bazelversion"),
         )?;
         fs::copy(platform.join(".bazelrc"), directory.path().join(".bazelrc"))?;
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(directory.path().join(".bazelrc"))?
+            .write_all(b"\ncommon --lockfile_mode=update\n")?;
         fs::write(
             directory.path().join("BUILD.bazel"),
             "exports_files([\"architecture/clippy.toml\"])\n",
         )?;
         fs::create_dir_all(directory.path().join("build/bazel"))?;
         for name in [
+            "outputs.cquery",
             "cargo_context.bzl",
             "cargo_contexts.bzl",
             "BUILD.bazel",

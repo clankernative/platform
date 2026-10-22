@@ -9,6 +9,7 @@ single_version_override(
     version = "0.74.0",
     patches = [
         "//build/bazel:patches/rules-rust-0.74.0-child-status.patch",
+        "//build/bazel:patches/rules-rust-0.74.0-platform-profiles.patch",
     ],
     patch_strip = 1,
 )

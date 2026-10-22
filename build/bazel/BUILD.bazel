@@ -1,6 +1,6 @@
 load(":cargo_context.bzl", "cargo_context_controls", "cargo_context_probe", "cargo_dependency_context")
 
-exports_files(["toolchain.json",
+exports_files(["outputs.cquery","toolchain.json",
     "rust.bzl",
     "cargo_context.bzl",
     "cargo_contexts.bzl",
@@ -55,7 +55,7 @@ cargo_context_controls(
 
 config_setting(
     name = "release",
-    values = {"compilation_mode": "opt"},
+    define_values = {"DAY2_PLATFORM_RUST_PROFILE": "release"},
     visibility = ["//visibility:public"],
 )
 

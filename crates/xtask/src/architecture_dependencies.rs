@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{collections::BTreeMap, fs, path::Path};
 
 const POLICY: &str = "architecture-boundaries.json";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -108,24 +108,9 @@ fn relative(root: &Path, value: &str) -> Result<String> {
 }
 
 fn metadata(root: &Path) -> Result<Vec<Package>> {
-    let output = Command::new("cargo")
-        .current_dir(root)
-        .args([
-            "metadata",
-            "--locked",
-            "--offline",
-            "--no-deps",
-            "--format-version",
-            "1",
-        ])
-        .output()
-        .context("read Cargo dependency boundaries")?;
-    ensure!(output.status.success(), "Cargo dependency inventory failed");
-    ensure!(
-        output.stdout.len() <= MAX_BYTES,
-        "dependency inventory budget"
-    );
-    let metadata: Metadata = serde_json::from_slice(&output.stdout)?;
+    let output = crate::bazel::dependency_metadata(root, true)?;
+    ensure!(output.len() <= MAX_BYTES, "dependency inventory budget");
+    let metadata: Metadata = serde_json::from_slice(&output)?;
     let mut packages = Vec::new();
     for package in metadata.packages {
         if !metadata.workspace_members.contains(&package.id) {
@@ -345,10 +330,94 @@ fn compare(policy: &Policy, actual: &[Package]) -> Result<()> {
     Ok(())
 }
 
+fn compare_bazel(
+    policy: &Policy,
+    catalog: &[crate::bazel::Target],
+    dependencies: &BTreeMap<String, Vec<crate::bazel::Dependency>>,
+) -> Result<()> {
+    let expected = catalog
+        .iter()
+        .filter(|target| !target.test)
+        .map(|target| target.label.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure!(
+        dependencies
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected,
+        "complete Bazel production dependency inventory required"
+    );
+    for target in catalog.iter().filter(|target| !target.test) {
+        let package = policy
+            .packages
+            .iter()
+            .find(|package| package.name == target.package)
+            .context("Bazel package outside reviewed dependency policy")?;
+        ensure!(
+            package
+                .production_targets
+                .iter()
+                .any(|expected| expected.name == target.target
+                    && expected.kind == target.kind
+                    && Path::new(&expected.source) == target.source),
+            "Bazel production target differs from reviewed manifest source/kind"
+        );
+        for dependency in &dependencies[&target.label] {
+            let label = dependency
+                .label
+                .strip_prefix("@@")
+                .unwrap_or(&dependency.label);
+            if label.starts_with("//") {
+                let producer = catalog
+                    .iter()
+                    .find(|producer| {
+                        !producer.test
+                            && producer.label == label
+                            && producer.source == dependency.source
+                    })
+                    .context("Bazel dependency has no reviewed workspace producer")?;
+                if producer.package == target.package {
+                    continue;
+                }
+                ensure!(
+                    package
+                        .dependencies
+                        .iter()
+                        .any(|allowed| allowed.kind == "normal"
+                            && allowed.name == producer.package
+                            && allowed
+                                .local_path
+                                .as_ref()
+                                .is_some_and(|path| Path::new(path) == producer.directory)),
+                    "Bazel crosses an undeclared workspace dependency boundary"
+                );
+            } else {
+                ensure!(
+                    dependency.source.starts_with("external")
+                        && package
+                            .dependencies
+                            .iter()
+                            .any(|allowed| allowed.kind == "normal"
+                                && allowed.local_path.is_none()
+                                && allowed.name.replace('-', "_") == dependency.name),
+                    "Bazel adds an external Rust dependency absent from reviewed declarations"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
     let policy = read_policy(&root)?;
     compare(&policy, &metadata(&root)?)?;
+    compare_bazel(
+        &policy,
+        &crate::bazel::targets(&root)?,
+        &crate::bazel::production_dependencies(&root)?,
+    )?;
     let effects = super::architecture::inventory(&root)?;
     for package in &policy.packages {
         if package.role.strict() {

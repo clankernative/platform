@@ -76,37 +76,23 @@ jobs:
       checks: read
     outputs:
       reused: ${{ steps.admit.outputs.reused }}
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      # Match the exact compiled-test producer environment for cache admission.
-      CARGO_BUILD_JOBS: '1'
-      CARGO_PROFILE_TEST_LTO: 'off'
-      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
-      SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Compile and install the current verifier with Bazel
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - run: rustup show active-toolchain
-      - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          save-if: 'false'
-      - run: bazel run //crates/xtask:xtask -- bootstrap
+      - run: build-out/bin/xtask bootstrap
       - id: find
-        run: bazel run //crates/xtask:xtask -- verify-queue-find
+        run: build-out/bin/xtask verify-queue-find
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -120,7 +106,7 @@ jobs:
           merge-multiple: true
       - id: admit
         if: ${{ steps.find.outputs.artifact != '' }}
-        run: bazel run //crates/xtask:xtask -- verify-queue-admit
+        run: build-out/bin/xtask verify-queue-admit
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -152,24 +138,24 @@ jobs:
       matrix:
         part: [inputs, tests]
     env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
       # Do not compile the largest test targets concurrently inside 6 GiB.
-      CARGO_BUILD_JOBS: ${{ matrix.part == 'tests' && '1' || '2' }}
       # Partition optimized tests into smaller LLVM units without local LTO.
       # Keep debug assertions and the complete runtime campaigns inside 6 GiB.
-      CARGO_PROFILE_TEST_LTO: 'off'
-      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Compile and install the current verifier with Bazel
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -181,30 +167,14 @@ jobs:
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
       - name: Install the browser test runtime
         if: ${{ matrix.part == 'inputs' }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.23.3'
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: ${{ matrix.part == 'inputs' }}
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: bazel run //crates/xtask:xtask -- verify-linux-context
+        run: build-out/bin/xtask verify-linux-context
       - name: Retain current native Linux preparation context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -222,9 +192,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'inputs' }}
         with:
-          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
-            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+            day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -233,25 +203,21 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'tests' }}
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
-            target/debug/deps/*
-            !target/debug/deps/*.rlib
-            !target/debug/deps/*.rmeta
-            !target/debug/deps/*.d
-      - run: bazel run //crates/xtask:xtask -- source-check
-      - run: cargo fetch --locked
-      - run: bazel run //crates/xtask:xtask -- notices
+            build-out/tests/*
+      - run: build-out/bin/xtask source-check
+      - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: bazel run //crates/xtask:xtask -- bootstrap
+      - run: build-out/bin/xtask bootstrap
       - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: bazel run //crates/xtask:xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
-      - run: bazel run //crates/xtask:xtask -- configure-tofu
-      - run: bazel run //crates/xtask:xtask -- verify-prepare-part ${{ matrix.part }}
+      - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
+      - run: build-out/bin/xtask configure-tofu
+      - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
         id: native_preparation
       - name: Retain current compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
@@ -259,8 +225,8 @@ jobs:
         with:
           name: day2-compiler-failure-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           # stdout.bin is a private, job-local spool; it is never uploaded.
-          path: artifacts/ci-compiler-failure-*/manifest.json
-          # A preparation failure outside Cargo may have no compiler capture.
+          path: artifacts/bazel/failures/*/outcome.json
+          # A preparation failure outside Bazel may have no compiler capture.
           if-no-files-found: warn
           retention-days: 3
       - name: Retain fixture compiler input identity and inventory
@@ -270,7 +236,7 @@ jobs:
           name: day2-fixture-cache-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/all-verification-cache.json
-            target/debug/xtask.d
+            artifacts/bazel-compiler-inputs.json
           if-no-files-found: error
           retention-days: 14
       - name: Retain compiled test input identity and inventory
@@ -283,11 +249,10 @@ jobs:
             artifacts/ci-test-binaries.json
           if-no-files-found: error
           retention-days: 14
-      # Archive only this file so tar records executable bytes, not Cargo's
-      # hard link to a hashed deps/xtask-* member in the larger preparation tar.
+      # Archive only this verifier's executable bytes.
       - name: Archive the current run verifier only
         if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+        run: tar -czf /tmp/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" build-out/bin/xtask
       - name: Retain the current run verifier only
         if: ${{ matrix.part == 'inputs' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -301,10 +266,10 @@ jobs:
       # overwrite fixture caches, CLI distribution or generated worker sources.
       - name: Archive fixture and check preparation
         if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
+        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out platform/artifacts platform/cli platform/crates/worker/generated .toolchains
       - name: Archive test compilation and documentation preparation
         if: ${{ matrix.part == 'tests' }}
-        run: tar -czf /tmp/day2-preparation.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target/debug platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-preparation-tests.json
+        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out/bin platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-preparation-tests.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -328,10 +293,7 @@ jobs:
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
-            target/debug/deps/*
-            !target/debug/deps/*.rlib
-            !target/debug/deps/*.rmeta
-            !target/debug/deps/*.d
+            build-out/tests/*
 
   verify-mac-compatibility:
     # Reject known security failures before allocating compilation runners.
@@ -340,20 +302,22 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 360
     env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
       # Keep compilation parallelism within the standard Mac runner's CPU budget.
-      CARGO_BUILD_JOBS: '3'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
       # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Compile and install the current verifier with Bazel
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-mac --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
           tofu_version: 1.11.5
@@ -364,49 +328,13 @@ jobs:
       - run: shasum -a 256 --check "$GITHUB_WORKSPACE/.github/temporal.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_darwin_arm64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-v2
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-      # Compatible intermediates warm Cargo/sccache across source edits. Cargo
-      # still checks freshness; this cache contains no completed test programs,
-      # verification manifests or runtime receipts. Exact executable admission
-      # below remains independently source/config/toolchain-bound.
-      - name: Restore compatible Cargo intermediates
-        id: cargo_intermediates
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          key: day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-
-          path: |
-            target/debug/.fingerprint
-            target/debug/build
-            target/debug/deps/*.rlib
-            target/debug/deps/*.rmeta
-            target/debug/deps/*.d
-            target/debug/deps/*.dylib
-      # Cross-run build outputs have their own source-bound namespace. Native
-      # guards re-admit them; no step or runtime receipt is selected by cache-hit.
-      # Reuse the pre-build key when saving instead of rehashing generated trees.
       - name: Restore completed fixture builds
         id: fixture_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
-            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+            day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -414,32 +342,28 @@ jobs:
         id: test_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
-            target/debug/deps/*
-            !target/debug/deps/*.rlib
-            !target/debug/deps/*.rmeta
-            !target/debug/deps/*.d
-      - run: bazel run //crates/xtask:xtask -- source-check
-      - run: cargo fetch --locked
-      - run: bazel run //crates/xtask:xtask -- notices
+            build-out/tests/*
+      - run: build-out/bin/xtask source-check
+      - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: bazel run //crates/xtask:xtask -- bootstrap
+      - run: build-out/bin/xtask bootstrap
       - run: gh release download roc-formatter-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-aarch64-apple-darwin --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: bazel run //crates/xtask:xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
-      - run: bazel run //crates/xtask:xtask -- configure-tofu
-      - run: bazel run //crates/xtask:xtask -- verify-mac
+      - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-aarch64-apple-darwin
+      - run: build-out/bin/xtask configure-tofu
+      - run: build-out/bin/xtask verify-mac
         id: native_preparation
       - name: Retain current Mac compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-compiler-failure-mac-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/ci-compiler-failure-*/manifest.json
+          path: artifacts/bazel/failures/*/outcome.json
           if-no-files-found: warn
           retention-days: 3
       - name: Retain real Mac native preparation, exact cases and both build campaigns
@@ -456,23 +380,10 @@ jobs:
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-binaries.json
-            target/debug/xtask.d
+            artifacts/bazel-compiler-inputs.json
           if-no-files-found: error
           retention-days: 14
-      # Save before rust-cache's post-job cleanup removes workspace crates.
       # Capture the restore-time key so generated files cannot change it.
-      - name: Save compatible Cargo intermediates
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}
-        with:
-          key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}
-          path: |
-            target/debug/.fingerprint
-            target/debug/build
-            target/debug/deps/*.rlib
-            target/debug/deps/*.rmeta
-            target/debug/deps/*.d
-            target/debug/deps/*.dylib
       - name: Save completed fixture builds
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ steps.fixture_cache.outputs.cache-hit != 'true' }}
@@ -489,10 +400,7 @@ jobs:
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
-            target/debug/deps/*
-            !target/debug/deps/*.rlib
-            !target/debug/deps/*.rmeta
-            !target/debug/deps/*.d
+            build-out/tests/*
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
@@ -509,29 +417,22 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require the selected complete preparation pipeline
         run: test "$PARALLEL" = success
         env:
           PARALLEL: ${{ needs.verify-prepare-parts.result }}
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          save-if: 'false'
-      - run: cargo fetch --locked
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
@@ -540,10 +441,10 @@ jobs:
       # Do not restore artifacts or generated worker files before their bounded
       # mounts exist; the context check must see the original checkout ABI seed.
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" build-out/bin/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: target/debug/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context
       - name: Retain current native Linux preparation join context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -565,9 +466,9 @@ jobs:
       - name: Restore test compilation outputs
         run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.."
       - name: Admit both preparation parts
-        run: target/debug/xtask verify-prepare-join
+        run: build-out/bin/xtask verify-prepare-join
       - name: Archive complete admitted preparation
-        run: tar -czf /tmp/day2-verification.tgz --exclude=platform/target/debug/incremental --exclude=platform/target/debug/build --exclude=platform/target/debug/.fingerprint --exclude='platform/target/debug/deps/*.rlib' --exclude='platform/target/debug/deps/*.rmeta' --exclude='platform/target/debug/deps/*.d' -C "$GITHUB_WORKSPACE/.." platform/target platform/artifacts platform/cli platform/crates/worker/generated .toolchains
+        run: tar -czf /tmp/day2-verification.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out platform/artifacts platform/cli platform/crates/worker/generated .toolchains
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
@@ -596,20 +497,18 @@ jobs:
       matrix:
         shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]
     env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_LTO: 'off'
-      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
-      CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
-      SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -621,28 +520,15 @@ jobs:
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
-      - run: rustup show active-toolchain
-      - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          save-if: 'false'
-      - run: cargo fetch --locked
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-linux-verifier
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" build-out/bin/xtask
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: target/debug/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context
       - name: Retain current native Linux shard context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -656,8 +542,8 @@ jobs:
           name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
-      - run: target/debug/xtask configure-tofu
-      - run: target/debug/xtask verify-shard ${{ matrix.shard }}
+      - run: build-out/bin/xtask configure-tofu
+      - run: build-out/bin/xtask verify-shard ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-result-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -681,18 +567,17 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
-      SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require security checks and complete verification
         run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS:$MAC" = success:success:success:success:success
@@ -703,34 +588,17 @@ jobs:
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
           MAC: ${{ needs.verify-mac-compatibility.result }}
-      - run: rustup show active-toolchain
-        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-      - uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-        with:
-          version: v0.18.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          save-if: 'false'
-      - run: cargo fetch --locked
-        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-linux-verifier
       - name: Restore the current run verifier only
-        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" target/debug/xtask
+        run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C "$GITHUB_WORKSPACE" build-out/bin/xtask
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
-        run: target/debug/xtask verify-linux-context
+        run: build-out/bin/xtask verify-linux-context
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - name: Retain current native Linux final context
         if: ${{ always() && steps.linux_context.outcome == 'success' }}
@@ -758,7 +626,7 @@ jobs:
         with:
           name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts
-      - run: target/debug/xtask verify-compose
+      - run: build-out/bin/xtask verify-compose
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
@@ -801,19 +669,21 @@ jobs:
         shell: bash
     timeout-minutes: 360
     env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
-      SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Restore the pinned Bazel tool and remote compilation cache
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: platform-native-${{ runner.os }}-${{ runner.arch }}
+          cache-save: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Compile and install the current verifier with Bazel
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -825,37 +695,20 @@ jobs:
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
-      - name: Select the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Set up the Rust compiler cache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: Restore Cargo dependencies and build outputs
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: day2-platform-ci-linux-v1
-          # The virtual root manifest owns the compilation profiles.
-          key: ${{ hashFiles('Cargo.toml') }}
-          cache-bin: 'false'
-          cache-workspace-crates: 'false'
-          shared-key: ${{ hashFiles('Cargo.toml') }}-verify
-          save-if: 'false'
-      - run: bazel run //crates/xtask:xtask -- source-check
-      - run: cargo fetch --locked
-      - run: bazel run //crates/xtask:xtask -- notices
+      - run: build-out/bin/xtask source-check
+      - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - run: bazel run //crates/xtask:xtask -- bootstrap
+      - run: build-out/bin/xtask bootstrap
       - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: bazel run //crates/xtask:xtask -- bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
-      - run: bazel run //crates/xtask:xtask -- configure-tofu
-      - run: bazel run //crates/xtask:xtask -- fmt
+      - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
+      - run: build-out/bin/xtask configure-tofu
+      - run: build-out/bin/xtask fmt
       - run: git diff --binary > /tmp/day2-format.patch
-      - run: target/debug/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
-      - run: target/debug/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
-      - run: target/debug/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
+      - run: build-out/bin/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
+      - run: build-out/bin/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
@@ -865,7 +718,7 @@ jobs:
             /tmp/day2-architecture-inventory.json
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
-            target/debug/xtask.d
+            artifacts/bazel-compiler-inputs.json
           if-no-files-found: error
           retention-days: 3
 

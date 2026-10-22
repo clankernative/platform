@@ -1,0 +1,21 @@
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -1264,6 +1264,18 @@
+     compilation_mode = get_compilation_mode_opts(ctx, toolchain)
+     rustc_flags.add(compilation_mode.opt_level, format = "--codegen=opt-level=%s")
+     rustc_flags.add(compilation_mode.debug_info, format = "--codegen=debuginfo=%s")
+     rustc_flags.add(compilation_mode.strip_level, format = "--codegen=strip=%s")
++
++    # Platform's former Cargo dev profile applies to build tools too: Bazel's
++    # exec configuration must not silently turn off assertions or optimize at 3.
++    # Workspace target flags below retain opt-level 1; dependencies use 2.
++    platform_release = ctx.var.get("DAY2_PLATFORM_RUST_PROFILE", "dev") == "release"
++    rustc_flags.add("-Copt-level=3" if platform_release else "-Copt-level=2")
++    rustc_flags.add("-Cdebug-assertions=off" if platform_release else "-Cdebug-assertions=on")
++    rustc_flags.add("-Coverflow-checks=off" if platform_release else "-Coverflow-checks=on")
++    if not _will_emit_object_file(emit):
++        rustc_flags.add("-Ccodegen-units=16" if platform_release else "-Ccodegen-units=256")
++    if platform_release:
++        rustc_flags.add("-Cpanic=abort")
+ 
+     # For determinism to help with build distribution and such

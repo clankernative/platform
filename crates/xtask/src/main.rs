@@ -288,7 +288,21 @@ fn main() -> Result<()> {
             .context("another xtask holds the workspace build lock")?;
         Some(lock)
     };
+    if _lock.is_some() {
+        let installed = bazel::program(&root, "xtask");
+        let current = std::env::current_exe()?.canonicalize()?;
+        if installed.canonicalize().ok().as_ref() != Some(&current) {
+            fs::create_dir_all(installed.parent().context("verifier output directory")?)?;
+            install_cli_file(current, installed)?;
+        }
+    }
     match action.as_str() {
+        "install-verifier" => {
+            ensure!(
+                args.next().is_none(),
+                "verifier installation accepts no overrides"
+            );
+        }
         "verify-linux-context" => {
             ensure!(args.next().is_none(), "CI context accepts no overrides");
             verification::linux_context(&root)?;

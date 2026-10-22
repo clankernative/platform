@@ -57,6 +57,26 @@ pub(crate) fn targets(root: &Path) -> Result<Vec<Target>> {
     let mut labels = BTreeSet::new();
     let mut keys = BTreeSet::new();
     for target in &catalog.targets {
+        for name in [&target.package, &target.target] {
+            ensure!(
+                !name.is_empty()
+                    && name.len() <= 128
+                    && !name.starts_with('-')
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+                "bounded package/target name required"
+            );
+        }
+        let rule = target.label.rsplit(':').next().context("Bazel rule name")?;
+        ensure!(
+            !rule.is_empty()
+                && rule
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+                && target.label.matches(':').count() == 1,
+            "bounded exact Bazel rule name required"
+        );
         ensure!(
             relative(&target.directory)
                 && relative(&target.source)
@@ -95,11 +115,15 @@ pub(crate) fn targets(root: &Path) -> Result<Vec<Target>> {
     Ok(catalog.targets)
 }
 
-pub(crate) fn command() -> Command {
+pub(crate) fn command(root: &Path) -> Command {
     {
-        let mut command =
-            Command::new(std::env::var_os("DAY2_BAZEL_BINARY").unwrap_or_else(|| "bazel".into()));
-        command.args(["--batch", "--nosystem_rc", "--nohome_rc"]);
+        let mut command = Command::new("bazel");
+        command
+            .args(["--batch", "--nosystem_rc", "--nohome_rc"])
+            .arg(format!(
+                "--output_base={}",
+                root.join(".cache/bazel-executor").display()
+            ));
         command
     }
 }
@@ -122,6 +146,116 @@ pub(crate) fn test_output(target: &Target) -> PathBuf {
 struct Files {
     label: String,
     files: Vec<PathBuf>,
+    source: PathBuf,
+    crate_name: String,
+    crate_type: String,
+    test: bool,
+    dependencies: Vec<Dependency>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Dependency {
+    pub(crate) label: String,
+    pub(crate) name: String,
+    pub(crate) source: PathBuf,
+}
+
+fn normalize_label(label: &str) -> &str {
+    label.strip_prefix("@@").unwrap_or(label)
+}
+
+fn producer(target: &Target, output: &Files) -> Result<()> {
+    ensure!(
+        target.label == normalize_label(&output.label)
+            && target.source == output.source
+            && target.target.replace('-', "_") == output.crate_name
+            && target.test == output.test,
+        "configured Rust producer/source/test identity differs from catalog"
+    );
+    if !target.test {
+        let matched = match target.kind[0].as_str() {
+            "lib" => ["rlib", "lib"].contains(&output.crate_type.as_str()),
+            "staticlib" => output.crate_type == "staticlib",
+            "bin" => output.crate_type == "bin",
+            _ => false,
+        };
+        ensure!(matched, "configured Rust crate type differs");
+    }
+    Ok(())
+}
+
+fn descriptors(
+    root: &Path,
+    selected: &[Target],
+    release: bool,
+    isolated_job: Option<&Path>,
+    budget: Duration,
+) -> Result<Vec<Files>> {
+    let expected = selected
+        .iter()
+        .map(|target| target.label.as_str())
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        !expected.is_empty() && expected.len() == selected.len(),
+        "unique configured producer selection required"
+    );
+    let expression = format!(
+        "set({})",
+        expected.iter().copied().collect::<Vec<_>>().join(" ")
+    );
+    let mut query = build_command(root, "cquery", isolated_job)?;
+    query.args([
+        "--output=starlark",
+        "--starlark:file=build/bazel/outputs.cquery",
+    ]);
+    if release {
+        query.arg("--config=release");
+    }
+    query.arg(expression);
+    let output = capture_query(root, &mut query, budget, MAX_CATALOG_BYTES)?;
+    let mut observed = BTreeSet::new();
+    let mut records = Vec::new();
+    for line in output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let record: Files = day2::json::decode(line)?;
+        let label = normalize_label(&record.label);
+        ensure!(
+            observed.insert(label.to_owned()),
+            "duplicate configured Rust producer"
+        );
+        let target = selected
+            .iter()
+            .find(|target| target.label == label)
+            .context("foreign configured Rust producer")?;
+        producer(target, &record)?;
+        records.push(record);
+    }
+    ensure!(
+        observed.iter().map(String::as_str).collect::<BTreeSet<_>>() == expected,
+        "complete configured Rust producer inventory required"
+    );
+    Ok(records)
+}
+
+pub(crate) fn production_dependencies(root: &Path) -> Result<BTreeMap<String, Vec<Dependency>>> {
+    let selected = targets(root)?
+        .into_iter()
+        .filter(|target| !target.test)
+        .collect::<Vec<_>>();
+    Ok(
+        descriptors(root, &selected, false, None, Duration::from_secs(600))?
+            .into_iter()
+            .map(|record| {
+                (
+                    normalize_label(&record.label).to_owned(),
+                    record.dependencies,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Resolve only successfully built targets. Missing, duplicate or foreign
@@ -143,65 +277,50 @@ fn build_profile(
 ) -> Result<BTreeMap<String, PathBuf>> {
     let started = std::time::Instant::now();
     ensure!(!selected.is_empty(), "nonempty Bazel build required");
-    let expected: BTreeSet<_> = selected.iter().map(|target| target.label.clone()).collect();
+    let expected = selected
+        .iter()
+        .map(|target| target.label.clone())
+        .collect::<BTreeSet<_>>();
     ensure!(
         expected.len() == selected.len(),
         "duplicate requested Bazel target"
     );
-    let mut build = build_command("build", isolated_job)?;
+    let mut build = build_command(root, "build", isolated_job)?;
     if release {
-        build.arg("--compilation_mode=opt");
+        build.arg("--config=release");
     }
     build.args(&expected);
-    // Test results are never reusable; only compilation actions use the cache.
     crate::build_capture::run(root, &mut build, budget)?;
-    let expression = format!(
-        "set({})",
-        expected.iter().cloned().collect::<Vec<_>>().join(" ")
-    );
-    let mut query = build_command("cquery", isolated_job)?;
-    query.args(["--output=starlark", "--starlark:expr=json.encode({\"label\":str(target.label),\"files\":[f.path for f in target.files.to_list()]})"]);
-    if release {
-        query.arg("--compilation_mode=opt");
-    }
-    query.arg(expression);
     let remaining = budget
         .checked_sub(started.elapsed())
         .context("Bazel build budget exhausted")?;
-    let output = capture_query(root, &mut query, remaining, MAX_CATALOG_BYTES)?;
+    let records = descriptors(root, selected, release, isolated_job, remaining)?;
+    let output_root = match isolated_job {
+        Some(job) => job.join("bazel-output"),
+        None => root.join(".cache/bazel-executor"),
+    }
+    .canonicalize()?;
     let mut result = BTreeMap::new();
-    for line in output
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let files: Files = day2::json::decode(line)?;
-        let label = files
-            .label
-            .strip_prefix("@@")
-            .map(|value| value.to_owned())
-            .unwrap_or(files.label);
-        ensure!(
-            expected.contains(&label) && !result.contains_key(&label),
-            "foreign or duplicate Bazel output label"
-        );
+    for record in records {
+        let label = normalize_label(&record.label).to_owned();
         let target = selected
             .iter()
             .find(|target| target.label == label)
-            .context("Bazel target selection")?;
-        let mut files = files.files.into_iter().filter(|path| {
-            !path
-                .extension()
-                .is_some_and(|extension| extension == "rmeta")
-        });
-        let path = files.next().context("Bazel output missing")?;
+            .context("requested producer")?;
         ensure!(
-            files.next().is_none() && relative(&path) && path.starts_with("bazel-out"),
-            "exactly one declared Bazel output required"
+            record.files.len() == 1,
+            "one configured Rust output required"
         );
-        let actual = root.join(&path).canonicalize()?;
+        let path = &record.files[0];
         ensure!(
-            fs::symlink_metadata(&actual)?.file_type().is_file(),
-            "Bazel output must be regular"
+            relative(path) && path.starts_with("bazel-out"),
+            "confined declared Rust output required"
+        );
+        let actual = root.join(path).canonicalize()?;
+        ensure!(
+            actual.starts_with(&output_root)
+                && fs::symlink_metadata(&actual)?.file_type().is_file(),
+            "Rust output leaves the owned compiler context or is not regular"
         );
         let destination = if target.test {
             root.join(test_output(target))
@@ -209,15 +328,20 @@ fn build_profile(
             program(root, &target.target)
         } else {
             root.join("build-out/lib")
-                .join(path.file_name().context("Bazel output name")?)
+                .join(path.file_name().context("Rust output name")?)
         };
-        fs::create_dir_all(destination.parent().context("Bazel output directory")?)?;
+        fs::create_dir_all(destination.parent().context("Rust output directory")?)?;
         install_cli_file(&actual, &destination)?;
-        result.insert(label, destination.strip_prefix(root)?.to_owned());
+        ensure!(
+            result
+                .insert(label, destination.strip_prefix(root)?.to_owned())
+                .is_none(),
+            "duplicate installed output"
+        );
     }
     ensure!(
         result.keys().cloned().collect::<BTreeSet<_>>() == expected,
-        "complete Bazel output inventory required"
+        "complete installed Rust output inventory required"
     );
     Ok(result)
 }
@@ -234,23 +358,23 @@ pub(crate) fn programs(root: &Path, packages: &[&str]) -> Result<()> {
 }
 
 pub(crate) fn lint(root: &Path) -> Result<()> {
-    let mut command = command();
+    let selected = targets(root)?;
+    let mut command = command(root);
     command.arg("build");
     configuration_arguments(&mut command);
     command.args([
         "--aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect",
         "--output_groups=clippy_checks",
         "--@rules_rust//rust/settings:clippy_flag=-Dwarnings",
-        "--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml",
-        "//:all_programs",
-        "//:test_binaries",
-        "//crates/worker:lib",
     ]);
+    // Apply the aspect to each Rust rule directly: filegroup roots do not
+    // traverse srcs in rules_rust's Clippy aspect and could silently check none.
+    command.args(selected.iter().map(|target| &target.label));
     run_with_budget(root, &mut command, Duration::from_secs(12_600))
 }
 
 pub(crate) fn docs(root: &Path) -> Result<()> {
-    let mut command = command();
+    let mut command = command(root);
     command.arg("test");
     configuration_arguments(&mut command);
     command.args([
@@ -262,7 +386,7 @@ pub(crate) fn docs(root: &Path) -> Result<()> {
 }
 
 pub(crate) fn format(root: &Path, check: bool) -> Result<()> {
-    let mut command = command();
+    let mut command = command(root);
     command.args(["run", "@rules_rust//:rustfmt", "--"]);
     if check {
         command.args(["--", "--check"]);
@@ -339,16 +463,16 @@ pub(crate) fn configuration_arguments(command: &mut Command) {
 
 pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
     ensure!(
-        ["rustc", "rustdoc"].contains(&name),
+        ["rustc", "rustdoc", "cargo"].contains(&name),
         "closed compiler tool selection"
     );
     let label = format!("@rules_rust//rust/toolchain:current_{name}_files");
-    let mut build = command();
+    let mut build = command(root);
     build.arg("build");
     configuration_arguments(&mut build);
     build.arg(&label);
     run_with_budget(root, &mut build, Duration::from_secs(600))?;
-    let mut query = command();
+    let mut query = command(root);
     query.args(["cquery", "--output=files"]);
     configuration_arguments(&mut query);
     query.arg(label);
@@ -361,7 +485,7 @@ pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
         paths.len() == 1 && relative(Path::new(paths[0])),
         "one actual configured compiler tool required"
     );
-    let mut info = command();
+    let mut info = command(root);
     info.args(["info", "execution_root"]);
     configuration_arguments(&mut info);
     let execution_root = capture_query(root, &mut info, Duration::from_secs(120), 16 * 1024)?;
@@ -379,7 +503,7 @@ pub(crate) fn tool(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 pub(crate) fn configured_output(root: &Path, label: &str) -> Result<PathBuf> {
-    let mut query = command();
+    let mut query = command(root);
     query.args(["cquery", "--output=files"]);
     configuration_arguments(&mut query);
     query.arg(label);
@@ -510,17 +634,17 @@ pub(crate) fn standalone(root: &Path) -> Result<PathBuf> {
 
 pub(crate) fn offline_repositories(root: &Path) -> Result<PathBuf> {
     let vendor = root.join(".cache/bazel-vendor");
-    let mut command = command();
+    let mut command = command(root);
     command
         .arg("vendor")
         .arg(format!("--vendor_dir={}", vendor.display()))
-        .args(["--compilation_mode=opt", "//crates/worker:lib"]);
+        .args(["--config=release", "//crates/worker:lib"]);
     configuration_arguments(&mut command);
     run_with_budget(root, &mut command, Duration::from_secs(600))?;
     vendor.canonicalize().map_err(Into::into)
 }
 
-fn build_command(verb: &str, isolated_job: Option<&Path>) -> Result<Command> {
+fn build_command(root: &Path, verb: &str, isolated_job: Option<&Path>) -> Result<Command> {
     let mut command = if let Some(job) = isolated_job {
         let job = job.canonicalize()?;
         let binary = job.join("bazel/bazel");
@@ -550,7 +674,7 @@ fn build_command(verb: &str, isolated_job: Option<&Path>) -> Result<Command> {
             .env("OPENSSL_CONF", "/dev/null");
         command
     } else {
-        let mut command = command();
+        let mut command = command(root);
         command.arg(verb);
         command
     };
@@ -615,4 +739,33 @@ mod tests {
         assert!(configuration(root.path()).is_err());
         Ok(())
     }
+}
+
+/// Cargo is used only as crate_universe's dependency-input reader. This closed
+/// metadata operation cannot compile, run or test a platform target.
+pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<Vec<u8>> {
+    let cargo = tool(root, "cargo")?;
+    let rustc = tool(root, "rustc")?;
+    let home = root.join(".cache/dependency-inputs");
+    fs::create_dir_all(home.join("tmp"))?;
+    let mut command = Command::new(cargo);
+    command.args(["metadata", "--locked", "--format-version=1"]);
+    if no_dependencies {
+        command.arg("--no-deps");
+    }
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("HOME", &home)
+        .env("CARGO_HOME", &home)
+        .env("TMPDIR", home.join("tmp"))
+        .env("RUSTC", rustc)
+        .env("PATH", "/usr/bin:/bin");
+    capture_query(
+        root,
+        &mut command,
+        Duration::from_secs(600),
+        16 * 1024 * 1024,
+    )
 }

@@ -1,5 +1,6 @@
 # One build graph; tests and runtime campaigns always execute fresh.
 startup --host_jvm_args=-Xmx768m
+common --lockfile_mode=error
 build --jobs=2
 build --local_resources=cpu=2
 build --local_resources=memory=4096
@@ -18,3 +19,7 @@ build:ci-linux --jobs=1
 build:ci-linux --local_resources=cpu=2
 build:ci-mac --jobs=3
 build:ci-mac --local_resources=cpu=3
+
+# Distribution builds preserve the former release panic/profile policy.
+build:release --compilation_mode=opt
+build:release --define=DAY2_PLATFORM_RUST_PROFILE=release

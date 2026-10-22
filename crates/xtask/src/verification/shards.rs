@@ -145,7 +145,7 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
             )
         },
         bazel: {
-            let mut command = crate::bazel::command();
+            let mut command = crate::bazel::command(root);
             command.args(["version", "--gnu_format"]);
             let output = command.current_dir(root).output()?;
             ensure!(output.status.success(), "actual Bazel version required");

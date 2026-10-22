@@ -951,6 +951,7 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
     }
     sources.extend(crate::bazel::configuration(&root)?);
     let executable = std::env::current_exe()?.canonicalize()?;
+    crate::bazel::programs(&root, &["xtask"])?;
     let compiled = crate::bazel::configured_output(&root, "//crates/xtask:xtask")?;
     ensure!(
         fs::read(&executable)? == fs::read(&compiled)?,
@@ -962,7 +963,14 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
 
 fn fixture_compiler_identity(root: &Path) -> Result<shards::BuildIdentity> {
     let sources = fixture_compiler_sources(root)?;
-    shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))
+    let compiler = shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))?;
+    fs::write(
+        root.join("artifacts/bazel-compiler-inputs.json"),
+        serde_json::to_vec_pretty(
+            &json!({"format":1,"backend":"Bazel","source_hashes":sources,"compiler":compiler}),
+        )?,
+    )?;
+    Ok(compiler)
 }
 
 fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCache> {
@@ -1748,7 +1756,7 @@ mod tests {
     fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
         let producer = ci_job("verify-prepare-parts");
         let prepared = producer
-            .find("      - run: bazel run //crates/xtask:xtask -- verify-prepare-part ${{ matrix.part }}\n")
+            .find("      - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}\n")
             .expect("fresh native preparation precedes verifier transport");
         let archived = producer
             .find("      - name: Archive the current run verifier only\n")
@@ -1816,8 +1824,8 @@ mod tests {
     }
 
     #[test]
-    fn single_file_verifier_archive_materializes_cargo_hard_links_without_restoring_outputs()
-    -> Result<()> {
+    fn single_file_verifier_archive_materializes_hard_links_without_restoring_outputs() -> Result<()>
+    {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let scratch = tempfile::tempdir()?;
@@ -1827,6 +1835,7 @@ mod tests {
         let hashed = "build-out/tests/xtask-82a2d84eb585bdf5";
         let abi = "crates/worker/generated/roc_platform_abi.rs";
         fs::create_dir_all(source.join("build-out/tests"))?;
+        fs::create_dir_all(source.join("build-out/bin"))?;
         fs::create_dir_all(source.join("artifacts"))?;
         fs::create_dir_all(destination.join("crates/worker/generated"))?;
         fs::write(source.join(hashed), b"current-run-verifier")?;
@@ -1856,10 +1865,10 @@ mod tests {
                 (entry.path().ok()?.as_ref() == Path::new(verifier))
                     .then(|| entry.header().entry_type())
             })
-            .context("Cargo verifier archive entry")?;
+            .context("verifier archive entry")?;
         assert!(
             linked.is_hard_link(),
-            "fixture must reproduce Cargo's tar hard link"
+            "fixture must reproduce a transported hard link"
         );
 
         let single = scratch.path().join("day2-linux-verifier.tgz");
@@ -1908,61 +1917,27 @@ mod tests {
     }
 
     #[test]
-    fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
+    fn remote_bazel_cache_cannot_publish_pr_outputs_or_skip_fresh_mac_checks() {
         let job = ci_job("verify-mac-compatibility");
-        let restore = ci_step(&job, "Restore compatible Cargo intermediates");
-        let save = ci_step(&job, "Save compatible Cargo intermediates");
-        let paths = |step: &str| {
-            step.split_once("          path: |\n")
-                .unwrap()
-                .1
-                .lines()
-                .take_while(|line| line.starts_with("            "))
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            paths(restore),
-            vec![
-                "build-out/bin/.fingerprint",
-                "build-out/bin/build",
-                "build-out/tests/*.rlib",
-                "build-out/tests/*.rmeta",
-                "build-out/tests/*.d",
-                "build-out/tests/*.dylib",
-            ]
+        let cache = ci_step(
+            &job,
+            "Restore the pinned Bazel tool and remote compilation cache",
         );
-        assert_eq!(paths(restore), paths(save));
-        let (key, fallback) = restore.split_once("          restore-keys: |\n").unwrap();
-        for binding in [
-            "runner.os",
-            "runner.arch",
-            "Cargo.toml",
-            "Cargo.lock",
-            "rust-toolchain.toml",
-            ".cargo/**",
-        ] {
-            assert!(key.contains(binding) && fallback.contains(binding));
-        }
-        assert!(key.contains("github.sha") && !fallback.contains("github.sha"));
-        assert!(save.contains("key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}"));
-        assert!(save.contains("if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}"));
-        let warm = job
-            .find("      - name: Restore compatible Cargo intermediates\n")
-            .unwrap();
-        let exact = job
-            .find("      - name: Restore completed test executables\n")
-            .unwrap();
-        let source = job
-            .find("      - run: bazel run //crates/xtask:xtask -- source-check\n")
-            .unwrap();
-        let verify = job.find("      - run: bazel run //crates/xtask:xtask -- verify-mac\n        id: native_preparation").unwrap();
-        let saved = job
-            .find("      - name: Save compatible Cargo intermediates\n")
-            .unwrap();
-        assert!(warm < exact && exact < source && source < verify && verify < saved);
+        assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
+        assert!(cache.contains("github.event_name == 'merge_group'"));
+        assert!(!cache.contains("github.event_name != 'pull_request'"));
+        let native = job
+            .split_once("      - run: build-out/bin/xtask verify-mac\n")
+            .expect("fresh native Mac recipe remains mandatory")
+            .1;
+        assert!(native.starts_with("        id: native_preparation\n"));
+        let native = native.split("\n      - ").next().unwrap();
+        assert!(
+            !native.contains("        if:"),
+            "native checks cannot depend on cache status"
+        );
+        assert!(!job.contains("rust-cache@") && !job.contains("sccache-action@"));
+        assert!(include_str!("../../../.bazelrc").contains("test --cache_test_results=no"));
     }
 
     #[test]
