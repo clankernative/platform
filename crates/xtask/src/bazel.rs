@@ -652,6 +652,9 @@ pub(crate) fn docs(root: &Path) -> Result<()> {
 pub(crate) fn format(root: &Path, check: bool) -> Result<()> {
     let mut command = command(root);
     command.args(["run", "@rules_rust//:rustfmt", "--"]);
+    // Query authored targets explicitly: generated evidence and strict-policy
+    // fixture output bases may contain foreign BUILD files beneath the root.
+    command.args(targets(root)?.into_iter().map(|target| target.label));
     if check {
         command.args(["--", "--check"]);
     }
@@ -991,6 +994,77 @@ fn build_command(root: &Path, verb: &str, isolated_job: Option<&Path>) -> Result
     Ok(command)
 }
 
+/// Cargo is used only as crate_universe's dependency-input reader. This closed
+/// metadata operation cannot compile, run or test a platform target.
+pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<Vec<u8>> {
+    let cargo = tool(root, "cargo")?;
+    let rustc = tool(root, "rustc")?;
+    let home = root.join(".cache/dependency-inputs");
+    fs::create_dir_all(home.join("tmp"))?;
+    let mut command = Command::new(cargo);
+    command.args(["metadata", "--locked", "--format-version=1"]);
+    if no_dependencies {
+        command.arg("--no-deps");
+    }
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("HOME", &home)
+        .env("CARGO_HOME", &home)
+        .env("TMPDIR", home.join("tmp"))
+        .env("RUSTC", rustc)
+        .env("PATH", "/usr/bin:/bin");
+    capture_query(
+        root,
+        &mut command,
+        Duration::from_secs(600),
+        16 * 1024 * 1024,
+    )
+}
+
+/// One closed image compilation operation; Docker retains image assembly order.
+pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
+    let names: &[&str] = if enrollment_only {
+        &["day2-native-enrollment", "day2-native-enrollment-qualify"]
+    } else {
+        &[
+            "day2-health",
+            "day2-inspect",
+            "day2-security-shell",
+            "day2-native-enrollment",
+            "day2-epoch-controller",
+            "day2-serve",
+            "day2-sandbox",
+            "day2-sandbox-probe",
+            "day2-backup",
+            "day2-provision-credentials",
+        ]
+    };
+    let selected = targets(root)?
+        .into_iter()
+        .filter(|target| {
+            !target.test && target.kind == ["bin"] && names.contains(&target.target.as_str())
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        selected.len() == names.len(),
+        "complete fixed runtime-image program set required"
+    );
+    build_profile(
+        root,
+        &selected,
+        Duration::from_secs(12600),
+        if enrollment_only {
+            Profile::Release
+        } else {
+            Profile::Distribution
+        },
+        None,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,75 +1304,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-/// Cargo is used only as crate_universe's dependency-input reader. This closed
-/// metadata operation cannot compile, run or test a platform target.
-pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<Vec<u8>> {
-    let cargo = tool(root, "cargo")?;
-    let rustc = tool(root, "rustc")?;
-    let home = root.join(".cache/dependency-inputs");
-    fs::create_dir_all(home.join("tmp"))?;
-    let mut command = Command::new(cargo);
-    command.args(["metadata", "--locked", "--format-version=1"]);
-    if no_dependencies {
-        command.arg("--no-deps");
-    }
-    command
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("HOME", &home)
-        .env("CARGO_HOME", &home)
-        .env("TMPDIR", home.join("tmp"))
-        .env("RUSTC", rustc)
-        .env("PATH", "/usr/bin:/bin");
-    capture_query(
-        root,
-        &mut command,
-        Duration::from_secs(600),
-        16 * 1024 * 1024,
-    )
-}
-
-/// One closed image compilation operation; Docker retains image assembly order.
-pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
-    let names: &[&str] = if enrollment_only {
-        &["day2-native-enrollment", "day2-native-enrollment-qualify"]
-    } else {
-        &[
-            "day2-health",
-            "day2-inspect",
-            "day2-security-shell",
-            "day2-native-enrollment",
-            "day2-epoch-controller",
-            "day2-serve",
-            "day2-sandbox",
-            "day2-sandbox-probe",
-            "day2-backup",
-            "day2-provision-credentials",
-        ]
-    };
-    let selected = targets(root)?
-        .into_iter()
-        .filter(|target| {
-            !target.test && target.kind == ["bin"] && names.contains(&target.target.as_str())
-        })
-        .collect::<Vec<_>>();
-    ensure!(
-        selected.len() == names.len(),
-        "complete fixed runtime-image program set required"
-    );
-    build_profile(
-        root,
-        &selected,
-        Duration::from_secs(12600),
-        if enrollment_only {
-            Profile::Release
-        } else {
-            Profile::Distribution
-        },
-        None,
-    )?;
-    Ok(())
 }

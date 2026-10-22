@@ -17,7 +17,7 @@
     "crates/xtask/Cargo.toml": "sha256:afa6dd07d472f03d0b8a31475bc907dabc13904275a53584ce7fbc344de588a7"
   },
   "models": {
-    "build/bazel/cargo_contexts.bzl": "sha256:60158f8ab7d46d1f6d700c0efa6dc28b8b4534feb5f8ddf74c64a70c2fc9e61c",
-    "build/bazel/cargo_production_contexts.bzl": "sha256:2c11a294e1cfc605d849b2593af7d8e3b1f87e806524b7fcb0d78b00c1416a64"
+    "build/bazel/cargo_contexts.bzl": "sha256:b64f61330861fae2392f53c392ebad612057bb0c2ddf641618685862a8d1f887",
+    "build/bazel/cargo_production_contexts.bzl": "sha256:66217eec028f275aecd6b89fd5a19aeb6ad4daeac22b2a26e12604959fe0d234"
   }
 }

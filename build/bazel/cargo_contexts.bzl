@@ -699,8 +699,7 @@ CARGO_CONTEXTS = {
                     "sync",
                     "test-util",
                     "time",
-                    "tokio-macros",
-                    "windows-sys"
+                    "tokio-macros"
                 ],
                 "proc_macro_deps": [
                     "@crates__tokio-macros-2.7.2//:tokio_macros"
@@ -1401,8 +1400,7 @@ CARGO_CONTEXTS = {
                     "sync",
                     "test-util",
                     "time",
-                    "tokio-macros",
-                    "windows-sys"
+                    "tokio-macros"
                 ],
                 "proc_macro_deps": [
                     "@crates__tokio-macros-2.7.2//:tokio_macros"
@@ -1440,7 +1438,9 @@ CARGO_CONTEXTS = {
                 "deps": [
                     "@crates__libc-0.2.189//:libc"
                 ],
-                "features": [],
+                "features": [
+                    "std"
+                ],
                 "proc_macro_deps": []
             },
             "target": {
@@ -1605,7 +1605,9 @@ CARGO_CONTEXTS = {
                 "deps": [
                     ":build_script_build"
                 ],
-                "features": [],
+                "features": [
+                    "std"
+                ],
                 "proc_macro_deps": []
             },
             "target": {
@@ -2079,8 +2081,7 @@ CARGO_CONTEXTS = {
                     "sync",
                     "test-util",
                     "time",
-                    "tokio-macros",
-                    "windows-sys"
+                    "tokio-macros"
                 ],
                 "proc_macro_deps": [
                     "@crates__tokio-macros-2.7.2//:tokio_macros"
