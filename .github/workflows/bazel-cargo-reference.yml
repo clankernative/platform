@@ -1,0 +1,91 @@
+name: Temporary Cargo dependency and profile reference
+on:
+  push:
+    branches: [build/bazel-cargo-reference]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bazel-cargo-reference-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_LTO: 'off'
+      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+      RUSTFLAGS: '-C link-arg=-fuse-ld=bfd'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Log exact source
+        run: git show -s --format=fuller HEAD
+      - name: Log pinned compiler
+        run: rustc --version --verbose
+      - name: Retain declared default targets
+        run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
+      - name: Compile every verification target without executing cases
+        run: cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+      - name: Compile production programs without development dependencies
+        run: cargo build --locked --workspace --bins --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-production.jsonl
+      - name: Compile the production native worker archive
+        run: cargo build --locked -p day2-roc-worker --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
+      - name: Retain reference metadata only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cargo-reference-linux
+          path: |
+            /tmp/day2-cargo-targets.json
+            /tmp/day2-cargo-verification.jsonl
+            /tmp/day2-cargo-production.jsonl
+            /tmp/day2-cargo-worker.jsonl
+            Cargo.lock
+          if-no-files-found: error
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '3'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Log exact source
+        run: git show -s --format=fuller HEAD
+      - name: Log pinned compiler
+        run: rustc --version --verbose
+      - name: Retain declared default targets
+        run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
+      - name: Compile every verification target without executing cases
+        run: cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+      - name: Compile production programs without development dependencies
+        run: cargo build --locked --workspace --bins --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-production.jsonl
+      - name: Compile the production native worker archive
+        run: cargo build --locked -p day2-roc-worker --release --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
+      - name: Retain reference metadata only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cargo-reference-mac
+          path: |
+            /tmp/day2-cargo-targets.json
+            /tmp/day2-cargo-verification.jsonl
+            /tmp/day2-cargo-production.jsonl
+            /tmp/day2-cargo-worker.jsonl
+            Cargo.lock
+          if-no-files-found: error
