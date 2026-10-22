@@ -2533,6 +2533,8 @@ mod tests {
             output_type: "Search".into(),
             live: false,
             live_refresh_ms: 0,
+            preparation: vec![],
+            prepare_failure_operation: String::new(),
             failure_page: String::new(),
         };
         let operations = vec![crate::artifact::Operation {
