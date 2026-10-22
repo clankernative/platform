@@ -1,6 +1,6 @@
-//! Diagnostic DATA for ONE actual Current bootstrap attempt. It cannot supply
+//! Diagnostic DATA for ONE purpose-bound bootstrap or metadata attempt. It cannot supply
 //! a clock, role, file, peer, writer, retry or authority. Measurements spend the
-//! unchanged original deadline; nested rows are inclusive, never additive.
+//! original purpose deadline; nested rows are inclusive, never additive.
 use super::preparation_timing::{Operation, Summary, Timings};
 use anyhow::Result;
 use serde::Serialize;
@@ -16,8 +16,8 @@ pub(in crate::security_epoch) struct BootstrapTiming {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DiagnosticScope {
-    BootstrapCurrent,
-    ProviderReadOnlyCurrent,
+    StorageBootstrap,
+    ProviderReadOnlyStorageMetadata,
 }
 
 #[derive(Clone, Copy)]
@@ -30,6 +30,8 @@ struct State {
 #[derive(Clone, Serialize)]
 pub(in crate::security_epoch) struct Snapshot {
     scope: DiagnosticScope,
+    // Nominal closed-purpose ceiling, not a sampled effective clock/permission.
+    purpose_limit_us: Option<u32>,
     // This is the LAST MEASURED callback, not the failed statement or overall
     // phase outcome. PreparationFailure remains the native error boundary.
     #[serde(rename = "last_step")]
@@ -38,6 +40,13 @@ pub(in crate::security_epoch) struct Snapshot {
     /// [attempted, fully validated]. None is overflow/inconclusive, not zero.
     provider_rounds: [Option<u8>; 2],
     timing: Summary,
+}
+
+fn purpose_limit_us() -> Option<u32> {
+    crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+        .as_micros()
+        .try_into()
+        .ok()
 }
 
 impl BootstrapTiming {
@@ -49,13 +58,13 @@ impl BootstrapTiming {
                 returned: None,
                 rounds: [Some(0), Some(0)],
             }))),
-            scope: DiagnosticScope::BootstrapCurrent,
+            scope: DiagnosticScope::StorageBootstrap,
         }
     }
 
     pub(in crate::security_epoch) fn provider_read_only() -> Self {
         Self {
-            scope: DiagnosticScope::ProviderReadOnlyCurrent,
+            scope: DiagnosticScope::ProviderReadOnlyStorageMetadata,
             ..Self::new()
         }
     }
@@ -64,7 +73,7 @@ impl BootstrapTiming {
         Self {
             timings: Timings::disabled(),
             state: None,
-            scope: DiagnosticScope::BootstrapCurrent,
+            scope: DiagnosticScope::StorageBootstrap,
         }
     }
 
@@ -123,6 +132,7 @@ impl BootstrapTiming {
             let value = state.get();
             Snapshot {
                 scope: self.scope,
+                purpose_limit_us: purpose_limit_us(),
                 at: value.at,
                 returned: value.returned,
                 provider_rounds: value.rounds,
@@ -134,7 +144,8 @@ impl BootstrapTiming {
     #[cfg(test)]
     pub(super) fn maximal_fixture() -> Snapshot {
         Snapshot {
-            scope: DiagnosticScope::BootstrapCurrent,
+            scope: DiagnosticScope::StorageBootstrap,
+            purpose_limit_us: purpose_limit_us(),
             at: Operation::BootstrapAuthentication,
             returned: Some(false),
             provider_rounds: [Some(u8::MAX), Some(u8::MAX)],
@@ -145,7 +156,8 @@ impl BootstrapTiming {
     #[cfg(test)]
     pub(super) fn maximal_provider_fixture() -> Snapshot {
         Snapshot {
-            scope: DiagnosticScope::ProviderReadOnlyCurrent,
+            scope: DiagnosticScope::ProviderReadOnlyStorageMetadata,
+            purpose_limit_us: purpose_limit_us(),
             at: Operation::VolumeAcquisition,
             returned: Some(true),
             provider_rounds: [Some(3), Some(3)],
@@ -156,7 +168,7 @@ impl BootstrapTiming {
 
 impl Snapshot {
     pub(in crate::security_epoch) fn is_provider_read_only(&self) -> bool {
-        self.scope == DiagnosticScope::ProviderReadOnlyCurrent
+        self.scope == DiagnosticScope::ProviderReadOnlyStorageMetadata
     }
 
     pub(in crate::security_epoch) fn completed_provider_control(&self) -> bool {
@@ -188,7 +200,7 @@ mod tests {
                 serde_json::json!([failed, failed - 1])
             );
             assert_eq!(json["returned"], false);
-            assert_eq!(json["scope"], "bootstrap_current");
+            assert_eq!(json["scope"], "storage_bootstrap");
         }
     }
 
@@ -225,7 +237,7 @@ mod tests {
             assert_eq!(snapshot.completed_provider_control(), rounds == 3);
             assert_eq!(
                 serde_json::to_value(snapshot).unwrap()["scope"],
-                "provider_read_only_current"
+                "provider_read_only_storage_metadata"
             );
         }
         assert!(!BootstrapTiming::maximal_fixture().is_provider_read_only());

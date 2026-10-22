@@ -7,7 +7,7 @@ use super::{
     firestore::Sample,
     identity_protocol,
     native_clock::NativeAcquisition,
-    native_enrollment::EnrolledRoleStage,
+    native_enrollment::{EnrolledRoleStage, StagePurpose},
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
@@ -32,6 +32,7 @@ pub(crate) use retained::{
 };
 
 pub(crate) struct AuthenticatedReads<'stage, 'role> {
+    scope: ReadScope,
     stage: &'stage mut EnrolledRoleStage<'role>,
     policy: InitialBootstrapPolicy,
     purpose: NativeRole,
@@ -46,7 +47,82 @@ pub(crate) struct AuthenticatedReads<'stage, 'role> {
     valid: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadScope {
+    Current,
+    StorageBootstrap,
+    StorageMetadataObservation,
+}
+
+impl ReadScope {
+    fn require(self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        stage.require_purpose(match self {
+            Self::Current => StagePurpose::CurrentRole,
+            Self::StorageBootstrap => StagePurpose::StorageBootstrap,
+            Self::StorageMetadataObservation => StagePurpose::StorageMetadataObservation,
+        })
+    }
+
+    fn authentication(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        self.require(stage)?;
+        match self {
+            Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
+            Self::StorageBootstrap | Self::StorageMetadataObservation => {
+                let mut child = stage.narrow_storage_authentication()?;
+                let (_, ceiling) = child.interval_data()?;
+                child.narrow(max_lease_seconds, ceiling)
+            }
+        }
+    }
+
+    fn io(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        self.require(stage)?;
+        match self {
+            Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
+            Self::StorageBootstrap => {
+                stage.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
+            }
+            Self::StorageMetadataObservation => {
+                stage.narrow_storage_metadata_observation_io_acquisition(max_lease_seconds)
+            }
+        }
+    }
+
+    fn join(self, retained: &mut NativeAcquisition, actual: NativeAcquisition) -> Result<()> {
+        match self {
+            Self::Current => retained.join_current_view(actual),
+            Self::StorageBootstrap => retained.join_storage_bootstrap_view(actual),
+            Self::StorageMetadataObservation => {
+                retained.join_storage_metadata_observation_view(actual)
+            }
+        }
+    }
+
+    fn exchange(
+        self,
+        retained: &mut NativeAcquisition,
+        actual: &mut NativeAcquisition,
+    ) -> Result<()> {
+        match self {
+            Self::Current => retained.exchange_current_views(actual),
+            Self::StorageBootstrap => retained.exchange_storage_bootstrap_views(actual),
+            Self::StorageMetadataObservation => {
+                retained.exchange_storage_metadata_observation_views(actual)
+            }
+        }
+    }
+}
+
 struct RoleGuard<'stage, 'role, 'selection> {
+    scope: ReadScope,
     stage: &'stage mut EnrolledRoleStage<'role>,
     policy: &'selection InitialBootstrapPolicy,
     selection: &'selection EpochStore,
@@ -56,7 +132,8 @@ struct RoleGuard<'stage, 'role, 'selection> {
 impl RoleGuard<'_, '_, '_> {
     fn check(&mut self) -> Result<()> {
         self.stage
-            .check_selection(self.policy, self.selection, self.purpose)
+            .check_selection(self.policy, self.selection, self.purpose)?;
+        self.scope.require(self.stage)
     }
 
     fn request(
@@ -97,12 +174,52 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         purpose: NativeRole,
         stage: &'stage mut EnrolledRoleStage<'role>,
     ) -> Result<Self> {
+        Self::acquire_scoped(policy, selection, purpose, stage, ReadScope::Current)
+    }
+
+    pub(super) fn acquire_storage_bootstrap(
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        purpose: NativeRole,
+        stage: &'stage mut EnrolledRoleStage<'role>,
+    ) -> Result<Self> {
+        Self::acquire_scoped(
+            policy,
+            selection,
+            purpose,
+            stage,
+            ReadScope::StorageBootstrap,
+        )
+    }
+
+    pub(super) fn acquire_storage_metadata_observation(
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        stage: &'stage mut EnrolledRoleStage<'role>,
+    ) -> Result<Self> {
+        Self::acquire_scoped(
+            policy,
+            selection,
+            NativeRole::EpochController,
+            stage,
+            ReadScope::StorageMetadataObservation,
+        )
+    }
+
+    fn acquire_scoped(
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        purpose: NativeRole,
+        stage: &'stage mut EnrolledRoleStage<'role>,
+        scope: ReadScope,
+    ) -> Result<Self> {
         policy.validate(&BTreeMap::from([(
             policy.epoch_store.id.clone(),
             selection.clone(),
         )]))?;
         let selected = reader_selection(policy, purpose)?;
         let mut guard = RoleGuard {
+            scope,
             stage,
             policy,
             selection,
@@ -112,9 +229,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         let role = selected.workload;
         // The native executable pin must come from the selected admitted profile;
         // matching it alone does not qualify the full deployment/profile/image.
-        let mut acquisition = guard
-            .stage
-            .narrow_io_acquisition(selection.max_lease_seconds)?;
+        let mut acquisition = scope.authentication(guard.stage, selection.max_lease_seconds)?;
         let process = NativeProcessObservation::acquire(
             selected.code,
             &mut acquisition,
@@ -271,6 +386,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             )?,
         )?;
         let mut reads = Self {
+            scope,
             stage: guard.stage,
             policy: policy.clone(),
             purpose,
@@ -286,6 +402,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         };
         reads.process.check(&mut reads.acquisition)?;
         reads.stage.check_selection(policy, selection, purpose)?;
+        reads.scope.require(reads.stage)?;
         Ok(reads)
     }
 
@@ -294,10 +411,12 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             ensure!(self.valid, "epoch_native_read_refused");
             self.stage
                 .check_selection(&self.policy, &self.store, self.purpose)?;
+            self.scope.require(self.stage)?;
             self.process.check(&mut self.acquisition)?;
             let sample = self.acquisition.sample()?;
             self.stage
                 .check_selection(&self.policy, &self.store, self.purpose)?;
+            self.scope.require(self.stage)?;
             Ok(sample)
         })();
         if result.is_err() {

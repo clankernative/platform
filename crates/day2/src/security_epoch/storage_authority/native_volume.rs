@@ -146,6 +146,9 @@ impl<'role> ProviderReader<'role> {
             StagePurpose::InitialFirstHolder => {
                 stage.initial_first_holder_acquisition(store.max_lease_seconds)?
             }
+            StagePurpose::StorageBootstrap | StagePurpose::StorageMetadataObservation => {
+                anyhow::bail!("storage_provider_authenticated_purpose_required")
+            }
         };
         let selected = profile(&mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
@@ -268,16 +271,25 @@ impl<'role> ProviderReader<'role> {
         timings: Timings,
         mut authentication: ProviderEpochReads,
         bootstrap: BootstrapTiming,
+        purpose: StagePurpose,
     ) -> Result<Self> {
         // The actual read-only GKE probe took 3.168939s, including 0.714994s
         // of repeated provider authentication. Reuse ONLY its genuine full
         // same-stage material, not a previous provider observation. All live
-        // profile/provider/physical/durability checks and Current's original
-        // five-second ceiling remain; this is not a measured margin claim.
+        // profile/provider/physical/durability checks remain. The original
+        // purpose-bound interval is retained; no margin is inferred here.
         let guard = authentication.arm_refusal()?;
-        stage.require_purpose(StagePurpose::CurrentRole)?;
+        stage.require_purpose(purpose)?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let mut acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+        let mut acquisition = match purpose {
+            StagePurpose::StorageBootstrap => {
+                stage.narrow_storage_bootstrap_io_acquisition(store.max_lease_seconds)?
+            }
+            StagePurpose::StorageMetadataObservation => {
+                stage.narrow_storage_metadata_observation_io_acquisition(store.max_lease_seconds)?
+            }
+            _ => anyhow::bail!("storage_provider_authenticated_purpose_required"),
+        };
         authentication.check(&mut stage, policy, store, &mut acquisition)?;
         let selected = profile(&mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
@@ -482,6 +494,7 @@ pub(super) fn observe_provider_read_only(
         trace.timings(),
         authentication,
         trace.clone(),
+        StagePurpose::StorageMetadataObservation,
     )?;
     // Three successive fresh validations through ONE genuine authentication
     // and original Current stage, matching the bootstrap's metadata-round
@@ -924,7 +937,7 @@ impl NativeVolumeContinuity {
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let guard = authentication.arm_refusal()?;
         let result = (|| {
-            stage.require_purpose(StagePurpose::CurrentRole)?;
+            stage.require_purpose(StagePurpose::StorageBootstrap)?;
             ensure!(self.resources.valid, "storage_native_volume_refused");
             self.owner.check(&mut stage)?;
             ProviderReader::acquire_authenticated(
@@ -934,6 +947,7 @@ impl NativeVolumeContinuity {
                 trace.timings(),
                 authentication,
                 trace.clone(),
+                StagePurpose::StorageBootstrap,
             )
         })();
         let phase = self.finish_begin(result)?;

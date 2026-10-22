@@ -1059,7 +1059,7 @@ mod tests {
         );
         assert_eq!(
             rows[1]["observation"]["bootstrap"]["scope"],
-            "provider_read_only_current"
+            "provider_read_only_storage_metadata"
         );
         assert!(
             rows.iter()
@@ -1625,7 +1625,7 @@ mod tests {
                 })
             );
             assert!(observation.get("timing").is_none());
-            assert_eq!(observation["bootstrap"]["scope"], "bootstrap_current");
+            assert_eq!(observation["bootstrap"]["scope"], "storage_bootstrap");
             assert!(!recorder.first_holder && !recorder.activated);
             let bytes = String::from_utf8(recorder.output).unwrap();
             assert!(!bytes.contains("epoch_native_clock") && !bytes.contains("MustNotDisplay"));
@@ -1788,7 +1788,7 @@ mod tests {
         assert!(rows[0]["observation"].get("timing").is_none());
         assert_eq!(
             rows[0]["observation"]["bootstrap"]["scope"],
-            "bootstrap_current"
+            "storage_bootstrap"
         );
         assert!(recorder.refused && !recorder.activated);
         assert!(

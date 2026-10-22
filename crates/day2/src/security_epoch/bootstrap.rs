@@ -465,13 +465,13 @@ impl AppStorageBootstrap {
             // Authenticate read-only material while the Controller performs its
             // fixed operation. This does not observe the epoch or acknowledge
             // anything; both provider observations still follow actual Known.
-            let mut reads = super::AuthenticatedReads::acquire(
+            let mut reads = super::AuthenticatedReads::acquire_storage_bootstrap(
                 &self.policy,
                 &self.store,
                 day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
                 stage,
             )?
-            .retain_current()?;
+            .retain_storage_bootstrap()?;
             phase.await_known(stage)?;
             // The Controller's signed result only unblocks a fresh coherent
             // provider read. It is not itself an activation/serving receipt.
@@ -675,7 +675,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;
@@ -713,7 +715,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;

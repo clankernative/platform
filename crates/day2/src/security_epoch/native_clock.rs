@@ -222,7 +222,16 @@ impl NativeAcquisition {
     }
 
     pub(super) fn budget(&mut self) -> Result<Budget> {
-        Budget::from_native_origin(self.sample()?, self.origin, self.deadline)
+        match self.scope {
+            AcquisitionScope::StorageBootstrap => Budget::from_storage_bootstrap(self),
+            AcquisitionScope::StorageMetadataObservation => {
+                self.refuse();
+                anyhow::bail!("epoch_native_metadata_budget_refused")
+            }
+            AcquisitionScope::Current | AcquisitionScope::InitialFirstHolder => {
+                Budget::from_native_origin(self.sample()?, self.origin, self.deadline)
+            }
+        }
     }
 
     /// Interval DATA for a signature, never a constructor or renewal.
@@ -468,6 +477,13 @@ mod tests {
             AcquisitionScope::StorageMetadataObservation,
         ] {
             let mut parent = storage_fixture(scope);
+            match scope {
+                AcquisitionScope::StorageBootstrap => parent.require_storage_bootstrap().unwrap(),
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent.require_storage_metadata_observation().unwrap();
+                }
+                _ => unreachable!(),
+            }
             let mut role_authentication = parent.narrow_authentication().unwrap();
             role_authentication.fixture_time = Some(Duration::from_millis(103_063));
             parent.fixture_time = role_authentication.fixture_time;
@@ -537,10 +553,13 @@ mod tests {
             AcquisitionScope::StorageBootstrap,
             AcquisitionScope::StorageMetadataObservation,
         ] {
-            let mut parent = storage_fixture(scope);
-            let child = parent.narrow(4, Duration::from_secs(104)).unwrap();
-            assert!(parent.join_current_view(child).is_err());
-            assert!(parent.remaining().is_err());
+            let mut original = storage_fixture(scope);
+            let mut current_candidate = original.narrow(4, Duration::from_secs(104)).unwrap();
+            let child = original.narrow(4, Duration::from_secs(104)).unwrap();
+            // Every non-purpose identity and <=5 ceiling is valid. Refusal
+            // must be caused by the actual private purpose, not a long clock.
+            assert!(current_candidate.join_current_view(child).is_err());
+            assert!(original.remaining().is_err());
 
             let mut parent = storage_fixture(scope);
             let mut child = parent.narrow(4, Duration::from_secs(104)).unwrap();
@@ -561,6 +580,36 @@ mod tests {
             assert!(result.is_err());
             assert!(parent.remaining().is_err());
             assert!(child.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn storage_exchange_retains_shorter_cap_and_shared_latest_observation() {
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut parent = storage_fixture(scope);
+            let mut other = parent.narrow(8, Duration::from_secs(110)).unwrap();
+            parent.fixture_time = Some(Duration::from_millis(106_300));
+            other.fixture_time = parent.fixture_time;
+            match scope {
+                AcquisitionScope::StorageBootstrap => {
+                    parent.exchange_storage_bootstrap_views(&mut other).unwrap();
+                }
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent
+                        .exchange_storage_metadata_observation_views(&mut other)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(parent.deadline, Duration::from_secs(108));
+            assert_eq!(other.deadline, parent.deadline);
+            assert_eq!(parent.remaining().unwrap(), Duration::from_millis(1_700));
+            other.fixture_time = Some(Duration::from_millis(106_299));
+            assert!(other.remaining().is_err());
+            assert!(parent.remaining().is_err());
         }
     }
 
@@ -597,6 +646,33 @@ mod tests {
         let mut diagnostic = storage_fixture(AcquisitionScope::StorageMetadataObservation);
         assert!(diagnostic.require_storage_bootstrap().is_err());
         assert!(diagnostic.require_storage_metadata_observation().is_err());
+    }
+
+    #[test]
+    fn storage_epoch_budget_requires_actual_bootstrap_clock_and_retains_spent_time() {
+        let mut actual = storage_fixture(AcquisitionScope::StorageBootstrap);
+        actual.fixture_time = Some(Duration::from_millis(106_300));
+        let mut budget = actual.budget().unwrap();
+        assert_eq!(
+            budget.remaining_native(&mut actual).unwrap(),
+            Duration::from_millis(3_700)
+        );
+        actual.fixture_time = Some(Duration::from_secs(110));
+        assert!(budget.remaining_native(&mut actual).is_err());
+        assert!(actual.remaining().is_err());
+
+        let mut diagnostic = storage_fixture(AcquisitionScope::StorageMetadataObservation);
+        assert!(diagnostic.budget().is_err());
+        assert!(diagnostic.remaining().is_err());
+
+        let mut current = NativeAcquisition::fixture(
+            Digest::new(b"ordinary-budget"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        assert!(Budget::from_storage_bootstrap(&mut current).is_err());
+        assert!(current.remaining().is_err());
     }
 
     #[test]
