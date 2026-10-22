@@ -22,7 +22,8 @@ pub(crate) use initial::{
     InitialStorageOutcome,
 };
 use native_volume::NativeVolumeObservation;
-pub(in crate::security_epoch) mod persistent_disk;
+mod persistent_disk;
+pub(in crate::security_epoch) use persistent_disk::PersistentDiskSelection;
 mod preparation;
 pub(crate) use preparation::{
     AppFileContinuity, AppPreparedFile, BeforeAttemptRefusal, CurrentPhysicalFilePhase,

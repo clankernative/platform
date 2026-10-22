@@ -4,7 +4,7 @@
 use super::{ControllerEpochReads, ProviderEpochReads, RefusalGuard, RetainedEpochReads};
 use crate::security_epoch::{
     native_clock::NativeAcquisition, native_enrollment::EnrolledRoleStage,
-    storage_authority::persistent_disk::PersistentDiskSelection, transport::Route,
+    storage_authority::PersistentDiskSelection, transport::Route,
 };
 use anyhow::Result;
 use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy};
