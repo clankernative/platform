@@ -41,9 +41,11 @@ jobs:
       - name: Compile the converted verifier and its controls
         run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //crates/xtask:xtask //crates/xtask:unit_xtask //crates/day2-control:control_integration
       - name: Execute actual build process and evidence controls
-        run: bazel test --config=${{ matrix.config }} --test_arg=build_capture::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
+        run: |
+          bazel test --config=${{ matrix.config }} --test_arg=build_capture::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
       - name: Execute build input identity controls
-        run: bazel test --config=${{ matrix.config }} --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
+        run: |
+          bazel test --config=${{ matrix.config }} --test_arg=bazel::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
       - name: Retain exact graph, lockfile and build outcome
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
