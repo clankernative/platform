@@ -112,7 +112,7 @@ pub(crate) enum ServiceResponse {
         outcome: Outcome,
     },
     Status {
-        receipt: Option<ReceiptSnapshot>,
+        receipt: Option<Box<ReceiptSnapshot>>,
     },
     ResultPage {
         result_id: String,
@@ -588,7 +588,9 @@ pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result
                     })
                 })
                 .transpose()?;
-            Ok(ServiceResponse::Status { receipt })
+            Ok(ServiceResponse::Status {
+                receipt: receipt.map(Box::new),
+            })
         }
         ServiceRequest::ResultPage {
             identity,
@@ -722,11 +724,8 @@ mod tests {
         assert!(matches!(
             status,
             ServiceResponse::Status {
-                receipt: Some(ReceiptSnapshot {
-                    state: ReceiptState::Settled(Outcome::Succeeded { .. }),
-                    ..
-                })
-            }
+                receipt: Some(receipt)
+            } if matches!(receipt.state, ReceiptState::Settled(Outcome::Succeeded { .. }))
         ));
         let page = simulated_call(
             &database,
