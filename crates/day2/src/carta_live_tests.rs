@@ -18,8 +18,23 @@ fn connection(pages: u16) -> LiveConnection {
     }
 }
 
+fn connection_ref() -> VersionRef {
+    VersionRef {
+        id: "carta-playground".into(),
+        revision: 1,
+    }
+}
+
 fn plan_with(children: CartaChildren, pages: u16) -> CapturePlan {
-    CapturePlan::authorize(SCOPE, &connection(pages), ISSUER, children, false).expect("valid plan")
+    CapturePlan::authorize(
+        SCOPE,
+        &connection_ref(),
+        &connection(pages),
+        ISSUER,
+        children,
+        false,
+    )
+    .expect("valid plan")
 }
 
 fn plan(children: CartaChildren) -> CapturePlan {
@@ -282,8 +297,14 @@ fn identity_is_content_addressed_and_binds_scope_mode_and_source() -> Result<()>
     assert_eq!(base, capture(&plan(CartaChildren::Include))?);
     let mut other_scope = plan(CartaChildren::Include);
     other_scope.scope = "cartaco/test/other".into();
-    let simulated =
-        CapturePlan::authorize(SCOPE, &connection(10), ISSUER, CartaChildren::Include, true)?;
+    let simulated = CapturePlan::authorize(
+        SCOPE,
+        &connection_ref(),
+        &connection(10),
+        ISSUER,
+        CartaChildren::Include,
+        true,
+    )?;
     let mut production = plan(CartaChildren::Include);
     production.environment = CartaEnvironment::Production;
     production.source_profile = SourceProfile::Production;
@@ -667,14 +688,16 @@ fn complete_capture(plan: &CapturePlan, stakeholders: &[&str]) -> Result<Complet
 }
 
 fn record_read(plan: &CapturePlan, snapshot: &str, cursor: u64) -> RecordRead {
-    RecordRead {
-        scope: plan.scope.clone(),
-        snapshot_id: snapshot.into(),
-        cursor,
-        issuer_id: plan.issuer_id.clone(),
-        source_profile: plan.source_profile,
-        children: plan.children,
-    }
+    RecordRead::authorize(
+        plan,
+        &crate::protocol::Instruction {
+            kind: "observe".into(),
+            model: "carta.record.v1".into(),
+            data: json!({"handle":"h","snapshot_id":snapshot,"cursor":cursor}).to_string(),
+            ..Default::default()
+        },
+    )
+    .expect("a well-formed record read")
 }
 
 #[test]
@@ -774,6 +797,158 @@ fn record_reads_are_bound_to_scope_issuer_source_and_mode() -> Result<()> {
     Ok(())
 }
 
+/// A plan for the same scope, issuer and mode under a differently reviewed
+/// connection profile.
+fn plan_through(
+    connection_ref: VersionRef,
+    edit: impl FnOnce(&mut String, &mut VersionRef, &mut CartaEnvironment),
+    simulated: bool,
+) -> CapturePlan {
+    let LiveConnection::Carta {
+        mut credential_ref,
+        mut client_id,
+        mut environment,
+        max_pages_per_collection,
+    } = connection(10)
+    else {
+        unreachable!()
+    };
+    edit(&mut client_id, &mut credential_ref, &mut environment);
+    CapturePlan::authorize(
+        SCOPE,
+        &connection_ref,
+        &LiveConnection::Carta {
+            credential_ref,
+            client_id,
+            environment,
+            max_pages_per_collection,
+        },
+        ISSUER,
+        CartaChildren::Include,
+        simulated,
+    )
+    .expect("valid plan")
+}
+
+#[test]
+fn record_reads_are_bound_to_the_authorizing_connection_client_and_credential() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join(STORE);
+    let plan = plan(CartaChildren::Include);
+    let capture = complete_capture(&plan, &["s1"])?;
+    publish(&path, &capture, 100, 100)?;
+    let id = &capture.snapshot().id;
+    assert!(read_record(&path, &record_read(&plan, id, 0)).is_ok());
+    let other_client = plan_through(
+        connection_ref(),
+        |client, _, _| *client = "other-client".into(),
+        false,
+    );
+    let other_credential = plan_through(
+        connection_ref(),
+        |_, credential, _| credential.revision = 2,
+        false,
+    );
+    let other_connection = plan_through(
+        VersionRef {
+            id: "carta-other".into(),
+            revision: 1,
+        },
+        |_, _, _| {},
+        false,
+    );
+    let other_revision = plan_through(
+        VersionRef {
+            id: "carta-playground".into(),
+            revision: 2,
+        },
+        |_, _, _| {},
+        false,
+    );
+    for (name, other) in [
+        ("client", &other_client),
+        ("credential", &other_credential),
+        ("connection", &other_connection),
+        ("revision", &other_revision),
+    ] {
+        assert_eq!(
+            (other.source_profile, other.environment, other.children),
+            (plan.source_profile, plan.environment, plan.children),
+            "{name}: only the connection authority differs"
+        );
+        assert_eq!(
+            read_record(&path, &record_read(other, id, 0))
+                .unwrap_err()
+                .to_string(),
+            "carta_snapshot_unavailable",
+            "{name}"
+        );
+        // The same provider content collected through it is a distinct
+        // capture with its own selection, never the original's identity.
+        let theirs = complete_capture(other, &["s1"])?;
+        assert_ne!(&theirs.snapshot().id, id, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_simulated_production_connection_cannot_read_a_simulated_playground_capture() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join(STORE);
+    let playground = plan_through(connection_ref(), |_, _, _| {}, true);
+    let production = plan_through(
+        connection_ref(),
+        |_, _, environment| *environment = CartaEnvironment::Production,
+        true,
+    );
+    // Both source profiles are carta_simulated; the environment still binds.
+    assert_eq!(playground.source_profile, production.source_profile);
+    let capture = complete_capture(&playground, &["s1"])?;
+    publish(&path, &capture, 100, 100)?;
+    let id = &capture.snapshot().id;
+    assert!(read_record(&path, &record_read(&playground, id, 0)).is_ok());
+    assert_eq!(
+        read_record(&path, &record_read(&production, id, 0))
+            .unwrap_err()
+            .to_string(),
+        "carta_snapshot_unavailable"
+    );
+    // Same authority but a different environment column is also refused.
+    let mut forged = record_read(&playground, id, 0);
+    forged.environment = CartaEnvironment::Production;
+    assert_eq!(
+        read_record(&path, &forged).unwrap_err().to_string(),
+        "carta_snapshot_unavailable"
+    );
+    Ok(())
+}
+
+#[test]
+fn retention_is_per_connection_so_another_connection_never_prunes_a_capture() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join(STORE);
+    let ours = plan(CartaChildren::Include);
+    let theirs = plan_through(
+        connection_ref(),
+        |client, _, _| *client = "other-client".into(),
+        false,
+    );
+    let kept = complete_capture(&ours, &["s1"])?;
+    publish(&path, &kept, 100, 100)?;
+    for (at, holders) in [(200, &["s2"][..]), (300, &["s3"]), (400, &["s4"])] {
+        publish(&path, &complete_capture(&theirs, holders)?, at, at)?;
+    }
+    assert!(
+        read_record(&path, &record_read(&ours, &kept.snapshot().id, 0)).is_ok(),
+        "three captures through another connection leave ours selected"
+    );
+    let selections: i64 =
+        Connection::open(&path)?
+            .query_row("SELECT count(*) FROM carta_selection", [], |row| row.get(0))?;
+    assert_eq!(selections, 3, "ours plus their current and previous");
+    Ok(())
+}
+
 #[test]
 fn the_live_store_has_an_explicit_fail_closed_capacity() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -802,6 +977,7 @@ fn plans_refuse_foreign_connections_and_non_numeric_issuers() {
     assert!(
         CapturePlan::authorize(
             SCOPE,
+            &connection_ref(),
             &connection(10),
             "synthetic-issuer-1",
             CartaChildren::Include,
@@ -810,12 +986,20 @@ fn plans_refuse_foreign_connections_and_non_numeric_issuers() {
         .is_err()
     );
     assert!(
-        CapturePlan::authorize(SCOPE, &connection(0), ISSUER, CartaChildren::Include, false)
-            .is_err()
+        CapturePlan::authorize(
+            SCOPE,
+            &connection_ref(),
+            &connection(0),
+            ISSUER,
+            CartaChildren::Include,
+            false
+        )
+        .is_err()
     );
     assert!(
         CapturePlan::authorize(
             SCOPE,
+            &connection_ref(),
             &LiveConnection::WorkspaceDirectory {
                 service_account: "reader@company.iam.gserviceaccount.com".into(),
                 auth: day2_capabilities::integrations::WorkspaceDirectoryAuth::DirectServiceAccount,
@@ -876,8 +1060,15 @@ mod simulated {
     }
 
     fn simulated_plan() -> CapturePlan {
-        CapturePlan::authorize(SCOPE, &connection(10), ISSUER, CartaChildren::Include, true)
-            .unwrap()
+        CapturePlan::authorize(
+            SCOPE,
+            &connection_ref(),
+            &connection(10),
+            ISSUER,
+            CartaChildren::Include,
+            true,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -964,6 +1155,7 @@ mod simulated {
         let mut foreign = SimulatedCartaPort::new(&database, SCOPE, "7654321")?;
         let foreign_plan = CapturePlan::authorize(
             SCOPE,
+            &connection_ref(),
             &connection(10),
             "7654321",
             CartaChildren::Include,

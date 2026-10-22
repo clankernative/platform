@@ -1004,6 +1004,7 @@ fn observe_native_carta(action: Action, variant: Variant) -> Result<Observed> {
     let before = worlds(&database)?;
     let plan = crate::carta_live::CapturePlan::authorize(
         SCOPE,
+        &reference(),
         &LiveConnection::Carta {
             credential_ref: reference(),
             client_id: "coverage-client".into(),
@@ -1229,6 +1230,7 @@ fn live_carta_read_rejects_wrong_scope_issuer_and_world() -> Result<()> {
     let plan = |issuer: &str| {
         crate::carta_live::CapturePlan::authorize(
             SCOPE,
+            &reference(),
             &LiveConnection::Carta {
                 credential_ref: reference(),
                 client_id: "coverage-client".into(),

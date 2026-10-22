@@ -1511,6 +1511,9 @@ mod carta_live {
         children: &'static str,
         max_request_bytes: u64,
         budget_bytes: u64,
+        /// Bind `advance` to a second resource on a distinct connection, OAuth
+        /// client and credential for the same issuer and mode.
+        separate_read_connection: bool,
     }
 
     impl Default for Setup {
@@ -1520,6 +1523,7 @@ mod carta_live {
                 children: "omit",
                 max_request_bytes: crate::carta_live::MAX_CAPTURE_REQUEST_BYTES,
                 budget_bytes: 1_000_000_000,
+                separate_read_connection: false,
             }
         }
     }
@@ -1567,9 +1571,19 @@ mod carta_live {
         let policy = json!({"version":1,"admins":[],"operations":{
             "capture":{"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":["carta.snapshot.v1"],"effects":[]},
             "advance":{"actors":[ACTOR],"mode":{"kind":"read"},"models":{},"observations":["carta.record.v1"],"effects":[]}}});
+        let other_live = json!({"provider":"carta","credential_ref":{"id":"carta-other-secret","revision":1},
+            "client_id":"other-playground-client","environment":"playground","max_pages_per_collection":3});
+        let read_resource = if setup.separate_read_connection {
+            "other_issuer"
+        } else {
+            "issuer"
+        };
         let catalog = json!({"version":1,
-            "connections":{"carta":{"revision":1,"provider":"carta","live":live}},
+            "connections":{"carta":{"revision":1,"provider":"carta","live":live},
+                "carta_other":{"revision":1,"provider":"carta","live":other_live}},
             "resources":{"issuer":{"revision":1,"connection":{"id":"carta","revision":1},
+                "target":{"kind":"carta_issuer","issuer_id":ISSUER,"children":setup.children}},
+                "other_issuer":{"revision":1,"connection":{"id":"carta_other","revision":1},
                 "target":{"kind":"carta_issuer","issuer_id":ISSUER,"children":setup.children}}},
             "policies":{
                 "carta_capture":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
@@ -1578,7 +1592,7 @@ mod carta_live {
                             "max_response_bytes":4_194_304,"max_calls_per_invocation":7},
                         "budgets":[{"id":"carta_daily","revision":1}]}}},
                 "carta_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
-                    "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":"issuer","revision":1}],
+                    "slots":{"carta":{"kind":"carta_issuer","allowed_resources":[{"id":read_resource,"revision":1}],
                         "actions":["carta_record"],"limits":{"max_request_bytes":1024,
                             "max_response_bytes":32_768,"max_calls_per_invocation":1},"budgets":[]}}}},
             "budgets":{"carta_daily":{"revision":1,"scope":"connection","period_seconds":86_400,
@@ -1587,7 +1601,7 @@ mod carta_live {
             "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
                 "resource_policies":[
                     {"policy":{"id":"carta_capture","revision":1},"operation":"capture","bindings":{"carta":{"id":"issuer","revision":1}}},
-                    {"policy":{"id":"carta_read","revision":1},"operation":"advance","bindings":{"carta":{"id":"issuer","revision":1}}}]}}});
+                    {"policy":{"id":"carta_read","revision":1},"operation":"advance","bindings":{"carta":{"id":read_resource,"revision":1}}}]}}});
         fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(json!({
             "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
@@ -1859,6 +1873,33 @@ mod carta_live {
             snapshot.record_count + 1,
         )?;
         assert_eq!(past_end.observation.error, "invalid_carta_cursor");
+        Ok(())
+    }
+
+    #[test]
+    fn a_record_read_through_another_connection_cannot_read_the_capture() -> Result<()> {
+        let (_directory, runtime) = carta_runtime(Setup {
+            separate_read_connection: true,
+            ..Setup::default()
+        })?;
+        let captured = capture(&runtime, "capture-a")?;
+        assert!(
+            captured.observation.error.is_empty(),
+            "{}",
+            captured.observation.error
+        );
+        let snapshot: crate::carta::Snapshot = serde_json::from_str(&captured.observation.result)?;
+        let before = calls(&runtime)?;
+        // Same scope, issuer, mode and simulated source; only the connection,
+        // OAuth client and credential differ. Every admission step passes and
+        // the read is refused at the capture, without reaching the provider.
+        let foreign = record(&runtime, "advance-b", &snapshot.id, 0)?;
+        assert_eq!(foreign.observation.error, "carta_snapshot_unavailable");
+        assert!(foreign.observation.result.is_empty());
+        assert_eq!(foreign.usage.calls, 0);
+        assert!(!foreign.usage.dispatched && foreign.usage.known);
+        assert_eq!(calls(&runtime)?, before);
+        replay(&runtime, &foreign)?;
         Ok(())
     }
 

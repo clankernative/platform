@@ -16,7 +16,7 @@ use crate::carta::{Exercise, Grant, OptionalText, Record, Snapshot, Stakeholder,
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     integrations::{CartaEnvironment, LiveConnection},
-    resources::CartaChildren,
+    resources::{CartaChildren, VersionRef},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Deserialize;
@@ -113,13 +113,45 @@ impl SourceProfile {
     }
 }
 
+/// The provider authority a capture was collected under: the reviewed
+/// connection and revision together with every field of its live profile that
+/// names an OAuth client in a Carta deployment. A record read must present the
+/// same authority, so a grant bound to another connection, client, credential
+/// or environment can never be answered from this capture.
+fn connection_authority(
+    connection_ref: &VersionRef,
+    connection: &LiveConnection,
+) -> Result<String> {
+    // Every field is named so a new one cannot silently fall out of the binding.
+    let LiveConnection::Carta {
+        credential_ref,
+        client_id,
+        environment,
+        max_pages_per_collection: _,
+    } = connection
+    else {
+        anyhow::bail!("carta_connection_invalid")
+    };
+    Ok(crate::digest(&serde_json::to_vec(&(
+        "carta-connection-v1",
+        &connection_ref.id,
+        connection_ref.revision,
+        environment.name(),
+        client_id,
+        &credential_ref.id,
+        credential_ref.revision,
+    ))?))
+}
+
 /// Facts frozen when the capability is authorized: the issuer, child-record
-/// mode, environment, page ceiling and source. Collection cannot widen them.
+/// mode, connection authority, environment, page ceiling and source. Collection
+/// cannot widen them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturePlan {
     scope: String,
     issuer_id: String,
     children: CartaChildren,
+    connection: String,
     environment: CartaEnvironment,
     max_pages: u16,
     source_profile: SourceProfile,
@@ -128,6 +160,7 @@ pub struct CapturePlan {
 impl CapturePlan {
     pub fn authorize(
         scope: &str,
+        connection_ref: &VersionRef,
         connection: &LiveConnection,
         issuer_id: &str,
         children: CartaChildren,
@@ -153,6 +186,7 @@ impl CapturePlan {
             scope: scope.into(),
             issuer_id: issuer_id.into(),
             children,
+            connection: connection_authority(connection_ref, connection)?,
             environment: *environment,
             max_pages: *max_pages_per_collection,
             source_profile: if simulated {
@@ -768,6 +802,7 @@ fn collect(
 pub struct CompleteCapture {
     snapshot: Snapshot,
     scope: String,
+    connection: String,
     environment: CartaEnvironment,
     children: CartaChildren,
     envelopes: Vec<String>,
@@ -786,10 +821,13 @@ fn complete(plan: &CapturePlan, collected: Collected) -> Result<CompleteCapture>
     let vesting_event_count = count(|record| matches!(record, Record::VestingEvent(_)));
     let exercise_count = count(|record| matches!(record, Record::Exercise(_)));
     let source_profile = plan.source_profile.name();
-    // No collection time: an unchanged recapture is the same capture.
+    // No collection time: an unchanged recapture is the same capture. The
+    // connection authority is part of it, so the same records collected under
+    // another connection, client or credential are a different capture.
     let identity = crate::digest(&serde_json::to_vec(&(
         "carta-live-v1",
         &plan.scope,
+        &plan.connection,
         plan.environment.name(),
         &plan.issuer_id,
         plan.children.name(),
@@ -812,6 +850,7 @@ fn complete(plan: &CapturePlan, collected: Collected) -> Result<CompleteCapture>
             source_profile: source_profile.into(),
         },
         scope: plan.scope.clone(),
+        connection: plan.connection.clone(),
         environment: plan.environment,
         children: plan.children,
         envelopes: collected.envelopes,
@@ -844,6 +883,7 @@ fn upgrade(connection: &Connection) -> Result<()> {
             exercise_count INTEGER NOT NULL CHECK(exercise_count >= 0),
             source_profile TEXT NOT NULL
                 CHECK(source_profile IN ('carta_production','carta_playground','carta_simulated')),
+            connection TEXT NOT NULL CHECK(length(connection) = 71 AND connection GLOB 'sha256:*'),
             environment TEXT NOT NULL CHECK(environment IN ('production','playground')),
             children TEXT NOT NULL CHECK(children IN ('include','omit')),
             CHECK(record_count = stakeholder_count + grant_count + vesting_event_count + exercise_count),
@@ -854,12 +894,14 @@ fn upgrade(connection: &Connection) -> Result<()> {
             envelope TEXT NOT NULL, PRIMARY KEY(scope,snapshot,ordinal),
             FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
         ) STRICT;
+        -- Selections and their retention are per connection authority: a
+        -- capture through one connection never prunes or replaces another's.
         CREATE TABLE IF NOT EXISTS carta_selection (
-            scope TEXT NOT NULL, issuer_id TEXT NOT NULL, seq INTEGER NOT NULL CHECK(seq > 0),
-            snapshot TEXT NOT NULL,
+            scope TEXT NOT NULL, connection TEXT NOT NULL, issuer_id TEXT NOT NULL,
+            seq INTEGER NOT NULL CHECK(seq > 0), snapshot TEXT NOT NULL,
             collected_from INTEGER NOT NULL, collected_to INTEGER NOT NULL,
             CHECK(collected_to >= collected_from),
-            PRIMARY KEY(scope,issuer_id,seq),
+            PRIMARY KEY(scope,connection,issuer_id,seq),
             FOREIGN KEY(scope,snapshot) REFERENCES carta_snapshots(scope,id)
         ) STRICT;
         CREATE INDEX IF NOT EXISTS carta_selection_snapshot ON carta_selection(scope,snapshot);
@@ -878,7 +920,8 @@ fn upgrade(connection: &Connection) -> Result<()> {
             BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
         -- Retention: a snapshot or its records are removable only once no
         -- selection refers to it, and the newest selection of each of the two
-        -- most recently selected snapshots per issuer cannot be removed.
+        -- most recently selected snapshots per connection and issuer cannot be
+        -- removed.
         CREATE TRIGGER IF NOT EXISTS carta_snapshots_retained BEFORE DELETE ON carta_snapshots
             WHEN EXISTS(SELECT 1 FROM carta_selection WHERE scope=OLD.scope AND snapshot=OLD.id)
             BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
@@ -887,9 +930,10 @@ fn upgrade(connection: &Connection) -> Result<()> {
             BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;
         CREATE TRIGGER IF NOT EXISTS carta_selection_retained BEFORE DELETE ON carta_selection
             WHEN OLD.seq = (SELECT max(seq) FROM carta_selection
-                    WHERE scope=OLD.scope AND issuer_id=OLD.issuer_id AND snapshot=OLD.snapshot)
+                    WHERE scope=OLD.scope AND connection=OLD.connection AND issuer_id=OLD.issuer_id
+                        AND snapshot=OLD.snapshot)
                 AND OLD.snapshot IN (SELECT snapshot FROM carta_selection
-                    WHERE scope=OLD.scope AND issuer_id=OLD.issuer_id
+                    WHERE scope=OLD.scope AND connection=OLD.connection AND issuer_id=OLD.issuer_id
                     GROUP BY snapshot ORDER BY max(seq) DESC LIMIT 2)
             BEGIN SELECT RAISE(ABORT,'immutable_carta_snapshot'); END;",
     )?;
@@ -925,17 +969,28 @@ fn publish_with_limit(
     let mut connection = crate::store::open(path)?;
     let tx = crate::write_queue::immediate(&mut connection)?;
     upgrade(&tx)?;
-    let existing: Option<(String, i64, String, String, String)> = tx
+    let existing: Option<(String, i64, String, String, String, String)> = tx
         .query_row(
-            "SELECT issuer_id,record_count,source_profile,environment,children FROM carta_snapshots WHERE scope=?1 AND id=?2",
+            "SELECT issuer_id,record_count,source_profile,connection,environment,children
+             FROM carta_snapshots WHERE scope=?1 AND id=?2",
             params![capture.scope, snapshot.id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .optional()?;
     let metadata = (
         snapshot.issuer_id.clone(),
         i64::try_from(snapshot.record_count)?,
         snapshot.source_profile.clone(),
+        capture.connection.clone(),
         capture.environment.name().to_owned(),
         capture.children.name().to_owned(),
     );
@@ -943,7 +998,7 @@ fn publish_with_limit(
         Some(existing) => ensure!(existing == metadata, "carta_capture_id_conflict"),
         None => {
             tx.execute(
-                "INSERT INTO carta_snapshots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO carta_snapshots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
                     capture.scope,
                     snapshot.id,
@@ -954,6 +1009,7 @@ fn publish_with_limit(
                     i64::try_from(snapshot.vesting_event_count)?,
                     i64::try_from(snapshot.exercise_count)?,
                     snapshot.source_profile,
+                    capture.connection,
                     capture.environment.name(),
                     capture.children.name(),
                 ],
@@ -971,9 +1027,11 @@ fn publish_with_limit(
     }
     tx.execute(
         "INSERT INTO carta_selection
-         SELECT ?1,?2,coalesce(max(seq),0)+1,?3,?4,?5 FROM carta_selection WHERE scope=?1 AND issuer_id=?2",
+         SELECT ?1,?2,?3,coalesce(max(seq),0)+1,?4,?5,?6 FROM carta_selection
+         WHERE scope=?1 AND connection=?2 AND issuer_id=?3",
         params![
             capture.scope,
+            capture.connection,
             snapshot.issuer_id,
             snapshot.id,
             collected_from,
@@ -981,22 +1039,30 @@ fn publish_with_limit(
         ],
     )?;
     // Older selections of retained snapshots are compacted; every selection of
-    // anything else goes, and then its records and the snapshot itself.
-    let retained = "SELECT snapshot FROM carta_selection WHERE scope=?1 AND issuer_id=?2
+    // anything else goes, and then its records and the snapshot itself. Only
+    // this connection's selections for this issuer are considered.
+    let retained =
+        "SELECT snapshot FROM carta_selection WHERE scope=?1 AND connection=?2 AND issuer_id=?3
         GROUP BY snapshot ORDER BY max(seq) DESC LIMIT 2";
     let pruned: Vec<String> = tx
         .prepare(&format!(
-            "SELECT DISTINCT snapshot FROM carta_selection WHERE scope=?1 AND issuer_id=?2 AND snapshot NOT IN ({retained})"
+            "SELECT DISTINCT snapshot FROM carta_selection
+             WHERE scope=?1 AND connection=?2 AND issuer_id=?3 AND snapshot NOT IN ({retained})"
         ))?
-        .query_map(params![capture.scope, snapshot.issuer_id], |row| row.get(0))?
+        .query_map(
+            params![capture.scope, capture.connection, snapshot.issuer_id],
+            |row| row.get(0),
+        )?
         .collect::<rusqlite::Result<_>>()?;
     tx.execute(
         &format!(
-            "DELETE FROM carta_selection WHERE scope=?1 AND issuer_id=?2 AND (snapshot NOT IN ({retained})
+            "DELETE FROM carta_selection WHERE scope=?1 AND connection=?2 AND issuer_id=?3
+             AND (snapshot NOT IN ({retained})
              OR seq < (SELECT max(seq) FROM carta_selection newest WHERE newest.scope=carta_selection.scope
-                AND newest.issuer_id=carta_selection.issuer_id AND newest.snapshot=carta_selection.snapshot))"
+                AND newest.connection=carta_selection.connection AND newest.issuer_id=carta_selection.issuer_id
+                AND newest.snapshot=carta_selection.snapshot))"
         ),
-        params![capture.scope, snapshot.issuer_id],
+        params![capture.scope, capture.connection, snapshot.issuer_id],
     )?;
     for old in pruned {
         tx.execute(
@@ -1018,13 +1084,16 @@ fn publish_with_limit(
     Ok(())
 }
 
-/// A `carta.record.v1` read of a live capture, bound to the grant's issuer,
-/// source and child-record mode as well as the runtime scope.
+/// A `carta.record.v1` read of a live capture, bound to the grant's connection
+/// authority, environment, issuer, source and child-record mode as well as the
+/// runtime scope.
 pub struct RecordRead {
     scope: String,
     snapshot_id: String,
     cursor: u64,
     issuer_id: String,
+    connection: String,
+    environment: CartaEnvironment,
     source_profile: SourceProfile,
     children: CartaChildren,
 }
@@ -1040,6 +1109,8 @@ impl RecordRead {
             snapshot_id,
             cursor,
             issuer_id: plan.issuer_id.clone(),
+            connection: plan.connection.clone(),
+            environment: plan.environment,
             source_profile: plan.source_profile,
             children: plan.children,
         })
@@ -1047,7 +1118,9 @@ impl RecordRead {
 }
 
 /// Read one record from the live store. Purely local: no provider is reached,
-/// and a pruned or foreign snapshot is unavailable rather than substituted.
+/// and a pruned or foreign snapshot is unavailable rather than substituted. A
+/// capture collected under any other connection authority or environment is
+/// foreign, even when its issuer, source and mode match.
 pub fn read_record(path: &Path, read: &RecordRead) -> Result<String> {
     // OPEN_CREATE is intentionally absent: a missing store is no capture.
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -1056,14 +1129,17 @@ pub fn read_record(path: &Path, read: &RecordRead) -> Result<String> {
     let count: Option<i64> = connection
         .query_row(
             "SELECT s.record_count FROM carta_snapshots s WHERE s.scope=?1 AND s.id=?2 AND s.issuer_id=?3
-                AND s.source_profile=?4 AND s.children=?5
-                AND EXISTS(SELECT 1 FROM carta_selection l WHERE l.scope=s.scope AND l.snapshot=s.id)",
+                AND s.source_profile=?4 AND s.children=?5 AND s.connection=?6 AND s.environment=?7
+                AND EXISTS(SELECT 1 FROM carta_selection l WHERE l.scope=s.scope AND l.connection=s.connection
+                    AND l.issuer_id=s.issuer_id AND l.snapshot=s.id)",
             params![
                 read.scope,
                 read.snapshot_id,
                 read.issuer_id,
                 read.source_profile.name(),
-                read.children.name()
+                read.children.name(),
+                read.connection,
+                read.environment.name()
             ],
             |row| row.get(0),
         )

@@ -404,10 +404,13 @@ pub(crate) fn authorized(
             match resource.grant.live.as_ref() {
                 None => Action::Carta(crate::carta::authorized(runtime, instruction, issuer_id)?),
                 Some(connection @ LiveConnection::Carta { .. }) => {
-                    // The source is frozen here, before any reservation: a
-                    // simulated host never falls through to the network.
+                    // The source and the reviewed connection authority are
+                    // frozen here, before any reservation: a simulated host
+                    // never falls through to the network, and a record read
+                    // only answers from a capture this same connection made.
                     let plan = crate::carta_live::CapturePlan::authorize(
                         runtime.scope(),
+                        &resource.grant.connection,
                         connection,
                         issuer_id,
                         *children,

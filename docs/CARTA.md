@@ -139,19 +139,26 @@ journals the failed observation; retrying the same invocation replays the
 failure and a new business attempt recaptures.
 
 Live captures live in a separate `carta.sqlite` store beside the app database.
-Identity is a digest of the runtime scope, environment, issuer, child-record
-mode, records, counts and source profile, with no collection time, so an
-unchanged daily recapture is the same capture. Each selection records when its
-collection started and finished. Publication is one transaction: insert the
-capture if absent, append a selection, then prune. The store keeps the two most
-recently selected distinct captures per runtime scope and issuer, so an import
-reading the previous capture finishes while a newer one lands; a third capture
-during that import prunes it and the import fails with
-`carta_snapshot_unavailable`. Triggers reject updates, replacement inserts and
+Every capture is bound to its connection authority: a digest of the reviewed
+connection ID and revision, its environment, OAuth `client_id` and client
+secret reference. Identity is a digest of the runtime scope, connection
+authority, environment, issuer, child-record mode, records, counts and source
+profile, with no collection time, so an unchanged daily recapture through the
+same connection is the same capture. Each selection records when its collection
+started and finished. Publication is one transaction: insert the capture if
+absent, append a selection, then prune. The store keeps the two most recently
+selected distinct captures per runtime scope, connection authority and issuer,
+so an import reading the previous capture finishes while a newer one lands; a
+third capture through that connection during the import prunes it and the import
+fails with `carta_snapshot_unavailable`. A capture through another connection
+never prunes or replaces one. Triggers reject updates, replacement inserts and
 deletion of anything still selected. The store is bounded at 128 MiB and fails
 with `carta_store_full`. A record read must match the snapshot's runtime scope,
-issuer, source profile and child-record mode, so a capture taken under another
-connection cannot be substituted.
+connection authority, environment, issuer, source profile and child-record
+mode. A record grant on another connection, connection revision, OAuth client,
+credential or environment, including a simulated production connection reading
+a simulated playground capture, gets `carta_snapshot_unavailable`; changing any
+of those starts from a new capture.
 
 Stakeholders and option grants are separate endpoints read in sequence. The
 local capture is immutable; it is not an upstream point-in-time snapshot, and
