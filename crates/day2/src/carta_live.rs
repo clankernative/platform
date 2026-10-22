@@ -281,18 +281,46 @@ impl AccessToken {
     }
 }
 
+/// An exchange that did not yield a complete reply. Like the shared transport's
+/// `TransportError`, it carries a stable code with what is already known of the
+/// exchange: the response bytes consumed before it stopped and any status or
+/// `Retry-After` the response declared. Never a body, header value or URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportFailure {
+    pub failure: Failure,
+    pub response_bytes: u64,
+    pub http_status: Option<u16>,
+    pub retry_after_seconds: Option<u32>,
+}
+
+/// A failure before any response arrived: nothing was read.
+impl From<Failure> for TransportFailure {
+    fn from(failure: Failure) -> Self {
+        Self {
+            failure,
+            response_bytes: 0,
+            http_status: None,
+            retry_after_seconds: None,
+        }
+    }
+}
+
 /// The two reviewed exchanges. Implementations build URLs and headers from
 /// fixed parts and report transport failures only; they never retry, follow a
 /// redirect or interpret a status. Classification belongs to the pipeline.
 pub trait CartaPort {
-    fn token(&mut self, form: &str, max_bytes: usize) -> std::result::Result<Reply, Failure>;
+    fn token(
+        &mut self,
+        form: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, TransportFailure>;
     fn page(
         &mut self,
         collection: Collection,
         query: Option<&str>,
         token: &AccessToken,
         max_bytes: usize,
-    ) -> std::result::Result<Reply, Failure>;
+    ) -> std::result::Result<Reply, TransportFailure>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,17 +370,31 @@ impl Meter {
         Ok(())
     }
 
+    /// Count every byte consumed and keep what the response declared, whether
+    /// or not the exchange completed: a truncated or refused response still
+    /// consumed provider traffic that known settlement must record.
     fn receive(
         &mut self,
-        reply: std::result::Result<Reply, Failure>,
+        reply: std::result::Result<Reply, TransportFailure>,
     ) -> std::result::Result<Reply, Failure> {
-        let reply = reply?;
-        self.response_bytes += reply.body.len() as u64;
+        let (bytes, status, retry_after_seconds) = match &reply {
+            Ok(reply) => (
+                reply.body.len() as u64,
+                Some(reply.status),
+                reply.retry_after_seconds,
+            ),
+            Err(failure) => (
+                failure.response_bytes,
+                failure.http_status,
+                failure.retry_after_seconds,
+            ),
+        };
+        self.response_bytes = self.response_bytes.saturating_add(bytes);
         if let Some(last) = &mut self.last {
-            last.http_status = (100..=599).contains(&reply.status).then_some(reply.status);
-            last.retry_after_seconds = reply.retry_after_seconds;
+            last.http_status = status.filter(|status| (100..=599).contains(status));
+            last.retry_after_seconds = retry_after_seconds;
         }
-        Ok(reply)
+        reply.map_err(|failure| failure.failure)
     }
 }
 
@@ -1188,7 +1230,11 @@ impl SimulatedCartaPort {
 }
 
 impl CartaPort for SimulatedCartaPort {
-    fn token(&mut self, form: &str, max_bytes: usize) -> std::result::Result<Reply, Failure> {
+    fn token(
+        &mut self,
+        form: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<Reply, TransportFailure> {
         crate::integrations::simulated::carta_read(
             &self.database,
             &self.scope,
@@ -1203,7 +1249,7 @@ impl CartaPort for SimulatedCartaPort {
         query: Option<&str>,
         token: &AccessToken,
         max_bytes: usize,
-    ) -> std::result::Result<Reply, Failure> {
+    ) -> std::result::Result<Reply, TransportFailure> {
         crate::integrations::simulated::carta_read(
             &self.database,
             &self.scope,

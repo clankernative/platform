@@ -12,6 +12,7 @@ package
 		Simulation,
 		ProviderConformance,
 		OAuthRegistration,
+		CartaQualification,
 		Release,
 		GkeRelease,
 		NativeEnrollment,

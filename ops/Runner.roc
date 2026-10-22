@@ -18,6 +18,7 @@ import ops.Provision
 import ops.Simulation
 import ops.ProviderConformance
 import ops.OAuthRegistration
+import ops.CartaQualification
 import ops.Release
 import ops.GkeRelease
 import ops.NativeEnrollment
@@ -65,6 +66,7 @@ run! = |args| match args {
 	["replay-control", trace] => Simulation.replay!(trace, call!)
 	["provider-conformance"] => ProviderConformance.run!(call!)
 	["oauth-registration"] => OAuthRegistration.run!(call!)
+	["carta-qualification"] => CartaQualification.run!(call!)
 	["release-step", snapshot] => Release.run(snapshot)
 	["gke-release"] => GkeRelease.run!(call!)
 	["gke-release-build"] => GkeRelease.build!(call!)

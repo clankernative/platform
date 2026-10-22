@@ -1,0 +1,61 @@
+{
+  "optionGrants": [
+    {
+      "id": "5001",
+      "issuerId": "1234567",
+      "stakeholderId": "1001",
+      "equityIncentivePlanName": "2020 Equity Incentive Plan",
+      "issueDate": { "value": "2024-01-15" },
+      "vestingStartDate": { "value": "2024-01-01" },
+      "boardApprovalDate": { "value": "2024-01-10" },
+      "stakeholderAcceptanceDate": { "value": "2024-01-20" },
+      "grantExpirationDate": { "value": "2034-01-14" },
+      "isoNsoSplit": false,
+      "stockOptionType": "ISO",
+      "quantity": { "value": "48000" },
+      "outstandingQuantity": { "value": "46000" },
+      "vestedQuantity": { "value": "12000" },
+      "exercisedQuantity": { "value": "2000" },
+      "exercisePrice": {
+        "currencyCode": { "value": "USD" },
+        "amount": { "value": "0.42" }
+      },
+      "securityLabel": "ES-1",
+      "earlyExercisable": false,
+      "vestingEvents": [
+        {
+          "id": "9001",
+          "vestDate": { "value": "2025-01-01" },
+          "quantity": { "value": "12000" },
+          "isoQuantity": { "value": "12000" },
+          "nsoQuantity": { "value": "0" },
+          "performanceCondition": false,
+          "vested": true,
+          "maxQuantity": { "value": "12000" },
+          "targetQuantity": { "value": "12000" },
+          "vestedQuantity": { "value": "12000" }
+        }
+      ],
+      "exercises": [
+        {
+          "exerciseId": "7001",
+          "quantity": { "value": "2000" },
+          "fairMarketValueAsOfDate": { "value": "2025-03-01" },
+          "exerciseDate": { "value": "2025-03-01" },
+          "status": "COMPLETED",
+          "certificateId": "CS-12",
+          "exerciseType": "CASH",
+          "qualified": true
+        }
+      ],
+      "vestingSchedule": {
+        "name": "4 year, 1 year cliff",
+        "lastModifiedDate": { "value": "2024-01-10" },
+        "startDate": { "value": "2024-01-01" },
+        "endDate": { "value": "2028-01-01" }
+      },
+      "lastModifiedDatetime": { "value": "2025-03-02T10:15:00Z" }
+    }
+  ],
+  "nextPageToken": ""
+}
