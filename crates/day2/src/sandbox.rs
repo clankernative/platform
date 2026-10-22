@@ -335,9 +335,18 @@ mod tests {
             &address,
         ];
         let result = (|| -> Result<()> {
-            assert!(Command::new(&curl).args(arguments).status()?.success());
-            assert!(!build_host(&job, &curl)?.args(arguments).status()?.success());
-            assert!(Command::new(&curl).args(arguments).status()?.success());
+            ensure!(
+                Command::new(&curl).args(arguments).status()?.success(),
+                "network witness before confinement"
+            );
+            ensure!(
+                !build_host(&job, &curl)?.args(arguments).status()?.success(),
+                "private builder network was permitted"
+            );
+            ensure!(
+                Command::new(&curl).args(arguments).status()?.success(),
+                "network witness after confinement"
+            );
             Ok(())
         })();
         stop.store(true, Ordering::SeqCst);

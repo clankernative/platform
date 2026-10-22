@@ -55,7 +55,8 @@ jobs:
       - name: Compile the converted verifier and its controls
         run: bazel build --config=${{ matrix.config }} --build_event_json_file=/tmp/day2-bazel-build.json //crates/xtask:xtask //crates/xtask:unit_xtask //crates/day2-control:control_integration
       - name: Execute selected developer path and actual native confinement controls
-        run: bazel test --config=${{ matrix.config }} --test_output=all --test_arg=sandbox::tests:: --test_arg=--nocapture //crates/day2:unit_lib
+        run: |
+          bazel test --config=${{ matrix.config }} --test_output=all --test_arg=sandbox::tests:: --test_arg=--nocapture //crates/day2:unit_lib
       - name: Execute actual build process and evidence controls
         run: |
           bazel test --config=${{ matrix.config }} --test_output=all --test_arg=build_capture::tests:: --test_arg=--nocapture //crates/xtask:unit_xtask
