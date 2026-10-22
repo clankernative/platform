@@ -1,7 +1,7 @@
 //! Closed storage metadata reads from the SAME genuine full authentication.
 //! Profile DATA narrows routes through its policy-bound digest; it cannot
 //! construct this owner or select an epoch/counter write.
-use super::{ControllerEpochReads, ProviderEpochReads, RetainedEpochReads};
+use super::{ControllerEpochReads, ProviderEpochReads, RefusalGuard, RetainedEpochReads};
 use crate::security_epoch::{
     native_clock::NativeAcquisition, native_enrollment::EnrolledRoleStage,
     storage_authority::persistent_disk::PersistentDiskSelection, transport::Route,
@@ -49,7 +49,7 @@ impl StorageMetadataRead {
 }
 
 impl ProviderEpochReads {
-    pub(in crate::security_epoch) fn arm_refusal(&self) -> Result<super::RefusalGuard> {
+    pub(in crate::security_epoch) fn arm_refusal(&self) -> Result<RefusalGuard> {
         self.state.gate.guard()
     }
 
