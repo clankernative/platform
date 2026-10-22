@@ -26,6 +26,7 @@ exports_files([
     "assets/icons/log-out.svg",
     "assets/icons/shield-check.svg",
     "assets/navigation.js",
+    "assets/reactive-queries.js",
     "assets/web.css",
     "build-dependencies/clanker-ui.json",
     "deploy/gke/k8s/maintenance-pod.yaml",
