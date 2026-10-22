@@ -567,8 +567,8 @@ impl Policy {
 
 /// The prefix of an entry that admits everyone at a domain instead of one person.
 ///
-/// `domain:D` may appear in an app's `readers` and `writers` and in an
-/// operation's `actors`, and nowhere else. It admits exactly the addresses
+/// `domain:D` may appear in an app's `readers` and `writers`, in an operation's
+/// `actors` and in a non-delegation resource grant's `actors`, and nowhere else. It admits exactly the addresses
 /// [`in_domain`] accepts, and only when `D` is the hosted domain the
 /// installation's edge verifies on every request (see [`valid_entry`]). It is
 /// never an identity: owners, administrators, delegation rules and the audit
@@ -589,7 +589,7 @@ pub(crate) fn valid_actor(actor: &str) -> Result<()> {
     ensure!(
         !actor.starts_with(DOMAIN_PREFIX),
         "a {DOMAIN_PREFIX} entry names a set of people, not one principal, and is accepted only \
-         in readers, writers and operation actors: {actor}"
+         in readers, writers, operation actors and resource grant actors: {actor}"
     );
     ensure!(
         !actor.is_empty()
@@ -666,6 +666,18 @@ pub(crate) fn admits(entries: &BTreeSet<String>, actor: &str) -> bool {
             || actor.split_once('@').is_some_and(|(_, domain)| {
                 in_domain(actor, domain) && entries.contains(&format!("{DOMAIN_PREFIX}{domain}"))
             }))
+}
+
+/// Whether `entries` admit everyone `entry` admits: a principal as [`admits`]
+/// decides, and a `domain:` entry only by that same entry, since no list of
+/// names covers a whole domain. Used where one membership list must stay within
+/// another, as a resource grant's actors within its operation and membership.
+pub(crate) fn covers(entries: &BTreeSet<String>, entry: &str) -> bool {
+    if entry.starts_with(DOMAIN_PREFIX) {
+        entries.contains(entry)
+    } else {
+        admits(entries, entry)
+    }
 }
 
 /// The host creates this namespace only after verifying a managed client token.

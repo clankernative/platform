@@ -996,6 +996,8 @@ fn provider_mode_is_independent_from_delegation_simulation_mode() -> Result<()> 
 fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capability() -> Result<()>
 {
     const ACTOR: &str = "directory-reader@coverage.test";
+    const NEWHIRE: &str = "newhire@coverage.test";
+    const CONTRACTOR: &str = "contractor@partner.test";
     const CUSTOMER: &str = "Ccoverage";
     const SCOPE: &str = "hybridco/test/app";
     const NOW: i64 = 1_700_000_001;
@@ -1006,6 +1008,26 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         allow_hierarchy: bool,
         response_limit: u64,
     ) -> Result<(tempfile::TempDir, Runtime)> {
+        fixture_runtime_in(with_world, with_user, allow_hierarchy, response_limit, None)
+    }
+
+    /// With a hosted domain, the resource policy names only `domain:D`, while
+    /// membership and the operation also name `CONTRACTOR` from another domain.
+    fn fixture_runtime_in(
+        with_world: bool,
+        with_user: bool,
+        allow_hierarchy: bool,
+        response_limit: u64,
+        hosted_domain: Option<&str>,
+    ) -> Result<(tempfile::TempDir, Runtime)> {
+        let domain_entry = hosted_domain.map(|domain| format!("domain:{domain}"));
+        let (members, granted) = match &domain_entry {
+            Some(entry) => (
+                vec![ACTOR.to_owned(), entry.clone(), CONTRACTOR.to_owned()],
+                vec![entry.clone()],
+            ),
+            None => (vec![ACTOR.to_owned()], vec![ACTOR.to_owned()]),
+        };
         let directory = tempfile::tempdir()?;
         let instance_path = directory.path().join("instance.json");
         let state = directory.path().join(".state");
@@ -1024,21 +1046,24 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             actions.push(Action::WorkspaceDirectoryHierarchy);
         }
         let observations: Vec<_> = actions.iter().map(|action| action.capability()).collect();
-        let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":[ACTOR],
+        let policy = json!({"version":1,"admins":[],"operations":{"run":{"actors":members,
             "mode":{"kind":"read"},"models":{},"observations":observations,"effects":[]}}});
         let catalog = json!({"version":1,
             "connections":{"directory":{"revision":1,"provider":"workspace_directory","live":live}},
             "resources":{"directory":{"revision":1,"connection":{"id":"directory","revision":1},"target":target}},
-            "policies":{"directory_read":{"revision":1,"owner":"it","actors":[ACTOR],"allowed_apps":["app"],"max_duration_seconds":null,
+            "policies":{"directory_read":{"revision":1,"owner":"it","actors":granted,"allowed_apps":["app"],"max_duration_seconds":null,
                 "slots":{"directory":{"kind":"workspace_directory","allowed_resources":[{"id":"directory","revision":1}],
                     "actions":actions,"limits":{"max_request_bytes":32768,"max_response_bytes":response_limit,"max_calls_per_invocation":5},
                     "budgets":[{"id":"directory_budget","revision":1}]}}}},
             "budgets":{"directory_budget":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":100,"bytes":10000000,"concurrency":1}}}});
-        let instance = json!({"installation":"hybridco","environment":"test","resources":catalog,
-            "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
+        let mut instance = json!({"installation":"hybridco","environment":"test","resources":catalog,
+            "apps":{"app":{"artifact":artifact_directory,"readers":members,"writers":members,"authority":policy,
                 "resource_policies":[{"policy":{"id":"directory_read","revision":1},"operation":"run",
                     "bindings":{"directory":{"id":"directory","revision":1}}}]}}});
+        if let Some(domain) = hosted_domain {
+            instance["identity"] = json!({"scheme":"google_iap","hosted_domain":domain});
+        }
         fs::write(&instance_path, serde_json::to_vec(&instance)?)?;
         let contract = serde_json::from_value(json!({
             "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
@@ -1064,7 +1089,7 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             app: "app".into(),
             db: state.join("app.sqlite"),
             scope: SCOPE.into(),
-            hosted_domain: None,
+            hosted_domain: hosted_domain.map(str::to_owned),
             artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
                 "hybrid-directory-test".into(),
                 artifact_directory,
@@ -1082,11 +1107,16 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
             crate::integrations::simulated::WorkspaceDirectoryWorld {
                 customer_id: CUSTOMER.into(),
                 users: if with_user {
-                    BTreeMap::from([(
-                        ACTOR.into(),
-                        json!({"customerId":CUSTOMER,
-                        "orgUnitPath":"/Engineering","primaryEmail":ACTOR,"kind":"admin#directory#user"}),
-                    )])
+                    [ACTOR, NEWHIRE, CONTRACTOR]
+                        .into_iter()
+                        .map(|person| {
+                            (
+                                person.into(),
+                                json!({"customerId":CUSTOMER,
+                                "orgUnitPath":"/Engineering","primaryEmail":person,"kind":"admin#directory#user"}),
+                            )
+                        })
+                        .collect()
                 } else {
                     BTreeMap::new()
                 },
@@ -1135,7 +1165,25 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         now: i64,
         expect_cache_hit: bool,
     ) -> Result<String> {
-        runtime.accept("run", ACTOR, invocation, &json!({}), now)?;
+        admitted_capture_as(
+            runtime,
+            ACTOR,
+            invocation,
+            capability_name,
+            now,
+            expect_cache_hit,
+        )
+    }
+
+    fn admitted_capture_as(
+        runtime: &Runtime,
+        actor: &str,
+        invocation: &str,
+        capability_name: &str,
+        now: i64,
+        expect_cache_hit: bool,
+    ) -> Result<String> {
+        runtime.accept("run", actor, invocation, &json!({}), now)?;
         let mut connection = open(runtime.db())?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let request = Request {
@@ -1480,6 +1528,34 @@ fn hybrid_qualification_keeps_workspace_directory_offline_through_admitted_capab
         admitted_capture(
             &runtime,
             "insufficient-response-allowance",
+            "workspace_directory.capture.v1",
+            NOW,
+            false,
+        )
+        .unwrap_err()
+        .to_string(),
+        crate::error::Failure::ResourceForbidden.to_string()
+    );
+
+    // A grant naming only the verified domain reads the Directory for someone
+    // nobody listed by name, and binds nothing for a member of another domain.
+    let (_directory, runtime) =
+        fixture_runtime_in(true, true, true, response_limit, Some("coverage.test"))?;
+    let capture: Value = serde_json::from_str(&admitted_capture_as(
+        &runtime,
+        NEWHIRE,
+        "domain-member",
+        "workspace_directory.capture.v1",
+        NOW,
+        false,
+    )?)?;
+    assert_eq!(capture["actor"], NEWHIRE);
+    assert_eq!(capture["user_path"], "/Engineering");
+    assert_eq!(
+        admitted_capture_as(
+            &runtime,
+            CONTRACTOR,
+            "named-outside-domain",
             "workspace_directory.capture.v1",
             NOW,
             false,

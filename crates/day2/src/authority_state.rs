@@ -5,7 +5,7 @@
 
 use crate::{
     artifact::{AppBinding, Instance, LoadedArtifact, Operation},
-    authority::{Policy, admits},
+    authority::{DOMAIN_PREFIX, Policy, admits, covers},
     error::Failure,
     store::{Runtime, open},
 };
@@ -186,8 +186,8 @@ impl AuthorityDocument {
             };
             bindings.retain(|_, grant| {
                 grant.actors.retain(|actor| {
-                    admits(&approved.actors, actor)
-                        && member(&self.readers, &self.writers, operation, actor)
+                    covers(&approved.actors, actor)
+                        && covered(&self.readers, &self.writers, operation, actor)
                 });
                 grant.actions.retain(|action| {
                     if action.is_write() {
@@ -267,18 +267,33 @@ impl AuthorityDocument {
                 .get(name)
                 .context("resource_operation_not_approved")?;
             for grant in bindings.values() {
+                // A domain carries a person's own request to a resource; it is
+                // never lent across an application boundary by delegation.
+                for entry in grant
+                    .actors
+                    .iter()
+                    .filter(|actor| actor.starts_with(DOMAIN_PREFIX))
+                {
+                    crate::authority::valid_entry(entry, hosted_domain)?;
+                    ensure!(
+                        grant.provider != day2_capabilities::resources::Provider::LocalDelegation,
+                        "a {DOMAIN_PREFIX} entry cannot be granted app delegation: {entry}"
+                    );
+                }
                 ensure!(
                     grant
                         .actors
                         .iter()
-                        .all(|actor| admits(&approved.actors, actor)),
+                        .all(|actor| covers(&approved.actors, actor)),
                     "resource_actors_exceed_operation_authority"
                 );
                 ensure!(
-                    grant
-                        .actors
-                        .iter()
-                        .all(|actor| self.admits(operation, actor)),
+                    grant.actors.iter().all(|actor| covered(
+                        &self.readers,
+                        &self.writers,
+                        operation,
+                        actor
+                    )),
                     "resource_actors_exceed_membership"
                 );
                 for action in &grant.actions {
@@ -409,6 +424,17 @@ fn member(
     actor: &str,
 ) -> bool {
     admits(writers, actor) || (operation.kind == "query" && admits(readers, actor))
+}
+
+/// [`member`] for a membership entry rather than a person: a `domain:` entry
+/// is within membership only where membership names that same domain.
+fn covered(
+    readers: &BTreeSet<String>,
+    writers: &BTreeSet<String>,
+    operation: &Operation,
+    entry: &str,
+) -> bool {
+    covers(writers, entry) || (operation.kind == "query" && covers(readers, entry))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -376,7 +376,7 @@ fn load(
         .ok_or(Failure::ResourceForbidden)?;
     ensure!(narrower(&claims.grant, grant), Failure::ResourceForbidden);
     ensure!(
-        claims.grant.actors.contains(&request.context.actor),
+        crate::authority::admits(&claims.grant.actors, &request.context.actor),
         Failure::ResourceForbidden
     );
     ensure!(
@@ -417,7 +417,7 @@ pub(crate) fn host_operation(
             .ok_or(Failure::ResourceForbidden)?
             .clone();
         ensure!(
-            grant.actors.contains(&request.context.actor),
+            crate::authority::admits(&grant.actors, &request.context.actor),
             Failure::ResourceForbidden
         );
         ensure!(
