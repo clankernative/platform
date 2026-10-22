@@ -863,7 +863,10 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
+        "fn begin_bounded (limit : Duration) -> Result < Self >",
+        "pub (super) fn begin_initial_first_holder () -> Result < Self >",
         "pub (super) fn budget (& mut self) -> Result < Budget >",
+        "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
         "pub (super) fn last_checked_elapsed_micros (& self) -> Option < u32 >",
@@ -876,7 +879,15 @@
       "factories": [
         {
           "owner": "NativeAcquisition",
+          "signature": "fn begin_bounded (limit : Duration) -> Result < Self >"
+        },
+        {
+          "owner": "NativeAcquisition",
           "signature": "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn begin_initial_first_holder () -> Result < Self >"
         },
         {
           "owner": "NativeAcquisition",
@@ -891,6 +902,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn budget (& mut self) -> Result < Budget >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >"
         },
         {
           "owner": "NativeAcquisition",
@@ -1597,6 +1612,8 @@
       ],
       "methods": [
         "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >",
+        "pub (crate) fn begin_initial_first_holder_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >",
+        "fn begin_stage (& mut self , purpose : StagePurpose) -> Result < EnrolledRoleStage < '_ > >",
         "pub (crate) fn capture_original_clock (& mut self , expected : NativeRole) -> Result < EnrolledOriginalClock >",
         "fn check_local (& mut self) -> Result < () >",
         "pub (crate) fn enroll_current_thread (scope : & AuthorityScope , role : NativeRole) -> Result < Self >",
@@ -1611,11 +1628,19 @@
       "material_uses": [
         {
           "owner": "EnrolledProcessRoleOwner",
+          "signature": "fn begin_stage (& mut self , purpose : StagePurpose) -> Result < EnrolledRoleStage < '_ > >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
           "signature": "fn check_local (& mut self) -> Result < () >"
         },
         {
           "owner": "EnrolledProcessRoleOwner",
           "signature": "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn begin_initial_first_holder_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
         },
         {
           "owner": "EnrolledProcessRoleOwner",
@@ -1665,8 +1690,11 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn check_storage_controller_statement (& mut self , statement : & StageStatement , kernel_process : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
         "fn check_storage_runtime_selection (& mut self , statement : & StageStatement , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
+        "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch) fn initial_first_holder_file_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
+        "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_role (& mut self) -> Result < NativeRole >",
@@ -1680,7 +1708,15 @@
       "factories": [
         {
           "owner": "EnrolledProcessRoleOwner",
+          "signature": "fn begin_stage (& mut self , purpose : StagePurpose) -> Result < EnrolledRoleStage < '_ > >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
           "signature": "pub (crate) fn begin_current_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
+        },
+        {
+          "owner": "EnrolledProcessRoleOwner",
+          "signature": "pub (crate) fn begin_initial_first_holder_stage (& mut self) -> Result < EnrolledRoleStage < '_ > >"
         }
       ],
       "material_uses": [
@@ -1799,6 +1835,18 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn initial_first_holder_file_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >"
         },
         {
           "owner": "SameEnrolledOwner",
@@ -2003,7 +2051,9 @@
       "type_name": "NativeVolumeContinuity",
       "owning_children": [],
       "methods": [
-        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
+        "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
+        "fn begin_phase < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , purpose : StagePurpose) -> Result < CurrentVolumePhase < 'volume , 'role > >"
       ],
       "factories": [
         {
@@ -2014,7 +2064,15 @@
       "material_uses": [
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "fn begin_phase < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , purpose : StagePurpose) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         }
       ],
       "proof_uses": [],
@@ -2034,7 +2092,15 @@
       "factories": [
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "fn begin_phase < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , purpose : StagePurpose) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         }
       ],
       "material_uses": [
@@ -2079,7 +2145,15 @@
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "fn acquire_phase < 'role > (self , stage : EnrolledRoleStage < 'role > , initial : bool) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_first_holder < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PreparedFileContinuity",
@@ -3820,7 +3894,9 @@
       "type_name": "PendingPreparedFilePhase",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire_first_holder < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >",
+        "fn acquire_phase < 'role > (self , stage : EnrolledRoleStage < 'role > , initial : bool) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
       ],
       "factories": [
         {
@@ -3831,7 +3907,15 @@
       "material_uses": [
         {
           "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "fn acquire_phase < 'role > (self , stage : EnrolledRoleStage < 'role > , initial : bool) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
+        },
+        {
+          "owner": "PendingPreparedFilePhase < 'file >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_first_holder < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPreparedFilePhase < 'file , 'role > >"
         }
       ],
       "proof_uses": [],
