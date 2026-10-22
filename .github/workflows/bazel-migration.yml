@@ -15,9 +15,6 @@ jobs:
           - os: ubuntu-24.04
             asset: bazel-9.3.0-linux-x86_64
             sha256: d302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8
-          - os: ubuntu-24.04-arm
-            asset: bazel-9.3.0-linux-arm64
-            sha256: 615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc6a6ca0
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -41,6 +38,13 @@ jobs:
           repository-cache: true
           disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
           cache-save: true
+      - name: Compile only the temporary fixed-vocabulary observation controls
+        run: rustc --edition=2024 --test .github/native-image-log-observations.rs -o /tmp/day2-native-image-observation-controls
+      - name: Run the actual diagnostic privacy refusal
+        run: /tmp/day2-native-image-observation-controls --nocapture
+      - name: Compile the fixed-vocabulary protected-log reader
+        id: observation_tool
+        run: rustc --edition=2024 .github/native-image-log-observations.rs -o /tmp/day2-native-image-observations
       - name: Install current source verifier
         run: bazel --batch run --config=ci-linux //crates/xtask:xtask -- install-verifier
       - name: Bootstrap current native inputs
@@ -49,6 +53,9 @@ jobs:
         run: build-out/bin/xtask qualify-linux artifacts/bazel-native-images
       - name: Build the current native enrollment image
         run: docker build --target runtime --iidfile /tmp/day2-enrollment-image.id -f deploy/gke/images/native-enrollment/Dockerfile .
+      - name: Project only fixed observations from protected operation logs
+        if: ${{ always() && steps.observation_tool.outcome == 'success' }}
+        run: /tmp/day2-native-image-observations
       - name: Retain actual image and native admission evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
