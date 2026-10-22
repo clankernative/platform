@@ -7,7 +7,7 @@ fn observe(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
     let mut index = 0;
     while index < arguments.len() {
         let value = arguments[index].to_str().unwrap_or("");
-        if ["--crate-name", "--crate-type", "--target"].contains(&value) {
+        if ["--crate-name", "--crate-type", "--target", "--edition"].contains(&value) {
             if let Some(next) = arguments.get(index + 1).and_then(|v| v.to_str()) {
                 fields.insert(
                     value.trim_start_matches('-').replace('-', "_"),
@@ -32,6 +32,13 @@ fn observe(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "debug-assertions",
                 "overflow-checks",
                 "extra-filename",
+                "lto",
+                "embed-bitcode",
+                "split-debuginfo",
+                "strip",
+                "relocation-model",
+                "target-cpu",
+                "target-feature",
             ]
             .contains(&name)
             {
@@ -66,6 +73,17 @@ fn observe(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
     {
         return Err(std::io::Error::other("unsupported observation field"));
     }
+    for (variable, field) in [
+        ("CARGO_PKG_NAME", "package"),
+        ("CARGO_PKG_VERSION", "version"),
+    ] {
+        if let Ok(value) = env::var(variable) {
+            if !bounded(&value) {
+                return Err(std::io::Error::other("unsupported package observation"));
+            }
+            fields.insert(field.to_owned(), value);
+        }
+    }
     features.sort();
     let mut record = String::from("{\"test\":");
     record.push_str(if arguments.iter().any(|v| v == "--test") {
@@ -73,6 +91,11 @@ fn observe(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
     } else {
         "false"
     });
+    let incremental_present = arguments.iter().any(|v| {
+        v.to_str()
+            .is_some_and(|v| v.starts_with("-Cincremental=") || v.starts_with("incremental="))
+    });
+    record.push_str(&format!(",\"incremental_present\":{incremental_present}"));
     for (name, value) in fields {
         record.push_str(&format!(",{name:?}:{value:?}"));
     }

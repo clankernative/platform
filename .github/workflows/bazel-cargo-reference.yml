@@ -43,9 +43,11 @@ jobs:
       - name: Retain declared default targets
         run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
       - name: Compile every verification target from empty owned outputs without executing cases
-        run: time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+        run: time -p cargo build --locked --profile test --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
       - name: Repeat the exact unchanged target build with local compiled outputs
-        run: time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
+        run: time -p cargo build --locked --profile test --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
+      - name: Observe the existing release native worker and build-tool profile
+        run: cargo build --locked --release -p day2-roc-worker --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
       - name: Retain reference metadata only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -56,12 +58,10 @@ jobs:
             /tmp/day2-cargo-verification.jsonl
             /tmp/day2-cargo-verification-warm.jsonl
             /tmp/day2-cargo-compiler-fields.jsonl
+            /tmp/day2-cargo-worker.jsonl
             Cargo.lock
           if-no-files-found: error
   mac:
-    # The original public Mac reference is still useful and runs to completion.
-    # This repair reruns only the Linux lane stopped by a missing time utility.
-    if: ${{ false }}
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -84,9 +84,11 @@ jobs:
       - name: Retain declared default targets
         run: cargo metadata --locked --no-deps --format-version=1 > /tmp/day2-cargo-targets.json
       - name: Compile every verification target from empty owned outputs without executing cases
-        run: time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
+        run: time -p cargo build --locked --profile test --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification.jsonl
       - name: Repeat the exact unchanged target build with local compiled outputs
-        run: time -p cargo build --locked --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
+        run: time -p cargo build --locked --profile test --workspace --all-targets --target-dir target/reference-verification --message-format=json > /tmp/day2-cargo-verification-warm.jsonl
+      - name: Observe the existing release native worker and build-tool profile
+        run: cargo build --locked --release -p day2-roc-worker --target-dir target/reference-production --message-format=json > /tmp/day2-cargo-worker.jsonl
       - name: Retain reference metadata only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -97,5 +99,6 @@ jobs:
             /tmp/day2-cargo-verification.jsonl
             /tmp/day2-cargo-verification-warm.jsonl
             /tmp/day2-cargo-compiler-fields.jsonl
+            /tmp/day2-cargo-worker.jsonl
             Cargo.lock
           if-no-files-found: error
