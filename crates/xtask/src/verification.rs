@@ -1278,6 +1278,12 @@ fn tests(
             ),
         );
         command.args(&selection.arguments);
+        if cfg!(target_os = "macos")
+            && target.package == "day2-control"
+            && target.target == "control_integration"
+        {
+            command.env("DAY2_TEST_RUSTC", crate::bazel::tool(root, "rustc")?);
+        }
         configure_tests(root, suite, fixtures, &mut command)?;
         let remaining = budget
             .checked_sub(started.elapsed())
@@ -1437,8 +1443,7 @@ fn configure_tests(
     Ok(())
 }
 
-/// Cargo places integration tests in `deps`, while normal executables live one
-/// directory above it. Install the freshly built trusted launchers beside the
+/// Install the freshly built trusted Linux launchers beside the
 /// test supervisors so tests use the same fixed-sibling lookup as deployment.
 /// Production worker lookup and confinement are unchanged.
 #[cfg(target_os = "linux")]

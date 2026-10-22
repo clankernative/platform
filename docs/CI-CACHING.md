@@ -184,7 +184,7 @@ checks execute normally. This change does not narrow ordinary test target keys
 or cache private/isolated build outputs.
 
 The test cache contains completed ordinary test harnesses, the normal programs
-Cargo builds for integration tests, and their compilation manifest, without run
+Bazel builds for integration tests, and their compilation manifest, without run
 receipts or runtime state. Cargo’s authoritative compiler messages and fresh
 metadata must close both inventories. Supporting programs are cached separately
 from Cargo’s ordinary output directory; only admitted programs are restored to

@@ -481,12 +481,15 @@ fn a_fast_successful_process_cannot_bypass_the_log_budget_or_forge_verification(
         fn main() { std::io::stdout().write_all(&vec![b'x'; 17*1024*1024]).unwrap(); }"#,
     )?;
     assert!(
-        std::process::Command::new("rustc")
-            .arg(&program)
-            .arg("-o")
-            .arg(directory.path().join("flood"))
-            .status()?
-            .success()
+        std::process::Command::new(
+            std::env::var_os("DAY2_TEST_RUSTC")
+                .context("configured Bazel compiler required for the native canary")?
+        )
+        .arg(&program)
+        .arg("-o")
+        .arg(directory.path().join("flood"))
+        .status()?
+        .success()
     );
     let runner = TrustedRunner::capture(
         name("flood-fixture"),
@@ -534,12 +537,15 @@ fn bazel_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes() ->
     }"#,
     )?;
     assert!(
-        std::process::Command::new("rustc")
-            .arg(&canary)
-            .arg("-o")
-            .arg(&cat)
-            .status()?
-            .success()
+        std::process::Command::new(
+            std::env::var_os("DAY2_TEST_RUSTC")
+                .context("configured Bazel compiler required for the native canary")?
+        )
+        .arg(&canary)
+        .arg("-o")
+        .arg(&cat)
+        .status()?
+        .success()
     );
     write(&job.join("allowed"), b"private build input", false)?;
     let outside = directory.path().join("secret");

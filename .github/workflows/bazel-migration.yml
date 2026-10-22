@@ -55,6 +55,8 @@ jobs:
       - name: Execute actual dependency and coverage controls
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_dependencies::tests:: --nocapture
+      - name: Check current manifest and actual Bazel dependency coverage
+        run: build-out/bin/xtask architecture-dependencies
       - name: Check real compiler-backed architectural refusals
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_kernel::tests:: --test-threads=1 --nocapture

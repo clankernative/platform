@@ -12,25 +12,6 @@ rust-version = "1.98"
 # Own every kernel-installed sender pidfd before validating ancillary messages.
 rustix = { git = "https://github.com/clankernative/rustix", rev = "6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0" }
 
-[profile.release]
-panic = "abort"
 
-# Tests exercise real workers, real SQLite and generated campaigns, so their cost
-# is platform CPU rather than compilation. Unoptimized hashing and JSON decoding
-# dominated the campaign suites: People Ops' four-cycle campaign ran 1301s at
-# opt-level 0 and 130s here, with identical assertions. `test` inherits this.
-# Dependencies such as ring and serde_json build once at opt-level 2; workspace
-# crates rebuild on every edit, so they use opt-level 1 to keep recompiles short.
-# Debug assertions and overflow checks are deliberately left enabled.
-[profile.dev]
-opt-level = 1
-# Debug info, not code, dominated the build tree. Unpacked, it left 70.6 GB of
-# per-codegen-unit object files; packed, every test binary link ran dsymutil and
-# left a .dSYM bundle behind (6.2 GB for one build of the test targets). Panic
-# messages keep their file and line without it, because those locations are
-# compiled in; only backtrace frames lose line numbers. Ask for them with
-# CARGO_PROFILE_DEV_DEBUG=line-tables-only, or for locals with =true.
-debug = false
-
-[profile.dev.package."*"]
-opt-level = 2
+# Compiler profiles live only in build/bazel and .bazelrc. This manifest is a
+# crate_universe dependency input, not a supported Cargo build entry point.

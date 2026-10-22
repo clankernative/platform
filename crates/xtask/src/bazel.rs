@@ -395,6 +395,12 @@ pub(crate) fn test_target(
     if let Some(arguments) = arguments {
         let mut command = Command::new(&executable);
         command.args(arguments);
+        if cfg!(target_os = "macos")
+            && selected.package == "day2-control"
+            && selected.target == "control_integration"
+        {
+            command.env("DAY2_TEST_RUSTC", tool(root, "rustc")?);
+        }
         run_with_budget(
             root,
             &mut command,

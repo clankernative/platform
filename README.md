@@ -5,7 +5,7 @@ The platform repository is public. Each company keeps its instance configuration
 application repositories, operational state and credentials private.
 
 The supported development host is Apple Silicon macOS with Xcode Command Line
-Tools and rustup. Native Linux ARM64 and x86_64 runtime images use pinned toolchains
+Tools and Bazelisk. Native Linux ARM64 and x86_64 runtime images use pinned toolchains
 and require the documented kernel qualification. Production browser authentication
 currently uses Google IAP and one hosted domain. The application runtime uses
 single-replica SQLite; it does not promise multi-writer HA or arbitrary identity
@@ -13,8 +13,8 @@ provider support. The isolated control-plane builder is currently macOS-only.
 
 ## Start locally
 
-Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Rust **1.98.1** is
-selected by `rust-toolchain.toml`. From this repository's root:
+Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Bazel **9.3.0** is selected by `.bazelversion`; its
+pinned rules_rust toolchain supplies Rust **1.98.1**. From this repository's root:
 
 ```console
 bazel run //crates/xtask:xtask -- bootstrap
@@ -28,7 +28,6 @@ The native operator programs are also installed in `build-out/bin`. Invoke
 those programs directly so relative instance/artifact paths keep the caller's
 working directory. `bazel run //crates/xtask:xtask -- ...` preserves that directory
 for build and verification commands.
-
 
 Open the one-use login URL printed by the local server. This is loopback-only
 development authentication. The Reports app is an explicitly public teaching

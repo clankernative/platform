@@ -781,21 +781,6 @@ mod tests {
             directory.path().join("build/bazel/targets.json"),
         )?)?;
         catalog["targets"].as_array_mut().unwrap().push(serde_json::json!({"package":"boundary-contract","directory":"contract","target":"boundary_contract","kind":["lib"],"label":"//contract:lib","test":false,"source":"contract/src/lib.rs"}));
-        fs::create_dir(directory.path().join("build/bazel/patches"))?;
-        for entry in fs::read_dir(platform.join("build/bazel/patches"))? {
-            let entry = entry?;
-            ensure!(
-                entry.file_type()?.is_file(),
-                "regular reviewed dependency patch required"
-            );
-            fs::copy(
-                entry.path(),
-                directory
-                    .path()
-                    .join("build/bazel/patches")
-                    .join(entry.file_name()),
-            )?;
-        }
         fs::write(
             directory.path().join("build/bazel/targets.json"),
             serde_json::to_vec(&catalog)?,
