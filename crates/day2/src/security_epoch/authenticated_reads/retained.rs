@@ -140,6 +140,35 @@ pub(crate) struct ProviderEpochReads {
     state: Rc<ControllerReadState>,
 }
 
+// Production compiler controls, not cfg(test) owners or native proof fixtures.
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+            let _ = <$type as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    macro_rules! assert_local_material {
+        ($type:ty) => {
+            assert_not_impl!($type, Clone);
+            assert_not_impl!($type, Copy);
+            assert_not_impl!($type, Default);
+            assert_not_impl!($type, serde::Serialize);
+            assert_not_impl!($type, serde::Deserialize<'static>);
+            assert_not_impl!($type, std::fmt::Debug);
+            assert_not_impl!($type, Send);
+            assert_not_impl!($type, Sync);
+        };
+    }
+    assert_local_material!(ControllerEpochReads);
+    assert_local_material!(ProviderEpochReads);
+    assert_local_material!(RefusalGuard);
+};
+
 impl ControllerReadState {
     fn refuse(&self) {
         // Refusal remains sticky even if an internal borrow is unavailable.
