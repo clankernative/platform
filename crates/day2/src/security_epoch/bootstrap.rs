@@ -8,6 +8,7 @@ use super::{
     control_slot::{AttemptCore, LogicalCore, SettlementCore, SlotState},
     control_slot_io,
     controller::evidence::{PreparationFailure, PreparationStep},
+    controller::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation},
     firestore::{self, Names, Port},
     journal::{CurrentBootstrapExecution, Purpose},
     kernel::{self, Outcome, Request, Snapshot},
@@ -70,6 +71,7 @@ pub(super) fn run_phase(
     selection: &EpochStore,
     request: &Request,
     action: Action,
+    trace: &BootstrapTiming,
 ) -> Result<Snapshot> {
     let core = (|| {
         LogicalCore::new(
@@ -81,11 +83,14 @@ pub(super) fn run_phase(
     })()
     .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapCore, error))?;
     let (phase, reads) = storage
-        .begin_bootstrap(stage, policy, selection, request)
+        .begin_bootstrap(stage, policy, selection, request, trace)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapFilePeer, error))?;
     let owner = Rc::new(RefCell::new(phase));
     let result = (|| {
-        let mut transport = ControllerPort::acquire(Rc::clone(&owner), policy, selection, reads)
+        let mut transport = trace
+            .measure(Operation::BootstrapWriter, || {
+                ControllerPort::acquire(Rc::clone(&owner), policy, selection, reads)
+            })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
         let names = Names::new(
@@ -97,18 +102,22 @@ pub(super) fn run_phase(
             },
         )
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapNames, error))?;
-        let counter_budget = port.budget().map_err(|error| {
-            PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
-        })?;
-        let counter =
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
+        let counter = trace.measure(Operation::BootstrapCounter, || {
+            let counter_budget = port.budget().map_err(|error| {
                 PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
             })?;
-        let slot_budget = port
-            .budget()
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error))?;
-        let slot = control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error))?;
+            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
+            })
+        })?;
+        let slot = trace.measure(Operation::BootstrapSlot, || {
+            let slot_budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error)
+            })?;
+            control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget).map_err(
+                |error| PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error),
+            )
+        })?;
         let purpose = match action {
             Action::Settle => Purpose::Reconcile,
             _ => Purpose::Dispatch,
@@ -122,9 +131,17 @@ pub(super) fn run_phase(
             &mut port,
         )
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
-        match action {
-            Action::Reserve => {
-                control_slot_io::accept(selection, core.clone(), counter, slot, context, &mut port)
+        trace.measure(Operation::BootstrapMutation, || {
+            match action {
+                Action::Reserve => {
+                    control_slot_io::accept(
+                        selection,
+                        core.clone(),
+                        counter,
+                        slot,
+                        context,
+                        &mut port,
+                    )
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapReservePrepare, error)
                     })?
@@ -132,98 +149,106 @@ pub(super) fn run_phase(
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapReserveSend, error)
                     })?;
-            }
-            Action::Dispatch => {
-                (|| {
-                    // Only the initial Prepared state is accepted. A historical
-                    // May/Retryable/Observed slot is not this actual known claim.
-                    let before = slot
-                        .data()
-                        .context("native_bootstrap_reservation_missing")?;
-                    let SlotState::Prepared { next } = before.slot.state else {
-                        anyhow::bail!("native_bootstrap_dispatch_not_prepared");
-                    };
-                    let incarnation = owner
-                        .try_borrow_mut()?
-                        .controller_stage()?
-                        .incarnation_data()?;
-                    let mut nonce = [0_u8; 32];
-                    crate::host_inputs::Entropy::fill(
-                        &crate::host_inputs::SecureEntropy,
-                        &mut nonce,
-                    )?;
-                    port.sample()?;
-                    let attempt = AttemptCore {
-                        logical: core.digest()?,
-                        request: request.digest()?,
-                        ordinal: next,
-                        expected: before.version.clone(),
-                        controller_incarnation: incarnation,
-                        nonce: Digest::new(&nonce),
-                    };
-                    control_slot_io::claim(
-                        selection,
-                        core.clone(),
-                        counter,
-                        slot,
-                        context,
-                        attempt,
-                        &mut port,
-                    )
+                }
+                Action::Dispatch => {
+                    (|| {
+                        // Only the initial Prepared state is accepted. A historical
+                        // May/Retryable/Observed slot is not this actual known claim.
+                        let before = slot
+                            .data()
+                            .context("native_bootstrap_reservation_missing")?;
+                        let SlotState::Prepared { next } = before.slot.state else {
+                            anyhow::bail!("native_bootstrap_dispatch_not_prepared");
+                        };
+                        let incarnation = owner
+                            .try_borrow_mut()?
+                            .controller_stage()?
+                            .incarnation_data()?;
+                        let mut nonce = [0_u8; 32];
+                        crate::host_inputs::Entropy::fill(
+                            &crate::host_inputs::SecureEntropy,
+                            &mut nonce,
+                        )?;
+                        port.sample()?;
+                        let attempt = AttemptCore {
+                            logical: core.digest()?,
+                            request: request.digest()?,
+                            ordinal: next,
+                            expected: before.version.clone(),
+                            controller_incarnation: incarnation,
+                            nonce: Digest::new(&nonce),
+                        };
+                        control_slot_io::claim(
+                            selection,
+                            core.clone(),
+                            counter,
+                            slot,
+                            context,
+                            attempt,
+                            &mut port,
+                        )
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::BootstrapDispatchPrepare, error)
+                        })?
+                        .send(selection, &mut port)
+                        .map_err(|error| {
+                            PreparationFailure::at(
+                                PreparationStep::BootstrapDispatchRecordSend,
+                                error,
+                            )
+                        })?
+                        .send(selection, &mut port)
+                        .map_err(|error| {
+                            PreparationFailure::at(
+                                PreparationStep::BootstrapDispatchCounterSend,
+                                error,
+                            )
+                        })?;
+                        Ok::<(), anyhow::Error>(())
+                    })()
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapDispatchPrepare, error)
-                    })?
-                    .send(selection, &mut port)
-                    .map_err(|error| {
-                        PreparationFailure::at(PreparationStep::BootstrapDispatchRecordSend, error)
-                    })?
-                    .send(selection, &mut port)
-                    .map_err(|error| {
-                        PreparationFailure::at(PreparationStep::BootstrapDispatchCounterSend, error)
                     })?;
-                    Ok::<(), anyhow::Error>(())
-                })()
-                .map_err(|error| {
-                    PreparationFailure::at(PreparationStep::BootstrapDispatchPrepare, error)
-                })?;
-            }
-            Action::Settle => {
-                (|| {
-                    let before = slot
-                        .data()
-                        .context("native_bootstrap_reservation_missing")?;
-                    let SlotState::MayHaveBeenSent { attempt } = &before.slot.state else {
-                        anyhow::bail!("native_bootstrap_settlement_not_pending");
-                    };
-                    let settlement = SettlementCore {
-                        logical: core.digest()?,
-                        expected: before.version.clone(),
-                        control_attempt: attempt.id.clone(),
-                        receipt: request.receipt()?.digest()?,
-                    };
-                    control_slot_io::settle(
-                        selection,
-                        core.clone(),
-                        counter,
-                        slot,
-                        context,
-                        settlement,
-                        &mut port,
-                    )
+                }
+                Action::Settle => {
+                    (|| {
+                        let before = slot
+                            .data()
+                            .context("native_bootstrap_reservation_missing")?;
+                        let SlotState::MayHaveBeenSent { attempt } = &before.slot.state else {
+                            anyhow::bail!("native_bootstrap_settlement_not_pending");
+                        };
+                        let settlement = SettlementCore {
+                            logical: core.digest()?,
+                            expected: before.version.clone(),
+                            control_attempt: attempt.id.clone(),
+                            receipt: request.receipt()?.digest()?,
+                        };
+                        control_slot_io::settle(
+                            selection,
+                            core.clone(),
+                            counter,
+                            slot,
+                            context,
+                            settlement,
+                            &mut port,
+                        )
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::BootstrapSettlePrepare, error)
+                        })?
+                        .send(selection, &mut port)
+                        .map_err(|error| {
+                            PreparationFailure::at(PreparationStep::BootstrapSettleSend, error)
+                        })?;
+                        Ok::<(), anyhow::Error>(())
+                    })()
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapSettlePrepare, error)
-                    })?
-                    .send(selection, &mut port)
-                    .map_err(|error| {
-                        PreparationFailure::at(PreparationStep::BootstrapSettleSend, error)
                     })?;
-                    Ok::<(), anyhow::Error>(())
-                })()
-                .map_err(|error| {
-                    PreparationFailure::at(PreparationStep::BootstrapSettlePrepare, error)
-                })?;
+                }
             }
-        }
+            Ok(())
+        })?;
         let counter_budget = port.budget().map_err(|error| {
             PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
         })?;
@@ -236,15 +261,18 @@ pub(super) fn run_phase(
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
         let slot = control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
-        validate_after(
-            action,
-            selection,
-            request,
-            &core,
-            observed.snapshot(),
-            &slot,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
+        trace
+            .measure(Operation::BootstrapValidation, || {
+                validate_after(
+                    action,
+                    selection,
+                    request,
+                    &core,
+                    observed.snapshot(),
+                    &slot,
+                )
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
         port.sample()
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
         (|| owner.try_borrow_mut()?.announce_known())().map_err(|error| {
@@ -262,13 +290,17 @@ pub(super) fn run_phase(
                     if matches!(action, Action::Settle)
                         && matches!(request, Request::CompleteInitialFirstActivation { .. })
                     {
-                        phase.finish_activated().map_err(|error| {
-                            PreparationFailure::at(PreparationStep::BootstrapRelease, error)
-                        })?;
+                        trace
+                            .measure(Operation::BootstrapRelease, || phase.finish_activated())
+                            .map_err(|error| {
+                                PreparationFailure::at(PreparationStep::BootstrapRelease, error)
+                            })?;
                     } else {
-                        phase.finish_checked().map_err(|error| {
-                            PreparationFailure::at(PreparationStep::BootstrapRelease, error)
-                        })?;
+                        trace
+                            .measure(Operation::BootstrapRelease, || phase.finish_checked())
+                            .map_err(|error| {
+                                PreparationFailure::at(PreparationStep::BootstrapRelease, error)
+                            })?;
                     }
                     Ok(snapshot)
                 }
@@ -640,16 +672,27 @@ pub(super) fn activate_controller(
             wait_app_pending(&mut storage).map_err(|error| {
                 PreparationFailure::at(PreparationStep::BootstrapWaitApp, error)
             })?;
-            let observed = run_phase(
-                &mut storage,
-                owner.begin_current_stage().map_err(|error| {
-                    PreparationFailure::at(PreparationStep::BootstrapRole, error)
-                })?,
-                policy,
-                selection,
-                &create,
-                action,
-            )?;
+            let trace = BootstrapTiming::new();
+            let result = (|| {
+                let stage = trace
+                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .map_err(|error| {
+                        PreparationFailure::at(PreparationStep::BootstrapRole, error)
+                    })?;
+                run_phase(
+                    &mut storage,
+                    stage,
+                    policy,
+                    selection,
+                    &create,
+                    action,
+                    &trace,
+                )
+            })();
+            // Native phase resources have returned/unwound before retaining
+            // diagnostic DATA or emitting any later refusal record.
+            evidence.bootstrap_timing(trace.snapshot());
+            let observed = result?;
             evidence.bootstrap(&create, action, &observed)?;
             pending = Some(observed);
         }
@@ -667,16 +710,27 @@ pub(super) fn activate_controller(
             wait_app_pending(&mut storage).map_err(|error| {
                 PreparationFailure::at(PreparationStep::BootstrapWaitApp, error)
             })?;
-            let observed = run_phase(
-                &mut storage,
-                owner.begin_current_stage().map_err(|error| {
-                    PreparationFailure::at(PreparationStep::BootstrapRole, error)
-                })?,
-                policy,
-                selection,
-                &complete,
-                action,
-            )?;
+            let trace = BootstrapTiming::new();
+            let result = (|| {
+                let stage = trace
+                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .map_err(|error| {
+                        PreparationFailure::at(PreparationStep::BootstrapRole, error)
+                    })?;
+                run_phase(
+                    &mut storage,
+                    stage,
+                    policy,
+                    selection,
+                    &complete,
+                    action,
+                    &trace,
+                )
+            })();
+            // Native phase resources have returned/unwound before retaining
+            // diagnostic DATA or emitting any later refusal record.
+            evidence.bootstrap_timing(trace.snapshot());
+            let observed = result?;
             evidence.bootstrap(&complete, action, &observed)?;
             activated = Some(observed);
         }

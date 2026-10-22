@@ -3,6 +3,7 @@
 //! creates the initial file nor turns a JSON reply into a P3/writer permission.
 
 use super::{DirectoryIdentity, directory_identity, persistent_disk::PersistentDiskSelection};
+use crate::security_epoch::controller::bootstrap_timing::BootstrapTiming;
 use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
 use crate::security_epoch::controller::preparation_timing::{Operation, Timings};
 use crate::security_epoch::{
@@ -33,6 +34,7 @@ struct ProviderReader<'role> {
     authentication: ProviderAuthentication,
     acquisition: NativeAcquisition,
     timings: Timings,
+    bootstrap: BootstrapTiming,
 }
 
 enum ProviderAuthentication {
@@ -255,6 +257,7 @@ impl<'role> ProviderReader<'role> {
             )),
             acquisition,
             timings,
+            bootstrap: BootstrapTiming::disabled(),
         })
     }
 
@@ -264,6 +267,7 @@ impl<'role> ProviderReader<'role> {
         store: &EpochStore,
         timings: Timings,
         mut authentication: ProviderEpochReads,
+        bootstrap: BootstrapTiming,
     ) -> Result<Self> {
         // The actual read-only GKE probe took 3.168939s, including 0.714994s
         // of repeated provider authentication. Reuse ONLY its genuine full
@@ -289,6 +293,7 @@ impl<'role> ProviderReader<'role> {
             authentication: ProviderAuthentication::Retained(authentication),
             acquisition,
             timings,
+            bootstrap,
         };
         guard.complete()?;
         Ok(reader)
@@ -400,6 +405,11 @@ impl<'role> ProviderReader<'role> {
     }
 
     fn observe_provider(&mut self) -> Result<String> {
+        let trace = self.bootstrap.clone();
+        trace.provider_round(|| self.observe_provider_inner())
+    }
+
+    fn observe_provider_inner(&mut self) -> Result<String> {
         let guard = self.refusal_guard()?;
         // Clone only desired DATA so no self-borrow is held during actual I/O.
         let profile = self.profile.clone();
@@ -465,8 +475,14 @@ pub(super) fn observe_provider_read_only(
     authentication: ProviderEpochReads,
 ) -> Result<()> {
     let guard = authentication.arm_refusal()?;
-    let mut reader =
-        ProviderReader::acquire_authenticated(stage, policy, store, timings, authentication)?;
+    let mut reader = ProviderReader::acquire_authenticated(
+        stage,
+        policy,
+        store,
+        timings,
+        authentication,
+        BootstrapTiming::disabled(),
+    )?;
     reader.observe_provider()?;
     reader.check()?;
     guard.complete()
@@ -898,6 +914,7 @@ impl NativeVolumeContinuity {
         &'volume mut self,
         mut stage: EnrolledRoleStage<'role>,
         authentication: ProviderEpochReads,
+        trace: &BootstrapTiming,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let guard = authentication.arm_refusal()?;
         let result = (|| {
@@ -908,8 +925,9 @@ impl NativeVolumeContinuity {
                 stage,
                 &self.policy,
                 &self.store,
-                Timings::disabled(),
+                trace.timings(),
                 authentication,
+                trace.clone(),
             )
         })();
         let phase = self.finish_begin(result)?;

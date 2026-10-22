@@ -5,6 +5,7 @@
 
 use super::AuthenticatedReads;
 use crate::security_epoch::{
+    controller::preparation_timing::{Operation, Timings},
     credential_material::CredentialMaterial,
     firestore::{self, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
@@ -47,6 +48,7 @@ pub(crate) struct RetainedEpochReads {
     process: NativeProcessObservation,
     selection: Digest,
     valid: bool,
+    timings: Timings,
 }
 
 // One actual authenticated owner, with two closed same-thread facades. There
@@ -216,6 +218,7 @@ impl AuthenticatedReads<'_, '_> {
             process,
             selection,
             valid: true,
+            timings: Timings::disabled(),
         })
     }
 }
@@ -229,8 +232,10 @@ impl RetainedEpochReads {
         stage: &mut EnrolledRoleStage<'_>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        timings: Timings,
     ) -> Result<(ControllerEpochReads, ProviderEpochReads)> {
         self.check_bootstrap(stage, policy, store)?;
+        self.timings = timings;
         let state = Rc::new(ControllerReadState {
             material: RefCell::new(self),
             gate: Rc::new(SharedUseGate::new()),
@@ -276,7 +281,8 @@ impl RetainedEpochReads {
     }
 
     fn sample(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<Sample> {
-        let result = (|| {
+        let timings = self.timings.clone();
+        let result = timings.measure(Operation::AuthenticationCheck, || {
             ensure!(self.valid, "epoch_retained_read_refused");
             self.owner.check(stage)?;
             stage.check_selection(&self.policy, &self.store, self.purpose)?;
@@ -288,7 +294,7 @@ impl RetainedEpochReads {
             let sample = self.acquisition.sample()?;
             self.owner.check(stage)?;
             Ok(sample)
-        })();
+        });
         if result.is_err() {
             self.refuse();
         }

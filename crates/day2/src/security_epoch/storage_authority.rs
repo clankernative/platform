@@ -400,7 +400,7 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
         .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_current)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let (_controller_reads, provider) = reads
-            .into_controller(&mut stage, policy, store)
+            .into_controller(&mut stage, policy, store, Timings::disabled())
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         native_volume::observe_provider_read_only(stage, policy, store, timings.clone(), provider)
     })

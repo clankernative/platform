@@ -10,6 +10,7 @@ use super::{observe_anchored_file, observe_current_anchored_file};
 use crate::security_epoch::storage_authority::native_volume::CurrentVolumePhase;
 use crate::security_epoch::{
     authenticated_reads::{ControllerEpochReads, ProviderEpochReads},
+    controller::bootstrap_timing::BootstrapTiming,
     controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep},
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     storage_authority::{
@@ -333,10 +334,13 @@ impl<'file> PendingPreparedFilePhase<'file> {
         self,
         stage: EnrolledRoleStage<'role>,
         authentication: ProviderEpochReads,
+        trace: &BootstrapTiming,
     ) -> Result<CurrentPreparedFilePhase<'file, 'role>> {
         let guard = authentication.arm_refusal()?;
         self.disposition.check()?;
-        let phase = self.volume.begin_authenticated(stage, authentication)?;
+        let phase = self
+            .volume
+            .begin_authenticated(stage, authentication, trace)?;
         let mut current = CurrentPreparedFilePhase {
             phase,
             selection: self.selection,

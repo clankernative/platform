@@ -12,6 +12,7 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use std::{path::Path, time::Duration};
 
+pub(in crate::security_epoch) mod bootstrap_timing;
 pub(in crate::security_epoch) mod evidence;
 mod health;
 pub(in crate::security_epoch) mod preparation_timing;

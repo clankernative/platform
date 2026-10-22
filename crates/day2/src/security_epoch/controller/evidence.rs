@@ -1,5 +1,6 @@
 //! Bounded historical observations from the real Controller executor. Nothing
 //! accepts these records as a native owner, permission, readiness or replay.
+use super::bootstrap_timing::Snapshot as BootstrapSnapshot;
 use super::preparation_timing::Summary;
 use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
@@ -48,6 +49,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     refused: bool,
     export_failed: bool,
     preparation_timing: Option<Summary>,
+    bootstrap_timing: Option<BootstrapSnapshot>,
     read_only_observed: bool,
 }
 
@@ -494,6 +496,8 @@ enum Observation {
         preparation: Option<PreparationFailure>,
         #[serde(skip_serializing_if = "Option::is_none")]
         timing: Option<Summary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bootstrap: Option<BootstrapSnapshot>,
     },
 }
 
@@ -520,6 +524,7 @@ impl<W: RecordOutput> Recorder<W> {
             refused: false,
             export_failed: false,
             preparation_timing: None,
+            bootstrap_timing: None,
             read_only_observed: false,
         }
     }
@@ -592,6 +597,17 @@ impl<W: RecordOutput> Recorder<W> {
     pub(in crate::security_epoch) fn enter_bootstrap(&mut self, request: &Request, action: Action) {
         let (_, at) = step(request, action);
         self.enter(at);
+        // The first-holder record already owns its historical preparation
+        // summary. It is not timing evidence about a new Current phase.
+        self.preparation_timing = None;
+        self.bootstrap_timing = None;
+    }
+
+    pub(in crate::security_epoch) fn bootstrap_timing(
+        &mut self,
+        snapshot: Option<BootstrapSnapshot>,
+    ) {
+        self.bootstrap_timing = snapshot;
     }
 
     pub(in crate::security_epoch) fn bootstrap(
@@ -660,6 +676,15 @@ impl<W: RecordOutput> Recorder<W> {
 
     pub(super) fn refuse(&mut self, error: Option<&anyhow::Error>) -> Result<()> {
         if !self.refused {
+            let current = matches!(
+                self.at,
+                FailurePhase::CreateReserve
+                    | FailurePhase::CreateDispatch
+                    | FailurePhase::CreateSettle
+                    | FailurePhase::ActivateReserve
+                    | FailurePhase::ActivateDispatch
+                    | FailurePhase::ActivateSettle
+            );
             // This closed field reports a failed native boundary, including
             // counter preparation/send/reobservation. It never asserts that a
             // failed bootstrap send had no remote effect or permits a retry.
@@ -684,7 +709,16 @@ impl<W: RecordOutput> Recorder<W> {
                 preparation,
                 // This completed preparation DATA remains attributable if a
                 // later listener/holder phase refuses before first-holder log.
-                timing: self.preparation_timing.clone(),
+                timing: if current {
+                    None
+                } else {
+                    self.preparation_timing.clone()
+                },
+                bootstrap: if current {
+                    self.bootstrap_timing.clone()
+                } else {
+                    None
+                },
             })?;
             self.refused = true;
         }
@@ -1548,6 +1582,9 @@ mod tests {
                 super::super::preparation_timing::Timings::maximal_summary_fixture(),
             );
             recorder.enter(phase);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
             recorder.refuse(Some(&error)).unwrap();
             let count = recorder.records;
             recorder
@@ -1564,7 +1601,8 @@ mod tests {
                     "step":"bootstrap_peer", "category":"clock_expired_or_rewound"
                 })
             );
-            assert!(observation["timing"].is_array());
+            assert!(observation.get("timing").is_none());
+            assert_eq!(observation["bootstrap"]["scope"], "bootstrap_current");
             assert!(!recorder.first_holder && !recorder.activated);
             let bytes = String::from_utf8(recorder.output).unwrap();
             assert!(!bytes.contains("epoch_native_clock") && !bytes.contains("MustNotDisplay"));
@@ -1627,6 +1665,9 @@ mod tests {
                 super::super::preparation_timing::Timings::maximal_summary_fixture(),
             );
             recorder.enter(FailurePhase::ActivateDispatch);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
             recorder.records = MAX_RECORDS - 1;
             recorder.refuse(Some(&error)).unwrap();
             let rows = records(&recorder.output);
@@ -1671,9 +1712,13 @@ mod tests {
                 anyhow::Error::new(MustNotDisplay),
             );
             recorder.enter(phase);
+            recorder.bootstrap_timing(Some(
+                super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            ));
             recorder.refuse(Some(&error)).unwrap();
             let rows = records(&recorder.output);
             assert!(rows[0]["observation"].get("preparation").is_none());
+            assert!(rows[0]["observation"].get("bootstrap").is_none());
             assert!(recorder.refused && !recorder.activated && !recorder.first_holder);
             assert!(
                 !String::from_utf8(recorder.output)
@@ -1681,5 +1726,52 @@ mod tests {
                     .contains("bootstrap_role")
             );
         }
+    }
+
+    #[test]
+    fn current_trace_replaces_initial_history_and_export_failure_keeps_first_native_cause() {
+        let (mut recorder, _, _, create, _, _) = fixture();
+        recorder.preparation_timings(
+            super::super::preparation_timing::Timings::maximal_summary_fixture(),
+        );
+        recorder.enter_bootstrap(&create, Action::Reserve);
+        assert!(recorder.preparation_timing.is_none() && recorder.bootstrap_timing.is_none());
+        recorder.bootstrap_timing(Some(
+            super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+        ));
+        let error = PreparationFailure::at(
+            PreparationStep::DiskBinding,
+            anyhow::Error::new(FailedRequestWindow::maximal_fixture(true))
+                .context("epoch_native_transport_unavailable")
+                .context(MustNotDisplay),
+        );
+        // The native result is retained even when a separate evidence export
+        // fails. No telemetry failure can turn it into success or replace it.
+        let result = crate::security_epoch::controller::preserve_native_failure(
+            Err(error),
+            Err(anyhow::anyhow!("native_evidence_export_failed")),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            FailedRequestWindow::observe(&error),
+            Some(FailedRequestWindow::maximal_fixture(true))
+        );
+        assert_eq!(
+            PreparationFailure::observe(&error).step,
+            PreparationStep::DiskBinding
+        );
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert!(rows[0]["observation"].get("timing").is_none());
+        assert_eq!(
+            rows[0]["observation"]["bootstrap"]["scope"],
+            "bootstrap_current"
+        );
+        assert!(recorder.refused && !recorder.activated);
+        assert!(
+            !String::from_utf8(recorder.output)
+                .unwrap()
+                .contains("MustNotDisplay")
+        );
     }
 }
