@@ -1183,6 +1183,66 @@ mod query_form_tests {
     }
 
     #[test]
+    fn query_status_is_text_only_and_disjoint_from_results_at_source_and_render() {
+        let catalog = routes_with_commit(false, true);
+        let valid = r#"<form id="search" data-page="target" data-query-on="input" data-query-results="results" data-query-status="status" data-query-commit-field="committed" data-query-commit-input="term"><input name="term" type="text"><input name="archived" type="hidden" value="false"><input name="page" type="hidden" value="1"><input name="committed" type="hidden" value="false"><div id="results"></div><p id="status" role="status">Ready</p></form>"#;
+        let admit = |markup: &str, source: bool| {
+            let document = Html::parse_fragment(markup);
+            let form = document.select(&selector("form")).next().unwrap();
+            if source {
+                validate_query_form_source(form, &catalog, "target")
+            } else {
+                validate_query_form(form, &catalog, "target")
+            }
+        };
+        let status = "<p id=\"status\" role=\"status\">Ready</p>";
+        let rejected = [
+            // Status inside a result region: replacing results detaches it.
+            valid.replace(status, "").replace(
+                "<div id=\"results\"></div>",
+                "<div id=\"results\"><p id=\"status\" role=\"status\"></p></div>",
+            ),
+            // Result region inside the status: setting the status text deletes it.
+            valid.replace(status, "").replace(
+                "<div id=\"results\"></div>",
+                "<div id=\"status\" role=\"status\"><section id=\"results\"></section></div>",
+            ),
+            // A named control inside the status.
+            valid
+                .replace("<input name=\"page\" type=\"hidden\" value=\"1\">", "")
+                .replace(
+                    status,
+                    "<div id=\"status\" role=\"status\"><input name=\"page\" type=\"hidden\" value=\"1\"></div>",
+                ),
+            // A submit button inside the status.
+            valid.replace(
+                status,
+                "<div id=\"status\" role=\"status\"><button type=\"submit\">Search</button></div>",
+            ),
+            // Any other markup is deleted on mount as well.
+            valid.replace(
+                status,
+                "<p id=\"status\" role=\"status\"><strong>Ready</strong></p>",
+            ),
+        ];
+        for source in [true, false] {
+            admit(valid, source).unwrap();
+            for bad in &rejected {
+                let Err(error) = admit(bad, source) else {
+                    panic!("source={source} accepted {bad}");
+                };
+                let error = error.to_string();
+                assert!(error.starts_with("query_status_"), "{error}: {bad}");
+            }
+        }
+        let range = r#"<form id="lookup" data-page="target" data-query-on="input" data-query-results="results" data-query-status="status"><input name="term" type="search"><input name="archived" type="hidden" value="false"><input name="page" type="hidden" value="1"><section id="results"></section><div id="status" aria-live="polite"><input id="mirror" type="range" data-query-input="term" data-query-labels="choices" min="1" max="2" step="1" value="1"><datalist id="choices"><option value="1" label="One"></option><option value="2" label="Two"></option></datalist><button id="preset" type="button" data-query-input="term" data-query-value="2" data-query-label="Two">Two</button></div></form>"#;
+        for source in [true, false] {
+            let error = admit(range, source).unwrap_err().to_string();
+            assert!(error.contains("query_status_must_be_text_only"), "{error}");
+        }
+    }
+
+    #[test]
     fn concrete_query_binding_checks_each_result_id_for_document_uniqueness() {
         let catalog = routes_with_commit(false, true);
         let markup = r#"<form id="search" data-page="target" data-query-on="input" data-query-results="results values" data-query-status="status" data-query-commit-field="committed" data-query-commit-input="term"><input name="term" type="text"><input name="archived" type="hidden" value="false"><input name="page" type="hidden" value="1"><input name="committed" type="hidden" value="false"><div id="results"></div><section id="values"></section><p id="status" role="status"></p></form>"#;

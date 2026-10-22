@@ -68,9 +68,24 @@ export function createLatestRead({read, publish, status, initialRevision = 0n,
   });
 }
 
-const controls = form => [...form.elements].filter(control => control.name && !control.disabled
+// Forms and documents are [LegacyOverrideBuiltIns] platform objects: a control
+// named `action`, `elements`, `id` or `addEventListener`, or a named image on a
+// document, shadows the DOM member of the same name. Admitted field names may be
+// any route input name, so resolve these members from the prototype chain only.
+function member(object, name) {
+  for (let prototype = Object.getPrototypeOf(object); prototype !== null; prototype = Object.getPrototypeOf(prototype)) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor) return descriptor;
+  }
+  throw new Error('query_dom_member');
+}
+const get = (object, name) => Reflect.apply(member(object, name).get, object, []);
+const call = (object, name, ...args) => Reflect.apply(member(object, name).value, object, args);
+const byID = (document, id) => call(document, 'getElementById', id);
+const within = (form, selector) => [...call(form, 'querySelectorAll', selector)];
+const field = (form, name) => call(get(form, 'elements'), 'namedItem', name);
+const controls = form => [...get(form, 'elements')].filter(control => control.name && !control.disabled
   && (control.localName === 'input' || control.localName === 'textarea'));
-const field = (form, name) => form.elements.namedItem(name);
 function snapshot(form) {
   return new Map(controls(form).map(control => [control.name, control.value]));
 }
@@ -84,8 +99,8 @@ function patchAttributes(current, incoming) {
   }
 }
 function owned(form, id) {
-  const element = form.ownerDocument.getElementById(id);
-  if (!element || !form.contains(element)) throw new Error('query_target');
+  const element = byID(get(form, 'ownerDocument'), id);
+  if (!element || !call(form, 'contains', element)) throw new Error('query_target');
   return element;
 }
 function choiceLabel(form, mirror, value) {
@@ -93,8 +108,7 @@ function choiceLabel(form, mirror, value) {
   return [...list.querySelectorAll('option')].find(option => option.value === value)?.label;
 }
 function mirrors(form, name) {
-  return [...form.querySelectorAll('input[type="range"][data-query-input]')]
-    .filter(control => control.dataset.queryInput === name);
+  return within(form, 'input[type="range"][data-query-input]').filter(control => control.dataset.queryInput === name);
 }
 function paintRange(form, mirror) {
   const value = Number(mirror.value), minimum = Number(mirror.min), maximum = Number(mirror.max);
@@ -103,7 +117,7 @@ function paintRange(form, mirror) {
   mirror.style.setProperty('--query-progress', `${Math.max(0, Math.min(100, (value - minimum) * 100 / (maximum - minimum)))}%`);
   const label = choiceLabel(form, mirror, mirror.value);
   if (label !== undefined) mirror.setAttribute('aria-valuetext', label);
-  const buttons = [...form.querySelectorAll('button[data-query-input]')]
+  const buttons = within(form, 'button[data-query-input]')
     .filter(button => button.dataset.queryInput === mirror.dataset.queryInput);
   let nearest, distance = Infinity;
   for (const button of buttons) {
@@ -113,23 +127,34 @@ function paintRange(form, mirror) {
   for (const button of buttons) button.setAttribute('aria-pressed', String(button === nearest));
 }
 
-export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defaultView.fetch.bind(form.ownerDocument.defaultView),
-  parseHTML = source => new form.ownerDocument.defaultView.DOMParser().parseFromString(source, 'text/html'),
-  schedule = setTimeout, cancelSchedule = clearTimeout} = {}) {
-  const document = form.ownerDocument, view = document.defaultView;
-  const resultIDs = form.dataset.queryResults.split(/\s+/);
+export function mountQueryForm(form, options = {}) {
+  const document = get(form, 'ownerDocument'), view = get(document, 'defaultView');
+  const {fetch: fetchPage = view.fetch.bind(view),
+    parseHTML = source => new view.DOMParser().parseFromString(source, 'text/html'),
+    schedule = setTimeout, cancelSchedule = clearTimeout} = options;
+  const config = get(form, 'dataset'), formID = get(form, 'id');
+  const resultIDs = config.queryResults.split(/\s+/);
   const results = resultIDs.map(id => owned(form, id));
-  const message = owned(form, form.dataset.queryStatus);
-  const revisionField = form.dataset.queryRevision && field(form, form.dataset.queryRevision);
-  const commitField = form.dataset.queryCommitField && field(form, form.dataset.queryCommitField);
+  const message = owned(form, config.queryStatus);
+  // Status text replaces its children; admission keeps it text-only and apart from results.
+  if (message.firstElementChild || results.some(region => region.contains(message) || message.contains(region))) {
+    throw new Error('query_status_identity');
+  }
+  const revisionField = config.queryRevision && field(form, config.queryRevision);
+  const commitField = config.queryCommitField && field(form, config.queryCommitField);
+  const focused = () => get(document, 'activeElement');
   let accepted = snapshot(form), acceptedMirrors = new Map(), state = 'idle';
-  const rememberMirrors = source => new Map([...source.querySelectorAll('input[type="range"][data-query-input]')]
+  // A commit request stays pending until Roc answers it. Any request that supersedes
+  // it while the committed control still holds the committed value carries it on.
+  let pendingCommit = null;
+  const rememberMirrors = source => new Map(within(source, 'input[type="range"][data-query-input]')
     .map(control => [control.id, control.value]));
   acceptedMirrors = rememberMirrors(form);
   const setStatus = (next, text) => {
     state = next;
-    form.dataset.queryState = next;
-    form.setAttribute('aria-busy', String(next === 'loading'));
+    if (next === 'ready' || next === 'invalid') pendingCommit = null;
+    config.queryState = next;
+    call(form, 'setAttribute', 'aria-busy', String(next === 'loading'));
     for (const result of results) {
       result.setAttribute('aria-busy', String(next === 'pending' || next === 'loading'));
       // Retained results are explicitly marked stale until the current draft succeeds.
@@ -138,22 +163,23 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
     message.textContent = text;
   };
   function syncFields() {
+    const active = focused();
     for (const control of controls(form)) {
-      if (control === revisionField || control === commitField || control === document.activeElement) continue;
+      if (control === revisionField || control === commitField || control === active) continue;
       if (accepted.has(control.name)) control.value = accepted.get(control.name);
     }
-    for (const mirror of form.querySelectorAll('input[type="range"][data-query-input]')) {
-      if (mirror !== document.activeElement && acceptedMirrors.has(mirror.id)) mirror.value = acceptedMirrors.get(mirror.id);
+    for (const mirror of within(form, 'input[type="range"][data-query-input]')) {
+      if (mirror !== active && acceptedMirrors.has(mirror.id)) mirror.value = acceptedMirrors.get(mirror.id);
       paintRange(form, mirror);
     }
   }
   const query = createLatestRead({
     initialRevision: revisionField?.value || '0',
-    debounceMs: Number(form.dataset.queryDebounce ?? '150'), schedule, cancelSchedule,
+    debounceMs: Number(config.queryDebounce ?? '150'), schedule, cancelSchedule,
     status: setStatus,
     async read(values, revision, signal) {
-      const url = new URL(form.action, document.baseURI);
-      if (url.origin !== new URL(document.baseURI).origin || form.method.toLowerCase() !== 'get') throw new Error('query_transport');
+      const base = get(document, 'baseURI'), url = new URL(get(form, 'action'), base);
+      if (url.origin !== new URL(base).origin || get(form, 'method').toLowerCase() !== 'get') throw new Error('query_transport');
       url.search = '';
       for (const [name, value] of values) url.searchParams.append(name, value);
       if (revisionField) url.searchParams.set(revisionField.name, String(revision));
@@ -170,9 +196,10 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
       if (!response.headers.get('content-type')?.includes('text/html')) throw new Error('query_response');
       const source = await response.text();
       if (source.length > MAX_HTML) throw new Error('query_response_budget');
-      const parsed = parseHTML(source), canonical = parsed.getElementById(form.id);
-      if (canonical?.localName !== 'form' || canonical.dataset.page !== form.dataset.page ||
-          canonical.dataset.queryResults !== form.dataset.queryResults) throw new Error('query_form_identity');
+      const canonical = byID(parseHTML(source), formID);
+      if (!canonical || get(canonical, 'localName') !== 'form') throw new Error('query_form_identity');
+      const identity = get(canonical, 'dataset');
+      if (identity.page !== config.page || identity.queryResults !== config.queryResults) throw new Error('query_form_identity');
       const incoming = resultIDs.map((id, index) => {
         const region = owned(canonical, id);
         if (region.localName !== results[index].localName ||
@@ -184,10 +211,10 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
       return {canonical, incoming};
     },
     publish({canonical, incoming}, revision) {
-      if (!form.isConnected) return;
-      const replacements = incoming.map(region => document.importNode(region, true));
-      const focused = document.activeElement;
-      const focusID = results.some(region => region.contains(focused)) ? focused.id : null;
+      if (!get(form, 'isConnected')) return;
+      const replacements = incoming.map(region => call(document, 'importNode', region, true));
+      const active = focused();
+      const focusID = results.some(region => region.contains(active)) ? active.id : null;
       for (let index = 0; index < results.length; index += 1) {
         const current = results[index], replacement = replacements[index];
         current.dispatchEvent(new view.CustomEvent('cui:before-patch', {
@@ -200,17 +227,19 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
       acceptedMirrors = rememberMirrors(canonical);
       if (revisionField) revisionField.value = String(revision);
       syncFields();
-      if (focusID && document.activeElement === document.body) document.getElementById(focusID)?.focus({preventScroll: true});
+      if (focusID && focused() === get(document, 'body')) byID(document, focusID)?.focus({preventScroll: true});
     },
   });
-  function update(immediate = false, commit = false) {
-    if (commitField) commitField.value = String(commit);
+  function update(immediate = false, committed = null) {
+    if (pendingCommit && pendingCommit.control.value !== pendingCommit.value) pendingCommit = null;
+    if (committed) pendingCommit = {control: committed, value: committed.value};
+    if (commitField) commitField.value = String(pendingCommit !== null);
     try { void query.update([...new view.FormData(form).entries()], immediate); }
     catch { setStatus('error', 'Results could not be updated. Reload the page to start a new query revision.'); }
   }
   function input(event) {
     const control = event.target;
-    if (control.form !== form) return;
+    if (control === form || control.form !== form) return;
     if (control.matches('input[type="range"][data-query-input]')) {
       const label = choiceLabel(form, control, control.value);
       if (label === undefined) { setStatus('error', 'This control has no admitted label. Try another value.'); return; }
@@ -220,6 +249,7 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
     update();
   }
   function click(event) {
+    if (event.target === form) return;
     const button = event.target.closest?.('button[data-query-input]');
     if (!button || button.form !== form) return;
     event.preventDefault();
@@ -232,26 +262,30 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
   }
   function blur(event) {
     const control = event.target;
-    if (control.form !== form || !control.name || control === revisionField || control === commitField) return;
-    const commit = control.dataset.queryCommit === 'blur' || form.dataset.queryCommitInput === control.name;
+    if (control === form || control.form !== form || !control.name || control === revisionField || control === commitField) return;
+    const commit = control.dataset.queryCommit === 'blur' || config.queryCommitInput === control.name;
     if (state === 'invalid' && !commit) syncFields();
-    update(true, commit);
+    update(true, commit ? control : null);
   }
   function submit(event) {
     event.preventDefault(); event.stopImmediatePropagation();
-    if (form.reportValidity()) update(true);
+    if (call(form, 'reportValidity')) update(true);
   }
   function keydown(event) {
-    if (event.key === 'Enter' && event.target.localName === 'input' && event.target.name) {
-      event.preventDefault(); event.target.blur();
+    const control = event.target;
+    if (control !== form && event.key === 'Enter' && control.localName === 'input' && control.name) {
+      event.preventDefault(); control.blur();
     }
   }
   const listeners = [['input', input, false], ['click', click, false], ['blur', blur, true],
     ['submit', submit, true], ['keydown', keydown, false]];
-  for (const [name, listener, capture] of listeners) form.addEventListener(name, listener, capture);
-  for (const mirror of form.querySelectorAll('input[type="range"][data-query-input]')) paintRange(form, mirror);
+  for (const [name, listener, capture] of listeners) call(form, 'addEventListener', name, listener, capture);
+  for (const mirror of within(form, 'input[type="range"][data-query-input]')) paintRange(form, mirror);
   setStatus('idle', '');
-  const stop = () => { query.stop(); for (const [name, listener, capture] of listeners) form.removeEventListener(name, listener, capture); };
+  const stop = () => {
+    query.stop();
+    for (const [name, listener, capture] of listeners) call(form, 'removeEventListener', name, listener, capture);
+  };
   stop.suspend = () => query.cancel();
   return stop;
 }
@@ -259,11 +293,11 @@ export function mountQueryForm(form, {fetch: fetchPage = form.ownerDocument.defa
 const installedRoots = new WeakMap();
 export function installQueryForms(root = document) {
   if (installedRoots.has(root)) return installedRoots.get(root);
-  const document = root.ownerDocument ?? root, view = document.defaultView, active = new Map();
+  const document = get(root, 'ownerDocument') ?? root, view = get(document, 'defaultView'), active = new Map();
   let stopped = false;
   function refresh() {
-    for (const [form, stop] of active) if (!root.contains(form)) { stop(); active.delete(form); }
-    for (const form of root.querySelectorAll('form[data-query-on="input"]')) if (!active.has(form)) active.set(form, mountQueryForm(form));
+    for (const [form, stop] of active) if (!call(root, 'contains', form)) { stop(); active.delete(form); }
+    for (const form of within(root, 'form[data-query-on="input"]')) if (!active.has(form)) active.set(form, mountQueryForm(form));
   }
   const observer = new view.MutationObserver(refresh);
   observer.observe(root, {childList: true, subtree: true});

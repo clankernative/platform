@@ -227,6 +227,15 @@ pub(crate) fn validate_form(
             }),
         "query_status_not_accessible"
     );
+    // The host replaces the status text on mount and on every state change, which
+    // deletes all of its descendants. It therefore holds only text: never a result
+    // region, a control, a range label list or any other markup.
+    ensure!(
+        status_node
+            .children()
+            .all(|child| !child.value().is_element()),
+        "query_status_must_be_text_only"
+    );
     let revision = get("data-query-revision");
     let commit_field = get("data-query-commit-field");
     let commit_input = get("data-query-commit-input");

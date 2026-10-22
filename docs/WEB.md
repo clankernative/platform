@@ -44,13 +44,16 @@ The existing route/input contract supplies native GET action/method and remains
 usable without JavaScript. This initial reactive port admits uniquely named
 text/search/hidden inputs and textareas, not choice controls or native resets.
 Ordinary query forms retain their existing control support. External form
-controls and submitter transport overrides are not admitted.
+controls and submitter transport overrides are not admitted. Field names such as
+`action`, `method`, `elements` or `id` keep working: the coordinator resolves form
+and document members from their prototypes, never through named properties.
 
 `data-query-results` references 1–8 owned, disjoint `div`/`section` containers
 with unique stable IDs. They may contain reviewed CUI presentation, including
 Number, but may not be component roots or contain editable controls, nested
 forms/regions or the status node. The status is an owned accessible
-`p`/`div`/`span`/`output`. Live/timed-live page updates cannot share this writer.
+`p`/`div`/`span`/`output` that holds only text: the host replaces that text, so
+it may not contain result regions, controls or other markup. Live/timed-live page updates cannot share this writer.
 
 Input edits invalidate old replies immediately; requests share one 0–1000ms
 debounce, cancellation and timeout. All region identities and any echoed U64
@@ -59,8 +62,10 @@ Roc/server HTML supplies accepted field values and all formatted labels. Failure
 retain and explicitly mark old results stale. Teardown stops pending work.
 `data-query-revision` names an unsigned hidden echo field; optional
 `data-query-commit-field` names a hidden Boolean, and `data-query-commit-input`
-selects the text input whose blur sets it. These are transport metadata, not
-business parsing or financial calculations.
+selects the text input whose blur sets it. A commit stays pending until Roc
+answers it: a read that supersedes it, such as the submit that follows the blur
+of a mouse click, still sets the field while that input holds the committed
+value. These are transport metadata, not business parsing or financial calculations.
 
 An unnamed native range may declare `data-query-input` and `data-query-labels`
 for an editable text/search target and owned datalist. Literal JS-safe integer
