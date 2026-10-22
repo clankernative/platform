@@ -65,8 +65,10 @@ record's source, name, type and test identity before output installation.
 
 Development workspace crates use optimization level 1; dependencies and build
 tools use level 2, with assertions and overflow checks enabled and debug info
-disabled. Linux CI preserves the existing test codegen partitioning and disabled
-LTO. Linux selects the existing GNU binutils linker instead of Bazel's
+disabled. Native non-incremental builds leave codegen partitioning at the
+compiler default; Linux CI applies its existing explicit256 and disabled-LTO
+test settings to target units while build tools retain their own defaults.
+Debug-disabled compilation strips debug information as before. Linux selects the existing GNU binutils linker instead of Bazel's
 default deprecated gold selection. Release programs and native worker archives retain the previous release
 panic/profile policy; build tools keep their separate build-override profile.
 The distribution image additionally strips executable symbols as before.
