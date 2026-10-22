@@ -28,6 +28,9 @@ pub struct Route {
     pub input: Record,
     pub path_fields: BTreeSet<String>,
     pub defaults: Map<String, Value>,
+    /// The registered page rendered with the same input, under the failure's
+    /// own server status, when this page cannot be served for a server reason.
+    pub failure_page: Option<String>,
     segments: Vec<Segment>,
 }
 
@@ -155,6 +158,7 @@ impl Catalog {
                 input,
                 path_fields,
                 defaults,
+                failure_page: None,
                 segments,
             };
             if let Some(segment) = route.segments.first() {
@@ -177,6 +181,44 @@ impl Catalog {
                 routes.insert(page.name.clone(), route).is_none(),
                 "duplicate route name"
             );
+        }
+        // A failure page is an ordinary registered page bound by its path. It
+        // receives the failed page's decoded input, so the input types must be
+        // the same; it is rendered once, so it cannot itself fall back or be live.
+        for page in pages.iter().filter(|page| !page.failure_page.is_empty()) {
+            let fallback = pages
+                .iter()
+                .find(|candidate| candidate.path == page.failure_page)
+                .with_context(|| format!("page {} failure page must be registered", page.name))?;
+            ensure!(
+                fallback.name != page.name,
+                "page {} cannot be its own failure page",
+                page.name
+            );
+            ensure!(
+                fallback.input_type == page.input_type,
+                "page {} failure page input differs from the page",
+                page.name
+            );
+            ensure!(
+                !fallback.live,
+                "page {} failure page must not be live",
+                page.name
+            );
+            ensure!(
+                fallback.failure_page.is_empty(),
+                "page {} failure page cannot declare its own failure page",
+                page.name
+            );
+            ensure!(
+                fallback.preparation.is_empty(),
+                "page {} failure page must not declare preparation",
+                page.name
+            );
+            routes
+                .get_mut(&page.name)
+                .context("failure page route missing")?
+                .failure_page = Some(fallback.name.clone());
         }
         let catalog = Self {
             routes,

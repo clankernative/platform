@@ -151,6 +151,7 @@ fn routes() -> Result<routing::Catalog> {
         live_refresh_ms: 0,
         preparation: vec![],
         prepare_failure_operation: String::new(),
+        failure_page: String::new(),
     })
     .collect();
     routing::Catalog::compile(&pages, &operations, &schema)

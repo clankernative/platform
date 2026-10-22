@@ -1149,6 +1149,7 @@ mod tests {
                     live_refresh_ms: 0,
                     preparation: vec![],
                     prepare_failure_operation: String::new(),
+                    failure_page: String::new(),
                 },
                 Page {
                     name: "featured".into(),
@@ -1163,6 +1164,7 @@ mod tests {
                     live_refresh_ms: 0,
                     preparation: vec![],
                     prepare_failure_operation: String::new(),
+                    failure_page: String::new(),
                 },
             ],
             schedules: vec![crate::artifact::Schedule {

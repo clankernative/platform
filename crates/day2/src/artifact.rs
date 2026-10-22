@@ -41,10 +41,15 @@ pub struct Page {
     pub live_refresh_ms: u64,
     pub preparation: Vec<String>,
     pub prepare_failure_operation: String,
+    /// Optional registered page path rendered with this page's input when it
+    /// fails on the server. See `crate::routing::Route::failure_page`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure_page: String,
 }
 
 /// A declared schedule. The artifact records what the author wrote; the occurrence
-/// source that will act on it is not built yet, so nothing here runs.
+/// source in `crate::schedules` acts on it. `anchor_hour` is the UTC hour a daily
+/// schedule fires at, or -1 for a schedule shorter than a day.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
@@ -839,7 +844,9 @@ impl LoadedArtifact {
             }
             if contract.format < 7 {
                 ensure!(
-                    page.path.is_empty() && page.input_type.is_empty(),
+                    page.path.is_empty()
+                        && page.input_type.is_empty()
+                        && page.failure_page.is_empty(),
                     "legacy page has route metadata"
                 );
                 contract.schema.inputs[&query.input_type]

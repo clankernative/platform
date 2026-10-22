@@ -17,6 +17,7 @@ instance repository; start with the
 | [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |
 | [qualification-runner](stacks/qualification-runner/main.tf) | Optional x86_64 native Docker VM, off by default, private IP and IAP SSH |
+| [native-enrollment-root](stacks/native-enrollment-root/main.tf) | Optional generated software Ed25519 enrollment root, exact version and key-scoped provisioner Workload Identity grant |
 
 Installed app-call workloads can hand software deployment to the native
 `day2-gke-release` command by enabling `release_managed` in the day2-app root.
