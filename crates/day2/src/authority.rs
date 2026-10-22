@@ -568,11 +568,11 @@ impl Policy {
 /// The prefix of an entry that admits everyone at a domain instead of one person.
 ///
 /// `domain:D` may appear in an app's `readers` and `writers`, in an operation's
-/// `actors` and in a non-delegation resource grant's `actors`, and nowhere else. It admits exactly the addresses
-/// [`in_domain`] accepts, and only when `D` is the hosted domain the
-/// installation's edge verifies on every request (see [`valid_entry`]). It is
-/// never an identity: owners, administrators, delegation rules and the audit
-/// always name the one person the edge verified.
+/// `actors` and in a non-delegation resource grant's `actors`, and nowhere
+/// else. It admits exactly the addresses [`in_domain`] accepts, and only when
+/// `D` is the hosted domain the installation's edge verifies on every request
+/// (see [`valid_entry`]). It is never an identity: owners, administrators,
+/// delegation rules and the audit always name the one person the edge verified.
 pub const DOMAIN_PREFIX: &str = "domain:";
 
 /// A principal the platform can record: one person's address, an `app:` or
@@ -589,7 +589,7 @@ pub(crate) fn valid_actor(actor: &str) -> Result<()> {
     ensure!(
         !actor.starts_with(DOMAIN_PREFIX),
         "a {DOMAIN_PREFIX} entry names a set of people, not one principal, and is accepted only \
-         in readers, writers, operation actors and resource grant actors: {actor}"
+         in readers, writers, operation actors and non-delegation resource grant actors: {actor}"
     );
     ensure!(
         !actor.is_empty()

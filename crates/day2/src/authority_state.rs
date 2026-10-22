@@ -268,18 +268,17 @@ impl AuthorityDocument {
                 .context("resource_operation_not_approved")?;
             for grant in bindings.values() {
                 // A domain carries a person's own request to a resource; it is
-                // never lent across an application boundary by delegation.
-                for entry in grant
-                    .actors
-                    .iter()
-                    .filter(|actor| actor.starts_with(DOMAIN_PREFIX))
-                {
-                    crate::authority::valid_entry(entry, hosted_domain)?;
-                    ensure!(
-                        grant.provider != day2_capabilities::resources::Provider::LocalDelegation,
-                        "a {DOMAIN_PREFIX} entry cannot be granted app delegation: {entry}"
-                    );
-                }
+                // never lent across an application boundary by delegation. Its
+                // hosted domain is checked through the membership entry that
+                // must cover it below.
+                ensure!(
+                    grant.provider != day2_capabilities::resources::Provider::LocalDelegation
+                        || !grant
+                            .actors
+                            .iter()
+                            .any(|actor| actor.starts_with(DOMAIN_PREFIX)),
+                    "a {DOMAIN_PREFIX} entry cannot be granted app delegation"
+                );
                 ensure!(
                     grant
                         .actors

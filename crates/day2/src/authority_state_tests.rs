@@ -1046,7 +1046,7 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
     );
     let read = artifact.route("items.read")?.clone();
     let everyone = String::from("domain:wonderly.com");
-    let grant = |provider_target: serde_json::Value, actors: &[&str]| {
+    let grant = |operation: &str, provider_target: serde_json::Value, actors: &[&str]| {
         let mut grant = serde_json::json!({
             "policy":{"id":"reading","revision":1},
             "resource":{"id":"directory","revision":1},
@@ -1059,7 +1059,7 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
             .as_object_mut()
             .unwrap()
             .extend(provider_target.as_object().unwrap().clone());
-        serde_json::json!({"operations":{"items.read":{"directory":grant}},"budgets":{}})
+        serde_json::json!({"operations":{operation:{"directory":grant}},"budgets":{}})
     };
     let notifications = serde_json::json!({
         "provider":"local_notifications",
@@ -1080,8 +1080,11 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
     approved
         .observations
         .insert("notifications.recipient.v1".into());
-    doc.resources =
-        serde_json::from_value(grant(notifications.clone(), &[everyone.as_str(), "viewer"]))?;
+    doc.resources = serde_json::from_value(grant(
+        "items.read",
+        notifications.clone(),
+        &[everyone.as_str(), "viewer"],
+    ))?;
     doc.validate(&artifact)?;
 
     // Activation keeps the domain entry, and the bound grant then admits a
@@ -1105,31 +1108,65 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
 
     // A domain is covered only by the same domain: naming people in the
     // operation or membership does not stretch to everyone at the domain.
-    for narrow in 0..2 {
-        let mut narrowed = doc.clone();
-        if narrow == 0 {
-            narrowed.readers.remove(&everyone);
-        } else {
-            narrowed
-                .policy
+    type Narrow = fn(&mut AuthorityDocument, &str);
+    let narrowings: [(&str, Narrow); 2] = [
+        ("membership", |doc, entry| {
+            doc.readers.remove(entry);
+        }),
+        ("operation", |doc, entry| {
+            doc.policy
                 .as_mut()
                 .unwrap()
                 .operations
                 .get_mut("items.read")
                 .unwrap()
                 .actors
-                .remove(&everyone);
-        }
-        assert!(narrowed.validate(&artifact).is_err(), "{narrow}");
+                .remove(entry);
+        }),
+    ];
+    for (narrowing, narrow) in narrowings {
+        let mut narrowed = doc.clone();
+        narrow(&mut narrowed, &everyone);
+        assert!(narrowed.validate(&artifact).is_err(), "{narrowing}");
         narrowed.attenuate_resources(&artifact.contract().operations)?;
         assert_eq!(
             narrowed.resources.operations["items.read"]["directory"].actors,
             BTreeSet::from(["viewer".into()]),
-            "{narrow}"
+            "{narrowing}"
         );
     }
 
-    // The entry must name the verified hosted domain.
+    // A command's grant is covered by writers only: a domain that may read
+    // the app does not reach a resource bound to one of its commands.
+    let mut command = doc.clone();
+    let approved = command
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.write")
+        .unwrap();
+    approved.actors.insert(everyone.clone());
+    approved
+        .observations
+        .insert("notifications.recipient.v1".into());
+    command.resources = serde_json::from_value(grant(
+        "items.write",
+        notifications.clone(),
+        &[everyone.as_str(), "alice"],
+    ))?;
+    assert!(command.validate(&artifact).is_err());
+    let mut attenuated = command.clone();
+    attenuated.attenuate_resources(&artifact.contract().operations)?;
+    assert_eq!(
+        attenuated.resources.operations["items.write"]["directory"].actors,
+        BTreeSet::from(["alice".into()])
+    );
+    command.writers.insert(everyone.clone());
+    command.validate(&artifact)?;
+
+    // The entry must name the verified hosted domain, which membership
+    // already requires of the entry that covers it.
     let mut unverified = doc.clone();
     unverified.hosted_domain = None;
     assert!(unverified.validate(&artifact).is_err());
@@ -1149,6 +1186,7 @@ fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> 
         .observations
         .insert("app.query.v1".into());
     delegated.resources = serde_json::from_value(grant(
+        "items.read",
         serde_json::json!({
             "provider":"local_delegation",
             "target":{"kind":"app_operation","app":"callee","operation":"callee.list",
