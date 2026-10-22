@@ -140,8 +140,62 @@ pub fn checked_runner(executable: &Path) -> Result<PathBuf> {
     executable.canonicalize().context("workflow executable")
 }
 
+/// Resolve the source distribution without depending on the operator's cwd.
+/// Bazel supplies its workspace for `run`; installed tools use their fixed
+/// source-distribution layout. No Cargo output directory is a supported path.
+pub fn source_root() -> Result<PathBuf> {
+    source_root_at(
+        &std::env::current_exe()?,
+        std::env::var_os("BUILD_WORKSPACE_DIRECTORY")
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+fn source_root_at(executable: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
+    let root: PathBuf = if let Some(workspace) = workspace {
+        workspace.to_owned()
+    } else {
+        let directory = executable.parent().context("source tool directory")?;
+        let parent = directory.parent().context("source tool layout")?;
+        match directory.file_name().and_then(|name| name.to_str()) {
+            Some("cli") => parent.to_owned(),
+            Some("bin" | "tests") if parent.file_name().is_some_and(|name| name == "build-out") => {
+                parent
+                    .parent()
+                    .context("source distribution root")?
+                    .to_owned()
+            }
+            Some("bin")
+                if parent.file_name().is_some_and(|name| name == "release")
+                    && parent
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == "build-out") =>
+            {
+                parent
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("release source root")?
+                    .to_owned()
+            }
+            _ => anyhow::bail!("tool must run through Bazel or an installed source distribution"),
+        }
+    };
+    let root = root
+        .canonicalize()
+        .context("platform source distribution missing")?;
+    for name in ["MODULE.bazel", "build/bazel/targets.json"] {
+        ensure!(
+            fs::symlink_metadata(root.join(name))?.file_type().is_file(),
+            "regular source-distribution build inputs required"
+        );
+    }
+    Ok(root)
+}
+
 pub fn runner() -> Result<PathBuf> {
-    checked_runner(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build-out/bin/day2-workflows"))
+    checked_runner(&source_root()?.join("build-out/bin/day2-workflows"))
 }
 
 #[derive(Deserialize)]
@@ -279,5 +333,57 @@ fn supervise(
                 input.flush()?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod source_root_tests {
+    use super::*;
+
+    #[test]
+    fn operator_root_uses_installed_layout_not_the_callers_directory() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        fs::create_dir_all(source.path().join("build/bazel"))?;
+        fs::write(
+            source.path().join("MODULE.bazel"),
+            b"module(name = \"test\")",
+        )?;
+        fs::write(source.path().join("build/bazel/targets.json"), b"{}")?;
+        for path in [
+            "cli/day2-host",
+            "build-out/bin/xtask",
+            "build-out/tests/unit",
+            "build-out/release/bin/day2-host",
+        ] {
+            assert_eq!(
+                source_root_at(&source.path().join(path), None)?,
+                source.path().canonicalize()?
+            );
+        }
+        for path in ["target/debug/xtask", "bin/day2-host", "other/cli-copy/host"] {
+            assert!(source_root_at(&source.path().join(path), None).is_err());
+        }
+        assert_eq!(
+            source_root_at(Path::new("/unused/bazel-program"), Some(source.path()))?,
+            source.path().canonicalize()?
+        );
+        fs::remove_file(source.path().join("MODULE.bazel"))?;
+        assert!(source_root_at(&source.path().join("cli/day2-host"), None).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_distribution_refuses_an_aliased_build_descriptor() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        fs::create_dir_all(source.path().join("build/bazel"))?;
+        fs::write(source.path().join("MODULE.bazel"), b"approved")?;
+        fs::write(source.path().join("build/bazel/actual.json"), b"{}")?;
+        std::os::unix::fs::symlink(
+            "actual.json",
+            source.path().join("build/bazel/targets.json"),
+        )?;
+        assert!(source_root_at(&source.path().join("cli/day2-host"), None).is_err());
+        Ok(())
     }
 }

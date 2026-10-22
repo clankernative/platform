@@ -27,12 +27,7 @@ fn input<T: DeserializeOwned>(request: &Request) -> Result<T> {
 }
 
 fn platform() -> Result<PathBuf> {
-    // Source distribution. xtask cli versions and builds the distribution binaries
-    // together; an installed/hosted distribution will supply its own pin root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .context("platform source distribution missing")
+    day2::automation::source_root()
 }
 
 struct Operations {

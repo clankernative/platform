@@ -484,12 +484,18 @@ pub(in super::super) fn focused(
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
     let started = Instant::now();
+    // The genuine child canaries compile their fixed probe with this exact
+    // configured tool; bare prebuilt launches do not inherit Bazel runfiles.
+    let rustc = crate::bazel::tool(root, "rustc")?;
     let mut cases = Vec::new();
     for (package, target, kind, name, ignored) in CASES {
         let binary = case_binary(prepared, package, target, kind)?;
         require_case(root, binary, name, *ignored)?;
         let mut command = Command::new(root.join(&binary.executable));
         command.args([*name, "--exact", "--nocapture"]);
+        if *package == "day2-control" && *target == "control_integration" {
+            command.env("DAY2_TEST_RUSTC", &rustc);
+        }
         if *ignored {
             command.arg("--ignored");
         }

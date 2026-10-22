@@ -951,13 +951,16 @@ fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
     }
     sources.extend(crate::bazel::configuration(&root)?);
     let executable = std::env::current_exe()?.canonicalize()?;
+    // Capture before rebuilding can atomically replace this installed pathname.
+    // A new producer must not relabel a previously running verifier's identity.
+    let executing = digest(&fs::read(&executable)?);
     crate::bazel::programs(&root, &["xtask"])?;
     let compiled = crate::bazel::configured_output(&root, "//crates/xtask:xtask")?;
     ensure!(
-        fs::read(&executable)? == fs::read(&compiled)?,
+        executing == digest(&fs::read(&compiled)?),
         "current configured Bazel xtask compiler adapter required"
     );
-    sources.insert("compiler/xtask".into(), digest(&fs::read(executable)?));
+    sources.insert("compiler/xtask".into(), executing);
     Ok(sources)
 }
 

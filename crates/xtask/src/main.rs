@@ -259,10 +259,7 @@ fn main() -> Result<()> {
         );
         root
     } else {
-        std::env::var_os("BUILD_WORKSPACE_DIRECTORY")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
-            .canonicalize()?
+        day2::automation::source_root()?
     };
     // These closed native helpers read source evidence or addressed artifacts, or write only their
     // explicit new package output. They run as unprivileged tooling users and
