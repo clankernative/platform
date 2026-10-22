@@ -78,8 +78,9 @@ pub(crate) fn dependency_inputs(root: &Path) -> Result<()> {
     );
     for (name, expected) in descriptor.inputs.iter().chain(&descriptor.models) {
         ensure!(
-            expected.len() == 64
-                && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            expected.len() == 71
+                && expected.starts_with("sha256:")
+                && expected[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
                 && day2::digest(&configuration_bytes(&root.join(name))?) == *expected,
             "dependency context source changed; review and refresh the native feature models: {name}"
         );
