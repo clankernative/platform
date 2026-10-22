@@ -71,7 +71,7 @@ intermittent replay mismatch does not lose its evidence. Evidence belongs in
 protected storage, like other raw replay artifacts.
 
 ```text
-DAY2_OAUTH_REPLAY=<bundle-path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact
+DAY2_OAUTH_REPLAY=<bundle-path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::simulation::replay_saved_oauth_history --exact
 ```
 
 The replay command succeeds only when the saved reduced history passes; a

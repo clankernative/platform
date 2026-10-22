@@ -407,7 +407,7 @@ fn verify(program: &Program) -> Result<()> {
                 &serde_json::json!({"version":1,"domain":"inbound", "implementation":implementation(),
             "original":program, "reduced":reduced,"failure":failure,"observation":error.downcast_ref::<Failure>(),
             "reduced_observation":minimized.downcast_ref::<Failure>(),
-            "replay":"DAY2_OAUTH_REPLAY=<path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact"}),
+            "replay":"DAY2_OAUTH_REPLAY=<path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::simulation::replay_saved_oauth_history --exact"}),
             )?,
         )?;
         anyhow::bail!(

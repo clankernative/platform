@@ -71,7 +71,7 @@ variable "boot_image" {
 }
 
 variable "boot_disk_gb" {
-  description = "Boot disk size. Holds Docker images/build cache for the tooling and runtime images plus the host cargo build of xtask."
+  description = "Boot disk size. Holds Docker images/build cache for the tooling and runtime images plus the host Bazel build of xtask."
   type        = number
   default     = 200
 

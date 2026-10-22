@@ -62,7 +62,7 @@ retain source-bound event histories with independent-oracle snapshots. Replay a
 saved history from the repository root with:
 
 ```console
-DAY2_HOST_LOOP_REPLAY=/absolute/path/to/trace.json cargo test --locked -p day2 --lib host_loop::tests::replay_saved_host_loop_history -- --exact
+DAY2_HOST_LOOP_REPLAY=/absolute/path/to/trace.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib host_loop::tests::replay_saved_host_loop_history --exact
 ```
 
 Campaign evidence prints this command with its exact saved path. The reader admits
@@ -81,7 +81,7 @@ each step. Fixture and native-step errors and panics retain their cause and stag
 The producer prints the exact command for either history type:
 
 ```console
-DAY2_RUNTIME_INPUT_REPLAY=/absolute/path/history.json cargo test --locked -p day2 --lib store::input_replay_tests::replay_saved_runtime_input_history -- --exact
+DAY2_RUNTIME_INPUT_REPLAY=/absolute/path/history.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib store::input_replay_tests::replay_saved_runtime_input_history --exact
 ```
 
 Replay checks recorded observations and the independent fixture expectations,

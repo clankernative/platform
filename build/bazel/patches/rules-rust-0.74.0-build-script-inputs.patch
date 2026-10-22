@@ -1,0 +1,40 @@
+--- a/cargo/private/cargo_build_script.bzl
++++ b/cargo/private/cargo_build_script.bzl
+@@ -413,7 +413,12 @@
+     flags_out = ctx.actions.declare_file(ctx.label.name + ".flags")
+     link_flags = ctx.actions.declare_file(ctx.label.name + ".linkflags")
+     link_search_paths = ctx.actions.declare_file(ctx.label.name + ".linksearchpaths")  # rustc-link-search, propagated from transitive dependencies
+-    compilation_mode_opt_level = get_compilation_mode_opts(ctx, toolchain).opt_level
++    platform_release = ctx.var.get("DAY2_PLATFORM_RUST_PROFILE", "dev") == "release"
++    platform_tool = ctx.configuration.is_tool_configuration()
++    compilation_mode_opt_level = ("0" if platform_tool else "3") if platform_release else "2"
++    platform_jobs = ctx.var.get("DAY2_PLATFORM_JOBS", "2")
++    if platform_jobs not in ["1", "2", "3"]:
++        fail("Unreviewed platform build-script job count")
+ 
+     script_data = []
+     for target in ctx.attr.data:
+@@ -464,7 +469,7 @@
+         "CARGO_MANIFEST_DIR": manifest_dir,
+         "CARGO_PKG_NAME": pkg_name,
+         "HOST": toolchain.exec_triple.str,
+-        "NUM_JOBS": "1",
++        "NUM_JOBS": platform_jobs,
+         "OPT_LEVEL": compilation_mode_opt_level,
+         "RUSTC": toolchain.rustc.path,
+         "RUSTDOC": toolchain.rust_doc.path,
+@@ -472,10 +477,11 @@
+         # OUT_DIR is set by the runner itself, rather than on the action.
+     })
+ 
+-    # This isn't exactly right, but Bazel doesn't have exact views of "debug" and "release", so...
++    # Both platform profiles disable debug information. Keep build-script
++    # inputs independent of Bazel's implicit optimized exec configuration.
+     env.update({
+-        "DEBUG": {"dbg": "true", "fastbuild": "true", "opt": "false"}.get(ctx.var["COMPILATION_MODE"], "true"),
+-        "PROFILE": {"dbg": "debug", "fastbuild": "debug", "opt": "release"}.get(ctx.var["COMPILATION_MODE"], "unknown"),
++        "DEBUG": "false",
++        "PROFILE": "release" if platform_release else "debug",
+     })
+ 
+     if ctx.attr.version:

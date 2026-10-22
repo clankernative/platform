@@ -73,9 +73,9 @@ artifact/host before upgrading. Back up the database and instance configuration.
 Build the new app, then use the artifact directory printed by that build:
 
 ```console
-cargo run --locked -p day2 -- migration-plan INSTANCE APP TARGET_ARTIFACT PLAN_FILE
-cargo run --locked -p day2 -- migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE
-cargo run --locked -p day2 -- activate INSTANCE APP TARGET_ARTIFACT LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID
+bazel run //crates/day2:day2 -- migration-plan INSTANCE APP TARGET_ARTIFACT PLAN_FILE
+bazel run //crates/day2:day2 -- migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE
+bazel run //crates/day2:day2 -- activate INSTANCE APP TARGET_ARTIFACT LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID
 ```
 
 Review the plan's `convert_ids: true` before applying. One SQLite transaction

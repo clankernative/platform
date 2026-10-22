@@ -94,8 +94,8 @@ server still has upstream formatting behavior.
 ## Regression Tests
 
 ```console
-cargo test --locked -p xtask
-cargo test --locked -p xtask formatter_native -- --ignored
+bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask
+bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask formatter_native --ignored
 ```
 
 The native patch tests paired and unannotated methods, constants, mismatched

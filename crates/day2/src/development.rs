@@ -301,7 +301,7 @@ fn verification_captured(
         .with_context(|| format!("{error:#}; could not retain verification evidence"))?;
         let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
         let command = format!(
-            "cargo run --locked -p day2 -- replay-verification {} {}",
+            "bazel run //crates/day2:day2 -- replay-verification {} {}",
             quote(&artifact.directory().to_string_lossy()),
             quote(&path.to_string_lossy()),
         );

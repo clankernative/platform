@@ -314,6 +314,23 @@ fn main() -> Result<()> {
             );
             bazel::image_programs(&root, action == "build-enrollment-image-programs")?;
         }
+        "test-rust" | "build-rust-test" => {
+            let label = args.next().context(
+                "usage: xtask test-rust LABEL [FILTER/OPTIONS] or build-rust-test LABEL",
+            )?;
+            let remaining = args.collect::<Vec<_>>();
+            if action == "build-rust-test" {
+                ensure!(remaining.is_empty(), "build-rust-test accepts one label");
+            }
+            let executable = bazel::test_target(
+                &root,
+                &label,
+                (action == "test-rust").then_some(remaining.as_slice()),
+            )?;
+            if action == "build-rust-test" {
+                println!("{}", executable.display());
+            }
+        }
         "install-verifier" => {
             ensure!(
                 args.next().is_none(),

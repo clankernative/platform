@@ -67,7 +67,7 @@ scope, kind, identity, actor, initiator, operation, outcome, time, artifact and 
 bounded reason code. It excludes request bodies, results, tokens and raw errors.
 
 ```text
-cargo run --locked -p day2 -- audit-events ../my-private-instance/instance.json reports developer 0
+bazel run //crates/day2:day2 -- audit-events ../my-private-instance/instance.json reports developer 0
 ```
 
 This owner-only view returns at most 50 events with `has_more` and `next_before`.
@@ -164,7 +164,7 @@ capabilities. The commands below assume an existing `../my-private-instance/inst
 with Reports installed and its source/build bindings configured. Export the authored app source:
 
 ```text
-cargo run --locked -p day2-control --bin control -- --local ../my-private-instance/instance.json developer reports export first-export examples/reports
+bazel run //crates/day2-control:control -- --local ../my-private-instance/instance.json developer reports export first-export examples/reports
 ```
 
 The command returns a durable execution identity. Run it, or resume after a process

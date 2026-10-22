@@ -30,7 +30,7 @@ The test retains histories under unique `artifacts/verification-actors-*`
 directories and prints the one-command saved-file replay beside each trace:
 
 ```sh
-cargo run --locked -p day2 -- replay ARTIFACT TRACE_FILE
+bazel run //crates/day2:day2 -- replay ARTIFACT TRACE_FILE
 ```
 
 Replay validates the stored request and deterministic decisions; it does not

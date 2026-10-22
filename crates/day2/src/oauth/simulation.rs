@@ -683,7 +683,7 @@ fn verify(program: &Program) -> Result<Trace> {
             let evidence = serde_json::json!({ "version":1, "implementation":implementation(), "original":program,
                 "reduced":reduced, "failure":fingerprint, "observation":error.downcast_ref::<Divergence>(),
                 "reduced_observation":minimized.downcast_ref::<Divergence>(),
-                "replay":"DAY2_OAUTH_REPLAY=<path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact" });
+                "replay":"DAY2_OAUTH_REPLAY=<path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::simulation::replay_saved_oauth_history --exact" });
             std::fs::write(&path, serde_json::to_vec_pretty(&evidence)?)?;
             anyhow::bail!(
                 "OAuth simulation failed; private counterexample: {}",
@@ -1065,7 +1065,7 @@ fn verify_registration(
         let evidence = serde_json::json!({"version":1,"domain":"registration","implementation":implementation(),
             "seed":seed,"fault":fault,"expires":expires,"driver":driver,
             "observation":error.downcast_ref::<RegistrationDivergence>(),
-            "replay":"DAY2_OAUTH_REPLAY=<path> cargo test --locked -p day2 --lib oauth::simulation::replay_saved_oauth_history -- --exact"});
+            "replay":"DAY2_OAUTH_REPLAY=<path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::simulation::replay_saved_oauth_history --exact"});
         std::fs::write(&path, serde_json::to_vec_pretty(&evidence)?)?;
         anyhow::bail!(
             "OAuth registration simulation failed; counterexample: {}",

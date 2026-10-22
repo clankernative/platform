@@ -371,6 +371,78 @@ fn build_profile(
     Ok(result)
 }
 
+/// One manual harness build/launch. Full verification still selects and orders
+/// its campaigns in the Roc recipe; this accepts only a declared Rust test.
+pub(crate) fn test_target(
+    root: &Path,
+    label: &str,
+    arguments: Option<&[String]>,
+) -> Result<PathBuf> {
+    let catalog = targets(root)?;
+    let selected = catalog
+        .iter()
+        .find(|target| target.label == label && target.test)
+        .context("declared Rust test label required")?;
+    if let Some(arguments) = arguments {
+        validate_test_arguments(arguments)?;
+    }
+    let mut compile = vec![selected.clone()];
+    compile.extend(
+        catalog
+            .iter()
+            .filter(|target| {
+                !target.test
+                    && target.kind == ["bin"]
+                    && (target.package == selected.package || target.package == "day2-sandbox")
+            })
+            .cloned(),
+    );
+    let budget = Duration::from_secs(12_600);
+    let started = std::time::Instant::now();
+    let outputs = build(root, &compile, budget)?;
+    let executable = root.join(outputs.get(label).context("built Rust harness required")?);
+    if let Some(arguments) = arguments {
+        let mut command = Command::new(&executable);
+        command.args(arguments);
+        run_with_budget(
+            root,
+            &mut command,
+            budget
+                .checked_sub(started.elapsed())
+                .context("Rust test budget exhausted")?,
+        )?;
+    }
+    Ok(executable)
+}
+
+fn validate_test_arguments(arguments: &[String]) -> Result<()> {
+    ensure!(arguments.len() <= 32, "Rust test argument count");
+    for argument in arguments {
+        ensure!(
+            [
+                "--exact",
+                "--ignored",
+                "--include-ignored",
+                "--nocapture",
+                "--list",
+                "--test-threads=1",
+                "--test-threads=2",
+                "--test-threads=3",
+                "--test-threads=4"
+            ]
+            .contains(&argument.as_str())
+                || (!argument.is_empty()
+                    && argument.len() <= 256
+                    && !argument.starts_with('-')
+                    && argument
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_:.-".contains(&byte))),
+            "unsupported Rust test option or filter"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn programs(root: &Path, packages: &[&str]) -> Result<()> {
     let selected = targets(root)?
         .into_iter()
@@ -753,6 +825,22 @@ mod tests {
         assert_eq!(original, configuration(root.path())?);
         fs::remove_file(root.path().join("MODULE.bazel.lock"))?;
         assert!(configuration(root.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn manual_rust_tests_refuse_unreviewed_harness_options() -> Result<()> {
+        validate_test_arguments(&["module::case".into(), "--exact".into(), "--ignored".into()])?;
+        for argument in [
+            "--skip",
+            "--test-threads=1000",
+            "--format=json",
+            "--logfile=private",
+            "--unstable-options",
+            "../another-program",
+        ] {
+            assert!(validate_test_arguments(&[argument.into()]).is_err());
+        }
         Ok(())
     }
 

@@ -88,7 +88,7 @@ The broader `xtask verify` additionally builds and tests the platform's relation
 migration and HTTP conformance fixtures. Their [acceptance status](../docs/VERIFICATION-COVERAGE.md)
 defines the required native checks; a Reports-only receipt does not cover them.
 There is no independent CLI Cargo workspace or lockfile.
-For direct `cargo test -p day2-cli-checks` runs, build the prerequisites with
+For direct `bazel run //crates/xtask:xtask -- test-rust //cli/checks:unit_lib` runs, build the prerequisites with
 `bazel run //crates/xtask:xtask -- cli` first. The process checks use that native host
 without rebuilding it inside the test campaign.
 

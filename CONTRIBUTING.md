@@ -22,7 +22,7 @@ tests use explicit disposable sandbox authority; production credentials do not
 belong in contribution CI.
 
 When updating dependencies, run `bazel run //crates/xtask:xtask -- notices` after
-`cargo fetch --locked`, review both the lockfile and notice inventory, then rerun
+updating the dependency lockfile and Bazel module lock, review both the lockfile and notice inventory, then rerun
 the relevant gates. The one informational fxhash maintenance exception expires
 for review on 2026-12-23; there are no accepted vulnerability exceptions.
 

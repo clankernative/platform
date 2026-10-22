@@ -171,7 +171,7 @@ Explicitly bind that Linux artifact and the runtime profile in an operator
 instance, then export to a new directory:
 
 ```text
-cargo run --locked -p day2 --bin day2-package -- INSTANCE APP ACTOR IMAGE_DIGEST PUBLISHED_PORT NEW_DIRECTORY
+bazel run //crates/day2:day2-package -- INSTANCE APP ACTOR IMAGE_DIGEST PUBLISHED_PORT NEW_DIRECTORY
 docker compose -f NEW_DIRECTORY/compose.json up -d
 docker compose -f NEW_DIRECTORY/compose.json logs app
 ```

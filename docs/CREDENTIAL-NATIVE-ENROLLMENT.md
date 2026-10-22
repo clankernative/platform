@@ -197,11 +197,10 @@ P3, a live Controller or a historical failure's exact inner cause.
 Build the actual library test executable from the selected source on Linux:
 
 ```sh
-cargo test --locked -p day2 --lib --no-run --message-format=json > socket-test-build.jsonl
-jq -r 'select(.reason=="compiler-artifact" and .target.name=="day2" and .profile.test and .executable!=null) | .executable' socket-test-build.jsonl
+bazel run //crates/xtask:xtask -- build-rust-test //crates/day2:unit_lib
 ```
 
-Set `DAY2_SOCKET_LIB_TEST` to that exact executable, `DAY2_SOCKET_TEST_IMAGE` to
+Set `DAY2_SOCKET_LIB_TEST` to the exact executable path printed by that command, `DAY2_SOCKET_TEST_IMAGE` to
 its matching pinned Linux runtime image, and retain their identities and the
 current source/manifest-root provenance. Use two fresh local named volumes,
 `DAY2_SOCKET_FIXTURE` and `DAY2_SOCKET_FOREIGN`, exclusively for these controls.

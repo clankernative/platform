@@ -36,8 +36,8 @@ remain the operational composition layer.
 Focused Linux checks, after building the workspace's host binaries:
 
 ```text
-cargo test --locked -p day2-sandbox --test isolation
-cargo test --locked -p day2 --test day2_integration -- linux_worker::
+bazel run //crates/xtask:xtask -- test-rust //crates/day2-sandbox:isolation
+bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration linux_worker::
 ```
 
 These are bounded local conformance checks, not proof of hostile multi-tenant
