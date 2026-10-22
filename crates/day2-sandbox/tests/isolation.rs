@@ -114,20 +114,28 @@ impl Drop for BusyProbe {
     }
 }
 
-fn held_executable() -> anyhow::Result<tempfile::NamedTempFile> {
+fn held_executable() -> anyhow::Result<(tempfile::TempDir, tempfile::NamedTempFile)> {
     use std::os::unix::fs::PermissionsExt;
-    let mut writer = tempfile::NamedTempFile::new()?;
-    writer.write_all(&std::fs::read(env!("CARGO_BIN_EXE_day2-sandbox-probe"))?)?;
+    let probe = Path::new(env!("CARGO_BIN_EXE_day2-sandbox-probe"));
+    // The fault image needs the probe's executable mount. A default temporary
+    // directory may be mounted noexec, which refuses before the writer check.
+    let directory = tempfile::tempdir_in(
+        probe
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("sandbox probe has no parent directory"))?,
+    )?;
+    let mut writer = tempfile::NamedTempFile::new_in(directory.path())?;
+    writer.write_all(&std::fs::read(probe)?)?;
     writer
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o500))?;
-    Ok(writer)
+    Ok((directory, writer))
 }
 
 #[test]
 fn a_released_executable_writer_hands_off_once_in_the_same_confined_process() -> anyhow::Result<()>
 {
-    let writer = held_executable()?;
+    let (_directory, writer) = held_executable()?;
     let mut probe = BusyProbe::start(writer.path())?;
     let pid = probe.child.id();
     let mut input = probe.child.stdin.take().unwrap();
@@ -157,7 +165,7 @@ fn a_released_executable_writer_hands_off_once_in_the_same_confined_process() ->
 
 #[test]
 fn a_retained_executable_writer_expires_without_executing_the_probe() -> anyhow::Result<()> {
-    let writer = held_executable()?;
+    let (_directory, writer) = held_executable()?;
     let mut probe = BusyProbe::start(writer.path())?;
     let mut input = probe.child.stdin.take().unwrap();
     writeln!(input, "pid\nexit")?;
