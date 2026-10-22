@@ -40,7 +40,7 @@ jobs:
           bazelisk-cache: false
           repository-cache: true
           disk-cache: platform-migration-${{ runner.os }}-${{ runner.arch }}
-          cache-save: false
+          cache-save: true
       - name: Install current source verifier
         run: bazel --batch run --config=ci-linux //crates/xtask:xtask -- install-verifier
       - name: Bootstrap current native inputs
