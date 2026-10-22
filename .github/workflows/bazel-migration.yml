@@ -4,13 +4,13 @@ on:
     inputs:
       probe:
         type: choice
-        options: [mac-bootstrap, linux-tool]
+        options: [mac-bootstrap, linux-tool, mac-rust]
         default: mac-bootstrap
 permissions:
   contents: read
 jobs:
   private-bootstrap:
-    if: ${{ inputs.probe != 'linux-tool' }}
+    if: ${{ inputs.probe != 'linux-tool' && inputs.probe != 'mac-rust' }}
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -114,3 +114,37 @@ jobs:
         run: ls -l bazel-bin/external/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/rustc
       - name: Execute that selected official tool after cache relocation
         run: bazel-bin/external/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/rustc --version
+
+  private-rust:
+    if: ${{ inputs.probe == 'mac-rust' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: git show -s --format=fuller HEAD
+      - name: Download the exact private Mac Bazel pin
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-darwin-arm64 --dir '${{ runner.temp }}/public-rust-bazel-download'
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the standalone binary
+        working-directory: ${{ runner.temp }}/public-rust-bazel-download
+        run: echo 'f29ca3f3bf577eb1619aeeed401b64a10901c8da8031aaa4add54a4ad0e99e3a  bazel-9.3.0-darwin-arm64' | shasum -a 256 --check
+      - name: Create only empty public Rust probe directories
+        run: mkdir -p '${{ runner.temp }}/public-rust-probe/bin' '${{ runner.temp }}/public-rust-probe/home' '${{ runner.temp }}/public-rust-probe/tmp' '${{ runner.temp }}/public-rust-probe/platform'
+      - name: Stage only the pinned launcher
+        run: install -m 0555 '${{ runner.temp }}/public-rust-bazel-download/bazel-9.3.0-darwin-arm64' '${{ runner.temp }}/public-rust-probe/bin/bazel'
+      - run: cp .bazelrc '${{ runner.temp }}/public-rust-probe/platform/.bazelrc'
+      - run: cp .github/bazel-private-rust.MODULE '${{ runner.temp }}/public-rust-probe/platform/MODULE.bazel'
+      - run: cp .github/bazel-private-rust.BUILD '${{ runner.temp }}/public-rust-probe/platform/BUILD.bazel'
+      - run: cp .github/bazel-private-rust-outside.rs '${{ runner.temp }}/public-rust-probe/platform/outside.rs'
+      - run: cp .github/bazel-private-rust-inside.rs '${{ runner.temp }}/public-rust-probe/platform/inside.rs'
+      - name: Stage only the four actual pinned compiler rule patches
+        run: cp build/bazel/patches/rules-rust-0.74.0-child-status.patch build/bazel/patches/rules-rust-0.74.0-platform-profiles.patch build/bazel/patches/rules-rust-0.74.0-build-script-inputs.patch build/bazel/patches/rules-rust-0.74.0-clippy-enforcement.patch '${{ runner.temp }}/public-rust-probe/platform/'
+      - name: Establish public Rust compilation and linking outside confinement
+        working-directory: ${{ runner.temp }}/public-rust-probe/platform
+        run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/public-rust-probe/home' TMPDIR='${{ runner.temp }}/public-rust-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null '${{ runner.temp }}/public-rust-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/public-rust-probe/bazel-output' build --lockfile_mode=update --config=release --config=production --define=DAY2_PUBLIC_PROBE=outside //:hello
+      - name: Compile and link a distinct public Rust input under the exact outer profile
+        working-directory: ${{ runner.temp }}/public-rust-probe/platform
+        run: /usr/bin/env -i LANG=C LC_ALL=C TZ=UTC HOME='${{ runner.temp }}/public-rust-probe/home' TMPDIR='${{ runner.temp }}/public-rust-probe/tmp' PATH=/usr/bin:/bin OPENSSL_CONF=/dev/null /usr/bin/sandbox-exec -D 'PRIVATE_JOB=${{ runner.temp }}/public-rust-probe' -f '${{ github.workspace }}/.github/bazel-private-probe.sb' '${{ runner.temp }}/public-rust-probe/bin/bazel' --batch --nosystem_rc --nohome_rc --output_user_root='${{ runner.temp }}/public-rust-probe/bazel-output' build --repository_disable_download --config=release --config=production --define=DAY2_PUBLIC_PROBE=inside //:hello

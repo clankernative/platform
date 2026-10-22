@@ -1,0 +1,30 @@
+module(name = "public_rust_probe", version = "0.0.0")
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# Numeric child-status diagnostics; upstream source and version stay pinned.
+single_version_override(
+    module_name = "rules_rust",
+    version = "0.74.0",
+    patches = [
+        "//:rules-rust-0.74.0-child-status.patch",
+        "//:rules-rust-0.74.0-platform-profiles.patch",
+        "//:rules-rust-0.74.0-build-script-inputs.patch",
+        "//:rules-rust-0.74.0-clippy-enforcement.patch",
+    ],
+    patch_strip = 1,
+)
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.98.1"],
+    extra_target_triples = [],
+    opt_level = {"fastbuild": "2", "dbg": "2", "opt": "3"},
+    extra_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
+    extra_exec_rustc_flags = ["-Cembed-bitcode=no", "-Cdebuginfo=0"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
