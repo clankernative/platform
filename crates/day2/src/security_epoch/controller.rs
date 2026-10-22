@@ -95,21 +95,28 @@ fn run_inner(
     evidence.enter(FailurePhase::Preparation);
     let timings = Timings::new();
     if read_only {
-        let result = timings
+        let trace = bootstrap_timing::BootstrapTiming::provider_read_only();
+        let result = trace
             .measure(Operation::RoleStage, || role.begin_current_stage())
             .map_err(|error| PreparationFailure::at(PreparationStep::RoleStage, error))
             .and_then(|stage| {
-                storage_authority::observe_preparation_read_only(stage, &policy, &store, &timings)
+                trace.measure(Operation::VolumeAcquisition, || {
+                    storage_authority::observe_preparation_read_only(stage, &policy, &store, &trace)
+                })
             });
         // The actual stage/resources have unwound. This record grants nothing;
         // returning here unconditionally excludes every creation/serving path.
         if result.is_err() {
             // The ordinary single refusal exports both timing and the original
             // native boundary, without a preceding potentially partial record.
-            evidence.preparation_timings(timings.summary());
+            evidence.bootstrap_timing(trace.snapshot());
             return result;
         }
-        return evidence.preparation_read_only(timings.summary(), true);
+        return evidence.preparation_read_only(
+            trace
+                .snapshot()
+                .context("native_provider_control_snapshot_missing")?,
+        );
     }
     let result = timings
         .measure(Operation::RoleStage, || role.begin_current_stage())

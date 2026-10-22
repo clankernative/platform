@@ -10,6 +10,14 @@ use std::{cell::Cell, rc::Rc};
 pub(in crate::security_epoch) struct BootstrapTiming {
     timings: Timings,
     state: Option<Rc<Cell<State>>>,
+    scope: DiagnosticScope,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiagnosticScope {
+    BootstrapCurrent,
+    ProviderReadOnlyCurrent,
 }
 
 #[derive(Clone, Copy)]
@@ -21,7 +29,9 @@ struct State {
 
 #[derive(Clone, Serialize)]
 pub(in crate::security_epoch) struct Snapshot {
-    scope: &'static str,
+    scope: DiagnosticScope,
+    // This is the LAST MEASURED callback, not the failed statement or overall
+    // phase outcome. PreparationFailure remains the native error boundary.
     #[serde(rename = "last_step")]
     at: Operation,
     returned: Option<bool>,
@@ -39,6 +49,14 @@ impl BootstrapTiming {
                 returned: None,
                 rounds: [Some(0), Some(0)],
             }))),
+            scope: DiagnosticScope::BootstrapCurrent,
+        }
+    }
+
+    pub(in crate::security_epoch) fn provider_read_only() -> Self {
+        Self {
+            scope: DiagnosticScope::ProviderReadOnlyCurrent,
+            ..Self::new()
         }
     }
 
@@ -46,6 +64,7 @@ impl BootstrapTiming {
         Self {
             timings: Timings::disabled(),
             state: None,
+            scope: DiagnosticScope::BootstrapCurrent,
         }
     }
 
@@ -103,7 +122,7 @@ impl BootstrapTiming {
         self.state.as_ref().map(|state| {
             let value = state.get();
             Snapshot {
-                scope: "bootstrap_current",
+                scope: self.scope,
                 at: value.at,
                 returned: value.returned,
                 provider_rounds: value.rounds,
@@ -115,12 +134,36 @@ impl BootstrapTiming {
     #[cfg(test)]
     pub(super) fn maximal_fixture() -> Snapshot {
         Snapshot {
-            scope: "bootstrap_current",
+            scope: DiagnosticScope::BootstrapCurrent,
             at: Operation::BootstrapAuthentication,
             returned: Some(false),
             provider_rounds: [Some(u8::MAX), Some(u8::MAX)],
             timing: Timings::maximal_bootstrap_fixture(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn maximal_provider_fixture() -> Snapshot {
+        Snapshot {
+            scope: DiagnosticScope::ProviderReadOnlyCurrent,
+            at: Operation::VolumeAcquisition,
+            returned: Some(true),
+            provider_rounds: [Some(3), Some(3)],
+            timing: Timings::maximal_bootstrap_fixture(),
+        }
+    }
+}
+
+impl Snapshot {
+    pub(in crate::security_epoch) fn is_provider_read_only(&self) -> bool {
+        self.scope == DiagnosticScope::ProviderReadOnlyCurrent
+    }
+
+    pub(in crate::security_epoch) fn completed_provider_control(&self) -> bool {
+        self.is_provider_read_only()
+            && matches!(self.at, Operation::VolumeAcquisition)
+            && self.returned == Some(true)
+            && self.provider_rounds == [Some(3), Some(3)]
     }
 }
 
@@ -164,5 +207,27 @@ mod tests {
             serde_json::json!([null, null])
         );
         assert!(BootstrapTiming::disabled().snapshot().is_none());
+    }
+
+    #[test]
+    fn provider_control_requires_exactly_three_fully_validated_rounds() {
+        for rounds in [1, 2, 3, 4] {
+            let trace = BootstrapTiming::provider_read_only();
+            trace
+                .measure(Operation::VolumeAcquisition, || {
+                    for _ in 0..rounds {
+                        trace.provider_round(|| Ok(()))?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            let snapshot = trace.snapshot().unwrap();
+            assert_eq!(snapshot.completed_provider_control(), rounds == 3);
+            assert_eq!(
+                serde_json::to_value(snapshot).unwrap()["scope"],
+                "provider_read_only_current"
+            );
+        }
+        assert!(!BootstrapTiming::maximal_fixture().is_provider_read_only());
     }
 }

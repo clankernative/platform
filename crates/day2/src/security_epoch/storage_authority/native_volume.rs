@@ -471,7 +471,7 @@ pub(super) fn observe_provider_read_only(
     stage: EnrolledRoleStage<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
-    timings: Timings,
+    trace: &BootstrapTiming,
     authentication: ProviderEpochReads,
 ) -> Result<()> {
     let guard = authentication.arm_refusal()?;
@@ -479,11 +479,17 @@ pub(super) fn observe_provider_read_only(
         stage,
         policy,
         store,
-        timings,
+        trace.timings(),
         authentication,
-        BootstrapTiming::disabled(),
+        trace.clone(),
     )?;
-    reader.observe_provider()?;
+    // Three successive fresh validations through ONE genuine authentication
+    // and original Current stage, matching the bootstrap's metadata-round
+    // count. First error returns immediately; no renew/retry, state/block
+    // descriptor, SQL, peer or writer exists in this closed diagnostic.
+    for _ in 0..3 {
+        reader.observe_provider()?;
+    }
     reader.check()?;
     guard.complete()
 }

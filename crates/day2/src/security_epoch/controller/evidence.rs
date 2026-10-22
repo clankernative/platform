@@ -448,7 +448,7 @@ pub(in crate::security_epoch) enum ServingRole {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ReadOnlyFrontier {
-    AuthProviderMetadata,
+    AuthThreeProviderRounds,
 }
 
 #[derive(Serialize)]
@@ -473,7 +473,8 @@ enum Observation {
     PreparationReadOnlyObserved {
         frontier: ReadOnlyFrontier,
         completed: bool,
-        timing: Summary,
+        expected_rounds: u8,
+        bootstrap: BootstrapSnapshot,
     },
     BootstrapCompleted {
         step: Step,
@@ -577,7 +578,7 @@ impl<W: RecordOutput> Recorder<W> {
         self.preparation_timing = Some(timing);
     }
 
-    pub(super) fn preparation_read_only(&mut self, timing: Summary, completed: bool) -> Result<()> {
+    pub(super) fn preparation_read_only(&mut self, bootstrap: BootstrapSnapshot) -> Result<()> {
         ensure!(
             self.incarnation.is_some()
                 && !self.first_holder
@@ -585,10 +586,15 @@ impl<W: RecordOutput> Recorder<W> {
                 && self.next == 0,
             "native_evidence_read_only_order"
         );
+        ensure!(
+            bootstrap.completed_provider_control(),
+            "native_evidence_three_provider_rounds_required"
+        );
         self.emit(Observation::PreparationReadOnlyObserved {
-            frontier: ReadOnlyFrontier::AuthProviderMetadata,
-            completed,
-            timing,
+            frontier: ReadOnlyFrontier::AuthThreeProviderRounds,
+            completed: true,
+            expected_rounds: 3,
+            bootstrap,
         })?;
         self.read_only_observed = true;
         Ok(())
@@ -685,6 +691,13 @@ impl<W: RecordOutput> Recorder<W> {
                     | FailurePhase::ActivateDispatch
                     | FailurePhase::ActivateSettle
             );
+            let provider_control = matches!(self.at, FailurePhase::Preparation)
+                && !self.first_holder
+                && self.next == 0
+                && self
+                    .bootstrap_timing
+                    .as_ref()
+                    .is_some_and(BootstrapSnapshot::is_provider_read_only);
             // This closed field reports a failed native boundary, including
             // counter preparation/send/reobservation. It never asserts that a
             // failed bootstrap send had no remote effect or permits a retry.
@@ -709,12 +722,12 @@ impl<W: RecordOutput> Recorder<W> {
                 preparation,
                 // This completed preparation DATA remains attributable if a
                 // later listener/holder phase refuses before first-holder log.
-                timing: if current {
+                timing: if current || provider_control {
                     None
                 } else {
                     self.preparation_timing.clone()
                 },
-                bootstrap: if current {
+                bootstrap: if current || provider_control {
                     self.bootstrap_timing.clone()
                 } else {
                     None
@@ -1016,16 +1029,14 @@ mod tests {
             .unwrap();
         recorder
             .preparation_read_only(
-                super::super::preparation_timing::Timings::maximal_summary_fixture(),
-                true,
+                super::super::bootstrap_timing::BootstrapTiming::maximal_provider_fixture(),
             )
             .unwrap();
         assert!(recorder.first_holder(&seed, &holder).is_err());
         assert!(
             recorder
                 .preparation_read_only(
-                    super::super::preparation_timing::Timings::new().summary(),
-                    true
+                    super::super::bootstrap_timing::BootstrapTiming::maximal_provider_fixture(),
                 )
                 .is_err()
         );
@@ -1037,7 +1048,19 @@ mod tests {
             rows[1]["observation"]["event"],
             "preparation_read_only_observed"
         );
-        assert_eq!(rows[1]["observation"]["frontier"], "auth_provider_metadata");
+        assert_eq!(
+            rows[1]["observation"]["frontier"],
+            "auth_three_provider_rounds"
+        );
+        assert_eq!(rows[1]["observation"]["expected_rounds"], 3);
+        assert_eq!(
+            rows[1]["observation"]["bootstrap"]["provider_rounds"],
+            serde_json::json!([3, 3])
+        );
+        assert_eq!(
+            rows[1]["observation"]["bootstrap"]["scope"],
+            "provider_read_only_current"
+        );
         assert!(
             rows.iter()
                 .all(|row| row["observation"]["event"] != "first_holder_durability_completed")
@@ -1773,5 +1796,31 @@ mod tests {
                 .unwrap()
                 .contains("MustNotDisplay")
         );
+    }
+
+    #[test]
+    fn one_or_two_provider_rounds_cannot_emit_three_round_control_completion() {
+        use super::super::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation};
+        for rounds in [1, 2, 4] {
+            // Export DATA only; no native owner/observation/permission is built.
+            let (mut recorder, ..) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            let trace = BootstrapTiming::provider_read_only();
+            trace
+                .measure(Operation::VolumeAcquisition, || {
+                    for _ in 0..rounds {
+                        trace.provider_round(|| Ok(()))?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                recorder
+                    .preparation_read_only(trace.snapshot().unwrap())
+                    .is_err()
+            );
+            assert_eq!(records(&recorder.output).len(), 1);
+            assert!(!recorder.read_only_observed && !recorder.first_holder && !recorder.activated);
+        }
     }
 }

@@ -3,6 +3,7 @@
 //! Namespace, Kubernetes and volume DATA cannot construct the native owner.
 //! Live profile qualification and current counter/writer admission are separate.
 
+use super::controller::bootstrap_timing::BootstrapTiming;
 use super::controller::evidence::{PreparationFailure, PreparationProgress, PreparationStep};
 use super::controller::preparation_timing::{Operation, Timings};
 use super::{firestore::Budget, native_clock::NativeAcquisition, seed_core::OriginalSeedCore};
@@ -384,14 +385,17 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
     mut stage: crate::security_epoch::native_enrollment::EnrolledRoleStage<'_>,
     policy: &InitialBootstrapPolicy,
     store: &EpochStore,
-    timings: &Timings,
+    trace: &BootstrapTiming,
 ) -> Result<()> {
-    timings.measure(Operation::VolumeAcquisition, || {
-        // Retain genuine material, not a copied credential or parsed proof.
-        // This diagnostic never consumes it into the fixed writer. The actual
-        // provider metadata reads stay fresh; only this same-stage authenticated
-        // material is reused, never a preceding observation or permission.
-        let reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire(
+    let (_controller_reads, provider) =
+        trace
+            .timings()
+            .measure(Operation::BootstrapAuthentication, || {
+                // Retain genuine material, not a copied credential or parsed proof.
+                // This diagnostic never consumes it into the fixed writer. The actual
+                // provider metadata reads stay fresh; only this same-stage authenticated
+                // material is reused, never a preceding observation or permission.
+                let reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire(
             policy,
             store,
             crate::security_epoch::native_enrollment::NativeRole::EpochController,
@@ -399,9 +403,11 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
         )
         .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_current)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
-        let (_controller_reads, provider) = reads
-            .into_controller(&mut stage, policy, store, Timings::disabled())
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
-        native_volume::observe_provider_read_only(stage, policy, store, timings.clone(), provider)
-    })
+                reads
+                    .into_controller(&mut stage, policy, store, trace.timings())
+                    .map_err(|error| {
+                        PreparationFailure::at(PreparationStep::BootstrapTransport, error)
+                    })
+            })?;
+    native_volume::observe_provider_read_only(stage, policy, store, trace, provider)
 }
