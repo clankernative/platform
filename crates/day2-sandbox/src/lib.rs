@@ -4,6 +4,9 @@
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(any(target_os = "linux", test))]
+mod handoff;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompilerCache {
     General,
@@ -54,6 +57,15 @@ pub(crate) enum LaunchProfile {
 
 #[cfg(any(target_os = "linux", test))]
 impl LaunchProfile {
+    pub(crate) const fn handoff_wall_time(self) -> std::time::Duration {
+        // These are the existing supervisor exchange ceilings, not CPU limits.
+        // The parent's possibly shorter actual timeout remains independent.
+        std::time::Duration::from_secs(match self {
+            Self::Ordinary => 3,
+            Self::QualifiedProperty => 30,
+        })
+    }
+
     pub(crate) const fn worker_argument(self) -> Option<&'static str> {
         match self {
             Self::Ordinary => None,

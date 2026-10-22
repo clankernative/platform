@@ -210,6 +210,11 @@ impl Catalog {
                 "page {} failure page cannot declare its own failure page",
                 page.name
             );
+            ensure!(
+                fallback.preparation.is_empty(),
+                "page {} failure page must not declare preparation",
+                page.name
+            );
             routes
                 .get_mut(&page.name)
                 .context("failure page route missing")?

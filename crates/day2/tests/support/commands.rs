@@ -21,14 +21,27 @@ impl World {
         world.runtime.initialize()?;
         Ok(world)
     }
+    /// Reports with the reactive query search overlay and its policy.
+    pub fn search() -> Result<Self> {
+        let world = Self::with_policy(
+            "DAY2_TEST_REPORTS_SEARCH_ARTIFACT",
+            include_str!("../../../../fixtures/authority-policies/reports-search.json"),
+        )?;
+        world.runtime.initialize()?;
+        Ok(world)
+    }
     pub fn uninitialized(variable: &str) -> Result<Self> {
+        Self::with_policy(
+            variable,
+            include_str!("../../../../fixtures/authority-policies/reports.json"),
+        )
+    }
+    fn with_policy(variable: &str, policy: &str) -> Result<Self> {
         let artifact = std::env::var_os(variable)
             .map(PathBuf::from)
             .context("run xtask verify-reports with compiled fixtures")?;
         let directory = tempfile::tempdir()?;
-        let policy: Value = serde_json::from_str(include_str!(
-            "../../../../fixtures/authority-policies/reports.json"
-        ))?;
+        let policy: Value = serde_json::from_str(policy)?;
         let (resources, resource_policies) = day2::development::local_resource_fixture(
             "reports",
             &serde_json::from_value(policy.clone())?,

@@ -554,13 +554,7 @@ fn publish_contract(
             &routes,
         )?;
         day2::web_templates::validate_routed_bindings(
-            stage,
-            templates,
-            &page.template,
-            &context,
-            assets,
-            &routes,
-            &contract,
+            stage, templates, page, &context, assets, &routes, &contract,
         )?;
     }
     let identity = digest(&serde_json::to_vec(&artifact)?);

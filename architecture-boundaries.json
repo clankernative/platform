@@ -1464,6 +1464,7 @@
           "rename": null,
           "features": [
             "fs",
+            "poll",
             "process",
             "resource",
             "signal"

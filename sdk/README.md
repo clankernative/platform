@@ -14,7 +14,7 @@ namespace to application code.
 | `data/pagination/` | Bounded collection results and opaque pagination inputs | [CollectionPage](data/pagination/CollectionPage.roc), [Cursor](data/pagination/Cursor.roc), [PageSize](data/pagination/PageSize.roc) |
 | `domain/` | Reusable validated values | [WebUrl](domain/WebUrl.roc) |
 | `contracts/Handler.roc`, `data/Observe.roc`, `contracts/Effects.roc` | Command/query phases and admitted capabilities | [Runtime contract](../docs/COMMAND-RUNTIME.md) |
-| `contracts/Notifications.roc`, `contracts/Carta.roc` | Typed provider packs with explicit host adapters | [Notifications](contracts/Notifications.roc), [Carta synthetic reads](../docs/CARTA.md) |
+| `contracts/Notifications.roc`, `contracts/Carta.roc` | Typed provider packs with explicit host adapters | [Notifications](contracts/Notifications.roc), [Carta reads](../docs/CARTA.md) |
 | `contracts/Schedule.roc` | Platform-owned recurring triggers for internal commands | [Schedule](contracts/Schedule.roc), [plan and current limits](../docs/SCHEDULES-PLAN.md) |
 | `web/` | Typed page registration, template references, assets and form fields | [Page](web/Page.roc), [PageBinding](web/PageBinding.roc), [Control](web/Control.roc) |
 | `web/markup/` | Existing pure HTML node helpers | [Html](web/markup/Html.roc); applications can use ordinary HTML templates instead |
@@ -59,8 +59,9 @@ The requirements also appear in generated docs and OpenAPI. See the
 
 Chain `.observes("workspace_directory.hierarchy.v1")` onto a command or query
 definition to declare a read dependency for disposable verification. Declare
-`workspace_directory.page.v1` when paging the capture, or
-`workspace_directory.capture.v1` when establishing membership. Build verification
+`workspace_directory.page.v1` when paging the capture,
+`workspace_directory.user_path.v1` for an independent current-actor user lookup,
+or `workspace_directory.capture.v1` for the combined user/hierarchy capture. Build verification
 and local development derive synthetic Directory bindings from these declarations,
 independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See

@@ -62,6 +62,7 @@ Verify :: [].{
 			"relational",
 			"lifecycle",
 			"verification-actors",
+			"verification-setup",
 			"relational-next",
 			"collection",
 			"owned",
@@ -69,6 +70,7 @@ Verify :: [].{
 			"repeated-field",
 			"reports",
 			"reports-probe",
+			"reports-search",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
@@ -148,7 +150,7 @@ Verify :: [].{
 	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
 	mac! = |host!| {
 		_ = Capability.call!("verify-cli", "{}", host!)?
-		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar", "verification-setup"] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
 		_ = Capability.call!("verify-test-build", "{}", host!)?

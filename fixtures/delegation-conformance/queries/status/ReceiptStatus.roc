@@ -19,7 +19,7 @@ ReceiptStatus :: [].{
 	prepare = |_context, input| ImportedContracts.peer_identity_record_status({ id: input.receipt }).map(
 		|status| match status {
 			Pending => "pending"
-			Success => "success"
+			Success(_) => "success"
 			Refused => "refused"
 			Blocked => "blocked"
 			Unknown => "unknown"

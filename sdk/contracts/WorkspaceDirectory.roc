@@ -24,6 +24,8 @@ WorkspaceDirectory :: [].{
 		expires_at : I64,
 	}
 
+	UserPath : { customer_id : Str, actor : Str, user_path : Str, captured_at : I64 }
+
 	HierarchyCapture : {
 		id : Str,
 		customer_id : Str,
@@ -48,6 +50,21 @@ WorkspaceDirectory :: [].{
 			parsed : Try(Capture, _)
 			parsed = Json.parse(raw)
 			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_capture"))
+		},
+	)
+
+	user_path : Context -> Observe(UserPath)
+	user_path = |context| Resource.bind(context, "workspace_directory").and_then(user_path_with)
+
+	user_path_with : Resource -> Observe(UserPath)
+	user_path_with = |resource| Observe.capability(
+		"workspace_directory.user_path.v1",
+		Json.to_str({ handle: Resource.token(resource) }),
+	).and_then(
+		|raw| {
+			parsed : Try(UserPath, _)
+			parsed = Json.parse(raw)
+			Observe.from_host(parsed.map_err(|_| "invalid_workspace_directory_user_path"))
 		},
 	)
 

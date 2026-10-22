@@ -1212,8 +1212,7 @@ impl Host {
             ("GET", path) if self.routes.is_none() && path.starts_with("/pages/") => {
                 let name = &path[7..];
                 let input = self.page_input(name, uri.query().unwrap_or(""))?;
-                let content = self.page(name, &input, session, at, None, None)?;
-                self.app_response(StatusCode::OK, name, &input, session, content)
+                self.get_page(name, &input, headers, session, at)
             }
             ("POST", "/actions") => {
                 ensure!(uri.query().is_none(), crate::error::Failure::UnknownFields);
@@ -1267,7 +1266,9 @@ impl Host {
                 // Page routes take precedence. A redirect route answers only a
                 // path no page route claims, even one a page route would refuse.
                 match route {
-                    Ok(Some((name, input))) => self.routed_page(&name, &input, session, at),
+                    Ok(Some((name, input))) => {
+                        self.routed_page(&name, &input, headers, session, at)
+                    }
                     Ok(None) => self.redirect_route(
                         path,
                         headers,
@@ -1497,7 +1498,8 @@ impl Host {
     }
 
     /// Render a routed page, or its app-owned failure page when it fails on the
-    /// server.
+    /// server. Page preparation runs first and answers its own refusals and
+    /// preparation fallback; a failure page never runs preparation.
     ///
     /// The fallback answers with the original failure's status, after that
     /// failure is logged exactly as the platform error page would log it. It
@@ -1509,13 +1511,11 @@ impl Host {
         &self,
         name: &str,
         input: &Value,
+        headers: &HeaderMap,
         session: &Session,
         at: i64,
     ) -> Result<Response> {
-        let error = match self
-            .page(name, input, session, at, None, None)
-            .and_then(|content| self.app_response(StatusCode::OK, name, input, session, content))
-        {
+        let error = match self.get_page(name, input, headers, session, at) {
             Ok(response) => return Ok(response),
             Err(error) => error,
         };
@@ -1678,6 +1678,7 @@ impl Host {
                         @if let Some(stylesheet) = stylesheet { link rel="stylesheet" href=(stylesheet); }
                         script type="module" src="/assets/platform/datastar-1.0.1.js" {}
                         script type="module" src="/assets/platform/forms.js" {}
+                        script type="module" src="/assets/platform/reactive-queries.js" {}
                         @if let Some(script) = script { script type="module" src=(script) {} }
                         // Component behavior has a separate admitted entrypoint.
                         @if let Some(script) = component_script { script type="module" src=(script) {} }
@@ -1691,12 +1692,52 @@ impl Host {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             format!(
-                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
-                self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
+                "default-src 'none'; script-src 'unsafe-eval' {}/assets/platform/datastar-1.0.1.js {}/assets/platform/forms.js {}/assets/platform/navigation.js {}/assets/platform/reactive-queries.js {}{}; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' {};{} connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'",
+                self.origin, self.origin, self.origin, self.origin, self.origin, self.appearance.resource_prefix(), image_sources, font_policy
             ).parse()?,
         );
         Ok(response)
     }
+    fn check_preparation_authority(
+        &self,
+        expected: &[(String, crate::authority_state::AuthorityStamp)],
+        actor: &str,
+    ) -> Result<()> {
+        for (operation, stamp) in expected {
+            ensure!(
+                self.runtime.authority_snapshot(operation, actor)?.stamp == *stamp,
+                crate::error::Failure::Forbidden
+            );
+        }
+        Ok(())
+    }
+
+    fn check_page_delivery(
+        &self,
+        operation: &str,
+        expected: &crate::authority_state::AuthorityStamp,
+        actor: &str,
+        session: &Session,
+    ) -> Result<()> {
+        self.appearance.check_binding(&self.runtime)?;
+        let current = self.runtime.authority_snapshot(operation, actor)?.stamp;
+        let db = open(self.runtime.db())?;
+        let current_session: Option<(String, i64)> = db
+            .query_row(
+                "SELECT actor,expires FROM day2_web_sessions WHERE hash=?1",
+                [&session.hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        validate_presentation_delivery(
+            expected,
+            &current,
+            actor,
+            current_session.as_ref(),
+            self.wall_seconds(),
+        )
+    }
+
     fn page(
         &self,
         name: &str,
@@ -1705,6 +1746,170 @@ impl Host {
         at: i64,
         notice: Option<Notice<'_>>,
         submitted: Option<view::Submitted<'_>>,
+    ) -> Result<Markup> {
+        self.page_with_outcome(name, input, session, at, notice, (submitted, None))
+    }
+
+    fn get_page(
+        &self,
+        name: &str,
+        input: &Value,
+        headers: &HeaderMap,
+        session: &Session,
+        at: i64,
+    ) -> Result<Response> {
+        let page = self.runtime.artifact().page(name)?;
+        if page.preparation.is_empty() {
+            let content = self.page(name, input, session, at, None, None)?;
+            return self.app_response(StatusCode::OK, name, input, session, content);
+        }
+        if let Some(status) = page_preparation_refusal(headers) {
+            let message = if status == StatusCode::SERVICE_UNAVAILABLE {
+                "Page preparation is not run for speculative requests."
+            } else {
+                "Page preparation requires page navigation or a same-origin HTML refresh."
+            };
+            return Ok(error_page(status, message));
+        }
+        let input_record = &self.runtime.artifact().contract().schema.inputs[&self
+            .runtime
+            .artifact()
+            .operation(&page.operation)?
+            .input_type];
+        input_record.validate_input(input)?;
+        // Admission is an all-or-nothing preflight: no preparation command may
+        // run until every operation needed by this page is authorized.
+        let primary = self
+            .runtime
+            .authority_snapshot(&page.operation, &session.actor)?;
+        let mut expected = Vec::with_capacity(
+            page.preparation.len() + 1 + usize::from(!page.prepare_failure_operation.is_empty()),
+        );
+        expected.push((page.operation.clone(), primary.stamp.clone()));
+        for operation in &page.preparation {
+            expected.push((
+                operation.clone(),
+                self.runtime
+                    .authority_snapshot(operation, &session.actor)?
+                    .stamp,
+            ));
+        }
+        if !page.prepare_failure_operation.is_empty() {
+            let fallback = &page.prepare_failure_operation;
+            expected.push((
+                fallback.clone(),
+                self.runtime
+                    .authority_snapshot(fallback, &session.actor)?
+                    .stamp,
+            ));
+        }
+        self.check_preparation_authority(&expected, &session.actor)?;
+
+        for (index, operation) in page.preparation.iter().enumerate() {
+            self.check_preparation_authority(&expected, &session.actor)?;
+            let id = format!(
+                "page-prepare-{index}-{}",
+                security::random(self.entropy.as_ref())?
+            );
+            let result = self.runtime.invoke_verified(
+                operation,
+                crate::store::RequestIdentity {
+                    actor: &session.actor,
+                    origin: session.origin.as_ref(),
+                },
+                &id,
+                &serde_json::json!({}),
+                at,
+                Fault::None,
+            );
+            let failure = match result {
+                Ok(outcome) if outcome.status == "success" => None,
+                Ok(outcome) => {
+                    let (status, _, message) =
+                        crate::web_api::outcome_failure(&self.runtime, &outcome.error);
+                    Some((status, message.to_owned()))
+                }
+                Err(error) => {
+                    let (status, _, message) = crate::web_api::failure_details(&error);
+                    Some((status, message.to_owned()))
+                }
+            };
+            if let Some((status, message)) = failure {
+                if page_preparation_denial(status) {
+                    return Ok(error_page(status, &message));
+                }
+                if !page.prepare_failure_operation.is_empty() {
+                    self.check_preparation_authority(&expected, &session.actor)?;
+                    let fallback = &page.prepare_failure_operation;
+                    let id = format!("page-fallback-{}", security::random(self.entropy.as_ref())?);
+                    let fallback_result = self.runtime.invoke_verified(
+                        fallback,
+                        crate::store::RequestIdentity {
+                            actor: &session.actor,
+                            origin: session.origin.as_ref(),
+                        },
+                        &id,
+                        input,
+                        at,
+                        Fault::None,
+                    );
+                    let outcome = fallback_result?;
+                    if outcome.status != "success" {
+                        return Ok(error_page(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "The page is temporarily unavailable.",
+                        ));
+                    }
+                    let content = self.page_with_outcome(
+                        name,
+                        input,
+                        session,
+                        at,
+                        None,
+                        (None, Some(outcome)),
+                    )?;
+                    let response = self.app_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        name,
+                        input,
+                        session,
+                        content,
+                    )?;
+                    self.check_preparation_authority(&expected, &session.actor)?;
+                    self.check_page_delivery(
+                        &page.operation,
+                        &primary.stamp,
+                        &session.actor,
+                        session,
+                    )?;
+                    return Ok(response);
+                }
+                return Ok(error_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The page is temporarily unavailable.",
+                ));
+            }
+            self.check_preparation_authority(&expected, &session.actor)?;
+        }
+        self.check_preparation_authority(&expected, &session.actor)?;
+        let content = self.page(name, input, session, at, None, None)?;
+        let response = self.app_response(StatusCode::OK, name, input, session, content)?;
+        self.check_preparation_authority(&expected, &session.actor)?;
+        self.check_page_delivery(&page.operation, &primary.stamp, &session.actor, session)?;
+        Ok(response)
+    }
+
+    fn page_with_outcome(
+        &self,
+        name: &str,
+        input: &Value,
+        session: &Session,
+        at: i64,
+        notice: Option<Notice<'_>>,
+        (submitted, supplied_outcome): (
+            Option<view::Submitted<'_>>,
+            Option<crate::protocol::Outcome>,
+        ),
     ) -> Result<Markup> {
         let page = self.runtime.artifact().page(name)?;
         let presentation_authority = if self.presentation.is_some() {
@@ -1719,10 +1924,13 @@ impl Host {
         // A completion can invalidate a prepared read between its observation
         // and validation. Retry only the page query with a fresh invocation;
         // the command and its durable receipt are never repeated here.
-        let outcome = fresh_page_query(self.entropy.as_ref(), |id| {
-            self.runtime
-                .render_page(name, &session.actor, id, input, at)
-        })?;
+        let outcome = match supplied_outcome {
+            Some(outcome) => outcome,
+            None => fresh_page_query(self.entropy.as_ref(), |id| {
+                self.runtime
+                    .render_page(name, &session.actor, id, input, at)
+            })?,
+        };
         if outcome.status != "success" {
             if let Some(rejection) = declared_page_rejection(&self.runtime, name, &outcome.error) {
                 return Err(anyhow::Error::new(rejection));
@@ -1791,26 +1999,7 @@ impl Host {
         // Presentation execution may take seconds. Do not return a formerly
         // authorized query after revocation or an A -> B -> A policy change.
         if let Some(authority) = presentation_authority {
-            self.appearance.check_binding(&self.runtime)?;
-            let current = self
-                .runtime
-                .authority_snapshot(&page.operation, &session.actor)?
-                .stamp;
-            let db = open(self.runtime.db())?;
-            let current_session: Option<(String, i64)> = db
-                .query_row(
-                    "SELECT actor,expires FROM day2_web_sessions WHERE hash=?1",
-                    [&session.hash],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            validate_presentation_delivery(
-                &authority,
-                &current,
-                &session.actor,
-                current_session.as_ref(),
-                self.wall_seconds(),
-            )?;
+            self.check_page_delivery(&page.operation, &authority, &session.actor, session)?;
         }
         Ok(html! { main id="day2-main"
             data-day2-invocation=[notice.as_ref().map(|value| value.invocation)]
@@ -2287,6 +2476,75 @@ fn edge_refusal(json: bool, error: &anyhow::Error) -> Response {
         error_page(status, message)
     }
 }
+fn page_preparation_denial(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST
+    )
+}
+
+pub fn page_preparation_refusal(headers: &HeaderMap) -> Option<StatusCode> {
+    let values = |key: &str| {
+        headers
+            .get_all(key)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    };
+    if ["sec-purpose", "purpose", "x-purpose", "x-moz"]
+        .iter()
+        .flat_map(|key| values(key))
+        .any(|value| value.contains("prefetch") || value.contains("preview"))
+    {
+        return Some(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let single = |key: &str| {
+        let values = values(key);
+        (values.len() == 1).then(|| values[0].as_str().to_owned())
+    };
+    if [
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "sec-fetch-dest",
+        "sec-fetch-user",
+    ]
+    .iter()
+    .any(|key| values(key).len() > 1)
+    {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    let site = single("sec-fetch-site");
+    let mode = single("sec-fetch-mode");
+    let dest = single("sec-fetch-dest");
+    let user = single("sec-fetch-user");
+    if user.as_deref().is_some_and(|value| value != "?1") {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    let navigation = matches!(mode.as_deref(), Some("navigate"))
+        && matches!(dest.as_deref(), Some("document"))
+        && matches!(
+            site.as_deref(),
+            Some("same-origin" | "same-site" | "cross-site" | "none")
+        )
+        && (user.as_deref() == Some("?1") || site.as_deref() == Some("none"));
+    let same_origin_refresh = site.as_deref() == Some("same-origin")
+        && matches!(mode.as_deref(), Some("cors" | "same-origin"))
+        && dest.as_deref() == Some("empty")
+        && user.is_none()
+        && single("accept").is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                part.split(';')
+                    .next()
+                    .is_some_and(|kind| kind.trim() == "text/html")
+            })
+        });
+    if navigation || same_origin_refresh {
+        None
+    } else {
+        Some(StatusCode::FORBIDDEN)
+    }
+}
+
 fn failure(error: &anyhow::Error) -> Response {
     if let Some(page_failure) = error.downcast_ref::<PageOutcomeFailure>() {
         return error_page(page_failure.status, &page_failure.message);
@@ -2438,6 +2696,15 @@ fn patch(markup: Markup) -> Response {
 mod page_failure_tests {
     use super::*;
 
+    #[test]
+    fn preparation_authority_and_input_failures_do_not_enter_fallback_policy() {
+        assert!(page_preparation_denial(StatusCode::UNAUTHORIZED));
+        assert!(page_preparation_denial(StatusCode::FORBIDDEN));
+        assert!(page_preparation_denial(StatusCode::BAD_REQUEST));
+        assert!(!page_preparation_denial(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!page_preparation_denial(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
     #[tokio::test]
     async fn app_failure_html_uses_status_and_escapes_public_message() {
         let response = failure(&anyhow::Error::new(PageOutcomeFailure {
@@ -2576,6 +2843,7 @@ mod page_failure_tests {
                 },
                 additional_operations: Vec::new(),
                 verification_actors: Vec::new(),
+                verification_delegations: Vec::new(),
             },
         )]);
         assert!(

@@ -2,31 +2,22 @@
 //! authenticated peer phase throughout each request; read credentials or parsed
 //! policy DATA alone cannot install this port.
 
-use super::AuthenticatedReads;
+use super::{ControllerEpochReads, RetainedEpochReads};
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
-    credential_material::CredentialMaterial,
-    firestore::{EpochReply, Port, Sample},
-    native_clock::NativeAcquisition,
-    native_identity::NativeProcessObservation,
-    transport::{NativeHttp, Route},
+    firestore::{Budget, EpochReply, Port, Sample},
+    transport::Route,
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     Digest,
-    security_epoch::{
-        EpochStore,
-        bootstrap::{InitialBootstrapPolicy, NativeRole},
-    },
+    security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy},
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 pub(crate) struct ControllerPort<'storage, 'role> {
     owner: Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
-    http: NativeHttp,
-    credential: CredentialMaterial,
-    acquisition: NativeAcquisition,
-    process: NativeProcessObservation,
+    reads: ControllerEpochReads,
     selection: Digest,
     valid: bool,
 }
@@ -46,43 +37,38 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         owner: Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
+        reads: ControllerEpochReads,
     ) -> Result<Self> {
+        let state = Rc::clone(&reads.state);
+        let guard = state.gate.guard()?;
         let result = (|| {
             let mut phase = owner.try_borrow_mut()?;
-            let mut reads = AuthenticatedReads::acquire(
-                policy,
-                store,
-                NativeRole::EpochController,
-                phase.controller_stage()?,
-            )?;
-            reads.sample()?;
-            // These are the credentials, transport, process and original narrow
-            // clock JUST acquired under the same actual Controller stage.
-            let AuthenticatedReads {
-                http,
-                credential,
-                acquisition,
-                process,
-                selection,
-                ..
-            } = reads;
+            // Resolve the actual phase BEFORE borrowing shared material:
+            // phase checks themselves reborrow that same provider context.
+            phase.check_authenticated_reads(&reads)?;
+            let stage = phase.controller_stage()?;
+            let borrow = state.gate.enter()?;
+            let mut material = state.material.try_borrow_mut()?;
+            material.check_bootstrap(stage, policy, store)?;
+            let selection = material.selection.clone();
+            drop(material);
+            borrow.complete()?;
             drop(phase);
             let mut port = Self {
                 owner: Rc::clone(&owner),
-                http,
-                credential,
-                acquisition,
-                process,
+                reads,
                 selection,
                 valid: true,
             };
             port.sample()?;
+            guard.complete()?;
             Ok(port)
         })();
-        if result.is_err()
-            && let Ok(mut phase) = owner.try_borrow_mut()
-        {
-            phase.refuse();
+        if result.is_err() {
+            state.refuse();
+            if let Ok(mut phase) = owner.try_borrow_mut() {
+                phase.refuse();
+            }
         }
         result
     }
@@ -102,7 +88,15 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 "epoch_writer_selection_changed"
             );
             let sample = self.sample()?;
-            let (_, deadline) = self.acquisition.interval_data()?;
+            let guard = self.reads.state.gate.enter()?;
+            let (_, deadline) = self
+                .reads
+                .state
+                .material
+                .try_borrow_mut()?
+                .acquisition
+                .interval_data()?;
+            guard.complete()?;
             Ok((sample, deadline))
         })();
         if result.is_err() {
@@ -111,14 +105,23 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         result
     }
 
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<super::super::firestore::Budget> {
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
         self.sample()?;
-        self.acquisition.budget()
+        let guard = self.reads.state.gate.enter()?;
+        let result = self
+            .reads
+            .state
+            .material
+            .try_borrow_mut()?
+            .acquisition
+            .budget()?;
+        guard.complete()?;
+        Ok(result)
     }
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.valid = false;
-        self.acquisition.refuse();
+        self.reads.refuse();
         if let Ok(mut phase) = self.owner.try_borrow_mut() {
             phase.refuse();
         }
@@ -128,11 +131,19 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
 impl ControllerPort<'_, '_> {
     fn sample(&mut self) -> Result<Sample> {
         let result = (|| {
+            let guard = self.reads.state.gate.guard()?;
             ensure!(self.valid, "epoch_writer_refused");
             self.owner.try_borrow_mut()?.check()?;
-            self.process.check(&mut self.acquisition)?;
-            let sample = self.acquisition.sample()?;
+            let mut phase = self.owner.try_borrow_mut()?;
+            let stage = phase.controller_stage()?;
+            let borrow = self.reads.state.gate.enter()?;
+            let mut material = self.reads.state.material.try_borrow_mut()?;
+            let sample = material.sample(stage)?;
+            drop(material);
+            borrow.complete()?;
+            drop(phase);
             self.owner.try_borrow_mut()?.check()?;
+            guard.complete()?;
             Ok(sample)
         })();
         if result.is_err() {
@@ -149,6 +160,7 @@ impl ControllerPort<'_, '_> {
         max_bytes: usize,
     ) -> Result<EpochReply> {
         let result = (|| {
+            let guard = self.reads.state.gate.guard()?;
             self.sample()?;
             ensure!(
                 max_bytes == 65_536
@@ -157,19 +169,37 @@ impl ControllerPort<'_, '_> {
                     && timeout <= Duration::from_secs(5),
                 "epoch_writer_budget"
             );
+            let mut phase = self.owner.try_borrow_mut()?;
+            let stage = phase.controller_stage()?;
+            let borrow = self.reads.state.gate.enter()?;
+            let mut material = self.reads.state.material.try_borrow_mut()?;
+            material.sample(stage)?;
             let route = writer_route(url)?;
             ensure!(
-                self.http.matches(&route, url)?,
+                material.http.matches(&route, url)?,
                 "epoch_writer_recipient_changed"
             );
-            let bytes = self.http.request_with_ceiling(
+            let RetainedEpochReads {
+                http,
+                credential,
+                acquisition,
+                ..
+            } = &mut *material;
+            let requested = http.request_with_ceiling(
                 route,
-                &self.credential.authorization()?,
+                &credential.authorization()?,
                 Some(body),
-                &mut self.acquisition,
+                acquisition,
                 timeout,
-            )?;
+            );
+            let checked = material.sample(stage);
+            let bytes = requested?;
+            checked?;
+            drop(material);
+            borrow.complete()?;
+            drop(phase);
             self.sample()?;
+            guard.complete()?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
@@ -191,7 +221,7 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
         self.owner.context_interval(owner, selection)
     }
 
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<super::super::firestore::Budget> {
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
         self.owner.budget()
     }
 }

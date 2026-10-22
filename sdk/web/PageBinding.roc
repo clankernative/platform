@@ -17,6 +17,8 @@ PageBinding :: { metadata : Metadata }.{
 		output_type : Str,
 		live : Bool,
 		live_refresh_ms : U64,
+		preparation : List(Str),
+		prepare_failure_operation : Str,
 		# Optional registered page path, with the same input type, rendered when
 		# this page fails on the server. Empty retains the platform error page.
 		failure_page : Str,
@@ -37,6 +39,8 @@ PageBinding :: { metadata : Metadata }.{
 				output_type: operation.output_type,
 				live: Bool.False,
 				live_refresh_ms: 0,
+				preparation: [],
+				prepare_failure_operation: "",
 				failure_page: "",
 			},
 		}
@@ -80,6 +84,24 @@ PageBinding :: { metadata : Metadata }.{
 
 	metadata : PageBinding -> Metadata
 	metadata = |binding| binding.metadata
+
+	before_read : PageBinding, Str -> PageBinding
+	before_read = |binding, command| {
+		..binding,
+		metadata: {
+			..binding.metadata,
+			preparation: List.append(binding.metadata.preparation, command),
+		},
+	}
+
+	on_prepare_failure : PageBinding, Str -> PageBinding
+	on_prepare_failure = |binding, operation| {
+		..binding,
+		metadata: {
+			..binding.metadata,
+			prepare_failure_operation: operation,
+		},
+	}
 
 	named : Str, PageBinding -> PageBinding
 	named = |name, binding| { ..binding, metadata: { ..binding.metadata, name } }

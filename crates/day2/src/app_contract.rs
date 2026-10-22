@@ -72,9 +72,23 @@ pub struct Operation {
     pub required_all_rows: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<String>,
+    pub verification_setup: Vec<String>,
+    pub verification_delegation: Vec<VerificationDelegation>,
 }
 
 impl Operation {
+    fn validate_verification_delegation(&self) -> Result<()> {
+        ensure!(
+            self.verification_delegation.len() <= 1,
+            "verification delegation budget"
+        );
+        for delegation in &self.verification_delegation {
+            validate_verification_name(&delegation.actor, "actor")?;
+            validate_verification_name(&delegation.application, "application")?;
+        }
+        Ok(())
+    }
+
     fn validate_observations(&self) -> Result<()> {
         ensure!(
             self.observations.len() <= crate::capabilities::READS.len(),
@@ -113,6 +127,21 @@ impl Operation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct VerificationDelegation {
+    pub actor: String,
+    pub application: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationDelegationCase {
+    pub operation: String,
+    pub actor: String,
+    pub application: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VerificationActor {
     pub operation: String,
     pub actor: String,
@@ -129,6 +158,19 @@ pub struct Failure {
     pub additional_operations: Vec<operation_metadata::Target>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_actors: Vec<VerificationActor>,
+    pub verification_delegations: Vec<VerificationDelegationCase>,
+}
+
+fn validate_verification_name(value: &str, label: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)),
+        "invalid verification {label}"
+    );
+    Ok(())
 }
 
 impl Failure {
@@ -182,6 +224,24 @@ impl Failure {
                 "application failure requires a matching operation contract and scenario"
             );
         }
+        let mut delegation_targets = BTreeSet::new();
+        ensure!(
+            self.verification_delegations.len() <= self.targets().count(),
+            "failure verification delegation budget"
+        );
+        for delegation in &self.verification_delegations {
+            ensure!(
+                self.targets()
+                    .any(|target| target.operation == delegation.operation),
+                "verification delegation requires a declared failure target"
+            );
+            ensure!(
+                delegation_targets.insert(&delegation.operation),
+                "duplicate failure verification delegation"
+            );
+            validate_verification_name(&delegation.actor, "actor")?;
+            validate_verification_name(&delegation.application, "application")?;
+        }
         let mut actor_targets = BTreeSet::new();
         for override_actor in &self.verification_actors {
             ensure!(
@@ -205,6 +265,72 @@ impl Failure {
         }
         Ok(())
     }
+}
+
+fn validate_verification_setup_list(setup: &[String], operation: &str) -> Result<()> {
+    ensure!(
+        setup.len() <= 4,
+        "verification setup command budget: {operation}"
+    );
+    let mut seen = BTreeSet::new();
+    for name in setup {
+        ensure!(
+            seen.insert(name),
+            "duplicate verification setup command: {operation}/{name}"
+        );
+        ensure!(name != operation, "operation cannot set itself up");
+    }
+    Ok(())
+}
+
+fn validate_verification_setup(
+    artifact: &Artifact,
+    target_name: &str,
+    target: &crate::artifact::Operation,
+    target_contract: &Operation,
+) -> Result<()> {
+    validate_verification_setup_list(&target_contract.verification_setup, target_name)?;
+    for setup_name in &target_contract.verification_setup {
+        let registered = artifact
+            .operations
+            .iter()
+            .find(|candidate| &candidate.name == setup_name)
+            .context("verification setup command must be registered")?;
+        ensure!(
+            registered.kind == "command",
+            "verification setup requires a command: {setup_name}"
+        );
+        let input = artifact
+            .schema
+            .inputs
+            .get(&registered.input_type)
+            .context("verification setup input is missing")?;
+        ensure!(
+            input.fields.is_empty(),
+            "verification setup command must have empty input: {setup_name}"
+        );
+        let contract = artifact
+            .app_contract
+            .as_ref()
+            .and_then(|definition| definition.operations.get(setup_name))
+            .context("verification setup command contract is missing")?;
+        ensure!(
+            !contract.deprecated
+                && !contract.execution.internal
+                && contract.credential_access == CredentialAccess::default()
+                && contract
+                    .execution
+                    .effects
+                    .iter()
+                    .all(|effect| { matches!(effect.kind.as_str(), "create" | "update") }),
+            "verification setup permits only public local create/update commands: {setup_name}"
+        );
+    }
+    ensure!(
+        target.name == target_name,
+        "verification setup metadata target mismatch"
+    );
+    Ok(())
 }
 
 fn validate_error_declarations(
@@ -507,6 +633,8 @@ impl Definition {
             );
             definition.validate_required_all_rows(&artifact.schema)?;
             definition.validate_observations()?;
+            definition.validate_verification_delegation()?;
+            validate_verification_setup(artifact, name, operation, definition)?;
         }
         for (path, media) in [
             (&self.presentation.stylesheet, "text/css; charset=utf-8"),
@@ -1001,7 +1129,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), observations: product.operations.{name}.observations(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), observations: product.operations.{name}.observations(), verification_setup: product.operations.{name}.verification_setup(), verification_delegation: product.operations.{name}.verification_delegation(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -1013,9 +1141,16 @@ pub fn modules(
     source.push_str(&format!("    definition : AppContract.Product -> Try(Api.Definition, Str)\n    definition = |product| Ok({{ operations: [{}], presentation: product.presentation, identities: SchemaSource.identities }})\n", metadata.join(", ")));
     source.push_str(&format!("    {prefix}step : AppContract.Product, Str -> Str\n    {prefix}step = |product, raw| {{\n        if raw == \"app-contract\" {{\n            result = definition(product)\n            empty : Api.Definition\n            empty = {{ operations: [], presentation: product.presentation, identities: SchemaSource.identities }}\n            return match result {{\n                Ok(value) => Json.to_str({{ definition: value, error: \"\" }})\n                Err(error) => Json.to_str({{ definition: empty, error }})\n            }}\n        }}\n        if raw == \"examples\" {{ return Example.encode(product.examples) }}\n        Product.{prefix}step({{ namespace: product.namespace, commands: [{}], queries: [{}], pages: product.pages, properties: product.properties }}, raw)\n    }}\n}}\n", bindings["command"], bindings["query"]));
     if !catalog.connections.is_empty() {
-        let declarations = catalog.connections.keys().map(|name| format!(
+        let declarations = catalog
+            .connections
+            .keys()
+            .map(|name| {
+                format!(
             "{{ registration: \"{name}\", requirement: product.connections.{name}.metadata() }}"
-        )).collect::<Vec<_>>().join(", ");
+        )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         source = source.replacen("        if raw == \"examples\"",
             &format!("        if raw == \"connection-contract\" {{ return Json.to_str([{declarations}]) }}\n        if raw == \"examples\""), 1);
     } else {
@@ -1627,14 +1762,40 @@ mod selector_tests {
     }
 
     #[test]
+    fn verification_setup_metadata_requires_bounded_distinct_non_self_commands() -> Result<()> {
+        validate_verification_setup_list(&[], "query")?;
+        validate_verification_setup_list(&["prepare_a".into(), "prepare_b".into()], "query")?;
+        assert!(validate_verification_setup_list(&["query".into()], "query").is_err());
+        assert!(
+            validate_verification_setup_list(&["prepare".into(), "prepare".into()], "query")
+                .is_err()
+        );
+        assert!(
+            validate_verification_setup_list(
+                &["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+                "query"
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn required_all_rows_metadata_defaults_empty_and_preserves_existing_wire() -> Result<()> {
         let (_, _, contracts) = shared_failure_fixture()?;
         for operation in contracts.values() {
             assert!(operation.required_all_rows.is_empty());
             let wire = serde_json::to_value(operation)?;
             assert!(wire.get("required_all_rows").is_none());
+            assert_eq!(wire["verification_setup"], serde_json::json!([]));
             let decoded: Operation = serde_json::from_value(wire.clone())?;
             assert_eq!(serde_json::to_value(decoded)?, wire);
+            let mut missing_setup = wire;
+            missing_setup
+                .as_object_mut()
+                .unwrap()
+                .remove("verification_setup");
+            assert!(serde_json::from_value::<Operation>(missing_setup).is_err());
         }
         Ok(())
     }
@@ -1702,6 +1863,9 @@ mod selector_tests {
                 assert!(metadata.contains("errors: contract.errors.map(|failure| failure.code())"));
                 assert!(metadata.contains(&format!(
                     "observations: product.operations.{operation}.observations()"
+                )));
+                assert!(metadata.contains(&format!(
+                    "verification_setup: product.operations.{operation}.verification_setup()"
                 )));
             }
         }
@@ -1805,7 +1969,7 @@ mod selector_tests {
                     "inputs":[], "outputs":[], "input_sources":[], "follow_ups":[]},
                 "request_example":"{}", "response_example":"{}", "deprecated":false,
                 "execution":{"internal":false,"model":"","id_field":"","version_field":"","effects":[]},
-                "errors":["app:example.invalid_input"]
+                "errors":["app:example.invalid_input"],"verification_setup":[],"verification_delegation":[]
             }))?);
         }
         let failure = Failure {
@@ -1823,6 +1987,7 @@ mod selector_tests {
                 output_type: "result".into(),
             }],
             verification_actors: Vec::new(),
+            verification_delegations: Vec::new(),
         };
         Ok((failure, operations, contracts))
     }
@@ -1954,7 +2119,8 @@ mod selector_tests {
     #[test]
     fn singleton_error_metadata_and_verification_keys_remain_compatible() -> Result<()> {
         let wire = serde_json::json!({"code":"app:example.invalid_input", "description":"Invalid.", "recovery":"Correct it.",
-            "operation":{"operation":"create","input_type":"input","output_type":"output"}});
+            "operation":{"operation":"create","input_type":"input","output_type":"output"},
+            "verification_delegations":[]});
         let failure: Failure = serde_json::from_value(wire.clone())?;
         assert_eq!(failure.targets().count(), 1);
         assert_eq!(
@@ -1967,7 +2133,8 @@ mod selector_tests {
             "description":"Invalid.",
             "recovery":"Correct it.",
             "operation":{"operation":"create","input_type":"input","output_type":"output"},
-            "verification_actors":[{"operation":"create","actor":"freetool-denied-synthetic"}]
+            "verification_actors":[{"operation":"create","actor":"freetool-denied-synthetic"}],
+            "verification_delegations":[]
         });
         let failure: Failure = serde_json::from_value(actor_wire.clone())?;
         assert_eq!(failure.verification_actors.len(), 1);

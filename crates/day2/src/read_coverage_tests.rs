@@ -41,7 +41,8 @@ impl Fixture {
                     },
                     "request_example":"{}","response_example":"{}","deprecated":false,
                     "execution":{"model":"","id_field":"","version_field":"","effects":[]},
-                    "errors":[],"required_all_rows":required
+                    "errors":[],"required_all_rows":required,
+                    "verification_setup":[],"verification_delegation":[]
                 }),
             );
             let grant = json!({"read":true,"create":false,
@@ -77,7 +78,7 @@ impl Fixture {
                 "sdk/main.roc":crate::digest(b"synthetic pure worker evidence"),
                 "sdk/contracts/Resource.roc":crate::digest(b"synthetic resource evidence")
             },"admission":"local-spike-only",
-            "pages":[{"name":"overview","title":"Overview","operation":"guarded_read","defaults":"{}"}],
+            "pages":[{"name":"overview","title":"Overview","operation":"guarded_read","defaults":"{}","preparation":[],"prepare_failure_operation":""}],
             "app_contract":{"operations":operation_contracts,"presentation":{"stylesheet":"","script":""},
                 "identities":"","invariants":{},"domains":{},"errors":{}}
         }))?;

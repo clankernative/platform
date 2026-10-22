@@ -121,7 +121,10 @@ providers! {
             NotificationsSend => "notifications.send.v1" (write),
         },
     },
-    SyntheticCarta {
+    // One provider for both sources. A connection without `live` reads the
+    // explicitly seeded synthetic store; a live connection captures Carta's
+    // issuer API (or its simulated wire world under a simulated host).
+    Carta {
         kind: CartaIssuer,
         world: "carta.synthetic.sqlite",
         actions: {
@@ -145,6 +148,7 @@ providers! {
         world: "workspace_directory.simulated.sqlite",
         actions: {
             WorkspaceDirectoryCapture => "workspace_directory.capture.v1" (read),
+            WorkspaceDirectoryUserPath => "workspace_directory.user_path.v1" (read),
             WorkspaceDirectoryHierarchy => "workspace_directory.hierarchy.v1" (read),
             WorkspaceDirectoryPage => "workspace_directory.page.v1" (read),
         },

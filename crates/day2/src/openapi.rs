@@ -434,7 +434,8 @@ mod structured_query_tests {
         let error: crate::app_contract::Failure = serde_json::from_value(json!({
             "code":"app:people.invalid_input", "description":"Invalid input.", "recovery":"Correct it.",
             "operation":{"operation":"people.upsert","input_type":"upsert_input","output_type":"rollout"},
-            "additional_operations":[{"operation":"people.effective","input_type":"path_input","output_type":"policy"}]
+            "additional_operations":[{"operation":"people.effective","input_type":"path_input","output_type":"policy"}],
+            "verification_delegations":[]
         }))?;
         let document = application_error(&error, "people.effective");
         assert_eq!(document["operation"]["operation"], "people.effective");

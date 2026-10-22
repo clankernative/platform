@@ -39,6 +39,8 @@ pub struct Page {
     pub live: bool,
     #[serde(default)]
     pub live_refresh_ms: u64,
+    pub preparation: Vec<String>,
+    pub prepare_failure_operation: String,
     /// Optional registered page path rendered with this page's input when it
     /// fails on the server. See `crate::routing::Route::failure_page`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -214,6 +216,44 @@ impl Page {
         Ok(())
     }
 }
+
+fn validate_page_preparation_command(artifact: &Artifact, name: &str) -> Result<()> {
+    let operation = artifact
+        .operations
+        .iter()
+        .find(|operation| operation.name == name && operation.kind == "command")
+        .context("page preparation requires a registered command")?;
+    let input = artifact
+        .schema
+        .inputs
+        .get(&operation.input_type)
+        .context("page preparation command input schema missing")?;
+    ensure!(
+        input.fields.is_empty(),
+        "page preparation command input must be empty"
+    );
+    let contract = artifact
+        .app_contract
+        .as_ref()
+        .and_then(|contract| contract.operations.get(name))
+        .context("page preparation command contract missing")?;
+    ensure!(
+        !contract.execution.internal
+            && contract.execution.model.is_empty()
+            && contract.execution.id_field.is_empty()
+            && contract.execution.version_field.is_empty()
+            && !contract.credential_access.enabled
+            && !contract.credential_access.interactive
+            && contract
+                .execution
+                .effects
+                .iter()
+                .all(|effect| { matches!(effect.kind.as_str(), "create" | "update") }),
+        "page preparation command exceeds the admitted create/update boundary"
+    );
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationLimits {
@@ -771,6 +811,37 @@ impl LoadedArtifact {
                 .find(|op| op.name == page.operation && op.kind == "query")
                 .context("page requires registered query")?;
             ensure!(page.defaults.len() < 65_536, "page defaults budget");
+            ensure!(
+                page.preparation.len() <= 4,
+                "page preparation command budget"
+            );
+            let mut preparation = BTreeSet::new();
+            for name in &page.preparation {
+                ensure!(
+                    preparation.insert(name),
+                    "duplicate page preparation command"
+                );
+                validate_page_preparation_command(&contract, name)?;
+            }
+            if !page.prepare_failure_operation.is_empty() {
+                let fallback = contract
+                    .operations
+                    .iter()
+                    .find(|operation| {
+                        operation.name == page.prepare_failure_operation
+                            && operation.kind == "query"
+                    })
+                    .context("page preparation fallback must be a registered query")?;
+                ensure!(
+                    fallback.input_type == query.input_type
+                        && fallback.output_type == query.output_type,
+                    "page preparation fallback schema differs from main query"
+                );
+                ensure!(
+                    !page.preparation.is_empty(),
+                    "preparation failure query requires preparation commands"
+                );
+            }
             if contract.format < 7 {
                 ensure!(
                     page.path.is_empty()
@@ -795,7 +866,7 @@ impl LoadedArtifact {
                     crate::web_templates::validate_routed_bindings(
                         &directory,
                         &contract.templates,
-                        &page.template,
+                        page,
                         &context,
                         &contract.assets,
                         routes,
@@ -2847,7 +2918,7 @@ mod output_contract_tests {
                 "format":6,"verification_limits":VerificationLimits::QUALIFIED,"roc_version":"fixture","worker_digest":"fixture",
                 "schema_digest":"fixture","schema":{"models":{},"inputs":{},"foreign_keys":[]},
                 "operations":[{"name":"links.list","kind":"query","input_type":"list_links","output_type":"links"}],
-                "pages":[{"name":"links","title":"Links","operation":"links.list","defaults":"{}","template":"pages/links.html","output_type":"links"}],
+                "pages":[{"name":"links","title":"Links","operation":"links.list","defaults":"{}","template":"pages/links.html","output_type":"links","preparation":[],"prepare_failure_operation":""}],
                 "outputs":{"links":{"shape":{"record":{"title":"string"}},"roc_type":"{ title : Str }"}},
                 "sources":{},"admission":"local-spike-only"
             }))?,
@@ -3105,6 +3176,8 @@ mod schedule_admission_tests {
                         "reports.sweep": {
                                 "deprecated": false,
                                 "errors": [],
+                                "verification_setup": [],
+                                "verification_delegation": [],
                                 "execution": {
                                         "effects": [],
                                         "id_field": "",
@@ -3139,6 +3212,8 @@ mod schedule_admission_tests {
                         "reports.submit": {
                                 "deprecated": false,
                                 "errors": [],
+                                "verification_setup": [],
+                                "verification_delegation": [],
                                 "execution": {
                                         "effects": [],
                                         "id_field": "",

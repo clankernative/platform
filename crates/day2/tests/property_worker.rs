@@ -72,6 +72,7 @@ fn operation_campaign_checks_large_before_and_after_snapshots() -> Result<()> {
     ensure!(campaign.is_complete() && campaign.evidence.verification_complete);
     ensure!(campaign.evidence.failure.is_none());
     let operations = campaign.runtime.artifact().contract().operations.len();
+    ensure!(completed.get("dev-setups") == Some(&operations));
     ensure!(completed.get("dev-prepare-sample") == Some(&operations));
     ensure!(completed.get("dev-assert") == Some(&operations));
     ensure!(completed.get("dev-errors") == Some(&1));

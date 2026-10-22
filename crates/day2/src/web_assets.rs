@@ -337,6 +337,10 @@ fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
             "text/javascript",
             include_bytes!("../../../assets/forms.js"),
         ),
+        "/assets/platform/reactive-queries.js" => (
+            "text/javascript",
+            include_bytes!("../../../assets/reactive-queries.js"),
+        ),
         "/assets/platform/navigation.js" => (
             "text/javascript",
             include_bytes!("../../../assets/navigation.js"),
