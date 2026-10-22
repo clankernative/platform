@@ -56,7 +56,7 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let result = (|| {
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             ensure!(
                 rustix::process::geteuid().as_raw() == 10001,
                 "storage_peer_filesystem_uid"
@@ -69,7 +69,7 @@ impl Channel {
             )?;
             configure(&socket)?;
             net::connect(&socket, &net::SocketAddrUnix::new(PATH)?)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             Ok(Self {
                 socket: File::from(socket),
                 refused: false,
@@ -89,9 +89,9 @@ impl Channel {
     ) -> Result<()> {
         let result = (|| {
             ensure!(!self.refused, "storage_peer_channel_refused");
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             require_connected(&self.socket, acquisition)?;
-            stage.check_storage_acquisition(acquisition)
+            stage.storage()?.check_storage_acquisition(acquisition)
         })();
         if result.is_err() {
             self.refused = true;
@@ -147,7 +147,7 @@ impl Channel {
         let result = (|| {
             ensure!(!self.refused, "storage_peer_channel_refused");
             self.check_storage_open(stage, acquisition)?;
-            let expected_code = stage.storage_peer_code()?;
+            let expected_code = stage.storage()?.storage_peer_code()?;
             let mut bytes = [0_u8; MAX_PACKET];
             let received = loop {
                 self.check_storage_open(stage, acquisition)?;
@@ -163,7 +163,7 @@ impl Channel {
             let message = crate::security_epoch::native_enrollment::storage_peer_wire::decode(
                 &bytes[..received.bytes],
             )?;
-            let process = match stage.storage_peer_role()? {
+            let process = match stage.storage()?.storage_peer_role()? {
                 NativeRole::AppHost => StorageSender::App(Box::new(MessageProcess::receive(
                     received,
                     &expected_code,
@@ -205,7 +205,7 @@ impl StorageListener {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let result = (|| {
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             ensure!(
                 rustix::process::geteuid().as_raw() == 10001,
                 "storage_peer_filesystem_uid"
@@ -216,7 +216,7 @@ impl StorageListener {
                 Mode::empty(),
             )?);
             let directory = StorageSocketDirectory::observe(&root)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             let socket = net::socket_with(
                 AddressFamily::UNIX,
                 SocketType::SEQPACKET,
@@ -230,7 +230,7 @@ impl StorageListener {
             std::fs::set_permissions(PATH, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
             net::listen(&socket, 1)?;
             directory.check(&root)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             Ok(Self {
                 socket: File::from(socket),
                 root,
@@ -252,15 +252,15 @@ impl StorageListener {
         let result = (|| {
             require_listener_cloexec(&self.socket)?;
             self.directory.check(&self.root)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             wait(&self.socket, PollFlags::IN, acquisition)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             let socket =
                 net::accept_with(&self.socket, SocketFlags::CLOEXEC | SocketFlags::NONBLOCK)?;
             configure(&socket)?;
             require_listener_cloexec(&self.socket)?;
             self.directory.check(&self.root)?;
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             Ok(Channel {
                 socket: File::from(socket),
                 refused: false,
@@ -385,7 +385,7 @@ impl ControllerReceipt {
     ) -> Result<()> {
         let result = (|| {
             self.check_received(acquisition)?;
-            stage.check_storage_controller_statement(
+            stage.storage()?.check_storage_controller_statement(
                 statement,
                 self.kernel_process,
                 acquisition,
@@ -426,8 +426,8 @@ impl ControllerReceipt {
     ) -> Result<()> {
         let result = (|| {
             self.check_received(acquisition)?;
-            stage.check_storage_acquisition(acquisition)?;
-            let local = stage.storage_statement()?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
+            let local = stage.storage()?.storage_statement()?;
             ensure!(
                 self.statement.as_ref() == Some(&statement.digest()?)
                     && statement.certificate == local.certificate
@@ -438,7 +438,7 @@ impl ControllerReceipt {
                 "storage_peer_original_controller_identity_changed"
             );
             self.check_received(acquisition)?;
-            stage.check_storage_acquisition(acquisition)
+            stage.storage()?.check_storage_acquisition(acquisition)
         })();
         if result.is_err() {
             self.valid = false;
@@ -459,7 +459,7 @@ impl ControllerReceipt {
                 self.statement.as_ref() == Some(&statement.digest()?),
                 "storage_peer_controller_not_bound"
             );
-            stage.check_storage_controller_statement(
+            stage.storage()?.check_storage_controller_statement(
                 statement,
                 self.kernel_process,
                 acquisition,

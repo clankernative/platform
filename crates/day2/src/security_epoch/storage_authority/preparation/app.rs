@@ -41,7 +41,9 @@ impl ContinuityPurpose {
     ) -> Result<NativeAcquisition> {
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
-            Self::Bootstrap => stage.narrow_storage_bootstrap_io_acquisition(max_lease_seconds),
+            Self::Bootstrap => stage
+                .storage()?
+                .narrow_storage_bootstrap_io_acquisition(max_lease_seconds),
         }
     }
 }
@@ -433,8 +435,9 @@ impl AppFileContinuity {
                     offset += read;
                     self.check_bootstrap_physical(stage)?;
                 }
-                let mut acquisition =
-                    stage.narrow_storage_bootstrap_io_acquisition(self.store.max_lease_seconds)?;
+                let mut acquisition = stage
+                    .storage()?
+                    .narrow_storage_bootstrap_io_acquisition(self.store.max_lease_seconds)?;
                 self.image.decode_exact_readback(&bytes, &mut acquisition)?;
                 self.check_bootstrap_physical(stage)
             }

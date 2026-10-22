@@ -241,12 +241,13 @@ impl RetainedPeer {
         );
         let mut acquisition = match purpose {
             StoragePeerPurpose::CurrentServing => stage.narrow_io_acquisition(5)?,
-            StoragePeerPurpose::BootstrapCreate | StoragePeerPurpose::BootstrapComplete => stage
-                .narrow_storage_bootstrap_io_acquisition(
+            StoragePeerPurpose::BootstrapCreate | StoragePeerPurpose::BootstrapComplete => {
+                stage.storage()?.narrow_storage_bootstrap_io_acquisition(
                     STORAGE_BOOTSTRAP_LIMIT.as_secs().try_into()?,
-                )?,
+                )?
+            }
         };
-        let local = stage.storage_statement()?;
+        let local = stage.storage()?.storage_statement()?;
         ensure!(
             self.local.same_enrollment(&local),
             "storage_peer_enrollment_changed"
@@ -262,12 +263,12 @@ impl RetainedPeer {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         self.same.check(stage)?;
-        let local = stage.storage_statement()?;
+        let local = stage.storage()?.storage_statement()?;
         ensure!(
             self.local.same_enrollment(&local),
             "storage_peer_enrollment_changed"
         );
-        stage.check_storage_acquisition(acquisition)?;
+        stage.storage()?.check_storage_acquisition(acquisition)?;
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("storage_peer_platform_unsupported");
         #[cfg(target_os = "linux")]
@@ -406,7 +407,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             let mut peer = Peer::authenticate(&ready, remote, process, stage, &mut acquisition)?;
             let nonce = protocol::nonce("current-storage-peer-app")?;
             self.owner.check_resources(stage, &mut acquisition)?;
-            let hello = stage.sign_storage_message(Body::CurrentHello {
+            let hello = stage.storage()?.sign_storage_message(Body::CurrentHello {
                 app: Box::new(local.clone()),
                 initial: self.owner.initial.clone(),
                 sequence,
@@ -447,7 +448,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             self.owner.check_resources(stage, &mut acquisition)?;
             peer.check(stage, &mut acquisition)?;
             let digest = exchange.digest()?;
-            let ack = stage.sign_storage_message(Body::CurrentAck {
+            let ack = stage.storage()?.sign_storage_message(Body::CurrentAck {
                 exchange: digest.clone(),
             })?;
             self.owner
@@ -556,12 +557,14 @@ impl ControllerHolderPeerContinuity {
             )?;
             self.owner.check_resources(stage, &mut acquisition)?;
             let nonce = protocol::nonce("current-storage-peer-controller")?;
-            let ready = stage.sign_storage_message(Body::CurrentBeginReady {
-                controller: Box::new(local.clone()),
-                initial: self.owner.initial.clone(),
-                sequence,
-                nonce: nonce.clone(),
-            })?;
+            let ready = stage
+                .storage()?
+                .sign_storage_message(Body::CurrentBeginReady {
+                    controller: Box::new(local.clone()),
+                    initial: self.owner.initial.clone(),
+                    sequence,
+                    nonce: nonce.clone(),
+                })?;
             self.owner
                 .channel
                 .send_storage(&ready, stage, &mut acquisition)?;
@@ -598,10 +601,12 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
         let local = self.local;
         let sequence = self.sequence;
         ensure!(
-            local == stage.storage_statement()?,
+            local == stage.storage()?.storage_statement()?,
             "storage_peer_current_ready_stage_changed"
         );
-        stage.check_storage_acquisition(&mut acquisition)?;
+        stage
+            .storage()?
+            .check_storage_acquisition(&mut acquisition)?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (acquisition, local, sequence, expected);
@@ -637,7 +642,7 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
             };
             self.owner.check_resources(stage, &mut acquisition)?;
             peer.check(stage, &mut acquisition)?;
-            let offer = stage.sign_storage_message(Body::CurrentOffer {
+            let offer = stage.storage()?.sign_storage_message(Body::CurrentOffer {
                 controller: Box::new(local.clone()),
                 exchange: exchange.clone(),
             })?;
@@ -657,7 +662,9 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
             );
             self.owner.check_resources(stage, &mut acquisition)?;
             peer.check(stage, &mut acquisition)?;
-            let ready = stage.sign_storage_message(Body::CurrentReady { exchange: digest })?;
+            let ready = stage
+                .storage()?
+                .sign_storage_message(Body::CurrentReady { exchange: digest })?;
             self.owner
                 .channel
                 .send_storage(&ready, stage, &mut acquisition)?;
@@ -722,7 +729,7 @@ impl CurrentStoragePeerPhase<'_> {
                     } else {
                         Body::CurrentConsumed { exchange: digest }
                     };
-                    let message = stage.sign_storage_message(body)?;
+                    let message = stage.storage()?.sign_storage_message(body)?;
                     self.owner
                         .channel
                         .send_storage(&message, stage, &mut self.acquisition)?;
@@ -830,7 +837,7 @@ impl CurrentStoragePeerPhase<'_> {
             stage.require_purpose(self.exchange.request.purpose.stage_purpose())?;
             self.owner.check_resources(stage, &mut self.acquisition)?;
             ensure!(
-                self.local == stage.storage_statement()?,
+                self.local == stage.storage()?.storage_statement()?,
                 "storage_peer_current_stage_replaced"
             );
             #[cfg(not(target_os = "linux"))]

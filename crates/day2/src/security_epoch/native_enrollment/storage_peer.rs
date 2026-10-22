@@ -158,14 +158,16 @@ impl InitialHolderConnection {
         }
         #[cfg(target_os = "linux")]
         {
-            stage.begin_initial_holder_attempt()?;
+            stage.storage()?.begin_initial_holder_attempt()?;
             let mut owner = stage.capture_same_owner()?;
             let mut acquisition = stage.narrow_io_acquisition(5)?;
             let mut channel = Channel::connect_storage(stage, &mut acquisition)?;
-            let setup_grant = stage.storage_statement()?.grant_digest()?;
+            let setup_grant = stage.storage()?.storage_statement()?.grant_digest()?;
             owner.check(stage)?;
             channel.check_storage_open(stage, &mut acquisition)?;
-            stage.check_storage_acquisition(&mut acquisition)?;
+            stage
+                .storage()?
+                .check_storage_acquisition(&mut acquisition)?;
             Ok(Self {
                 owner,
                 setup_grant,
@@ -273,9 +275,9 @@ impl InitialHolderListener {
                 .listener
                 .accept(stage, &mut acquisition)
                 .map_err(|error| PreparationFailure::at(PreparationStep::FirstAccept, error))?;
-            let local = stage.storage_statement()?;
+            let local = stage.storage()?.storage_statement()?;
             let controller_nonce = protocol::nonce("initial-holder-controller")?;
-            let ready = stage.sign_storage_message(Body::InitialReady {
+            let ready = stage.storage()?.sign_storage_message(Body::InitialReady {
                 controller: Box::new(local.clone()),
                 nonce: controller_nonce.clone(),
             })?;
@@ -310,9 +312,10 @@ impl InitialHolderRendezvous {
         );
         phase
             .controller_stage()?
+            .storage()?
             .check_storage_acquisition(&mut self.acquisition)?;
         ensure!(
-            phase.controller_stage()?.storage_statement()? == self.local,
+            phase.controller_stage()?.storage()?.storage_statement()? == self.local,
             "storage_peer_ready_stage_changed"
         );
         self.owner.check(phase.controller_stage()?)?;
@@ -337,9 +340,11 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
         #[cfg(target_os = "linux")]
         {
             let stage = self.phase.controller_stage()?;
-            stage.check_storage_acquisition(&mut self.acquisition)?;
+            stage
+                .storage()?
+                .check_storage_acquisition(&mut self.acquisition)?;
             ensure!(
-                stage.storage_statement()? == self.local,
+                stage.storage()?.storage_statement()? == self.local,
                 "storage_peer_local_stage_changed"
             );
             Ok(())
@@ -394,6 +399,7 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
             let offer = (|| {
                 self.phase
                     .controller_stage()?
+                    .storage()?
                     .sign_storage_message(Body::Offer {
                         controller: Box::new(self.local.clone()),
                         exchange: exchange.clone(),
@@ -439,6 +445,7 @@ impl<'file, 'role> InitialHolderServer<'file, 'role> {
             let complete = (|| {
                 self.phase
                     .controller_stage()?
+                    .storage()?
                     .sign_storage_message(Body::Complete {
                         exchange: exchange_digest.clone(),
                     })
@@ -514,7 +521,7 @@ impl AuthenticatedInitialHolderOffer {
         #[cfg(target_os = "linux")]
         {
             connection.owner.check(stage)?;
-            let local = stage.storage_statement()?;
+            let local = stage.storage()?.storage_statement()?;
             local.require_new_grant(&connection.setup_grant)?;
             let mut acquisition = stage.initial_first_holder_acquisition(
                 INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
@@ -531,7 +538,7 @@ impl AuthenticatedInitialHolderOffer {
             let mut peer =
                 Peer::authenticate(&ready, controller, process, stage, &mut acquisition)?;
             let app_nonce = protocol::nonce("initial-holder-app")?;
-            let hello = stage.sign_storage_message(Body::Hello {
+            let hello = stage.storage()?.sign_storage_message(Body::Hello {
                 app: Box::new(local.clone()),
                 nonce: app_nonce.clone(),
                 controller_nonce: controller_nonce.clone(),
@@ -586,9 +593,11 @@ impl AuthenticatedInitialHolderOffer {
             }
             #[cfg(target_os = "linux")]
             {
-                stage.check_storage_acquisition(&mut self.acquisition)?;
+                stage
+                    .storage()?
+                    .check_storage_acquisition(&mut self.acquisition)?;
                 ensure!(
-                    stage.storage_statement()? == self.local,
+                    stage.storage()?.storage_statement()? == self.local,
                     "storage_peer_local_stage_changed"
                 );
                 self.channel
@@ -647,10 +656,13 @@ impl AuthenticatedInitialHolderOffer {
             #[cfg(target_os = "linux")]
             {
                 let exchange = self.exchange.digest()?;
-                let confirm = file.app_stage()?.sign_storage_message(Body::Confirm {
-                    exchange: exchange.clone(),
-                    projection: self.exchange.projection.clone(),
-                })?;
+                let confirm = file
+                    .app_stage()?
+                    .storage()?
+                    .sign_storage_message(Body::Confirm {
+                        exchange: exchange.clone(),
+                        projection: self.exchange.projection.clone(),
+                    })?;
                 self.channel
                     .send_storage(&confirm, file.app_stage()?, &mut self.acquisition)?;
                 self.check_file(&mut file)?;
@@ -670,6 +682,7 @@ impl AuthenticatedInitialHolderOffer {
                 self.check_file(&mut file)?;
                 let accepted = file
                     .app_stage()?
+                    .storage()?
                     .sign_storage_message(Body::Accepted { exchange })?;
                 self.channel
                     .send_storage(&accepted, file.app_stage()?, &mut self.acquisition)?;
@@ -716,9 +729,11 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
             #[cfg(target_os = "linux")]
             {
                 let stage = self.phase.controller_stage()?;
-                stage.check_storage_acquisition(&mut self.acquisition)?;
+                stage
+                    .storage()?
+                    .check_storage_acquisition(&mut self.acquisition)?;
                 ensure!(
-                    stage.storage_statement()? == self.local,
+                    stage.storage()?.storage_statement()? == self.local,
                     "storage_peer_local_stage_changed"
                 );
                 self.channel

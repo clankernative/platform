@@ -228,9 +228,9 @@ impl AuthenticatedReads<'_, '_> {
         } = self;
         let acquisition = match scope {
             ReadScope::Current => acquisition,
-            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
-                stage.complete_storage_authentication(acquisition, store.max_lease_seconds)?
-            }
+            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => stage
+                .storage()?
+                .complete_storage_authentication(acquisition, store.max_lease_seconds)?,
         };
         Ok(RetainedEpochReads {
             scope,

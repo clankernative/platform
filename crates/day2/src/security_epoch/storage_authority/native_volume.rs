@@ -282,12 +282,12 @@ impl<'role> ProviderReader<'role> {
         stage.require_purpose(purpose)?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let mut acquisition = match purpose {
-            StagePurpose::StorageBootstrap => {
-                stage.narrow_storage_bootstrap_io_acquisition(store.max_lease_seconds)?
-            }
-            StagePurpose::StorageMetadataObservation => {
-                stage.narrow_storage_metadata_observation_io_acquisition(store.max_lease_seconds)?
-            }
+            StagePurpose::StorageBootstrap => stage
+                .storage()?
+                .narrow_storage_bootstrap_io_acquisition(store.max_lease_seconds)?,
+            StagePurpose::StorageMetadataObservation => stage
+                .storage()?
+                .narrow_storage_metadata_observation_io_acquisition(store.max_lease_seconds)?,
             _ => anyhow::bail!("storage_provider_authenticated_purpose_required"),
         };
         authentication.check(&mut stage, policy, store, &mut acquisition)?;

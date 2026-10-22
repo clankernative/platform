@@ -72,7 +72,7 @@ impl ReadScope {
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
             Self::StorageBootstrap | Self::StorageMetadataObservation => {
-                let mut child = stage.narrow_storage_authentication()?;
+                let mut child = stage.storage()?.narrow_storage_authentication()?;
                 let (_, ceiling) = child.interval_data()?;
                 child.narrow(max_lease_seconds, ceiling)
             }
@@ -87,12 +87,12 @@ impl ReadScope {
         self.require(stage)?;
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
-            Self::StorageBootstrap => {
-                stage.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
-            }
-            Self::StorageMetadataObservation => {
-                stage.narrow_storage_metadata_observation_io_acquisition(max_lease_seconds)
-            }
+            Self::StorageBootstrap => stage
+                .storage()?
+                .narrow_storage_bootstrap_io_acquisition(max_lease_seconds),
+            Self::StorageMetadataObservation => stage
+                .storage()?
+                .narrow_storage_metadata_observation_io_acquisition(max_lease_seconds),
         }
     }
 
