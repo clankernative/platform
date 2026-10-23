@@ -57,6 +57,8 @@ pub struct Manifest {
     /// Reviewed local provider stores. Older format-2 backups predate this field.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_databases: BTreeMap<String, String>,
+    /// Additional durable companion state, keyed by its path beneath `.state`.
+    pub companion_state: BTreeMap<String, String>,
     pub app: String,
     pub authority: authority_state::AuthorityStamp,
     #[serde(default)]
@@ -321,7 +323,359 @@ fn verify_providers(backup: &Path, providers: &BTreeMap<String, String>) -> Resu
     Ok(())
 }
 
+const MAX_COMPANION_STATE_FILES: usize = 16_384;
+const MAX_COMPANION_STATE_ENTRIES: usize = 65_536;
+const MAX_COMPANION_STATE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+#[derive(Default)]
+struct CompanionBudget {
+    files: usize,
+    entries: usize,
+    bytes: u64,
+}
+
+fn sorted_companion_entries(
+    directory: &Path,
+    budget: &mut CompanionBudget,
+) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        budget.entries += 1;
+        ensure!(
+            budget.entries <= MAX_COMPANION_STATE_ENTRIES,
+            "companion state entry budget exceeded"
+        );
+        entries.push(entry?);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+pub fn validate_companion_state_subpath(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with("companions/") && path.len() <= 220 && path.split('/').count() <= 5,
+        "companion state path must be beneath companions/"
+    );
+    validate_relative_state_path(path)
+}
+
+pub fn validate_companion_sqlite_path(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with("companions/")
+            && path.ends_with(".sqlite")
+            && path.len() <= 256
+            && path.split('/').count() <= 15,
+        "companion SQLite path must name a .sqlite file beneath companions/"
+    );
+    validate_relative_state_path(path)
+}
+
+fn validate_relative_state_path(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && path.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }),
+        "invalid companion state path"
+    );
+    Ok(())
+}
+
+fn validate_companion_selection(subpaths: &[String], databases: &[String]) -> Result<()> {
+    ensure!(subpaths.len() <= 8, "companion state path budget");
+    let unique: std::collections::BTreeSet<_> = subpaths.iter().collect();
+    ensure!(
+        unique.len() == subpaths.len(),
+        "duplicate companion state path"
+    );
+    for path in subpaths {
+        validate_companion_state_subpath(path)?;
+    }
+    for (index, path) in subpaths.iter().enumerate() {
+        ensure!(
+            !subpaths.iter().enumerate().any(|(other_index, other)| {
+                index != other_index && other.starts_with(&format!("{path}/"))
+            }),
+            "overlapping companion state paths"
+        );
+    }
+    let unique: std::collections::BTreeSet<_> = databases.iter().collect();
+    ensure!(
+        unique.len() == databases.len(),
+        "duplicate companion SQLite path"
+    );
+    for database in databases {
+        validate_companion_sqlite_path(database)?;
+        ensure!(
+            subpaths
+                .iter()
+                .filter(|subpath| database.starts_with(&format!("{subpath}/")))
+                .count()
+                == 1,
+            "companion SQLite path must belong to one selected state directory"
+        );
+    }
+    Ok(())
+}
+
+fn private_parent(path: &Path) -> Result<()> {
+    if path.exists() {
+        ensure!(
+            fs::symlink_metadata(path)?.file_type().is_dir(),
+            "companion backup parent must be a directory"
+        );
+        return Ok(());
+    }
+    let parent = path.parent().context("companion backup parent")?;
+    if parent.exists() {
+        ensure!(
+            fs::symlink_metadata(parent)?.file_type().is_dir(),
+            "companion backup parent must be a directory"
+        );
+    } else {
+        private_parent(parent)?;
+        private_new(parent)?;
+    }
+    private_new(path)
+}
+
+fn copy_companion_tree(
+    source: &Path,
+    target: &Path,
+    relative: &Path,
+    excluded: &std::collections::BTreeSet<String>,
+    budget: &mut CompanionBudget,
+    depth: usize,
+) -> Result<()> {
+    ensure!(
+        depth <= 10 && fs::symlink_metadata(source)?.file_type().is_dir(),
+        "invalid companion state directory"
+    );
+    private_parent(target.parent().context("companion backup parent")?)?;
+    private_new(target)?;
+    for entry in sorted_companion_entries(source, budget)? {
+        let kind = entry.file_type()?;
+        let child_relative = relative.join(entry.file_name());
+        let child_name = child_relative
+            .to_str()
+            .context("companion state path must be UTF-8")?
+            .to_owned();
+        if excluded.contains(&child_name)
+            || excluded.contains(&format!("{child_name}-wal"))
+            || excluded.contains(&format!("{child_name}-shm"))
+        {
+            continue;
+        }
+        let source_child = entry.path();
+        let target_child = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_companion_tree(
+                &source_child,
+                &target_child,
+                &child_relative,
+                excluded,
+                budget,
+                depth + 1,
+            )?;
+        } else {
+            ensure!(
+                kind.is_file(),
+                "companion state links and special files forbidden"
+            );
+            budget.files += 1;
+            budget.bytes = budget.bytes.saturating_add(entry.metadata()?.len());
+            ensure!(
+                budget.files <= MAX_COMPANION_STATE_FILES
+                    && budget.bytes <= MAX_COMPANION_STATE_BYTES,
+                "companion state backup budget exceeded"
+            );
+            fs::copy(source_child, target_child)?;
+        }
+    }
+    Ok(())
+}
+
+fn tree_digest_with_budget(path: &Path, budget: &mut CompanionBudget) -> Result<String> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        hasher: &mut DigestContext,
+        budget: &mut CompanionBudget,
+        depth: usize,
+    ) -> Result<()> {
+        ensure!(
+            depth <= 10 && fs::symlink_metadata(directory)?.file_type().is_dir(),
+            "invalid companion state directory"
+        );
+        for entry in sorted_companion_entries(directory, budget)? {
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)?
+                .to_str()
+                .context("companion state path must be UTF-8")?;
+            if kind.is_dir() {
+                hasher.update(relative.as_bytes());
+                hasher.update(&[0]);
+                visit(root, &path, hasher, budget, depth + 1)?;
+            } else {
+                ensure!(
+                    kind.is_file(),
+                    "companion state links and special files forbidden"
+                );
+                let file_size = entry.metadata()?.len();
+                budget.files += 1;
+                budget.bytes = budget.bytes.saturating_add(file_size);
+                ensure!(
+                    budget.files <= MAX_COMPANION_STATE_FILES
+                        && budget.bytes <= MAX_COMPANION_STATE_BYTES,
+                    "companion state verification budget exceeded"
+                );
+                hasher.update(relative.as_bytes());
+                hasher.update(&[0]);
+                hasher.update(&file_size.to_be_bytes());
+                let mut file = fs::File::open(path)?;
+                let mut buffer = [0; 64 * 1024];
+                loop {
+                    let count = match file.read(&mut buffer) {
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+                hasher.update(&[0xff]);
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = DigestContext::new(&SHA256);
+    visit(path, path, &mut hasher, budget, 0)?;
+    let hex: String = hasher
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("sha256:{hex}"))
+}
+
+fn state_source_path(root: &Path, relative: &str, directory: bool) -> Result<PathBuf> {
+    validate_relative_state_path(relative)?;
+    let mut path = root.to_path_buf();
+    let segments: Vec<_> = relative.split('/').collect();
+    for (index, segment) in segments.iter().enumerate() {
+        path.push(segment);
+        let metadata = fs::symlink_metadata(&path)?;
+        let final_segment = index + 1 == segments.len();
+        ensure!(
+            if final_segment && !directory {
+                metadata.file_type().is_file()
+            } else {
+                metadata.file_type().is_dir()
+            },
+            "companion state paths cannot contain links or special files"
+        );
+    }
+    Ok(path)
+}
+
+fn snapshot_companion_state(
+    state_root: &Path,
+    output: &Path,
+    subpaths: &[String],
+    databases: &[String],
+) -> Result<BTreeMap<String, String>> {
+    validate_companion_selection(subpaths, databases)?;
+    if !subpaths.is_empty() {
+        private_parent(&output.join("companion-state"))?;
+    }
+    let database_set: std::collections::BTreeSet<_> = databases.iter().cloned().collect();
+    let mut budget = CompanionBudget::default();
+    let mut digest_budget = CompanionBudget::default();
+    let mut digests = BTreeMap::new();
+    for subpath in subpaths {
+        let source = state_source_path(state_root, subpath, true)
+            .context("companion state directory is missing or unsafe")?;
+        let target = output.join("companion-state").join(subpath);
+        let excluded: std::collections::BTreeSet<_> = database_set
+            .iter()
+            .filter_map(|database| database.strip_prefix(&format!("{subpath}/")))
+            .map(str::to_owned)
+            .collect();
+        copy_companion_tree(&source, &target, Path::new(""), &excluded, &mut budget, 0)?;
+        for database in databases.iter().filter_map(|database| {
+            database
+                .strip_prefix(&format!("{subpath}/"))
+                .map(|relative| (database, relative))
+        }) {
+            let (database_path, relative) = database;
+            let source_database = state_source_path(state_root, database_path, false)
+                .context("companion SQLite database is missing or unsafe")?;
+            budget.files += 1;
+            ensure!(
+                budget.files <= MAX_COMPANION_STATE_FILES,
+                "companion state backup budget exceeded"
+            );
+            let destination = target.join(relative);
+            private_parent(destination.parent().context("companion database parent")?)?;
+            let start = Instant::now();
+            drop(online_snapshot(
+                &source_database,
+                &destination,
+                ONLINE,
+                || start.elapsed(),
+            )?);
+            integrity(&destination)?;
+            budget.bytes = budget
+                .bytes
+                .saturating_add(fs::metadata(&destination)?.len());
+            ensure!(
+                budget.bytes <= MAX_COMPANION_STATE_BYTES,
+                "companion state backup budget exceeded"
+            );
+        }
+        digests.insert(
+            subpath.clone(),
+            tree_digest_with_budget(&target, &mut digest_budget)?,
+        );
+    }
+    Ok(digests)
+}
+
+fn verify_companion_state(backup: &Path, state: &BTreeMap<String, String>) -> Result<()> {
+    validate_companion_selection(&state.keys().cloned().collect::<Vec<_>>(), &[])?;
+    let mut budget = CompanionBudget::default();
+    for (subpath, digest) in state {
+        ensure!(
+            tree_digest_with_budget(&backup.join("companion-state").join(subpath), &mut budget)?
+                == *digest,
+            "companion state digest mismatch"
+        );
+    }
+    Ok(())
+}
+
 pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> {
+    take_with_companion_state(instance_path, app, output, &[], &[])
+}
+
+pub fn take_with_companion_state(
+    instance_path: &Path,
+    app: &str,
+    output: &Path,
+    state_subpaths: &[String],
+    sqlite_paths: &[String],
+) -> Result<Manifest> {
+    validate_companion_selection(state_subpaths, sqlite_paths)?;
     let instance = Instance::load(instance_path)?;
     let runtime = Runtime::load(instance_path, app)?;
     ensure!(
@@ -348,6 +702,12 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     // quiesced provider work, as the managed local checkpoint does before take.
     // This is not an atomic distributed snapshot of arbitrary active executors.
     let provider_databases = snapshot_providers(runtime.db(), output)?;
+    let companion_state = snapshot_companion_state(
+        runtime.db().parent().context("app state directory")?,
+        output,
+        state_subpaths,
+        sqlite_paths,
+    )?;
     let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&active.artifact_id)?);
     private_new(&output.join("artifacts"))?;
     copy_tree(&artifact, &output.join(&artifact_relative), &mut 0, 0)?;
@@ -363,11 +723,12 @@ pub fn take(instance_path: &Path, app: &str, output: &Path) -> Result<Manifest> 
     binding.authority = active.document.policy;
     binding.resource_policies.clear();
     let manifest = Manifest {
-        format: 2,
+        format: 3,
         scope: runtime.scope().to_owned(),
         artifact: active.artifact_id,
         database: database_digest(&database)?,
         provider_databases,
+        companion_state,
         app: app.into(),
         authority: active.stamp,
         resources: active.document.resources,
@@ -388,7 +749,7 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
     );
     let manifest: Manifest = serde_json::from_slice(&fs::read(backup.join("backup.json"))?)?;
     ensure!(
-        manifest.format == 2
+        manifest.format == 3
             && manifest.instance.apps.len() == 1
             && manifest.instance.scope(&manifest.app)? == manifest.scope,
         "invalid backup scope"
@@ -404,6 +765,7 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
         "backup database digest mismatch"
     );
     verify_providers(backup, &manifest.provider_databases)?;
+    verify_companion_state(backup, &manifest.companion_state)?;
     let artifact = day2::artifact::LoadedArtifact::load(&backup.join(&artifact_relative))?;
     ensure!(
         artifact.id() == manifest.artifact,
@@ -469,6 +831,17 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
         fs::copy(
             backup.join("providers").join(name),
             output.join(".state").join(name),
+        )?;
+    }
+    let mut companion_budget = CompanionBudget::default();
+    for subpath in manifest.companion_state.keys() {
+        copy_companion_tree(
+            &backup.join("companion-state").join(subpath),
+            &output.join(".state").join(subpath),
+            Path::new(""),
+            &std::collections::BTreeSet::new(),
+            &mut companion_budget,
+            0,
         )?;
     }
     let database = output
@@ -690,11 +1063,12 @@ mod tests {
                 all.apps[app].oauth_connections
             );
             let manifest = Manifest {
-                format: 2,
+                format: 3,
                 scope: reloaded.scope(app)?,
                 artifact: day2::digest(b"historical artifact"),
                 database: day2::digest(b"historical database"),
                 provider_databases: BTreeMap::new(),
+                companion_state: BTreeMap::new(),
                 app: app.into(),
                 authority: authority_state::AuthorityStamp {
                     epoch: "local-history".into(),
@@ -859,11 +1233,12 @@ mod tests {
             instance.oauth_runtime.as_ref().unwrap().shell
         );
         let manifest = Manifest {
-            format: 2,
+            format: 3,
             scope: projected.scope("primary")?,
             artifact: day2::digest(b"artifact"),
             database: day2::digest(b"database"),
             provider_databases: BTreeMap::new(),
+            companion_state: BTreeMap::new(),
             app: "primary".into(),
             authority: authority_state::AuthorityStamp {
                 epoch: "local-history".into(),
@@ -934,6 +1309,94 @@ mod tests {
             .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn companion_state_uses_online_sqlite_snapshots_and_restores_the_selected_subpath() -> Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let state_root = directory.path().join(".state");
+        let service_state = state_root.join("companions/executor");
+        fs::create_dir_all(&service_state)?;
+        fs::write(service_state.join("private.json"), b"operator metadata")?;
+        let source_database = service_state.join("executor.sqlite");
+        let writer = Connection::open(&source_database)?;
+        writer.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE valueset(value TEXT NOT NULL); INSERT INTO valueset VALUES('before');",
+        )?;
+        let backup_root = directory.path().join("backup");
+        fs::create_dir(&backup_root)?;
+        let subpaths = vec!["companions/executor".to_owned()];
+        let databases = vec!["companions/executor/executor.sqlite".to_owned()];
+        let snapshot = snapshot_companion_state(&state_root, &backup_root, &subpaths, &databases)?;
+        verify_companion_state(&backup_root, &snapshot)?;
+        let copied_database =
+            backup_root.join("companion-state/companions/executor/executor.sqlite");
+        let copied =
+            Connection::open_with_flags(&copied_database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        assert_eq!(
+            copied.query_row("SELECT value FROM valueset", [], |row| row
+                .get::<_, String>(0))?,
+            "before"
+        );
+        writer.execute("INSERT INTO valueset VALUES('after')", [])?;
+        assert_eq!(
+            copied.query_row("SELECT COUNT(*) FROM valueset", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        verify_companion_state(&backup_root, &snapshot)?;
+
+        let restored_root = directory.path().join("restored/.state");
+        fs::create_dir_all(&restored_root)?;
+        let mut budget = CompanionBudget::default();
+        copy_companion_tree(
+            &backup_root.join("companion-state/companions/executor"),
+            &restored_root.join("companions/executor"),
+            Path::new(""),
+            &std::collections::BTreeSet::new(),
+            &mut budget,
+            0,
+        )?;
+        let restored = Connection::open_with_flags(
+            restored_root.join("companions/executor/executor.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        assert_eq!(
+            restored.query_row("SELECT COUNT(*) FROM valueset", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert_eq!(
+            fs::read(restored_root.join("companions/executor/private.json"))?,
+            b"operator metadata"
+        );
+        fs::write(
+            backup_root.join("companion-state/companions/executor/private.json"),
+            b"changed",
+        )?;
+        assert!(verify_companion_state(&backup_root, &snapshot).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn companion_state_selection_rejects_overlap_and_unscoped_sqlite_paths() {
+        assert!(
+            validate_companion_selection(
+                &["companions/a".into(), "companions/a/nested".into()],
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_companion_selection(
+                &["companions/a".into()],
+                &["companions/other/store.sqlite".into()]
+            )
+            .is_err()
+        );
+        assert!(validate_companion_state_subpath("companions/../escape").is_err());
+        assert!(validate_companion_state_subpath("companions/a/b/c/d/e").is_err());
     }
 
     #[test]

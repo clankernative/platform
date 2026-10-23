@@ -27,8 +27,8 @@ pub const METADATA_TOKEN_URL: &str =
 pub const GCS_UPLOAD_URL: &str = "https://storage.googleapis.com/upload/storage/v1";
 pub const COMPLETE: &str = "COMPLETE";
 
-const MAX_FILES: usize = 4096;
-const MAX_DEPTH: usize = 10;
+const MAX_FILES: usize = 32_768;
+const MAX_DEPTH: usize = 16;
 
 /// Where the token and the uploads go. `day2-backup` always uses
 /// [`Endpoints::google`]; tests pass a local mock.
