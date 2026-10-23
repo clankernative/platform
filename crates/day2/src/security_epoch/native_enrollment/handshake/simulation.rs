@@ -2,6 +2,7 @@
 //! oracle records an accepted wire prefix, not the production cursor/state.
 //! No native enrollment/process/file/permission owner is made in this module.
 
+use super::super::protocol::StagePurpose;
 use super::{
     Actor, Direction, Frame, Observation, PollObservation, Protocol, Transcript, Transport,
     TransportDecision,
@@ -16,6 +17,12 @@ mod model;
 const MAX_EVENTS: usize = 512;
 const MAX_QUEUED: usize = 64;
 const MAX_BUNDLE: u64 = 8 * 1024 * 1024;
+const CAMPAIGNS: [(Protocol, StagePurpose); 4] = [
+    (Protocol::Enrollment, StagePurpose::CurrentRole),
+    (Protocol::InitialStorage, StagePurpose::CurrentRole),
+    (Protocol::InitialStorage, StagePurpose::StorageBootstrap),
+    (Protocol::InitialServing, StagePurpose::CurrentRole),
+];
 
 trait Machine: Sized {
     fn new(protocol: Protocol, actor: Actor) -> Self;
@@ -23,7 +30,7 @@ trait Machine: Sized {
     fn begin(&mut self, direction: Direction, clock: Observation) -> Result<()>;
     fn transport(&mut self, event: Transport, clock: Observation) -> Result<TransportDecision>;
     fn delivered(&mut self, frame: Frame, clock: Observation) -> Result<()>;
-    fn current(&mut self, sequence: u64) -> Result<()>;
+    fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()>;
     fn poll(observation: PollObservation) -> Result<TransportDecision>;
     fn refuse(&mut self);
     fn snapshot(&self) -> serde_json::Value;
@@ -50,8 +57,8 @@ impl Machine for Transcript {
         self.delivered(frame, clock)
     }
 
-    fn current(&mut self, sequence: u64) -> Result<()> {
-        self.begin_current(sequence)
+    fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
+        self.begin_current(sequence, purpose)
     }
 
     fn poll(observation: PollObservation) -> Result<TransportDecision> {
@@ -124,6 +131,7 @@ enum Event {
     BeginCurrent {
         endpoint: usize,
         sequence: u64,
+        purpose: StagePurpose,
     },
     ReplaceClock {
         endpoint: usize,
@@ -288,10 +296,17 @@ impl<M: Machine> World<M> {
                 clock.now = self.now;
                 Outcome::Accepted
             }
-            Event::BeginCurrent { endpoint, sequence } => {
+            Event::BeginCurrent {
+                endpoint,
+                sequence,
+                purpose,
+            } => {
                 if !self.endpoints[endpoint].alive
                     || self.endpoints[endpoint].refused
-                    || self.endpoints[endpoint].machine.current(sequence).is_err()
+                    || self.endpoints[endpoint]
+                        .machine
+                        .current(sequence, purpose)
+                        .is_err()
                 {
                     self.refuse(endpoint)
                 } else {
@@ -303,7 +318,12 @@ impl<M: Machine> World<M> {
                             sequence,
                         ))?,
                         origin: self.now,
-                        deadline: self.now + Duration::from_secs(5),
+                        deadline: self.now
+                            + Duration::from_secs(if purpose == StagePurpose::StorageBootstrap {
+                                10
+                            } else {
+                                5
+                            }),
                         now: self.now,
                     };
                     Outcome::Accepted
@@ -726,7 +746,7 @@ fn exchange(protocol: Protocol, sequence: u64, random: &mut u64) -> Vec<Event> {
     events
 }
 
-fn successful(seed: u64, protocol: Protocol) -> Program {
+fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
     let mut random = seed;
     let mut events = exchange(protocol, 0, &mut random);
     let current = match protocol {
@@ -742,7 +762,18 @@ fn successful(seed: u64, protocol: Protocol) -> Program {
                 nanos: 20_000_000_000,
             });
             for endpoint in 0..2 {
-                events.push(Event::BeginCurrent { endpoint, sequence });
+                events.push(Event::BeginCurrent {
+                    endpoint,
+                    sequence,
+                    purpose,
+                });
+            }
+            if purpose == StagePurpose::StorageBootstrap {
+                // The checked bootstrap class can spend beyond five seconds;
+                // authentication itself remains a separate native five-second guard.
+                events.push(Event::Advance {
+                    nanos: 6_000_000_000,
+                });
             }
             events.extend(exchange(current, sequence, &mut random));
         }
@@ -758,13 +789,9 @@ fn successful(seed: u64, protocol: Protocol) -> Program {
 #[test]
 fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_model() -> Result<()>
 {
-    for protocol in [
-        Protocol::Enrollment,
-        Protocol::InitialStorage,
-        Protocol::InitialServing,
-    ] {
+    for (protocol, purpose) in CAMPAIGNS {
         for seed in 1..=32 {
-            let program = successful(seed, protocol);
+            let program = successful(seed, protocol, purpose);
             let records = check(&program)?;
             ensure!(
                 records
@@ -781,6 +808,7 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
             for endpoint in last["endpoints"].as_array().unwrap() {
                 ensure!(
                     endpoint["machine"]["position"] == expected
+                        && endpoint["machine"]["purpose"] == serde_json::to_value(purpose)?
                         && endpoint["machine"]["busy"] == false
                         && endpoint["machine"]["refused"] == false,
                     "positive transcript incomplete"
@@ -803,12 +831,8 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
 fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts() -> Result<()> {
     let mut seed = 10_000;
     let mut coverage = std::collections::BTreeSet::new();
-    for protocol in [
-        Protocol::Enrollment,
-        Protocol::InitialStorage,
-        Protocol::InitialServing,
-    ] {
-        let base = successful(seed, protocol);
+    for (protocol, purpose) in CAMPAIGNS {
+        let base = successful(seed, protocol, purpose);
         let mut oracle = World::<model::Model>::new(&base)?;
         // Fault every completed syscall before its final native postcheck,
         // across enrollment, first holder and both current settlement rounds.
@@ -849,6 +873,7 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                     8 => Event::BeginCurrent {
                         endpoint,
                         sequence: 99,
+                        purpose,
                     },
                     _ => Event::Substitute {
                         sender: endpoint,
@@ -907,24 +932,20 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                     "fault did not reach refusal"
                 );
                 // Count executed refusal, not merely a generated fault action.
-                coverage.insert((format!("{protocol:?}"), fault));
+                coverage.insert((format!("{protocol:?}/{purpose:?}"), fault));
             }
         }
     }
-    ensure!(coverage.len() == 30, "missing executed fault family");
+    ensure!(coverage.len() == 40, "missing executed fault family");
     Ok(())
 }
 
 #[test]
 fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal() -> Result<()> {
-    for protocol in [
-        Protocol::Enrollment,
-        Protocol::InitialStorage,
-        Protocol::InitialServing,
-    ] {
+    for (protocol, purpose) in CAMPAIGNS {
         for seed in 100..132 {
             let mut random = seed;
-            let mut program = successful(seed, protocol);
+            let mut program = successful(seed, protocol, purpose);
             let cut = (next(&mut random) as usize) % program.events.len();
             program.events.truncate(cut + 1);
             for _ in 0..96 {
@@ -959,6 +980,12 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
                     12 => Event::BeginCurrent {
                         endpoint,
                         sequence: next(&mut random) % 5,
+                        purpose: match next(&mut random) % 4 {
+                            0 => StagePurpose::CurrentRole,
+                            1 => StagePurpose::StorageBootstrap,
+                            2 => StagePurpose::InitialFirstHolder,
+                            _ => StagePurpose::StorageMetadataObservation,
+                        },
                     },
                     13 => Event::NativeRefusal { endpoint },
                     _ => Event::ReplaceClock { endpoint },
@@ -966,6 +993,97 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
                 program.events.push(event);
             }
             check(&program)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() -> Result<()> {
+    for protocol in [Protocol::InitialStorage, Protocol::InitialServing] {
+        for purpose in [
+            StagePurpose::CurrentRole,
+            StagePurpose::StorageBootstrap,
+            StagePurpose::StorageMetadataObservation,
+            StagePurpose::InitialFirstHolder,
+        ] {
+            for seconds in [1, 5, 10] {
+                for at_deadline in [false, true] {
+                    let mut actual = Transcript::new(protocol, Actor::Controller);
+                    let mut expected = model::Model::new(protocol, Actor::Controller);
+                    let initial_clock = Observation {
+                        domain: Digest::new(b"initial-purpose-control"),
+                        origin: Duration::from_secs(100),
+                        deadline: Duration::from_secs(if protocol == Protocol::InitialStorage {
+                            110
+                        } else {
+                            105
+                        }),
+                        now: Duration::from_secs(100),
+                    };
+                    for (sender, frame) in model::contract(protocol, 0) {
+                        let direction = if sender == Actor::Controller {
+                            Direction::Send
+                        } else {
+                            Direction::Receive
+                        };
+                        actual.begin(direction, initial_clock.clone())?;
+                        expected.begin(direction, initial_clock.clone())?;
+                        actual.delivered(frame, initial_clock.clone())?;
+                        expected.delivered(frame, initial_clock.clone())?;
+                    }
+                    let allowed = purpose == StagePurpose::CurrentRole
+                        || (protocol == Protocol::InitialStorage
+                            && purpose == StagePurpose::StorageBootstrap);
+                    ensure!(
+                        actual.begin_current(1, purpose).is_ok() == allowed,
+                        "production purpose class"
+                    );
+                    ensure!(
+                        expected.current(1, purpose).is_ok() == allowed,
+                        "model purpose class"
+                    );
+                    ensure!(actual.snapshot() == expected.snapshot(), "purpose snapshot");
+                    let original = Observation {
+                        domain: Digest::new(b"current-purpose-control"),
+                        origin: Duration::from_secs(200),
+                        deadline: Duration::from_secs(200 + seconds),
+                        now: Duration::from_secs(if at_deadline { 200 + seconds } else { 200 }),
+                    };
+                    // The oracle's bound is literal and independent of the
+                    // production purpose limit. Equal one-second ceilings
+                    // keep distinct labels and never imply ordinary Current.
+                    let limit = if purpose == StagePurpose::StorageBootstrap {
+                        10
+                    } else {
+                        5
+                    };
+                    let accepts = allowed && seconds <= limit && !at_deadline;
+                    ensure!(
+                        actual.begin(Direction::Send, original.clone()).is_ok() == accepts,
+                        "purpose interval"
+                    );
+                    ensure!(
+                        expected.begin(Direction::Send, original.clone()).is_ok() == accepts,
+                        "model purpose interval"
+                    );
+                    ensure!(
+                        actual.snapshot() == expected.snapshot(),
+                        "purpose interval snapshot"
+                    );
+                    if accepts {
+                        ensure!(
+                            actual.snapshot()["purpose"] == serde_json::to_value(purpose)?,
+                            "short cap changed class"
+                        );
+                    } else {
+                        ensure!(
+                            actual.begin_current(2, StagePurpose::CurrentRole).is_err(),
+                            "refused purpose revived"
+                        );
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1078,7 +1196,7 @@ fn production_reducer_itself_refuses_replaced_rewound_expired_and_widened_clock_
                 "original revived after refusal"
             );
             ensure!(
-                actual.begin_current(1).is_err(),
+                actual.begin_current(1, StagePurpose::CurrentRole).is_err(),
                 "new phase revived refusal"
             );
         }

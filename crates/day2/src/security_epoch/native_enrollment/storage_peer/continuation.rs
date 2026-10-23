@@ -254,9 +254,15 @@ impl RetainedPeer {
         );
         local.require_new_grant(&self.last_local_grant)?;
         self.check_resources(stage, &mut acquisition)?;
+        // The actual signed stage matched this purpose above, and the
+        // purpose-specific clock/peer guards just succeeded. The DATA reducer
+        // records that checked class; it never guesses from a scalar deadline.
         #[cfg(target_os = "linux")]
-        self.channel
-            .begin_current_handshake(sequence, &mut acquisition)?;
+        self.channel.begin_current_handshake(
+            sequence,
+            purpose.stage_purpose(),
+            &mut acquisition,
+        )?;
         Ok((acquisition, local, sequence))
     }
 

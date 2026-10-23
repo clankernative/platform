@@ -2,6 +2,7 @@
 //! not an authenticated sender, enrolled stage, file, holder or serving permit.
 //! Native adapters still retain and check every actual kernel/process owner.
 
+use super::protocol::StagePurpose;
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,7 @@ pub(super) fn poll_decision(observation: PollObservation) -> Result<TransportDec
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct Transcript {
     protocol: Protocol,
+    purpose: StagePurpose,
     actor: Actor,
     sequence: u64,
     position: usize,
@@ -175,11 +177,23 @@ impl Protocol {
         }
     }
 
-    fn limit(self) -> Duration {
-        match self {
-            Self::InitialStorage => super::protocol::StagePurpose::InitialFirstHolder.limit(),
-            _ => super::protocol::StagePurpose::CurrentRole.limit(),
-        }
+    fn limit(self, purpose: StagePurpose) -> Result<Duration> {
+        ensure!(
+            matches!(
+                (self, purpose),
+                (Self::InitialStorage, StagePurpose::InitialFirstHolder)
+                    | (Self::CurrentStorage, StagePurpose::StorageBootstrap)
+                    | (
+                        Self::Enrollment
+                            | Self::CurrentStorage
+                            | Self::InitialServing
+                            | Self::CurrentServing,
+                        StagePurpose::CurrentRole
+                    )
+            ),
+            "native_handshake_stage_purpose"
+        );
+        Ok(purpose.limit())
     }
 }
 
@@ -193,6 +207,11 @@ impl Transcript {
         );
         Self {
             protocol,
+            purpose: if protocol == Protocol::InitialStorage {
+                StagePurpose::InitialFirstHolder
+            } else {
+                StagePurpose::CurrentRole
+            },
             actor,
             sequence: 0,
             position: 0,
@@ -206,18 +225,21 @@ impl Transcript {
     /// Only a completely exchanged prior transcript can start another current
     /// transcript. Native disposition/file/consumer final checks are additional
     /// requirements; completing these DATA steps does not settle an operation.
-    pub(super) fn begin_current(&mut self, sequence: u64) -> Result<()> {
+    pub(super) fn begin_current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
         let result = (|| {
             ensure!(self.complete(), "native_handshake_previous_incomplete");
             ensure!(
                 self.sequence.checked_add(1) == Some(sequence),
                 "native_handshake_sequence"
             );
-            self.protocol = match self.protocol {
+            let protocol = match self.protocol {
                 Protocol::InitialStorage | Protocol::CurrentStorage => Protocol::CurrentStorage,
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
                 Protocol::Enrollment => anyhow::bail!("native_handshake_no_reenrollment"),
             };
+            protocol.limit(purpose)?;
+            self.protocol = protocol;
+            self.purpose = purpose;
             self.sequence = sequence;
             self.position = 0;
             self.clock = None;
@@ -339,7 +361,8 @@ impl Transcript {
             observation.origin <= observation.now
                 && observation.now < observation.deadline
                 && observation.deadline > observation.origin
-                && observation.deadline - observation.origin <= self.protocol.limit(),
+                && observation.deadline - observation.origin
+                    <= self.protocol.limit(self.purpose)?,
             "native_handshake_original_interval"
         );
         if let Some(previous) = &self.clock {

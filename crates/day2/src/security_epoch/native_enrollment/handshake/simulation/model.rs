@@ -2,13 +2,14 @@
 //! production message catalog, deadline limits, cursor or transition methods.
 
 use super::{
-    Actor, Direction, Frame, Machine, Observation, PollObservation, Protocol, Transport,
-    TransportDecision,
+    Actor, Direction, Frame, Machine, Observation, PollObservation, Protocol, StagePurpose,
+    Transport, TransportDecision,
 };
 use anyhow::{Result, ensure};
 
 pub(super) struct Model {
     protocol: Protocol,
+    purpose: StagePurpose,
     actor: Actor,
     sequence: u64,
     accepted: Vec<Frame>,
@@ -90,7 +91,10 @@ pub(super) fn contract(protocol: Protocol, sequence: u64) -> Vec<(Actor, Frame)>
 
 impl Model {
     fn clock(&mut self, clock: Observation) -> Result<()> {
-        let limit = if self.protocol == Protocol::InitialStorage {
+        let limit = if self.protocol == Protocol::InitialStorage
+            || (self.protocol == Protocol::CurrentStorage
+                && self.purpose == StagePurpose::StorageBootstrap)
+        {
             10_000_000_000
         } else {
             5_000_000_000
@@ -137,6 +141,11 @@ impl Machine for Model {
         };
         Self {
             protocol,
+            purpose: if protocol == Protocol::InitialStorage {
+                StagePurpose::InitialFirstHolder
+            } else {
+                StagePurpose::CurrentRole
+            },
             actor,
             sequence: 0,
             accepted: Vec::new(),
@@ -217,7 +226,7 @@ impl Machine for Model {
         self.result(result)
     }
 
-    fn current(&mut self, sequence: u64) -> Result<()> {
+    fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
         let result = (|| {
             let contract = contract(self.protocol, self.sequence);
             ensure!(
@@ -236,7 +245,17 @@ impl Machine for Model {
                 Protocol::InitialServing | Protocol::CurrentServing => Protocol::CurrentServing,
                 _ => anyhow::bail!("model enrollment is not renewable"),
             };
+            let purpose_allowed = match protocol {
+                Protocol::CurrentStorage => matches!(
+                    purpose,
+                    StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+                ),
+                Protocol::CurrentServing => purpose == StagePurpose::CurrentRole,
+                _ => false,
+            };
+            ensure!(purpose_allowed, "model purpose");
             self.protocol = protocol;
+            self.purpose = purpose;
             self.sequence = sequence;
             self.accepted.clear();
             self.last_clock = None;
@@ -261,7 +280,7 @@ impl Machine for Model {
 
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
-            "protocol":self.protocol,"actor":self.actor,"sequence":self.sequence,
+            "protocol":self.protocol,"purpose":self.purpose,"actor":self.actor,"sequence":self.sequence,
             "position":self.accepted.len(),"busy":self.outstanding.is_some(),
             "waiting":self.outstanding == Some(true),"refused":self.terminal,"clock":self.last_clock,
         })
