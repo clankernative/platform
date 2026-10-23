@@ -271,7 +271,9 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
     let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
-        let prepared = shards::load(root, &snapshot)?;
+        // A runtime shard admits exactly the programs it will execute. The
+        // producer and final join still independently admit every output.
+        let prepared = shards::load(root, &snapshot, recipe.strip_prefix("verify-shard-"))?;
         fixtures = shards::fixtures(root, &prepared)?;
         Some(prepared)
     } else {
@@ -1038,6 +1040,11 @@ fn save_cache(root: &Path, cache: &VerificationCache) -> Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(cache_path(root, &cache.scope))?;
     Ok(())
+}
+
+pub fn transport_plan(root: &Path, phase: &str) -> Result<()> {
+    let snapshot = verification_snapshot(root, "verify")?;
+    shards::transport::plan(root, &snapshot, phase)
 }
 
 fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
@@ -1879,8 +1886,8 @@ mod tests {
         assert!(upload.contains("if-no-files-found: error"));
         for (name, archive) in [
             ("verify-prepare", "preparation-inputs/day2-preparation"),
-            ("verify-shards", "verification/day2-verification"),
-            ("verify", "verification/day2-verification"),
+            ("verify-shards", "verification/day2-common"),
+            ("verify", "verification/day2-common"),
         ] {
             let job = ci_job(name);
             let download = job
@@ -1906,7 +1913,7 @@ mod tests {
                 .unwrap();
             let restore = job
                 .find(&format!(
-                    "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE/..\"\n"
+                    "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE\"\n"
                 ))
                 .expect("full restoration still required after context setup");
             assert!(
@@ -1917,6 +1924,80 @@ mod tests {
                 let skip_reused = "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}";
                 assert!(bootstrap.contains(skip_reused));
                 assert!(context.contains(skip_reused));
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_transport_is_partitioned_without_changing_test_campaigns_and_retries_once() {
+        let producer = ci_job("verify-prepare");
+        assert!(producer.contains("xtask verify-transport-plan runtime"));
+        for group in [
+            "common",
+            "workspace-day2",
+            "workspace-control",
+            "workspace-other",
+        ] {
+            assert!(producer.contains(&format!(
+                "name: day2-verify-{group}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
+            )));
+            assert!(producer.contains(&format!(
+                "--no-recursion --null -T /tmp/day2-verification-transport/{group}.list0"
+            )));
+        }
+        let shards = ci_job("verify-shards");
+        assert!(shards.contains("shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]"));
+        assert!(shards.contains(
+            "name: day2-verify-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        ));
+        assert!(
+            ci_step(&shards, "Download this workspace shard's test executables")
+                .contains("startsWith(matrix.shard, 'workspace-')")
+        );
+        assert!(
+            ci_step(&shards, "Download all required binary groups in parallel")
+                .contains("matrix.shard == 'parallel-runtime'")
+        );
+        assert!(shards.contains("build-out/bin/xtask verify-shard ${{ matrix.shard }}"));
+        for job in [producer, shards, ci_job("verify")] {
+            assert!(!job.contains("name: day2-verify-${{ github.run_id }}"));
+            assert!(!job.contains("platform/build-out platform/artifacts"));
+            let steps = job.split("      - ").skip(1).collect::<Vec<_>>();
+            for (index, step) in steps.iter().enumerate() {
+                if !step.contains("uses: actions/download-artifact@")
+                    || !step.contains("continue-on-error: true")
+                {
+                    continue;
+                }
+                assert!(step.contains("timeout-minutes: 2"));
+                let id = step
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("id: "))
+                    .unwrap();
+                let retry = steps[index + 1];
+                assert!(
+                    retry.contains(&format!("!cancelled() && steps.{id}.outcome == 'failure'"))
+                );
+                assert!(retry.contains("timeout-minutes: 2"));
+                assert!(retry.contains("uses: actions/download-artifact@"));
+                assert!(!retry.contains("continue-on-error"));
+                let first_inputs = step
+                    .split("        with:\n")
+                    .nth(1)
+                    .unwrap()
+                    .lines()
+                    .take_while(|line| !line.starts_with("      #"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let retry_inputs = retry
+                    .split("        with:\n")
+                    .nth(1)
+                    .unwrap()
+                    .lines()
+                    .take_while(|line| !line.starts_with("      #"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(first_inputs.trim(), retry_inputs.trim());
             }
         }
     }

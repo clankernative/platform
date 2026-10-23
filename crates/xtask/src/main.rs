@@ -886,6 +886,16 @@ fn main() -> Result<()> {
             );
             verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
         }
+        "verify-transport-plan" => {
+            let phase = args
+                .next()
+                .context("usage: xtask verify-transport-plan PHASE")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: xtask verify-transport-plan PHASE"
+            );
+            verification::transport_plan(&root, &phase)?;
+        }
         "verify-shard" => {
             let shard = args.next().context("usage: xtask verify-shard SHARD")?;
             ensure!(args.next().is_none(), "usage: xtask verify-shard SHARD");
