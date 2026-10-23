@@ -91,11 +91,12 @@ pub(super) fn contract(protocol: Protocol, sequence: u64) -> Vec<(Actor, Frame)>
 
 impl Model {
     fn clock(&mut self, clock: Observation) -> Result<()> {
-        let limit = if self.protocol == Protocol::InitialStorage
-            || (self.protocol == Protocol::CurrentStorage
-                && self.purpose == StagePurpose::StorageBootstrap)
-        {
+        let limit = if self.protocol == Protocol::InitialStorage {
             10_000_000_000
+        } else if self.protocol == Protocol::CurrentStorage
+            && self.purpose == StagePurpose::StorageBootstrap
+        {
+            30_000_000_000
         } else {
             5_000_000_000
         };

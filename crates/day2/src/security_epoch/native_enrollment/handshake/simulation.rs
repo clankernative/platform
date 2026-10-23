@@ -320,7 +320,7 @@ impl<M: Machine> World<M> {
                         origin: self.now,
                         deadline: self.now
                             + Duration::from_secs(if purpose == StagePurpose::StorageBootstrap {
-                                10
+                                30
                             } else {
                                 5
                             }),
@@ -759,7 +759,7 @@ fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
             // Expired historical handshakes are identity DATA only. Only a
             // fully known/released prior transcript can begin a fresh phase.
             events.push(Event::Advance {
-                nanos: 20_000_000_000,
+                nanos: 40_000_000_000,
             });
             for endpoint in 0..2 {
                 events.push(Event::BeginCurrent {
@@ -769,10 +769,10 @@ fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
                 });
             }
             if purpose == StagePurpose::StorageBootstrap {
-                // The checked bootstrap class can spend beyond five seconds;
+                // The checked bootstrap class can spend beyond ten seconds;
                 // authentication itself remains a separate native five-second guard.
                 events.push(Event::Advance {
-                    nanos: 6_000_000_000,
+                    nanos: 11_000_000_000,
                 });
             }
             events.extend(exchange(current, sequence, &mut random));
@@ -861,7 +861,7 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                         endpoint: 1 - endpoint,
                     },
                     2 => Event::Advance {
-                        nanos: 10_000_000_000,
+                        nanos: 60_000_000_000,
                     },
                     3 => Event::Rewind {
                         nanos: 1_000_000_000,
@@ -895,7 +895,7 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                         },
                         Event::Call { endpoint: receiver }, // still unavailable, remains waiting
                         Event::Advance {
-                            nanos: 10_000_000_000,
+                            nanos: 60_000_000_000,
                         },
                         Event::Transport {
                             endpoint: receiver,
@@ -907,7 +907,7 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                 // original deadline, then try late/replayed work: no revival.
                 program.events.extend([
                     Event::Advance {
-                        nanos: 10_000_000_000,
+                        nanos: 60_000_000_000,
                     },
                     Event::Begin { endpoint: 0 },
                     Event::Call { endpoint: 0 },
@@ -919,6 +919,12 @@ fn every_wire_position_explores_loss_duplicates_death_expiry_and_postcheck_cuts(
                     Event::Begin { endpoint: 0 },
                 ]);
                 let records = check(&program)?;
+                if fault == 2 {
+                    ensure!(
+                        records[index + 1].outcome == Outcome::Refused,
+                        "expiry did not refuse the immediate postcheck"
+                    );
+                }
                 if matches!(fault, 4 | 5 | 9) {
                     ensure!(
                         records[index].outcome == Outcome::Accepted,
@@ -1007,8 +1013,12 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
             StagePurpose::StorageMetadataObservation,
             StagePurpose::InitialFirstHolder,
         ] {
-            for seconds in [1, 5, 10, 11, 30] {
-                for at_deadline in [false, true] {
+            for seconds in [1, 5, 10, 11, 30, 31, 60] {
+                for (elapsed, at_deadline) in [
+                    (Duration::ZERO, false),
+                    (Duration::from_secs(seconds) - Duration::from_nanos(1), false),
+                    (Duration::from_secs(seconds), true),
+                ] {
                     let mut actual = Transcript::new(protocol, Actor::Controller);
                     let mut expected = model::Model::new(protocol, Actor::Controller);
                     let initial_clock = Observation {
@@ -1048,13 +1058,13 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
                         domain: Digest::new(b"current-purpose-control"),
                         origin: Duration::from_secs(200),
                         deadline: Duration::from_secs(200 + seconds),
-                        now: Duration::from_secs(if at_deadline { 200 + seconds } else { 200 }),
+                        now: Duration::from_secs(200) + elapsed,
                     };
                     // The oracle's bound is literal and independent of the
                     // production purpose limit. Equal one-second ceilings
                     // keep distinct labels and never imply ordinary Current.
                     let limit = if purpose == StagePurpose::StorageBootstrap {
-                        10
+                        30
                     } else {
                         5
                     };
