@@ -136,6 +136,20 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         result
     }
 
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
+        self.sample()?;
+        let guard = self.reads.state.gate.enter()?;
+        let result = self
+            .reads
+            .state
+            .material
+            .try_borrow_mut()?
+            .acquisition
+            .budget()?;
+        guard.complete()?;
+        Ok(result)
+    }
+
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.valid = false;
         self.reads.refuse();
@@ -317,6 +331,10 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
         request: &Digest,
     ) -> Result<(Sample, Budget, Duration)> {
         self.owner.context_budget(owner, selection, request)
+    }
+
+    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
+        self.owner.budget()
     }
 }
 
