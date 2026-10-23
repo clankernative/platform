@@ -252,6 +252,32 @@ impl NativeAcquisition {
         }
     }
 
+    /// Budget/clock DATA for the closed Controller construction boundary.
+    /// No role, file, provider or permission is created here. The caller must
+    /// finish its full same-owner checks and DATA bindings before this leaf.
+    pub(super) fn bootstrap_context_budget(&mut self) -> Result<(Sample, Budget, Duration)> {
+        let result = (|| {
+            self.require_storage_bootstrap()?;
+            let mut budget = self.budget()?;
+            let (_, deadline) = self.interval_data()?;
+            // This fresh observation, not an earlier full-check timestamp,
+            // charges all work before the context's original floor is set.
+            let sample = self.sample()?;
+            let budget = budget.narrow_for_context(
+                Sample {
+                    domain: sample.domain.clone(),
+                    elapsed: sample.elapsed,
+                },
+                deadline,
+            )?;
+            Ok((sample, budget, deadline))
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     /// Interval DATA for a signature, never a constructor or renewal.
     pub(super) fn interval_data(&mut self) -> Result<(Duration, Duration)> {
         self.sample()?;
@@ -1033,6 +1059,76 @@ mod tests {
         );
         assert!(Budget::from_storage_bootstrap(&mut current).is_err());
         assert!(current.remaining().is_err());
+    }
+
+    #[test]
+    fn bootstrap_context_budget_charges_prior_construction_work_without_resetting_original() {
+        // This is only the real original-clock/budget leaf with DATA fixture
+        // time. No enrolled Controller, file, peer or P3 is manufactured.
+        for (ceiling, now) in [(130_000, 106_300), (104_500, 104_400)] {
+            let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
+            let mut actual = parent
+                .narrow(60, Duration::from_millis(ceiling))
+                .unwrap();
+            let original = (
+                actual.domain.clone(),
+                actual.origin,
+                actual.deadline,
+                Rc::clone(&actual.observation),
+            );
+            // Model time already spent in full checks and binding DATA before
+            // the production constructor calls this exact closed clock leaf.
+            actual.fixture_time = Some(Duration::from_millis(now));
+            let (sample, mut budget, deadline) = actual.bootstrap_context_budget().unwrap();
+            assert_eq!(sample.domain, original.0);
+            assert_eq!(sample.elapsed, Duration::from_millis(now));
+            assert_eq!(deadline, Duration::from_millis(ceiling));
+            assert_eq!(
+                budget.remaining_native(&mut actual).unwrap(),
+                Duration::from_millis(ceiling - now)
+            );
+            assert_eq!((actual.domain.clone(), actual.origin, actual.deadline),
+                (original.0, original.1, original.2));
+            assert!(Rc::ptr_eq(&actual.observation, &original.3));
+            assert_eq!(actual.observation.get().latest, sample.elapsed);
+            actual.fixture_time = Some(deadline);
+            assert!(budget.remaining_native(&mut actual).is_err());
+            actual.fixture_time = Some(Duration::from_millis(now));
+            assert!(actual.bootstrap_context_budget().is_err());
+            assert!(parent.sample().is_err());
+        }
+    }
+
+    #[test]
+    fn bootstrap_context_budget_rejects_other_purposes_and_original_failure_restoration() {
+        for scope in [
+            AcquisitionScope::Current,
+            AcquisitionScope::InitialFirstHolder,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut clock = storage_fixture(scope);
+            assert!(clock.bootstrap_context_budget().is_err());
+            assert!(clock.sample().is_err());
+        }
+        for fault in ["equality", "rewind", "refused", "process"] {
+            let mut clock = storage_fixture(AcquisitionScope::StorageBootstrap);
+            let mut sibling = clock.narrow(60, clock.deadline).unwrap();
+            match fault {
+                "equality" => clock.fixture_time = Some(clock.deadline),
+                "rewind" => {
+                    clock.fixture_time = Some(Duration::from_secs(102));
+                    clock.sample().unwrap();
+                    clock.fixture_time = Some(Duration::from_secs(101));
+                }
+                "refused" => clock.refuse(),
+                _ => clock.process = clock.process.wrapping_add(1),
+            }
+            assert!(clock.bootstrap_context_budget().is_err(), "{fault}");
+            clock.process = std::process::id();
+            clock.fixture_time = Some(Duration::from_secs(100));
+            assert!(clock.bootstrap_context_budget().is_err(), "{fault}");
+            assert!(sibling.sample().is_err(), "{fault}");
+        }
     }
 
     #[test]

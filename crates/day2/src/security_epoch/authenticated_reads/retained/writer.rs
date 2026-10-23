@@ -84,11 +84,12 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         result
     }
 
-    pub(in crate::security_epoch) fn context_interval(
+    fn context_budget(
         &mut self,
         owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         selection: &EpochStore,
-    ) -> Result<(Sample, Duration)> {
+        request: &Digest,
+    ) -> Result<(Sample, Budget, Duration)> {
         let result = (|| {
             ensure!(
                 Rc::ptr_eq(owner, &self.owner),
@@ -98,36 +99,41 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 self.selection == Digest::of(selection)?,
                 "epoch_writer_selection_changed"
             );
-            let sample = self.sample()?;
-            let guard = self.reads.state.gate.enter()?;
-            let (_, deadline) = self
-                .reads
-                .state
-                .material
-                .try_borrow_mut()?
-                .acquisition
-                .interval_data()?;
+            ensure!(
+                self.owner.try_borrow()?.request_digest()? == *request,
+                "security_epoch_native_request_changed"
+            );
+            // One construction boundary, not an effect or transfer. Release
+            // every phase/material borrow before this unchanged FULL sample:
+            // the full check itself reborrows the same provider/file/peer.
+            self.sample()?;
+            let guard = self.reads.state.gate.guard()?;
+            let phase = self.owner.try_borrow()?;
+            phase.check_budget_liveness()?;
+            let borrow = self.reads.state.gate.enter()?;
+            let mut material = self.reads.state.material.try_borrow_mut()?;
+            ensure!(
+                self.valid
+                    && material.valid
+                    && material.scope == ReadScope::StorageBootstrap
+                    && material.purpose == NativeRole::EpochController,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            // Only this actual original purpose-bound acquisition can issue
+            // the budget. No scalar deadline or fresh origin selects 30s.
+            // All binding hashes/full work and budget derivation precede this
+            // ACTUAL clock checkpoint. Retain each original floor/ceiling.
+            let result = material.acquisition.bootstrap_context_budget()?;
+            drop(material);
+            borrow.complete()?;
+            drop(phase);
             guard.complete()?;
-            Ok((sample, deadline))
+            Ok(result)
         })();
         if result.is_err() {
             self.refuse();
         }
         result
-    }
-
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
-        self.sample()?;
-        let guard = self.reads.state.gate.enter()?;
-        let result = self
-            .reads
-            .state
-            .material
-            .try_borrow_mut()?
-            .acquisition
-            .budget()?;
-        guard.complete()?;
-        Ok(result)
     }
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
@@ -304,16 +310,13 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
         result
     }
 
-    pub(in crate::security_epoch) fn context_interval(
+    pub(in crate::security_epoch) fn context_budget(
         &mut self,
         owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         selection: &EpochStore,
-    ) -> Result<(Sample, Duration)> {
-        self.owner.context_interval(owner, selection)
-    }
-
-    pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
-        self.owner.budget()
+        request: &Digest,
+    ) -> Result<(Sample, Budget, Duration)> {
+        self.owner.context_budget(owner, selection, request)
     }
 }
 

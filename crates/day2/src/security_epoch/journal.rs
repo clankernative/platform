@@ -94,30 +94,26 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
         port: &mut super::authenticated_reads::ControllerBorrow<'_, 'storage, 'role>,
     ) -> Result<Self> {
         let result = (|| {
-            owner.try_borrow_mut()?.check()?;
-            ensure!(
-                owner.try_borrow()?.request_digest()? == request.digest()?,
-                "security_epoch_native_request_changed"
-            );
-            // Preserve the actual purpose-bound budget, including all role,
-            // authentication, file and peer time already spent. Scalar context
-            // DATA must not select or renew the bootstrap interval.
-            let mut budget = port.budget()?;
-            let (sample, deadline) = port.context_interval(&owner, selection)?;
-            let domain = sample.domain.clone();
-            let floor = sample.elapsed;
-            let native_budget = budget.narrow_for_context(sample, deadline)?;
+            // Complete all context binding DATA before the one closed native
+            // construction boundary and its final actual clock checkpoint.
+            let selection_binding = Digest::of(selection)?;
+            let request_binding = request.digest()?;
+            let snapshot_binding = snapshot_digest(snapshot)?;
+            let request_stage = stage(request);
+            let native = Some(Rc::clone(&owner));
+            let (sample, native_budget, deadline) =
+                port.context_budget(&owner, selection, &request_binding)?;
             Ok(Self {
-                selection: Digest::of(selection)?,
-                request: request.digest()?,
-                snapshot: snapshot_digest(snapshot)?,
-                stage: stage(request),
+                selection: selection_binding,
+                request: request_binding,
+                snapshot: snapshot_binding,
+                stage: request_stage,
                 purpose,
-                domain,
-                floor,
+                domain: sample.domain,
+                floor: sample.elapsed,
                 deadline,
                 valid: true,
-                native: Some(Rc::clone(&owner)),
+                native,
                 native_budget: Some(native_budget),
                 local: PhantomData,
                 #[cfg(test)]
@@ -125,7 +121,12 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
             })
         })();
         if result.is_err() {
-            owner.try_borrow_mut()?.refuse();
+            // Preserve the original failure, including a borrow failure. The
+            // actual port/shared gate is refused even if the phase is borrowed.
+            port.refuse();
+            if let Ok(mut phase) = owner.try_borrow_mut() {
+                phase.refuse();
+            }
         }
         result
     }
