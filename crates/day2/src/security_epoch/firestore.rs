@@ -57,11 +57,36 @@ impl Budget {
         origin: Duration,
         deadline: Duration,
     ) -> Result<Self> {
+        Self::from_original_parts(sample, origin, deadline, ACQUISITION_BUDGET)
+    }
+
+    /// Only an ACTUAL purpose-bound clock can select the bootstrap ceiling.
+    /// This budget still grants no port, writer or role permission.
+    pub(super) fn from_storage_bootstrap(
+        acquisition: &mut super::native_clock::NativeAcquisition,
+    ) -> Result<Self> {
+        acquisition.require_storage_bootstrap()?;
+        let (origin, deadline) = acquisition.interval_data()?;
+        let sample = acquisition.sample()?;
+        Self::from_original_parts(
+            sample,
+            origin,
+            deadline,
+            super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+    }
+
+    fn from_original_parts(
+        sample: Sample,
+        origin: Duration,
+        deadline: Duration,
+        maximum: Duration,
+    ) -> Result<Self> {
         ensure!(
             sample.elapsed >= origin
                 && sample.elapsed < deadline
                 && deadline > origin
-                && deadline - origin <= ACQUISITION_BUDGET,
+                && deadline - origin <= maximum,
             "security_epoch_original_native_budget"
         );
         Ok(Self {
@@ -98,6 +123,27 @@ impl Budget {
         })
     }
 
+    /// Derive only from this actual budget. A context cannot use a scalar
+    /// deadline to select the storage-bootstrap ceiling or restart its origin.
+    pub(super) fn narrow_for_context(
+        &mut self,
+        sample: Sample,
+        deadline: Duration,
+    ) -> Result<Self> {
+        self.limit = self.limit.min(
+            deadline
+                .checked_sub(self.start)
+                .context("security_epoch_context_expired")?,
+        );
+        self.observe(sample)?;
+        Ok(Self {
+            domain: self.domain.clone(),
+            start: self.start,
+            latest: self.latest,
+            limit: self.limit,
+        })
+    }
+
     pub(super) fn remaining(&mut self, port: &mut impl Port) -> Result<Duration> {
         let sample = port.sample()?;
         self.observe(sample)
@@ -130,7 +176,8 @@ impl Budget {
 
     pub(super) fn call(&mut self, port: &mut impl Port, url: &str, body: &[u8]) -> Result<Vec<u8>> {
         ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
-        let timeout = self.remaining(port)?;
+        // A wider purpose interval does not widen any single HTTP request.
+        let timeout = self.remaining(port)?.min(ACQUISITION_BUDGET);
         let response = port.post(url, body, timeout, MAX_BYTES)?;
         self.remaining(port)?;
         ensure!(
@@ -585,4 +632,122 @@ pub(super) fn commit(
         ensure!(update <= commit, "security_epoch_commit_time_order");
     }
     reply.finish(selection, port)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    // Arithmetic/transport-contract DATA only. This port owns no enrolled role,
+    // file, native clock, credential, writable journal or provider connection.
+    struct ObservedTimeout {
+        domain: Digest,
+        now: Duration,
+        selected: Option<Duration>,
+    }
+
+    impl Port for ObservedTimeout {
+        fn sample(&mut self) -> Result<Sample> {
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn post(
+            &mut self,
+            _url: &str,
+            _body: &[u8],
+            timeout: Duration,
+            max_bytes: usize,
+        ) -> Result<EpochReply> {
+            assert_eq!(max_bytes, MAX_BYTES);
+            self.selected = Some(timeout);
+            Ok(EpochReply {
+                status: 200,
+                body: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn storage_budget_keeps_origin_and_caps_each_request_at_five_seconds() {
+        let domain = Digest::new(b"budget-arithmetic-only");
+        for (limit, expected) in [(5, 3), (10, 5), (30, 5)] {
+            let mut port = ObservedTimeout {
+                domain: domain.clone(),
+                now: Duration::from_secs(102),
+                selected: None,
+            };
+            let mut budget = Budget::from_original_parts(
+                port.sample().unwrap(),
+                Duration::from_secs(100),
+                Duration::from_secs(100 + limit),
+                super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+            )
+            .unwrap();
+            budget.call(&mut port, "fixed-test-contract", &[]).unwrap();
+            assert_eq!(port.selected, Some(Duration::from_secs(expected)));
+            assert_eq!(budget.start, Duration::from_secs(100));
+            assert_eq!(
+                budget.remaining(&mut port).unwrap(),
+                Duration::from_secs(limit - 2)
+            );
+            port.now = Duration::from_secs(100 + limit);
+            assert!(budget.call(&mut port, "fixed-test-contract", &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn context_budget_consumes_actual_spent_time_and_only_tightens_its_deadline() {
+        let domain = Digest::new(b"context-budget-data-only");
+        let sample = |milliseconds| Sample {
+            domain: domain.clone(),
+            elapsed: Duration::from_millis(milliseconds),
+        };
+        let mut original = Budget::from_original_parts(
+            sample(100_000),
+            Duration::from_secs(100),
+            Duration::from_secs(110),
+            super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+        .unwrap();
+        let mut context = original
+            .narrow_for_context(sample(106_300), Duration::from_secs(109))
+            .unwrap();
+        assert_eq!(context.start, Duration::from_secs(100));
+        assert_eq!(
+            context.observe(sample(106_300)).unwrap(),
+            Duration::from_millis(2700)
+        );
+        let mut next = context
+            .narrow_for_context(sample(107_000), Duration::from_secs(112))
+            .unwrap();
+        assert_eq!(
+            next.observe(sample(107_000)).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert!(
+            next.narrow_for_context(sample(109_000), Duration::from_secs(112))
+                .is_err()
+        );
+        assert!(
+            context
+                .narrow_for_context(sample(106_000), Duration::from_secs(109))
+                .is_err()
+        );
+        assert!(
+            original
+                .narrow_for_context(
+                    Sample {
+                        domain: Digest::new(b"different-domain"),
+                        elapsed: Duration::from_secs(107),
+                    },
+                    Duration::from_secs(109)
+                )
+                .is_err()
+        );
+        // The ordinary scalar context factory still cannot select ten seconds.
+        assert!(Budget::for_context(sample(100_000), Duration::from_secs(110)).is_err());
+    }
 }

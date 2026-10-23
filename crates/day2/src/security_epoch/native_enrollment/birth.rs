@@ -5,7 +5,7 @@ use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::{HashCosts, issuer_stderr};
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
-    policy::EnrollmentPolicy,
+    policy::{EnrollmentPolicy, MAX_POLICY_BYTES, PolicyInterpretation},
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
     root_kms::RootKms,
@@ -23,11 +23,35 @@ const POLICY: &str = "/etc/day2/native-enrollment.json";
 const ISSUER: &str = "/usr/local/bin/day2-native-enrollment";
 
 pub(super) fn load_policy(acquisition: &mut NativeAcquisition) -> Result<EnrollmentPolicy> {
-    let bytes = selected_file(POLICY, 65_536, acquisition)?;
+    let bytes = selected_file(POLICY, MAX_POLICY_BYTES, acquisition)?;
     let policy: EnrollmentPolicy = crate::json::decode(&bytes)?;
     policy.validate()?;
     acquisition.remaining()?;
     Ok(policy)
+}
+
+pub(super) fn check_policy_interpretation(
+    acquisition: &mut NativeAcquisition,
+    interpretation: &mut PolicyInterpretation,
+    expected: &EnrollmentPolicy,
+) -> Result<()> {
+    check_policy_file(POLICY, acquisition, interpretation, expected)
+}
+
+// The producer has only the fixed POLICY entry above. This private atomic
+// loader also lets isolated root Linux tests exercise the exact same guards
+// with their own temporary files, without changing the host's /etc policy.
+fn check_policy_file(
+    path: &'static str,
+    acquisition: &mut NativeAcquisition,
+    interpretation: &mut PolicyInterpretation,
+    expected: &EnrollmentPolicy,
+) -> Result<()> {
+    // The same fresh NOFOLLOW/open, metadata, bounded read and clock checks
+    // run even on an exact-byte hit. A failed read cannot use cached DATA.
+    interpretation.observe(selected_file(path, MAX_POLICY_BYTES, acquisition), expected)?;
+    acquisition.remaining()?;
+    Ok(())
 }
 
 fn selected_file(
@@ -349,6 +373,133 @@ impl IssuerOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated root-owned Linux fixture; run this exact test explicitly"]
+    fn policy_interpretation_rechecks_real_files_after_hits_and_refuses_restoration() -> Result<()>
+    {
+        use std::os::unix::fs::symlink;
+
+        for change in [
+            "mode",
+            "symlink",
+            "missing",
+            "oversize",
+            "semantic",
+            "malformed",
+        ] {
+            let directory = tempfile::tempdir()?;
+            ensure!(
+                std::fs::metadata(directory.path())?.uid() == 0,
+                "native_policy_file_test_requires_root_owned_linux_fixture"
+            );
+            let selected = directory.path().join("native-enrollment.json");
+            let saved = directory.path().join("saved-policy.json");
+            // selected_file already accepts static paths. Only this bounded
+            // test leaks one temporary path string per case; no production
+            // configuration, callback or path argument is exposed.
+            let path: &'static str = Box::leak(
+                selected
+                    .to_str()
+                    .context("native_policy_test_path")?
+                    .to_owned()
+                    .into_boxed_str(),
+            );
+            let expected = super::super::tests::policy(&KeyOwner::generate()?);
+            expected.validate()?;
+            let bytes = serde_json::to_vec(&expected)?;
+            std::fs::write(&selected, &bytes)?;
+            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
+
+            // A real original clock and real successful file reads establish
+            // both cold interpretation and an exact-byte hit. No native role
+            // or file authority is manufactured by this test.
+            let mut acquisition = NativeAcquisition::begin(5)?;
+            let mut interpretation = PolicyInterpretation::new();
+            check_policy_file(path, &mut acquisition, &mut interpretation, &expected)?;
+            check_policy_file(path, &mut acquisition, &mut interpretation, &expected)?;
+
+            match change {
+                "mode" => {
+                    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o666))?;
+                }
+                "symlink" => {
+                    std::fs::rename(&selected, &saved)?;
+                    symlink(&saved, &selected)?;
+                }
+                "missing" => std::fs::rename(&selected, &saved)?,
+                "oversize" => {
+                    std::fs::write(&selected, vec![b' '; MAX_POLICY_BYTES as usize + 1])?;
+                }
+                "semantic" => {
+                    let original = std::fs::metadata(&selected)?;
+                    let mut changed = expected.clone();
+                    changed.runtime.node_name = "node-two".into();
+                    changed.validate()?;
+                    let encoded = serde_json::to_vec(&changed)?;
+                    ensure!(encoded.len() == bytes.len(), "native_policy_test_same_size");
+                    std::fs::write(&selected, &encoded)?;
+                    File::open(&selected)?
+                        .set_times(std::fs::FileTimes::new().set_modified(original.modified()?))?;
+                    let observed = std::fs::metadata(&selected)?;
+                    ensure!(
+                        observed.ino() == original.ino()
+                            && observed.len() == original.len()
+                            && observed.modified()? == original.modified()?,
+                        "native_policy_test_preserved_metadata"
+                    );
+                }
+                "malformed" => std::fs::write(&selected, b"{")?,
+                _ => unreachable!(),
+            }
+
+            let error = check_policy_file(path, &mut acquisition, &mut interpretation, &expected)
+                .unwrap_err();
+            match change {
+                "mode" | "oversize" => {
+                    assert_eq!(error.to_string(), "native_enrollment_operator_file")
+                }
+                "symlink" => assert_eq!(
+                    error.downcast_ref::<rustix::io::Errno>(),
+                    Some(&rustix::io::Errno::LOOP)
+                ),
+                "missing" => assert_eq!(
+                    error.downcast_ref::<rustix::io::Errno>(),
+                    Some(&rustix::io::Errno::NOENT)
+                ),
+                "semantic" => assert_eq!(
+                    error.to_string(),
+                    "native_enrollment_operator_selection_changed"
+                ),
+                "malformed" => assert!(error.to_string().contains("EOF")),
+                _ => unreachable!(),
+            }
+
+            // Restore a genuinely valid regular file, prove the unchanged
+            // native loader can read it, then require sticky interpretation
+            // refusal on the same original clock. No fresh stage or retry.
+            match std::fs::symlink_metadata(&selected) {
+                Ok(_) => std::fs::remove_file(&selected)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            std::fs::write(&selected, &bytes)?;
+            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
+            assert_eq!(
+                selected_file(path, MAX_POLICY_BYTES, &mut acquisition)?.as_slice(),
+                bytes
+            );
+            let restored =
+                check_policy_file(path, &mut acquisition, &mut interpretation, &expected)
+                    .unwrap_err();
+            assert_eq!(
+                restored.to_string(),
+                "native_enrollment_policy_interpretation_refused"
+            );
+            acquisition.remaining()?;
+        }
+        Ok(())
+    }
 
     struct ChildGuard(Child);
 

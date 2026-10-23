@@ -17,9 +17,42 @@ const MAX_ACQUISITION: Duration = Duration::from_secs(5);
 pub(in crate::security_epoch) const INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT: Duration =
     Duration::from_secs(10);
 
+/// User-approved ceiling for EACH original storage-bootstrap action only.
+/// The 2026-10-23 run spent 7.718s before writer preparation, then exhausted
+/// 10s there after all three provider rounds, before its first counter read.
+/// Thirty seconds permits qualification of the unmeasured tail; margin is not
+/// established until repeated complete actions finish within 24s. Role and
+/// provider authentication still share the SAME original origin+5 deadline.
+pub(in crate::security_epoch) const STORAGE_BOOTSTRAP_LIMIT: Duration = Duration::from_secs(30);
+
+/// Read-only metadata diagnostics retain their separate existing ten seconds.
+/// They cannot create a file, join the bootstrap peer or install a writer.
+pub(in crate::security_epoch) const STORAGE_METADATA_OBSERVATION_LIMIT: Duration =
+    Duration::from_secs(10);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcquisitionScope {
+    Current,
+    InitialFirstHolder,
+    StorageBootstrap,
+    StorageMetadataObservation,
+}
+
+impl AcquisitionScope {
+    fn limit(self) -> Duration {
+        match self {
+            Self::Current => MAX_ACQUISITION,
+            Self::InitialFirstHolder => INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+            Self::StorageBootstrap => STORAGE_BOOTSTRAP_LIMIT,
+            Self::StorageMetadataObservation => STORAGE_METADATA_OBSERVATION_LIMIT,
+        }
+    }
+}
+
 /// One original interval for code, identity, credentials, metadata and epoch I/O.
 /// No production scalar/config constructor, clock replacement or renewal exists.
 pub(crate) struct NativeAcquisition {
+    scope: AcquisitionScope,
     domain: Digest,
     process: u32,
     origin: Duration,
@@ -50,14 +83,54 @@ impl NativeAcquisition {
             (1..=60).contains(&max_lease_seconds),
             "epoch_native_acquisition_bound"
         );
-        Self::begin_bounded(MAX_ACQUISITION.min(Duration::from_secs(u64::from(max_lease_seconds))))
+        Self::begin_bounded(
+            AcquisitionScope::Current,
+            MAX_ACQUISITION.min(Duration::from_secs(u64::from(max_lease_seconds))),
+        )
     }
 
     pub(super) fn begin_initial_first_holder() -> Result<Self> {
-        Self::begin_bounded(INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT)
+        Self::begin_bounded(
+            AcquisitionScope::InitialFirstHolder,
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+        )
     }
 
-    fn begin_bounded(limit: Duration) -> Result<Self> {
+    pub(super) fn begin_storage_bootstrap() -> Result<Self> {
+        Self::begin_bounded(AcquisitionScope::StorageBootstrap, STORAGE_BOOTSTRAP_LIMIT)
+    }
+
+    pub(super) fn begin_storage_metadata_observation() -> Result<Self> {
+        Self::begin_bounded(
+            AcquisitionScope::StorageMetadataObservation,
+            STORAGE_METADATA_OBSERVATION_LIMIT,
+        )
+    }
+
+    pub(super) fn require_storage_bootstrap(&mut self) -> Result<()> {
+        self.require_scope(AcquisitionScope::StorageBootstrap)
+    }
+
+    pub(super) fn require_storage_metadata_observation(&mut self) -> Result<()> {
+        self.require_scope(AcquisitionScope::StorageMetadataObservation)
+    }
+
+    fn require_scope(&mut self, scope: AcquisitionScope) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.scope == scope,
+                "epoch_native_acquisition_purpose_changed"
+            );
+            self.sample().map(|_| ())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn begin_bounded(scope: AcquisitionScope, limit: Duration) -> Result<Self> {
+        ensure!(limit <= scope.limit(), "epoch_native_acquisition_bound");
         let origin = boottime()?;
         let process = std::process::id();
         let mut nonce = [0_u8; 32];
@@ -67,6 +140,7 @@ impl NativeAcquisition {
             .checked_add(limit)
             .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?;
         let mut acquisition = Self {
+            scope,
             domain,
             process,
             origin,
@@ -166,7 +240,16 @@ impl NativeAcquisition {
     }
 
     pub(super) fn budget(&mut self) -> Result<Budget> {
-        Budget::from_native_origin(self.sample()?, self.origin, self.deadline)
+        match self.scope {
+            AcquisitionScope::StorageBootstrap => Budget::from_storage_bootstrap(self),
+            AcquisitionScope::StorageMetadataObservation => {
+                self.refuse();
+                anyhow::bail!("epoch_native_metadata_budget_refused")
+            }
+            AcquisitionScope::Current | AcquisitionScope::InitialFirstHolder => {
+                Budget::from_native_origin(self.sample()?, self.origin, self.deadline)
+            }
+        }
     }
 
     /// Interval DATA for a signature, never a constructor or renewal.
@@ -180,11 +263,25 @@ impl NativeAcquisition {
     /// interval; the retained ceiling may only be shorter. Consume the actual
     /// current child and retain its latest sample, never a caller timestamp or
     /// max that could hide a rewind. This cannot extend a five-second stage.
-    pub(super) fn join_current_view(&mut self, mut current: Self) -> Result<()> {
+    pub(super) fn join_current_view(&mut self, current: Self) -> Result<()> {
+        self.join_view(current, AcquisitionScope::Current)
+    }
+
+    pub(super) fn join_storage_bootstrap_view(&mut self, current: Self) -> Result<()> {
+        self.join_view(current, AcquisitionScope::StorageBootstrap)
+    }
+
+    pub(super) fn join_storage_metadata_observation_view(&mut self, current: Self) -> Result<()> {
+        self.join_view(current, AcquisitionScope::StorageMetadataObservation)
+    }
+
+    fn join_view(&mut self, mut current: Self, scope: AcquisitionScope) -> Result<()> {
         let result = (|| {
             ensure!(
                 self.valid
                     && current.valid
+                    && self.scope == scope
+                    && current.scope == scope
                     && Rc::ptr_eq(&self.observation, &current.observation)
                     && self.domain == current.domain
                     && self.process == current.process
@@ -192,7 +289,7 @@ impl NativeAcquisition {
                     && self.deadline <= current.deadline
                     && self.deadline > self.origin
                     && current.deadline > current.origin
-                    && current.deadline - current.origin <= MAX_ACQUISITION,
+                    && current.deadline - current.origin <= scope.limit(),
                 "epoch_native_current_read_clock_changed"
             );
             let sample = current.sample()?;
@@ -211,18 +308,35 @@ impl NativeAcquisition {
     /// and the exact last observed sample, never a maximum of timestamp DATA.
     /// This permits a shorter legitimate lease without widening either side.
     pub(super) fn exchange_current_views(&mut self, other: &mut Self) -> Result<()> {
+        self.exchange_views(other, AcquisitionScope::Current)
+    }
+
+    pub(super) fn exchange_storage_bootstrap_views(&mut self, other: &mut Self) -> Result<()> {
+        self.exchange_views(other, AcquisitionScope::StorageBootstrap)
+    }
+
+    pub(super) fn exchange_storage_metadata_observation_views(
+        &mut self,
+        other: &mut Self,
+    ) -> Result<()> {
+        self.exchange_views(other, AcquisitionScope::StorageMetadataObservation)
+    }
+
+    fn exchange_views(&mut self, other: &mut Self, scope: AcquisitionScope) -> Result<()> {
         let result = (|| {
             ensure!(
                 self.valid
                     && other.valid
+                    && self.scope == scope
+                    && other.scope == scope
                     && Rc::ptr_eq(&self.observation, &other.observation)
                     && self.domain == other.domain
                     && self.process == other.process
                     && self.origin == other.origin
                     && self.deadline > self.origin
                     && other.deadline > other.origin
-                    && self.deadline - self.origin <= MAX_ACQUISITION
-                    && other.deadline - other.origin <= MAX_ACQUISITION,
+                    && self.deadline - self.origin <= scope.limit()
+                    && other.deadline - other.origin <= scope.limit(),
                 "epoch_native_current_read_clock_changed"
             );
             let ceiling = self.deadline.min(other.deadline);
@@ -251,11 +365,14 @@ impl NativeAcquisition {
             ensure!(
                 self.valid
                     && child.valid
+                    && self.scope == child.scope
                     && Rc::ptr_eq(&self.observation, &child.observation)
                     && child.domain == self.domain
                     && child.process == self.process
                     && child.origin == self.origin
                     && child.deadline <= self.deadline
+                    && self.deadline > self.origin
+                    && self.deadline - self.origin <= self.scope.limit()
                     && child.deadline > child.origin
                     && child.deadline - child.origin <= MAX_ACQUISITION,
                 "epoch_native_authentication_clock_changed"
@@ -293,6 +410,7 @@ impl NativeAcquisition {
                 "epoch_native_narrowed_acquisition_expired"
             );
             let mut child = Self {
+                scope: self.scope,
                 domain: self.domain.clone(),
                 process: self.process,
                 origin: self.origin,
@@ -312,9 +430,16 @@ impl NativeAcquisition {
         result
     }
 
+    /// Authentication always consumes the first five seconds of THIS origin;
+    /// starting a second authentication child cannot restart that interval.
+    pub(super) fn narrow_authentication(&mut self) -> Result<Self> {
+        self.narrow(5, self.deadline)
+    }
+
     #[cfg(test)]
     pub(super) fn fixture(domain: Digest, process: u32, origin: Duration, limit: Duration) -> Self {
         Self {
+            scope: AcquisitionScope::Current,
             domain,
             process,
             origin,
@@ -351,6 +476,297 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn storage_fixture(scope: AcquisitionScope) -> NativeAcquisition {
+        let mut clock = NativeAcquisition::fixture(
+            Digest::new(b"storage-bootstrap-clock"),
+            std::process::id(),
+            Duration::from_secs(100),
+            scope.limit(),
+        );
+        clock.scope = scope;
+        clock
+    }
+
+    #[test]
+    fn both_storage_authentication_children_spend_the_first_original_five_seconds() {
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut parent = storage_fixture(scope);
+            match scope {
+                AcquisitionScope::StorageBootstrap => parent.require_storage_bootstrap().unwrap(),
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent.require_storage_metadata_observation().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut role_authentication = parent.narrow_authentication().unwrap();
+            role_authentication.fixture_time = Some(Duration::from_millis(103_063));
+            parent.fixture_time = role_authentication.fixture_time;
+            parent.complete_authentication(role_authentication).unwrap();
+            let mut provider_authentication = parent.narrow_authentication().unwrap();
+            assert_eq!(provider_authentication.origin, parent.origin);
+            assert_eq!(provider_authentication.deadline, Duration::from_secs(105));
+            assert_eq!(
+                provider_authentication.remaining().unwrap(),
+                Duration::from_millis(1_937)
+            );
+            provider_authentication.fixture_time = Some(Duration::from_millis(104_255));
+            parent.fixture_time = provider_authentication.fixture_time;
+            parent
+                .complete_authentication(provider_authentication)
+                .unwrap();
+            // The completed authentication child is gone. Subsequent I/O is
+            // derived from THIS actual parent, never by widening that child.
+            let mut io = parent.narrow(30, parent.deadline).unwrap();
+            io.fixture_time = Some(Duration::from_millis(106_300));
+            parent.fixture_time = io.fixture_time;
+            match scope {
+                AcquisitionScope::StorageBootstrap => {
+                    parent.join_storage_bootstrap_view(io).unwrap();
+                }
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent.join_storage_metadata_observation_view(io).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                parent.remaining().unwrap(),
+                scope.limit() - Duration::from_millis(6_300)
+            );
+            assert_eq!(parent.origin, Duration::from_secs(100));
+            assert_eq!(parent.deadline, parent.origin + scope.limit());
+        }
+    }
+
+    #[test]
+    fn bootstrap_peer_wait_cannot_defer_provider_authentication_past_original_five_seconds() {
+        for elapsed in [Duration::from_secs(5), Duration::from_millis(6_300)] {
+            let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
+            let mut role = parent.narrow_authentication().unwrap();
+            role.fixture_time = Some(parent.origin + Duration::from_millis(1_400));
+            parent.fixture_time = role.fixture_time;
+            parent.complete_authentication(role).unwrap();
+            // The bootstrap interval itself is still live. A peer wait is not
+            // authentication completion and cannot issue a new five seconds.
+            parent.fixture_time = Some(parent.origin + elapsed);
+            assert!(parent.remaining().is_ok());
+            let error = parent.narrow_authentication().err().unwrap();
+            assert_eq!(
+                error.to_string(),
+                "epoch_native_narrowed_acquisition_expired"
+            );
+            assert!(parent.remaining().is_err());
+        }
+
+        let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
+        let mut role = parent.narrow_authentication().unwrap();
+        role.fixture_time = Some(parent.origin + Duration::from_millis(1_400));
+        parent.fixture_time = role.fixture_time;
+        parent.complete_authentication(role).unwrap();
+        let mut provider = parent.narrow_authentication().unwrap();
+        provider.fixture_time = Some(parent.origin + Duration::from_millis(2_300));
+        parent.fixture_time = provider.fixture_time;
+        parent.complete_authentication(provider).unwrap();
+        // Authenticate first, consume that actual successful child, then spend
+        // peer/file I/O time on the same original bootstrap parent.
+        let mut io = parent.narrow(30, parent.deadline).unwrap();
+        io.fixture_time = Some(parent.origin + Duration::from_millis(6_300));
+        parent.fixture_time = io.fixture_time;
+        parent.join_storage_bootstrap_view(io).unwrap();
+        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(23_700));
+        parent.fixture_time = Some(parent.origin + STORAGE_BOOTSTRAP_LIMIT);
+        assert!(parent.remaining().is_err());
+    }
+
+    #[test]
+    fn storage_authentication_expiry_or_foreign_kind_permanently_refuses_parent() {
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            for changed in ["equality", "foreign_kind", "wider_child", "rewind"] {
+                let mut parent = storage_fixture(scope);
+                let mut child = parent.narrow_authentication().unwrap();
+                child.fixture_time = Some(Duration::from_millis(104_900));
+                parent.fixture_time = child.fixture_time;
+                match changed {
+                    "equality" => child.fixture_time = Some(Duration::from_secs(105)),
+                    "foreign_kind" => child.scope = AcquisitionScope::Current,
+                    "wider_child" => child.deadline = Duration::from_secs(106),
+                    "rewind" => parent.fixture_time = Some(Duration::from_millis(104_800)),
+                    _ => unreachable!(),
+                }
+                assert!(parent.complete_authentication(child).is_err(), "{changed}");
+                parent.fixture_time = Some(Duration::from_secs(106));
+                assert!(parent.remaining().is_err());
+                parent.fixture_time = Some(Duration::from_secs(101));
+                assert!(parent.narrow_authentication().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn storage_views_cannot_alias_current_or_each_other_even_with_short_deadlines() {
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut original = storage_fixture(scope);
+            let mut current_candidate = original.narrow(4, Duration::from_secs(104)).unwrap();
+            let child = original.narrow(4, Duration::from_secs(104)).unwrap();
+            // Every non-purpose identity and <=5 ceiling is valid. Refusal
+            // must be caused by the actual private purpose, not a long clock.
+            assert!(current_candidate.join_current_view(child).is_err());
+            assert!(original.remaining().is_err());
+
+            let mut parent = storage_fixture(scope);
+            let mut child = parent.narrow(4, Duration::from_secs(104)).unwrap();
+            child.scope = if scope == AcquisitionScope::StorageBootstrap {
+                AcquisitionScope::StorageMetadataObservation
+            } else {
+                AcquisitionScope::StorageBootstrap
+            };
+            let result = match scope {
+                AcquisitionScope::StorageBootstrap => {
+                    parent.exchange_storage_bootstrap_views(&mut child)
+                }
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent.exchange_storage_metadata_observation_views(&mut child)
+                }
+                _ => unreachable!(),
+            };
+            assert!(result.is_err());
+            assert!(parent.remaining().is_err());
+            assert!(child.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn storage_exchange_retains_shorter_cap_and_shared_latest_observation() {
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut parent = storage_fixture(scope);
+            let mut other = parent.narrow(8, Duration::from_secs(110)).unwrap();
+            parent.fixture_time = Some(Duration::from_millis(106_300));
+            other.fixture_time = parent.fixture_time;
+            match scope {
+                AcquisitionScope::StorageBootstrap => {
+                    parent.exchange_storage_bootstrap_views(&mut other).unwrap();
+                }
+                AcquisitionScope::StorageMetadataObservation => {
+                    parent
+                        .exchange_storage_metadata_observation_views(&mut other)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(parent.deadline, Duration::from_secs(108));
+            assert_eq!(other.deadline, parent.deadline);
+            assert_eq!(parent.remaining().unwrap(), Duration::from_millis(1_700));
+            other.fixture_time = Some(Duration::from_millis(106_299));
+            assert!(other.remaining().is_err());
+            assert!(parent.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn storage_deadline_and_shorter_caps_refuse_equality_without_recovery() {
+        assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(30));
+        assert_eq!(STORAGE_METADATA_OBSERVATION_LIMIT, Duration::from_secs(10));
+        assert_eq!(
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+            Duration::from_secs(10)
+        );
+        assert_eq!(MAX_ACQUISITION, Duration::from_secs(5));
+        for scope in [
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            for seconds in [7, scope.limit().as_secs().try_into().unwrap()] {
+                let mut parent = storage_fixture(scope);
+                let mut child = parent.narrow(seconds, parent.deadline).unwrap();
+                let original = (child.domain.clone(), child.origin, child.deadline);
+                child.fixture_time = Some(Duration::from_secs(100 + u64::from(seconds)));
+                assert!(child.remaining().is_err());
+                child.fixture_time = Some(Duration::from_secs(101));
+                assert!(child.remaining().is_err());
+                assert_eq!((child.domain, child.origin, child.deadline), original);
+                assert!(parent.remaining().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn only_bootstrap_spends_thirty_seconds_and_every_original_deadline_is_exclusive() {
+        for (scope, seconds) in [
+            (AcquisitionScope::Current, 5),
+            (AcquisitionScope::InitialFirstHolder, 10),
+            (AcquisitionScope::StorageMetadataObservation, 10),
+            (AcquisitionScope::StorageBootstrap, 30),
+        ] {
+            assert_eq!(scope.limit(), Duration::from_secs(seconds));
+            let mut clock = storage_fixture(scope);
+            let identity = (clock.domain.clone(), clock.origin, clock.deadline);
+            clock.fixture_time = Some(clock.deadline - Duration::from_nanos(1));
+            assert_eq!(clock.remaining().unwrap(), Duration::from_nanos(1));
+            clock.fixture_time = Some(clock.deadline);
+            assert!(clock.remaining().is_err());
+            clock.fixture_time = Some(clock.origin + Duration::from_secs(1));
+            assert!(clock.remaining().is_err());
+            assert_eq!((clock.domain, clock.origin, clock.deadline), identity);
+        }
+        let mut bootstrap = storage_fixture(AcquisitionScope::StorageBootstrap);
+        bootstrap.fixture_time = Some(bootstrap.origin + Duration::from_secs(11));
+        assert_eq!(bootstrap.remaining().unwrap(), Duration::from_secs(19));
+        // A live bootstrap purpose cannot start late provider authentication.
+        assert!(bootstrap.narrow_authentication().is_err());
+        assert!(bootstrap.remaining().is_err());
+    }
+
+    #[test]
+    fn storage_scope_requirement_refuses_same_length_wrong_purpose_permanently() {
+        let mut initial = storage_fixture(AcquisitionScope::InitialFirstHolder);
+        assert!(initial.require_storage_bootstrap().is_err());
+        assert!(initial.remaining().is_err());
+        let mut actual = storage_fixture(AcquisitionScope::StorageBootstrap);
+        assert!(actual.require_storage_metadata_observation().is_err());
+        assert!(actual.require_storage_bootstrap().is_err());
+        let mut diagnostic = storage_fixture(AcquisitionScope::StorageMetadataObservation);
+        assert!(diagnostic.require_storage_bootstrap().is_err());
+        assert!(diagnostic.require_storage_metadata_observation().is_err());
+    }
+
+    #[test]
+    fn storage_epoch_budget_requires_actual_bootstrap_clock_and_retains_spent_time() {
+        let mut actual = storage_fixture(AcquisitionScope::StorageBootstrap);
+        actual.fixture_time = Some(Duration::from_millis(106_300));
+        let mut budget = actual.budget().unwrap();
+        assert_eq!(
+            budget.remaining_native(&mut actual).unwrap(),
+            Duration::from_millis(23_700)
+        );
+        actual.fixture_time = Some(Duration::from_secs(130));
+        assert!(budget.remaining_native(&mut actual).is_err());
+        assert!(actual.remaining().is_err());
+
+        let mut diagnostic = storage_fixture(AcquisitionScope::StorageMetadataObservation);
+        assert!(diagnostic.budget().is_err());
+        assert!(diagnostic.remaining().is_err());
+
+        let mut current = NativeAcquisition::fixture(
+            Digest::new(b"ordinary-budget"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        assert!(Budget::from_storage_bootstrap(&mut current).is_err());
+        assert!(current.remaining().is_err());
+    }
 
     #[test]
     fn historical_progress_never_samples_renews_or_clears_a_refusal() {
@@ -567,6 +983,7 @@ mod tests {
             Duration::from_secs(100),
             INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
         );
+        original.scope = AcquisitionScope::InitialFirstHolder;
         let mut authentication = original.narrow(5, Duration::from_secs(110)).unwrap();
         assert_eq!(authentication.domain, original.domain);
         assert_eq!(authentication.origin, original.origin);
@@ -606,6 +1023,7 @@ mod tests {
             Duration::from_secs(100),
             INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
         );
+        original.scope = AcquisitionScope::InitialFirstHolder;
         original.fixture_time = Some(Duration::from_secs(102));
         let mut configured = original.narrow(3, Duration::from_secs(110)).unwrap();
         assert_eq!(configured.remaining().unwrap(), Duration::from_secs(1));
@@ -622,6 +1040,7 @@ mod tests {
             Duration::from_secs(100),
             INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
         );
+        original.scope = AcquisitionScope::InitialFirstHolder;
         assert!(original.narrow(61, Duration::from_secs(110)).is_err());
         assert!(original.remaining().is_err());
     }
@@ -636,6 +1055,9 @@ mod tests {
                     Duration::from_secs(100),
                     limit,
                 );
+                if limit == INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT {
+                    original.scope = AcquisitionScope::InitialFirstHolder;
+                }
                 let mut child = original.narrow(5, Duration::from_secs(110)).unwrap();
                 child.fixture_time = Some(Duration::from_millis(104_900));
                 original.fixture_time = Some(Duration::from_millis(parent_now));
@@ -673,6 +1095,7 @@ mod tests {
                 Duration::from_secs(100),
                 INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
             );
+            original.scope = AcquisitionScope::InitialFirstHolder;
             let mut child = original.narrow(5, Duration::from_secs(110)).unwrap();
             original.fixture_time = Some(Duration::from_secs(106));
             child.fixture_time = Some(Duration::from_secs(104));

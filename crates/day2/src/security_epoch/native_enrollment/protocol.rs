@@ -56,13 +56,15 @@ pub(super) struct StageData {
     pub deadline_ns: u64,
 }
 
-/// Signed closed stage purpose. A longer initial handshake cannot authorize a
-/// later bootstrap operation, current writer, serving phase or Shell stage.
+/// Signed closed stage purpose. Each producer and consumer requires its exact
+/// purpose; a longer bootstrap/observation interval is never ordinary Current.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum StagePurpose {
     CurrentRole,
     InitialFirstHolder,
+    StorageBootstrap,
+    StorageMetadataObservation,
 }
 
 impl StagePurpose {
@@ -72,15 +74,29 @@ impl StagePurpose {
             Self::InitialFirstHolder => {
                 crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
             }
+            Self::StorageBootstrap => crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+            Self::StorageMetadataObservation => {
+                crate::security_epoch::native_clock::STORAGE_METADATA_OBSERVATION_LIMIT
+            }
         }
     }
 
     pub(super) fn require_role(self, role: NativeRole) -> Result<()> {
-        ensure!(
-            self == Self::CurrentRole
-                || matches!(role, NativeRole::EpochController | NativeRole::AppHost),
-            "native_enrollment_stage_purpose_role"
-        );
+        let allowed = match self {
+            Self::CurrentRole => true,
+            Self::InitialFirstHolder | Self::StorageBootstrap => {
+                matches!(role, NativeRole::EpochController | NativeRole::AppHost)
+            }
+            Self::StorageMetadataObservation => role == NativeRole::EpochController,
+        };
+        ensure!(allowed, "native_enrollment_stage_purpose_role");
+        Ok(())
+    }
+
+    /// DATA comparison used by the actual native stage gate. Success here
+    /// neither constructs nor checks a native stage, clock or permission.
+    pub(super) fn require_exact(self, expected: Self) -> Result<()> {
+        ensure!(self == expected, "native_enrollment_stage_purpose_changed");
         Ok(())
     }
 }
