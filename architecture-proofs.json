@@ -2240,6 +2240,7 @@
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn check_budget_liveness (& self) -> Result < () >",
         "pub (crate) fn check_initial_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
@@ -2301,6 +2302,10 @@
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPreparedFilePhase < 'file , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_budget_liveness (& self) -> Result < () >"
         },
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
@@ -2755,6 +2760,7 @@
         "pub (in crate :: security_epoch) fn announce_known (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_budget_liveness (& self) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_activated (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_checked (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >",
@@ -2783,6 +2789,10 @@
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check_budget_liveness (& self) -> Result < () >"
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
@@ -2964,6 +2974,7 @@
         "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >",
         "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < Budget >",
         "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >",
+        "fn decoding_sample (& mut self) -> Result < Sample >",
         "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "fn sample (& mut self) -> Result < Sample >"
@@ -2975,6 +2986,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "ControllerPort < '_ , '_ >",
+          "signature": "fn decoding_sample (& mut self) -> Result < Sample >"
+        },
         {
           "owner": "ControllerPort < '_ , '_ >",
           "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
