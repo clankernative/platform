@@ -112,6 +112,20 @@ const MARKERS: &[(&str, &str)] = &[
         "Rust glue did not emit the required worker ABI",
         "glue_output_metadata",
     ),
+    ("tooling_root=true", "glue_root_is_tooling_workspace"),
+    ("tooling_root=false", "glue_root_is_other_workspace"),
+    (
+        "before_generator=regular",
+        "glue_seed_was_regular_before_generator",
+    ),
+    (
+        "before_generator=nonregular",
+        "glue_seed_was_nonregular_before_generator",
+    ),
+    (
+        "before_generator=unavailable",
+        "glue_seed_was_unavailable_before_generator",
+    ),
     ("Bazel build failed: primary=", "bazel_command_failed"),
     ("primary=exit, code=Some(1)", "reported_bazel_exit1"),
     ("native_link_failed", "reported_native_link_failure"),

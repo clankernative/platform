@@ -795,6 +795,13 @@ pub fn execute(
                             done.contains("build-app-types"),
                             "checked app types required before pure ABI generation"
                         );
+                        let reviewed_abi_before_generator = match fs::symlink_metadata(
+                            root.join("crates/worker/generated/roc_platform_abi.rs"),
+                        ) {
+                            Ok(metadata) if metadata.is_file() => "regular",
+                            Ok(_) => "nonregular",
+                            Err(_) => "unavailable",
+                        };
                         // The pure ABI is always Str -> Str and does not import
                         // authored App code. Product linking still requires both
                         // final native admission profiles below.
@@ -828,7 +835,10 @@ pub fn execute(
                         );
                         ensure!(
                             fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))
-                                .context("native glue reviewed ABI read")?
+                                .with_context(|| format!(
+                                    "native glue reviewed ABI read; tooling_root={}; before_generator={reviewed_abi_before_generator}",
+                                    root == Path::new("/workspace/platform")
+                                ))?
                                 == fs::read(generated).context("native glue emitted ABI read")?,
                             "generated worker ABI differs from the reviewed Bazel source input"
                         );

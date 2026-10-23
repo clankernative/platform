@@ -2015,12 +2015,39 @@ mod tests {
     }
 
     #[test]
-    fn remote_bazel_cache_cannot_publish_pr_outputs_or_skip_fresh_mac_checks() {
+    fn remote_bazel_cache_cannot_publish_shared_pr_outputs_or_skip_fresh_mac_checks() {
         let job = ci_job("verify-mac-compatibility");
-        let cache = ci_step(
-            &job,
-            "Restore the pinned Bazel tool and remote compilation cache",
+        let cache = ci_step(&job, "Restore Bazel compilation and repository caches");
+        assert!(cache.contains("disk-cache: false"));
+        let actions = ci_step(&job, "Restore source-keyed compiled actions");
+        assert!(actions.contains("path: ~/.cache/bazel-disk"));
+        assert!(actions.contains("lookup-only: ${{ inputs.compilation_cache == 'empty' }}"));
+        assert!(
+            actions.contains("-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}")
         );
+        let publish = ci_step(
+            &job,
+            "Persist newly compiled actions under the captured source key",
+        );
+        assert!(publish.contains("!cancelled()"));
+        assert!(publish.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
+        assert!(publish.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
+        assert!(publish.contains("github.event_name == 'merge_group'"));
+        assert!(publish.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(publish.contains(
+            "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
+        ));
+        for consumer in [
+            "verify-prepare",
+            "verify-shards",
+            "verify",
+            "verify-queue-receipt",
+        ] {
+            assert!(
+                !ci_job(consumer)
+                    .contains("Persist newly compiled actions under the captured source key")
+            );
+        }
         assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(cache.contains("github.event_name == 'merge_group'"));
         assert!(cache.contains(
