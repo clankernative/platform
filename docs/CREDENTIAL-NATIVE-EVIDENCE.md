@@ -271,7 +271,7 @@ its separate named count/total/max format. Bootstrap codes are:
 | Codes | Operations in the same order |
 | --- | --- |
 | 0, 1, 2 | role_stage, volume_acquisition, native_check |
-| 18–22 | claim, volume, node, disk, instance |
+| 17–21 | claim, volume, node, disk, instance |
 | 28–34 | bootstrap_ready, bootstrap_authentication, bootstrap_file, bootstrap_projection, bootstrap_durability, bootstrap_peer, bootstrap_peer_check |
 | 35–41 | bootstrap_writer, bootstrap_counter, bootstrap_slot, bootstrap_mutation, bootstrap_validation, bootstrap_release, authentication_check |
 | 42–45 | provider_round_one, provider_round_two, provider_round_three, provider_round_other |
