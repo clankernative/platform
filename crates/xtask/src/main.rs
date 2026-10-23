@@ -47,6 +47,52 @@ struct Manifest {
 }
 
 const DEFAULT_CAMPAIGN_BUDGET_SECONDS: u64 = 600;
+const MAXIMUM_BUILD_CAMPAIGN_BUDGET_SECONDS: u64 = 3600;
+const BUILD_CAMPAIGN_BUDGET_ENV: &str = "DAY2_BUILD_CAMPAIGN_BUDGET_SECONDS";
+
+#[derive(Clone, Copy)]
+struct BuildCampaignBudget(std::time::Duration);
+
+impl BuildCampaignBudget {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        let Some(value) = value else {
+            return Ok(Self(std::time::Duration::from_secs(
+                DEFAULT_CAMPAIGN_BUDGET_SECONDS,
+            )));
+        };
+        let seconds = value.parse::<u64>().with_context(|| {
+            format!(
+                "{BUILD_CAMPAIGN_BUDGET_ENV} must be an integer between 1 and \
+                 {MAXIMUM_BUILD_CAMPAIGN_BUDGET_SECONDS} seconds"
+            )
+        })?;
+        ensure!(
+            (1..=MAXIMUM_BUILD_CAMPAIGN_BUDGET_SECONDS).contains(&seconds),
+            "{BUILD_CAMPAIGN_BUDGET_ENV} must be between 1 and \
+             {MAXIMUM_BUILD_CAMPAIGN_BUDGET_SECONDS} seconds"
+        );
+        Ok(Self(std::time::Duration::from_secs(seconds)))
+    }
+
+    fn from_environment() -> Result<Self> {
+        let value = match std::env::var(BUILD_CAMPAIGN_BUDGET_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                bail!("{BUILD_CAMPAIGN_BUDGET_ENV} must be valid UTF-8")
+            }
+        };
+        Self::parse(value.as_deref())
+    }
+
+    fn duration(self) -> std::time::Duration {
+        self.0
+    }
+}
+
+fn run_build(root: &Path, command: &mut Command, budget: BuildCampaignBudget) -> Result<()> {
+    run_with_budget(root, command, budget.duration())
+}
 
 fn run(root: &Path, command: &mut Command) -> Result<()> {
     run_with_budget(
@@ -218,6 +264,7 @@ fn build_recipe(
     isolated_job: Option<&Path>,
     imports: Option<&BuildImportContext>,
 ) -> Result<PathBuf> {
+    let budget = BuildCampaignBudget::from_environment()?;
     let runner = if let Some(job) = isolated_job {
         for (name, expected) in day2::automation::SOURCES {
             ensure!(
@@ -229,7 +276,7 @@ fn build_recipe(
     } else {
         workflows::build(root)?
     };
-    build_native::execute(root, app, overrides, isolated_job, imports, &runner)
+    build_native::execute(root, app, overrides, isolated_job, imports, &runner, budget)
 }
 
 fn main() -> Result<()> {
@@ -1432,6 +1479,26 @@ mod tests {
         install_cli_file(&source, &installed)?;
         assert!(fs::symlink_metadata(&installed)?.file_type().is_file());
         assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    fn build_campaign_budget_defaults_and_overrides_are_bounded() -> Result<()> {
+        assert_eq!(
+            BuildCampaignBudget::parse(None)?.duration().as_secs(),
+            DEFAULT_CAMPAIGN_BUDGET_SECONDS
+        );
+        for (value, expected) in [("1", 1), ("2400", 2400), ("3600", 3600)] {
+            assert_eq!(
+                BuildCampaignBudget::parse(Some(value))?
+                    .duration()
+                    .as_secs(),
+                expected
+            );
+        }
+        assert!(BuildCampaignBudget::parse(Some("0")).is_err());
+        assert!(BuildCampaignBudget::parse(Some("3601")).is_err());
+        assert!(BuildCampaignBudget::parse(Some("not-a-number")).is_err());
         Ok(())
     }
 

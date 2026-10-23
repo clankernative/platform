@@ -35,6 +35,12 @@ cd ..
 ./cli/day2 platform local-dev examples/reports
 ```
 
+App build subprocesses use a 600-second campaign budget by default. Operators can set
+`DAY2_BUILD_CAMPAIGN_BUDGET_SECONDS` to an integer from 1 through 3600 to bound larger
+builds; values outside that range are rejected. The one-hour ceiling is six times the default,
+leaving room for slow builds while preserving a hard stop for runaway subprocesses. The same
+budget applies to each compiler, glue-generation and worker-build subprocess in that app build.
+
 `xtask cli` builds the Roc CLI, Roc workflow runner, Rust host and source builder together,
 records binary/toolchain and bundled Clanker identities in `cli/distribution.json`,
 and checks the pinned compiler. It automatically installs the reviewed target's
