@@ -938,7 +938,10 @@ impl SharedPort {
     /// New model transport only; preserve the independent slot/counter state,
     /// permanent May record and complete send observations.
     fn reopen_model_transport(self) -> Self {
-        Self { counter: self.counter.reopen_model_transport(), ..self }
+        Self {
+            counter: self.counter.reopen_model_transport(),
+            ..self
+        }
     }
 
     fn new() -> Self {
