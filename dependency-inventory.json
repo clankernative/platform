@@ -3834,7 +3834,7 @@
     ],
     "repository": "https://github.com/tokio-rs/tokio",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "1.53.1"
+    "version": "1.53.3"
   },
   {
     "license": "MIT",

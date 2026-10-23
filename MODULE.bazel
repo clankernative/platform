@@ -174,8 +174,8 @@ crate.annotation(
 
 crate.annotation(
     crate = "tokio",
-    version = "1.53.1",
-    patches = ["//build/bazel:patches/tokio-1.53.1-cargo-context.patch"],
+    version = "1.53.3",
+    patches = ["//build/bazel:patches/tokio-1.53.3-cargo-context.patch"],
     patch_args = ["-p1"],
 )
 
