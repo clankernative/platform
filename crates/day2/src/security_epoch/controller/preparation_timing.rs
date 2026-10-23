@@ -367,7 +367,14 @@ mod tests {
         }
         assert_eq!(
             serde_json::to_value(timings.summary().compact()).unwrap(),
-            serde_json::json!([[42, 1, 11], [43, 1, 22], [44, 1, 33], [53, 1, 44], [60, 1, 55], [61, 1, 66]])
+            serde_json::json!([
+                [42, 1, 11],
+                [43, 1, 22],
+                [44, 1, 33],
+                [53, 1, 44],
+                [60, 1, 55],
+                [61, 1, 66]
+            ])
         );
         let inconclusive = Summary(vec![(
             Operation::BootstrapFirestoreCommit,

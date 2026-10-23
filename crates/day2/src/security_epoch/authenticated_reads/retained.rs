@@ -430,7 +430,10 @@ impl RetainedEpochReads {
         stage: &mut EnrolledRoleStage<'_>,
         selection: &EpochStore,
         core: &crate::security_epoch::control_slot::LogicalCore,
-    ) -> Result<(EpochObservation, crate::security_epoch::control_slot_io::SlotObservation)> {
+    ) -> Result<(
+        EpochObservation,
+        crate::security_epoch::control_slot_io::SlotObservation,
+    )> {
         let result = (|| {
             ensure!(
                 self.scope == ReadScope::StorageBootstrap,

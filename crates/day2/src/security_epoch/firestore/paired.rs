@@ -110,9 +110,7 @@ fn read_once(
         "security_epoch_paired_document_selection"
     );
     expected.push(slot_name);
-    let body = serde_json::to_vec(
-        &json!({"documents":expected,"newTransaction":{"readOnly":{}}}),
-    )?;
+    let body = serde_json::to_vec(&json!({"documents":expected,"newTransaction":{"readOnly":{}}}))?;
     let bytes = budget.call(port, &names.endpoint("batchGet"), &body)?;
     // The strict JSON decoder rejects duplicate/escaped object keys before
     // either generic document payload is converted to its closed record codec.
@@ -154,11 +152,7 @@ fn read_once(
                 slot = entry
                     .found
                     .map(|document| {
-                        slot_codec::decode(
-                            &names.selection,
-                            core,
-                            &serde_json::to_vec(&document)?,
-                        )
+                        slot_codec::decode(&names.selection, core, &serde_json::to_vec(&document)?)
                     })
                     .transpose()?;
             } else {
@@ -208,17 +202,18 @@ fn validate_stream(entries: &[PairEntry], expected: &[&str]) -> Result<()> {
             .read_time
             .as_ref()
             .context("security_epoch_read_time_missing")?;
-        let read_time = time::OffsetDateTime::parse(
-            read_time,
-            &time::format_description::well_known::Rfc3339,
-        )?;
+        let read_time =
+            time::OffsetDateTime::parse(read_time, &time::format_description::well_known::Rfc3339)?;
         ensure!(
             previous_time.is_none_or(|previous| previous <= read_time),
             "security_epoch_provider_read_time_rewind"
         );
         previous_time = Some(read_time);
         let name = document_name(entry)?;
-        ensure!(expected.contains(&name), "security_epoch_unrequested_document");
+        ensure!(
+            expected.contains(&name),
+            "security_epoch_unrequested_document"
+        );
         ensure!(seen.insert(name), "security_epoch_duplicate_document");
     }
     ensure!(
