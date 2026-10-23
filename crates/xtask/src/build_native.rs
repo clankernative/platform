@@ -42,9 +42,11 @@ fn prepare(
     overrides: Option<&Path>,
     import_context: Option<&BuildImportContext>,
 ) -> Result<Prepared> {
-    let platform_hashes = platform_sources(root)?;
+    let platform_hashes = platform_sources(root).context("required platform compiler sources")?;
     let native_pin = native_toolchain::load(root)?;
-    let roc = native_pin.verified_compiler(root)?;
+    let roc = native_pin
+        .verified_compiler(root)
+        .context("selected pinned Roc compiler unavailable")?;
     let rust_glue = native_pin.rust_glue_path();
     let target = native_pin.target;
     let pin = native_pin.value;
@@ -64,7 +66,7 @@ fn prepare(
     if let Some(overrides) = overrides {
         snapshot(overrides, &captured, &mut hashes, "app")?;
     }
-    ui_assembly::expand(root, &captured, &mut hashes)?;
+    ui_assembly::expand(root, &captured, &mut hashes).context("managed UI source expansion")?;
     let modules = day2::app_sources::stage(&captured, &stage.join("app"))?;
     fs::write(
         stage.join("app-modules.json"),
@@ -349,7 +351,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
     let app_contract = day2::app_contract::decode(&worker.exchange(b"app-contract")?)?;
     let worker_digest = digest(&fs::read(stage.join("worker"))?);
     let schema_digest = schema.hash()?;
-    let platform_hashes = platform_sources(root)?;
+    let platform_hashes = platform_sources(root).context("required platform compiler sources")?;
     ensure!(
         platform_hashes == prepared.platform_hashes,
         "platform inputs changed during build; rebuild from one stable snapshot"
@@ -430,7 +432,12 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         ".dockerignore",
         "build-dependencies/clanker-ui.json",
     ] {
-        hashes.insert(path.to_string(), digest(&fs::read(root.join(path))?));
+        hashes.insert(
+            path.to_string(),
+            digest(&fs::read(root.join(path)).with_context(|| {
+                format!("required platform compiler input unavailable: {path}")
+            })?),
+        );
     }
     for directory in [
         "crates",
@@ -443,7 +450,9 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
         "deploy",
         "toolchains",
     ] {
-        hash_tree(root, &root.join(directory), &mut hashes)?;
+        hash_tree(root, &root.join(directory), &mut hashes).with_context(|| {
+            format!("required platform compiler source tree unavailable: {directory}")
+        })?;
     }
     Ok(hashes)
 }
@@ -615,49 +624,44 @@ pub fn execute(
     let mut done = BTreeSet::new();
     let mut published = None;
     let receipt = day2::automation::run(runner, &["build-recipe"], |request| {
-        let parameters: BTreeMap<String, Value> = request.decode()?;
-        ensure!(
-            parameters.is_empty(),
-            "compiler capabilities accept no recipe overrides"
-        );
-        ensure!(!done.contains(&request.action), "duplicate compiler effect");
-        if request.action == "build-stage" {
-            prepared = Some(prepare(root, app, overrides, import_context)?);
-        } else {
-            let prepared = prepared
-                .as_mut()
-                .context("stage source before compilation")?;
-            let stage = &prepared.stage;
-            let roc = &prepared.roc;
-            match request.action.as_str() {
-                "build-schema" => run(
-                    root,
-                    day2::sandbox::glue_compiler(
-                        root,
-                        stage,
-                        roc,
-                        day2::sandbox::CompilerCache::SchemaGlue,
-                    )?
-                    .arg("glue")
-                    .arg(root.join("tools/SchemaGlue.roc"))
-                    .arg(stage)
-                    .arg(stage.join("app/schema-platform.roc")),
-                )?,
-                "build-data" => {
-                    ensure!(done.contains("build-schema"), "checked types required");
-                    bound = Some(data(app, isolated_job, prepared)?);
-                }
-                "build-app-shape" | "build-app-types" | "build-app-check" => {
-                    let prerequisite = match request.action.as_str() {
-                        "build-app-shape" => "build-data",
-                        "build-app-types" => "build-witnesses",
-                        _ => "build-bind",
-                    };
-                    ensure!(
-                        done.contains(prerequisite),
-                        "missing app inference prerequisite: {prerequisite}"
-                    );
-                    run(
+        // Only the fixed compiler capability name can leave protected build logs.
+        let phase = match request.action.as_str() {
+            "build-stage" => "stage",
+            "build-schema" => "schema",
+            "build-data" => "data",
+            "build-app-shape" => "app-shape",
+            "build-witnesses" => "witnesses",
+            "build-app-types" => "app-types",
+            "build-glue" => "glue",
+            "build-host" => "host",
+            "build-connection-contract" => "connection-contract",
+            "build-bind" => "bind",
+            "build-app-check" => "app-check",
+            "build-admission" => "admission",
+            "build-check" => "check",
+            "build-link" => "link",
+            "build-publish" => "publish",
+            "build-verify" => "verify",
+            "build-select" => "select",
+            _ => "unknown",
+        };
+        let result: Result<Value> = (|| {
+            let parameters: BTreeMap<String, Value> = request.decode()?;
+            ensure!(
+                parameters.is_empty(),
+                "compiler capabilities accept no recipe overrides"
+            );
+            ensure!(!done.contains(&request.action), "duplicate compiler effect");
+            if request.action == "build-stage" {
+                prepared = Some(prepare(root, app, overrides, import_context)?);
+            } else {
+                let prepared = prepared
+                    .as_mut()
+                    .context("stage source before compilation")?;
+                let stage = &prepared.stage;
+                let roc = &prepared.roc;
+                match request.action.as_str() {
+                    "build-schema" => run(
                         root,
                         day2::sandbox::glue_compiler(
                             root,
@@ -668,237 +672,270 @@ pub fn execute(
                         .arg("glue")
                         .arg(root.join("tools/SchemaGlue.roc"))
                         .arg(stage)
-                        .arg(stage.join("app/app-platform.roc")),
-                    )?;
-                    if request.action == "build-app-check" {
-                        let bound = bound.as_mut().context("bound app required")?;
-                        let (checked, catalog) = checked_app(prepared, bound)?;
-                        ensure!(
-                            catalog == bound.declarations,
-                            "final handles changed the inferred catalog"
-                        );
-                        bound.checked_types = checked;
+                        .arg(stage.join("app/schema-platform.roc")),
+                    )?,
+                    "build-data" => {
+                        ensure!(done.contains("build-schema"), "checked types required");
+                        bound = Some(data(app, isolated_job, prepared)?);
                     }
-                }
-                "build-witnesses" => {
-                    ensure!(
-                        done.contains("build-app-shape"),
-                        "checked App.definition shape required"
-                    );
-                    let shape = day2::registry::AppShape::from_checked_types(&fs::read(
-                        stage.join("checked-types.json"),
-                    )?)?;
-                    ensure!(
-                        shape.unified,
-                        "App.definition requires unified Api.command/Api.query definitions"
-                    );
-                    fs::write(
-                        stage.join("app/app-platform.roc"),
-                        day2::registry::app_platform_for(Some(&shape), prepared.projection),
-                    )?;
-                    prepared.shape = Some(shape);
-                }
-                "build-bind" => {
-                    ensure!(
-                        done.contains("build-connection-contract"),
-                        "checked connection metadata required"
-                    );
-                    bind(
-                        root,
-                        prepared,
-                        bound.as_mut().context("bound data required")?,
-                    )?;
-                }
-                "build-connection-contract" => {
-                    ensure!(
-                        done.contains("build-app-types") && done.contains("build-host"),
-                        "checked registration inventory and pure host required"
-                    );
-                    let bound = bound.as_mut().context("bound data required")?;
-                    let (_, catalog) = checked_app(prepared, bound)?;
-                    if !catalog.connections.is_empty() {
-                        let source = stage.join("app/connection-probe.roc");
-                        let executable = stage.join("connection-probe");
-                        fs::write(&source, day2::connection_codegen::probe(&catalog))?;
+                    "build-app-shape" | "build-app-types" | "build-app-check" => {
+                        let prerequisite = match request.action.as_str() {
+                            "build-app-shape" => "build-data",
+                            "build-app-types" => "build-witnesses",
+                            _ => "build-bind",
+                        };
+                        ensure!(
+                            done.contains(prerequisite),
+                            "missing app inference prerequisite: {prerequisite}"
+                        );
+                        run(
+                            root,
+                            day2::sandbox::glue_compiler(
+                                root,
+                                stage,
+                                roc,
+                                day2::sandbox::CompilerCache::SchemaGlue,
+                            )?
+                            .arg("glue")
+                            .arg(root.join("tools/SchemaGlue.roc"))
+                            .arg(stage)
+                            .arg(stage.join("app/app-platform.roc")),
+                        )?;
+                        if request.action == "build-app-check" {
+                            let bound = bound.as_mut().context("bound app required")?;
+                            let (checked, catalog) = checked_app(prepared, bound)?;
+                            ensure!(
+                                catalog == bound.declarations,
+                                "final handles changed the inferred catalog"
+                            );
+                            bound.checked_types = checked;
+                        }
+                    }
+                    "build-witnesses" => {
+                        ensure!(
+                            done.contains("build-app-shape"),
+                            "checked App.definition shape required"
+                        );
+                        let shape = day2::registry::AppShape::from_checked_types(&fs::read(
+                            stage.join("checked-types.json"),
+                        )?)?;
+                        ensure!(
+                            shape.unified,
+                            "App.definition requires unified Api.command/Api.query definitions"
+                        );
+                        fs::write(
+                            stage.join("app/app-platform.roc"),
+                            day2::registry::app_platform_for(Some(&shape), prepared.projection),
+                        )?;
+                        prepared.shape = Some(shape);
+                    }
+                    "build-bind" => {
+                        ensure!(
+                            done.contains("build-connection-contract"),
+                            "checked connection metadata required"
+                        );
+                        bind(
+                            root,
+                            prepared,
+                            bound.as_mut().context("bound data required")?,
+                        )?;
+                    }
+                    "build-connection-contract" => {
+                        ensure!(
+                            done.contains("build-app-types") && done.contains("build-host"),
+                            "checked registration inventory and pure host required"
+                        );
+                        let bound = bound.as_mut().context("bound data required")?;
+                        let (_, catalog) = checked_app(prepared, bound)?;
+                        if !catalog.connections.is_empty() {
+                            let source = stage.join("app/connection-probe.roc");
+                            let executable = stage.join("connection-probe");
+                            fs::write(&source, day2::connection_codegen::probe(&catalog))?;
+                            run(
+                                root,
+                                day2::sandbox::compiler(root, stage, roc)?
+                                    .arg("build")
+                                    .arg(&source)
+                                    .arg(format!("--output={}", executable.display())),
+                            )?;
+                            // This worker can only evaluate the pure projection.
+                            // No runtime, authority provider or effect dispatcher
+                            // participates in declaration discovery.
+                            let raw =
+                                Worker::start(&executable)?.exchange(b"connection-contract")?;
+                            bound.connections =
+                                day2::connection_declaration::decode_catalog(&raw, &catalog)?;
+                            fs::remove_file(source)?;
+                            fs::remove_file(executable)?;
+                        }
+                        day2::connection_declaration::validate_catalog(
+                            &bound.connections,
+                            &catalog,
+                        )?;
+                        fs::write(
+                            stage.join("connections.json"),
+                            serde_json::to_vec(&bound.connections)?,
+                        )?;
+                    }
+                    "build-admission" => {
+                        ensure!(
+                            done.contains("build-app-check"),
+                            "final app reflection required"
+                        );
+                        let admission = root.join("artifacts/admission");
+                        run(
+                            root,
+                            day2::sandbox::compiler(root, &admission, roc)?
+                                .args(["check", "--no-cache"])
+                                .arg(admission.join("app/main.roc")),
+                        )?;
+                    }
+                    "build-glue" => {
+                        ensure!(
+                            done.contains("build-app-types"),
+                            "checked app types required before pure ABI generation"
+                        );
+                        // The pure ABI is always Str -> Str and does not import
+                        // authored App code. Product linking still requires both
+                        // final native admission profiles below.
+                        fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
+                        fs::create_dir_all(root.join("crates/worker/generated"))?;
+                        let output = tempfile::tempdir_in(stage)?;
+                        run(
+                            root,
+                            day2::sandbox::glue_compiler(
+                                root,
+                                stage,
+                                roc,
+                                day2::sandbox::CompilerCache::RustGlue,
+                            )?
+                            .arg("glue")
+                            .arg(prepared.rust_glue)
+                            .arg(output.path())
+                            .arg("sdk/main.roc"),
+                        )?;
+                        let generated = output.path().join("roc_platform_abi.rs");
+                        let metadata = fs::symlink_metadata(&generated)
+                            .context("Rust glue did not emit the required worker ABI")?;
+                        ensure!(
+                            metadata.is_file() && metadata.len() <= 2 * 1024 * 1024,
+                            "invalid generated worker ABI"
+                        );
+                        ensure!(
+                            fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))?
+                                == fs::read(generated)?,
+                            "generated worker ABI differs from the reviewed Bazel source input"
+                        );
+                    }
+                    "build-host" => {
+                        ensure!(done.contains("build-glue"), "checked ABI required");
+                        let archive = crate::bazel::worker_archive(root, isolated_job)?;
+                        prepared.hashes.extend(native_toolchain::stage_link_inputs(
+                            prepared.target,
+                            stage,
+                            &archive,
+                        )?);
+                    }
+                    "build-check" => {
+                        ensure!(done.contains("build-admission"), "final admission required");
+                        ensure!(bound.is_some(), "bound schema required");
+                        run(
+                            root,
+                            day2::sandbox::compiler(root, stage, roc)?
+                                .args(["check", "--no-cache"])
+                                .arg(stage.join("app/main.roc")),
+                        )?;
+                    }
+                    "build-link" => {
+                        ensure!(
+                            done.contains("build-host")
+                                && done.contains("build-check")
+                                && done.contains("build-admission"),
+                            "checked app and native host required"
+                        );
                         run(
                             root,
                             day2::sandbox::compiler(root, stage, roc)?
                                 .arg("build")
-                                .arg(&source)
-                                .arg(format!("--output={}", executable.display())),
+                                .arg(stage.join("app/main.roc"))
+                                .arg(format!("--output={}", stage.join("worker").display())),
                         )?;
-                        // This worker can only evaluate the pure projection.
-                        // No runtime, authority provider or effect dispatcher
-                        // participates in declaration discovery.
-                        let raw = Worker::start(&executable)?.exchange(b"connection-contract")?;
-                        bound.connections =
-                            day2::connection_declaration::decode_catalog(&raw, &catalog)?;
-                        fs::remove_file(source)?;
-                        fs::remove_file(executable)?;
                     }
-                    day2::connection_declaration::validate_catalog(&bound.connections, &catalog)?;
-                    fs::write(
-                        stage.join("connections.json"),
-                        serde_json::to_vec(&bound.connections)?,
-                    )?;
-                }
-                "build-admission" => {
-                    ensure!(
-                        done.contains("build-app-check"),
-                        "final app reflection required"
-                    );
-                    let admission = root.join("artifacts/admission");
-                    run(
-                        root,
-                        day2::sandbox::compiler(root, &admission, roc)?
-                            .args(["check", "--no-cache"])
-                            .arg(admission.join("app/main.roc")),
-                    )?;
-                }
-                "build-glue" => {
-                    ensure!(
-                        done.contains("build-app-types"),
-                        "checked app types required before pure ABI generation"
-                    );
-                    // The pure ABI is always Str -> Str and does not import
-                    // authored App code. Product linking still requires both
-                    // final native admission profiles below.
-                    fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
-                    fs::create_dir_all(root.join("crates/worker/generated"))?;
-                    let output = tempfile::tempdir_in(stage)?;
-                    run(
-                        root,
-                        day2::sandbox::glue_compiler(
-                            root,
-                            stage,
-                            roc,
-                            day2::sandbox::CompilerCache::RustGlue,
-                        )?
-                        .arg("glue")
-                        .arg(prepared.rust_glue)
-                        .arg(output.path())
-                        .arg("sdk/main.roc"),
-                    )?;
-                    let generated = output.path().join("roc_platform_abi.rs");
-                    let metadata = fs::symlink_metadata(&generated)
-                        .context("Rust glue did not emit the required worker ABI")?;
-                    ensure!(
-                        metadata.is_file() && metadata.len() <= 2 * 1024 * 1024,
-                        "invalid generated worker ABI"
-                    );
-                    ensure!(
-                        fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))?
-                            == fs::read(generated)?,
-                        "generated worker ABI differs from the reviewed Bazel source input"
-                    );
-                }
-                "build-host" => {
-                    ensure!(done.contains("build-glue"), "checked ABI required");
-                    let archive = crate::bazel::worker_archive(root, isolated_job)?;
-                    prepared.hashes.extend(native_toolchain::stage_link_inputs(
-                        prepared.target,
-                        stage,
-                        &archive,
-                    )?);
-                }
-                "build-check" => {
-                    ensure!(done.contains("build-admission"), "final admission required");
-                    ensure!(bound.is_some(), "bound schema required");
-                    run(
-                        root,
-                        day2::sandbox::compiler(root, stage, roc)?
-                            .args(["check", "--no-cache"])
-                            .arg(stage.join("app/main.roc")),
-                    )?;
-                }
-                "build-link" => {
-                    ensure!(
-                        done.contains("build-host")
-                            && done.contains("build-check")
-                            && done.contains("build-admission"),
-                        "checked app and native host required"
-                    );
-                    run(
-                        root,
-                        day2::sandbox::compiler(root, stage, roc)?
-                            .arg("build")
-                            .arg(stage.join("app/main.roc"))
-                            .arg(format!("--output={}", stage.join("worker").display())),
-                    )?;
-                }
-                "build-publish" => {
-                    ensure!(done.contains("build-link"), "linked worker required");
-                    let artifact =
-                        publish(root, prepared, bound.as_ref().context("checked schema")?)?;
-                    published = Some(artifact.clone());
-                }
-                "build-verify" => {
-                    ensure!(
-                        done.contains("build-publish"),
-                        "candidate contract admission required"
-                    );
-                    let artifact = published.as_ref().context("candidate required")?;
-                    let evidence = day2::development::verify_with_runner_imports(
-                        artifact,
-                        &stage.join("verification"),
-                        day2::development::DEFAULT_SEED,
-                        2,
-                        runner,
-                        &prepared.import_fixtures,
-                    )
-                    .context("native build required application verification")?;
-                    ensure!(
-                        evidence.verification_complete,
-                        "application verification obligations incomplete"
-                    );
-                    fs::write(
-                        artifact.join("verification.json"),
-                        serde_json::to_vec_pretty(&evidence)?,
-                    )?;
-                }
-                "build-select" => {
-                    ensure!(
-                        done.contains("build-verify"),
-                        "verified application required before selection"
-                    );
-                    let artifact = published.as_ref().context("candidate required")?;
-                    let loaded = day2::artifact::LoadedArtifact::load(artifact)
-                        .context("native build candidate selection admission")?;
-                    ensure!(
-                        platform_sources(root)? == prepared.platform_hashes,
-                        "platform inputs changed during verification"
-                    );
-                    let destination = root
-                        .join("artifacts")
-                        .join(loaded.id().trim_start_matches("sha256:"));
-                    if destination.exists() {
-                        let existing = day2::artifact::LoadedArtifact::load(&destination)
-                            .context("native build existing selection admission")?;
-                        ensure!(existing.id() == loaded.id(), "existing artifact differs");
-                        fs::copy(
+                    "build-publish" => {
+                        ensure!(done.contains("build-link"), "linked worker required");
+                        let artifact =
+                            publish(root, prepared, bound.as_ref().context("checked schema")?)?;
+                        published = Some(artifact.clone());
+                    }
+                    "build-verify" => {
+                        ensure!(
+                            done.contains("build-publish"),
+                            "candidate contract admission required"
+                        );
+                        let artifact = published.as_ref().context("candidate required")?;
+                        let evidence = day2::development::verify_with_runner_imports(
+                            artifact,
+                            &stage.join("verification"),
+                            day2::development::DEFAULT_SEED,
+                            2,
+                            runner,
+                            &prepared.import_fixtures,
+                        )
+                        .context("native build required application verification")?;
+                        ensure!(
+                            evidence.verification_complete,
+                            "application verification obligations incomplete"
+                        );
+                        fs::write(
                             artifact.join("verification.json"),
-                            destination.join("verification.json"),
+                            serde_json::to_vec_pretty(&evidence)?,
                         )?;
-                    } else {
-                        fs::rename(artifact, &destination)?;
                     }
-                    use std::io::Write;
-                    let mut pointer = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
-                    pointer.write_all(&serde_json::to_vec_pretty(
-                        &json!({ "artifact": loaded.id() }),
-                    )?)?;
-                    pointer.as_file().sync_all()?;
-                    pointer.persist(root.join("artifacts/current.json"))?;
-                    println!("Built and verified artifact: {}", destination.display());
-                    published = Some(destination.clone());
-                    done.insert(request.action);
-                    return Ok(json!({"artifact":destination}));
+                    "build-select" => {
+                        ensure!(
+                            done.contains("build-verify"),
+                            "verified application required before selection"
+                        );
+                        let artifact = published.as_ref().context("candidate required")?;
+                        let loaded = day2::artifact::LoadedArtifact::load(artifact)
+                            .context("native build candidate selection admission")?;
+                        ensure!(
+                            platform_sources(root)? == prepared.platform_hashes,
+                            "platform inputs changed during verification"
+                        );
+                        let destination = root
+                            .join("artifacts")
+                            .join(loaded.id().trim_start_matches("sha256:"));
+                        if destination.exists() {
+                            let existing = day2::artifact::LoadedArtifact::load(&destination)
+                                .context("native build existing selection admission")?;
+                            ensure!(existing.id() == loaded.id(), "existing artifact differs");
+                            fs::copy(
+                                artifact.join("verification.json"),
+                                destination.join("verification.json"),
+                            )?;
+                        } else {
+                            fs::rename(artifact, &destination)?;
+                        }
+                        use std::io::Write;
+                        let mut pointer = tempfile::NamedTempFile::new_in(root.join("artifacts"))?;
+                        pointer.write_all(&serde_json::to_vec_pretty(
+                            &json!({ "artifact": loaded.id() }),
+                        )?)?;
+                        pointer.as_file().sync_all()?;
+                        pointer.persist(root.join("artifacts/current.json"))?;
+                        println!("Built and verified artifact: {}", destination.display());
+                        published = Some(destination.clone());
+                        done.insert(request.action);
+                        return Ok(json!({"artifact":destination}));
+                    }
+                    _ => bail!("unknown compiler capability: {}", request.action),
                 }
-                _ => bail!("unknown compiler capability: {}", request.action),
             }
-        }
-        done.insert(request.action);
-        Ok(json!({}))
+            done.insert(request.action);
+            Ok(json!({}))
+        })();
+        result.with_context(|| format!("native compiler capability failed: {phase}"))
     })?;
     let artifact = published.context("workflow omitted artifact publication")?;
     ensure!(

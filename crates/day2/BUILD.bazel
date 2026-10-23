@@ -30,6 +30,7 @@ COMPILE_INPUTS = [
     "//:fixtures/authority-policies/owned-links.json",
     "//:fixtures/authority-policies/relational-conformance.json",
     "//:fixtures/authority-policies/repeated-field.json",
+    "//:fixtures/authority-policies/reports-search.json",
     "//:fixtures/authority-policies/reports.json",
     "//:infra/Stack.roc",
     "//:infra/main.roc",

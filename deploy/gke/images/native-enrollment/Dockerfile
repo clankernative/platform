@@ -11,7 +11,7 @@ FROM rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b0295
 COPY --from=bazel /bazel /usr/local/bin/bazel
 WORKDIR /workspace/platform
 COPY . .
-RUN ["bazel", "--batch", "run", "//crates/xtask:xtask", "--", "install-verifier"]
+RUN ["bazel", "--batch", "--output_base=/workspace/platform/.cache/bazel-executor", "run", "//crates/xtask:xtask", "--", "install-verifier"]
 RUN ["build-out/bin/xtask", "build-enrollment-image-programs"]
 RUN ["build-out/bin/xtask", "bootstrap"]
 RUN ["build-out/bin/xtask", "workflows"]

@@ -43,6 +43,7 @@ Verify :: [].{
 
 	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
 	inputs! = |host!| {
+		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in [
@@ -160,6 +161,7 @@ Verify :: [].{
 	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
 	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
 	mac! = |host!| {
+		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar", "verification-setup"] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?

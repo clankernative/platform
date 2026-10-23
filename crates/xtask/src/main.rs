@@ -226,7 +226,7 @@ fn build_recipe(
         }
         job.join("day2-workflows")
     } else {
-        workflows::build(root)?
+        workflows::build(root).context("prepare native build workflow runner")?
     };
     build_native::execute(root, app, overrides, isolated_job, imports, &runner)
 }
@@ -260,7 +260,7 @@ fn main() -> Result<()> {
         );
         root
     } else {
-        day2::automation::source_root()?
+        day2::automation::source_root().context("resolve verifier source distribution")?
     };
     // These closed native helpers read source evidence or addressed artifacts, or write only their
     // explicit new package output. They run as unprivileged tooling users and
@@ -293,10 +293,13 @@ fn main() -> Result<()> {
     };
     if _lock.is_some() {
         let installed = bazel::program(&root, "xtask");
-        let current = std::env::current_exe()?.canonicalize()?;
+        let current = std::env::current_exe()?
+            .canonicalize()
+            .context("current verifier executable is unavailable")?;
         if installed.canonicalize().ok().as_ref() != Some(&current) {
             fs::create_dir_all(installed.parent().context("verifier output directory")?)?;
-            install_cli_file(&current, &installed)?;
+            install_cli_file(&current, &installed)
+                .context("install current verifier entrypoint")?;
             if action != "install-verifier" {
                 // Bazel places package outputs in separate directories. Run
                 // operations from the admitted installation so native worker

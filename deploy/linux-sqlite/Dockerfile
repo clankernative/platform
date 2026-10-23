@@ -13,7 +13,7 @@ WORKDIR /workspace/platform
 # The disposable tooling image keeps executable behavior and assertions while
 # avoiding multi-gigabyte debug symbols and incremental caches in image layers.
 COPY . .
-RUN ["bazel", "--batch", "run", "//crates/xtask:xtask", "--", "install-verifier"]
+RUN ["bazel", "--batch", "--output_base=/workspace/platform/.cache/bazel-executor", "run", "//crates/xtask:xtask", "--", "install-verifier"]
 RUN ["build-out/bin/xtask", "build-tooling-image"]
 RUN ["build-out/bin/xtask", "bootstrap"]
 RUN ["build-out/bin/xtask", "cli"]

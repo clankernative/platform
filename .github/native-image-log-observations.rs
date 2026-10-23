@@ -2,6 +2,99 @@
 use std::{collections::BTreeSet, fs, io::Read, path::Path};
 
 const MARKERS: &[(&str, &str)] = &[
+    (
+        "prepare native build workflow runner",
+        "native_workflow_runner_failed",
+    ),
+    (
+        "resolve verifier source distribution",
+        "verifier_source_root_failed",
+    ),
+    (
+        "current verifier executable is unavailable",
+        "verifier_path_unavailable",
+    ),
+    (
+        "install current verifier entrypoint",
+        "verifier_installation_failed",
+    ),
+    (
+        "native compiler capability failed: stage",
+        "native_compiler_stage",
+    ),
+    (
+        "native compiler capability failed: schema",
+        "native_compiler_schema",
+    ),
+    (
+        "native compiler capability failed: data",
+        "native_compiler_data",
+    ),
+    (
+        "native compiler capability failed: app-shape",
+        "native_compiler_app_shape",
+    ),
+    (
+        "native compiler capability failed: witnesses",
+        "native_compiler_witnesses",
+    ),
+    (
+        "native compiler capability failed: app-types",
+        "native_compiler_app_types",
+    ),
+    (
+        "native compiler capability failed: glue",
+        "native_compiler_glue",
+    ),
+    (
+        "native compiler capability failed: host",
+        "native_compiler_host",
+    ),
+    (
+        "native compiler capability failed: connection-contract",
+        "native_compiler_connection_contract",
+    ),
+    (
+        "native compiler capability failed: bind",
+        "native_compiler_bind",
+    ),
+    (
+        "native compiler capability failed: app-check",
+        "native_compiler_app_check",
+    ),
+    (
+        "native compiler capability failed: admission",
+        "native_compiler_admission",
+    ),
+    (
+        "native compiler capability failed: check",
+        "native_compiler_check",
+    ),
+    (
+        "native compiler capability failed: link",
+        "native_compiler_link",
+    ),
+    (
+        "native compiler capability failed: publish",
+        "native_compiler_publish",
+    ),
+    (
+        "native compiler capability failed: verify",
+        "native_compiler_verify",
+    ),
+    (
+        "native compiler capability failed: select",
+        "native_compiler_select",
+    ),
+    (
+        "required platform compiler sources",
+        "platform_source_capture_failed",
+    ),
+    (
+        "selected pinned Roc compiler unavailable",
+        "pinned_Roc_compiler_unavailable",
+    ),
+    ("managed UI source expansion", "managed_UI_expansion_failed"),
     ("Bazel build failed: primary=", "bazel_command_failed"),
     ("primary=exit, code=Some(1)", "reported_bazel_exit1"),
     ("native_link_failed", "reported_native_link_failure"),

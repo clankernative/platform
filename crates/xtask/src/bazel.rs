@@ -637,6 +637,20 @@ fn admit_clippy_json(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Execute the complete pinned compiler-wrapper controls as fresh tests.
+/// Roc selects this single compiler prerequisite before native preparation.
+pub(crate) fn wrapper_controls(root: &Path) -> Result<()> {
+    let mut command = command(root);
+    command.arg("test");
+    configuration_arguments(&mut command);
+    command.args([
+        "--cache_test_results=no",
+        "--test_output=all",
+        "@rules_rust//util/process_wrapper:process_wrapper_test",
+    ]);
+    run_with_budget(root, &mut command, Duration::from_secs(600))
+}
+
 pub(crate) fn docs(root: &Path) -> Result<()> {
     let mut command = command(root);
     command.arg("test");

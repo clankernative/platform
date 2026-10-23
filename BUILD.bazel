@@ -35,6 +35,7 @@ exports_files([
     "fixtures/authority-policies/owned-links.json",
     "fixtures/authority-policies/relational-conformance.json",
     "fixtures/authority-policies/repeated-field.json",
+    "fixtures/authority-policies/reports-search.json",
     "fixtures/authority-policies/reports.json",
     "fixtures/control-simulation/lost-publication.json",
     "fixtures/control-simulation/release-readiness.json",

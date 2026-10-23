@@ -47,6 +47,8 @@ jobs:
         run: rustc --edition=2024 .github/native-image-log-observations.rs -o /tmp/day2-native-image-observations
       - name: Install current source verifier
         run: bazel --batch run --config=ci-linux //crates/xtask:xtask -- install-verifier
+      - name: Enforce the exact current native source policy before image work
+        run: build-out/bin/xtask architecture-check
       - name: Bootstrap current native inputs
         run: build-out/bin/xtask bootstrap
       - name: Qualify actual native tooling and runtime images

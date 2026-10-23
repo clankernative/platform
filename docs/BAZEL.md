@@ -107,8 +107,9 @@ concurrently changing filesystem.
 ## CI cache and measurements
 
 The commit-pinned setup-bazel action persists Bazel action/repository caches in
-GitHub Actions storage. Compiled-output snapshots use exact checkout commit keys with
-same-role and OS/architecture fallbacks, so a Rust-only edit can save new actions
+GitHub Actions storage. Compiled-output snapshots use exact checkout commit plus run/attempt keys with
+same-source, same-role and OS/architecture fallbacks. Each run can save newly
+compiled actions, including when a previous immutable snapshot was partial. A Rust-only edit can save new actions
 without discarding reusable prior actions. Valid compiled actions may be saved
 after a later fresh-runtime failure, while cancelled runs do not save them.
 Only the native preparation builders
@@ -119,10 +120,20 @@ GitHub-isolated pull-request cache scope; they cannot seed the main branch. Ther
 or paid storage setting. Eviction within the existing repository allowance can
 reduce hits.
 
+The ordinary Roc verification recipes execute the complete patched compiler-wrapper
+control module on Linux and Mac. The Mac campaign also executes the actual trusted
+builder outside-file and network refusal control. These are permanent gates.
+
 Test results are never reused (`--cache_test_results=no`). Runtime, private,
 docs and installation outcomes remain fresh and source-bound. Prepared native
 outputs have their existing complete-inventory and byte/mode admission before
 transport; a cache archive alone does not qualify them.
+
+For a controlled full run, dispatch CI with `compilation_cache=empty` to skip
+downloading all prior-run compiled-output snapshots. Fetched repositories and
+current-run transport stay enabled. Repeat the same source/ref with
+`compilation_cache=reuse` to measure restored compiled outputs. Both modes run
+the same fresh verification campaigns; neither asserts empty tool/download caches.
 
 Report queue/setup, restore/save, compilation, fresh test work, runner minutes
 and the critical path separately. A warm action hit is compiled-output reuse,
