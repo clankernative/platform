@@ -488,6 +488,37 @@ mod tests {
         clock
     }
 
+    #[test]
+    fn retained_short_view_charges_final_parent_guard_without_renewal() {
+        for end in [100_999, 101_000, 101_100] {
+            let mut parent = NativeAcquisition::fixture(
+                Digest::new(b"retained-child-clock-data"),
+                std::process::id(),
+                Duration::from_secs(100),
+                Duration::from_secs(5),
+            );
+            let mut retained = parent.narrow(1, parent.deadline).unwrap();
+            retained.fixture_time = Some(Duration::from_millis(100_900));
+            let earlier = retained.sample().unwrap();
+            assert_eq!(earlier.elapsed, Duration::from_millis(100_900));
+            // Model the final real parent/stage check: it can still succeed
+            // while the retained one-second view has already expired.
+            parent.fixture_time = Some(Duration::from_millis(end));
+            assert!(parent.sample().is_ok());
+            retained.fixture_time = parent.fixture_time;
+            let final_sample = retained.sample();
+            assert_eq!(final_sample.is_ok(), end < 101_000);
+            assert_eq!(retained.origin, Duration::from_secs(100));
+            assert_eq!(retained.deadline, Duration::from_secs(101));
+            if end >= 101_000 {
+                retained.fixture_time = Some(Duration::from_millis(100_900));
+                parent.fixture_time = Some(Duration::from_millis(100_900));
+                assert!(retained.sample().is_err());
+                assert!(parent.sample().is_err());
+            }
+        }
+    }
+
     // DATA-only transport schedule over the real budget/clock arithmetic. No
     // native role, physical file, provider identity or positive permission is
     // constructed. Pre/post times represent work inside a guarded exchange.

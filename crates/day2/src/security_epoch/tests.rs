@@ -395,14 +395,25 @@ fn caught_transport_refusal_cannot_resend_and_new_model_port_keeps_send_history(
     provider.fault = Fault::None;
     assert!(budget.call(&mut provider, url, &body).is_err());
     assert_eq!(provider.calls.len(), 1);
-    // A separate consumed model port can observe the same provider database.
-    // This fixture grants no native role or retry/adoption of a failed file.
+    let original_trace = provider.calls.clone();
+    // A separate consumed model port can coherently OBSERVE the same provider
+    // database. It must not repeat the failed write. No native role or retry/
+    // adoption of a failed file is granted by this fixture.
     provider = provider.reopen_model_transport();
-    let mut fresh_budget =
-        firestore::Budget::for_context(provider.sample().unwrap(), Duration::from_secs(105))
-            .unwrap();
-    fresh_budget.call(&mut provider, url, &body).unwrap();
-    assert_eq!(provider.calls.len(), 2);
+    let observed = provider.read(&request).unwrap();
+    assert!(observed.root.is_none());
+    assert_eq!(
+        &provider.calls[..original_trace.len()],
+        original_trace.as_slice()
+    );
+    assert_eq!(
+        provider
+            .calls
+            .iter()
+            .filter(|(url, _, _)| url.ends_with(":commit"))
+            .count(),
+        1
+    );
 }
 
 fn create_pending(
