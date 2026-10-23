@@ -151,7 +151,7 @@ five-second stage. Initial first-holder admission retains its separate
 10-second purpose. Neither purpose can substitute for the other.
 
 Only the six fixed Controller storage-bootstrap operations and their exact
-retained App responder select `storage_bootstrap`, with a nominal 30-second
+retained App responder select `storage_bootstrap`, with a temporary nominal 60-second
 original interval. The App selects it from its local `Bootstrapping` owner,
 never from a received purpose label. Role exchange and complete Google/Kubernetes
 authentication must both finish by that same original origin plus five seconds.
@@ -169,9 +169,14 @@ is refused by ordinary consumers. The nominal ceiling does not establish a
 complete-path timing margin or successful native qualification. On 2026-10-23,
 the ten-second bootstrap attempt spent 7.718 seconds before writer preparation
 and then refused there after all three provider rounds, before the first
-counter read. The user approved thirty seconds per bootstrap action to qualify
-the unmeasured tail. Require repeated complete actions within 24 seconds before
-claiming margin; neither this ceiling nor successful DATA tests establish it.
+counter read. The user first approved thirty seconds per bootstrap action.
+The later paired-read run completed reserve in 29.809998 seconds, but its next
+dispatch refused at announcement after 30.001722 seconds. The user approved a
+temporary sixty-second ceiling to measure all remaining steps, pending the
+kernel-integrity/Firestore redesign intended to return to thirty seconds or less.
+Neither this temporary ceiling nor successful DATA tests establishes margin;
+the redesign's thirty-second target still requires repeated complete actions
+within 24 seconds before claiming its six-second margin.
 
 The subsequent thirty-second attempt refused during its counter read: the
 inclusive counter phase took 18.732 seconds, including 17.968 seconds of native
@@ -283,7 +288,7 @@ the last I/O before the infallible owner transfer.
 Each of the six bootstrap steps starts a separate diagnostic collector for its
 actual storage-bootstrap attempt. Entering that step clears the cached
 first-holder summary. A refusal there can carry `bootstrap` with the fixed
-`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 30000000`, `last_step`,
+`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 60000000`, `last_step`,
 `returned`, `provider_rounds`, `elapsed_us`, `timing_format` and `timing`; it never reuses the earlier
 preparation `timing` field. Shorter effective caps are not reported as a fresh
 interval by this nominal value.

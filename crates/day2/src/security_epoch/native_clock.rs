@@ -18,12 +18,13 @@ pub(in crate::security_epoch) const INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT: Durati
     Duration::from_secs(10);
 
 /// User-approved ceiling for EACH original storage-bootstrap action only.
-/// The 2026-10-23 run spent 7.718s before writer preparation, then exhausted
-/// 10s there after all three provider rounds, before its first counter read.
-/// Thirty seconds permits qualification of the unmeasured tail; margin is not
-/// established until repeated complete actions finish within 24s. Role and
-/// provider authentication still share the SAME original origin+5 deadline.
-pub(in crate::security_epoch) const STORAGE_BOOTSTRAP_LIMIT: Duration = Duration::from_secs(30);
+/// Temporary pending the kernel-integrity/Firestore redesign: the 2026-10-23
+/// paired-read run completed reserve in 29.809998s, then its next dispatch
+/// exhausted 30.001722s during announcement, before acknowledgement/release.
+/// Sixty seconds permits measuring the complete path; it establishes no margin.
+/// Role/provider authentication and ordinary serving remain five seconds, and
+/// all freshness checks, shorter caps and exclusive deadlines remain unchanged.
+pub(in crate::security_epoch) const STORAGE_BOOTSTRAP_LIMIT: Duration = Duration::from_secs(60);
 
 /// Read-only metadata diagnostics retain their separate existing ten seconds.
 /// They cannot create a file, join the bootstrap peer or install a writer.
@@ -656,7 +657,7 @@ mod tests {
                     Duration::from_secs(102)
                 };
                 port.post = Duration::from_secs(102);
-                // The actual thirty-second parent is independently live;
+                // The actual sixty-second parent is independently live;
                 // the narrower caller must still stop before or after send.
                 port.clock.fixture_time = Some(port.pre);
                 assert!(port.clock.sample().is_ok());
@@ -695,7 +696,7 @@ mod tests {
                     "epoch_native_acquisition_refused"
                 );
             }
-            assert_eq!(port.clock.deadline, Duration::from_secs(130));
+            assert_eq!(port.clock.deadline, Duration::from_secs(160));
         }
     }
 
@@ -969,7 +970,7 @@ mod tests {
 
     #[test]
     fn storage_deadline_and_shorter_caps_refuse_equality_without_recovery() {
-        assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(30));
+        assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(60));
         assert_eq!(STORAGE_METADATA_OBSERVATION_LIMIT, Duration::from_secs(10));
         assert_eq!(
             INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
@@ -995,12 +996,12 @@ mod tests {
     }
 
     #[test]
-    fn only_bootstrap_spends_thirty_seconds_and_every_original_deadline_is_exclusive() {
+    fn only_bootstrap_spends_sixty_seconds_and_every_original_deadline_is_exclusive() {
         for (scope, seconds) in [
             (AcquisitionScope::Current, 5),
             (AcquisitionScope::InitialFirstHolder, 10),
             (AcquisitionScope::StorageMetadataObservation, 10),
-            (AcquisitionScope::StorageBootstrap, 30),
+            (AcquisitionScope::StorageBootstrap, 60),
         ] {
             assert_eq!(scope.limit(), Duration::from_secs(seconds));
             let mut clock = storage_fixture(scope);
@@ -1015,7 +1016,7 @@ mod tests {
         }
         let mut bootstrap = storage_fixture(AcquisitionScope::StorageBootstrap);
         bootstrap.fixture_time = Some(bootstrap.origin + Duration::from_secs(11));
-        assert_eq!(bootstrap.remaining().unwrap(), Duration::from_secs(19));
+        assert_eq!(bootstrap.remaining().unwrap(), Duration::from_secs(49));
         // A live bootstrap purpose cannot start late provider authentication.
         assert!(bootstrap.narrow_authentication().is_err());
         assert!(bootstrap.remaining().is_err());
@@ -1041,9 +1042,14 @@ mod tests {
         let mut budget = actual.budget().unwrap();
         assert_eq!(
             budget.remaining_native(&mut actual).unwrap(),
-            Duration::from_millis(23_700)
+            Duration::from_millis(53_700)
         );
-        actual.fixture_time = Some(Duration::from_secs(130));
+        actual.fixture_time = Some(Duration::from_secs(131));
+        assert_eq!(
+            budget.remaining_native(&mut actual).unwrap(),
+            Duration::from_secs(29)
+        );
+        actual.fixture_time = Some(Duration::from_secs(160));
         assert!(budget.remaining_native(&mut actual).is_err());
         assert!(actual.remaining().is_err());
 

@@ -248,7 +248,7 @@ mod tests {
         assert!(snapshot.completed_bootstrap_action());
         let json = serde_json::to_value(snapshot).unwrap();
         assert_eq!(json["elapsed_us"], 23_999_000);
-        assert_eq!(json["purpose_limit_us"], 30_000_000);
+        assert_eq!(json["purpose_limit_us"], 60_000_000);
         assert_eq!(json["timing_format"], "operation_count_total_us_v1");
         for end in [None, Some(Duration::from_secs(99)), Some(Duration::MAX)] {
             assert!(serde_json::to_value(trace.snapshot_at(end)).unwrap()["elapsed_us"].is_null());
