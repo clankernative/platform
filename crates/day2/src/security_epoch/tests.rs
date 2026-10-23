@@ -140,6 +140,7 @@ pub(super) struct Provider {
     samples: VecDeque<(Digest, Duration)>,
     read_override: Option<Vec<u8>>,
     calls: Vec<(String, Value, Duration)>,
+    refused: bool,
 }
 
 fn timestamp(version: i64) -> String {
@@ -147,6 +148,16 @@ fn timestamp(version: i64) -> String {
 }
 
 impl Provider {
+    /// A new DATA-only transport lifetime over the same independent provider
+    /// database. Consumes the old model port; never renews a native owner or
+    /// clears a journal's MayHaveBeenSent state. Keep the complete send trace.
+    pub(super) fn reopen_model_transport(self) -> Self {
+        Self {
+            refused: false,
+            ..self
+        }
+    }
+
     fn open(path: impl AsRef<Path>) -> Self {
         Self::from_db(Connection::open(path).unwrap())
     }
@@ -164,6 +175,7 @@ impl Provider {
             samples: VecDeque::new(),
             read_override: None,
             calls: Vec::new(),
+            refused: false,
         }
     }
 
@@ -298,16 +310,10 @@ impl Provider {
     }
 }
 
-impl Port for Provider {
-    fn sample(&mut self) -> Result<Sample> {
-        let (domain, elapsed) = self
-            .samples
-            .pop_front()
-            .unwrap_or((Digest::new(b"controller-process-clock"), self.tick));
-        Ok(Sample { domain, elapsed })
-    }
-
-    fn post(
+impl Provider {
+    /// Provider-side DATA model; this raw backend hook is not a native port or
+    /// authority. SharedPort uses it for the same independent SQLite oracle.
+    pub(super) fn post_wire(
         &mut self,
         url: &str,
         body: &[u8],
@@ -346,6 +352,57 @@ impl Port for Provider {
             body: bytes,
         })
     }
+}
+
+impl Port for Provider {
+    fn sample(&mut self) -> Result<Sample> {
+        ensure!(!self.refused, "model_transport_refused");
+        let (domain, elapsed) = self
+            .samples
+            .pop_front()
+            .unwrap_or((Digest::new(b"controller-process-clock"), self.tick));
+        Ok(Sample { domain, elapsed })
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut firestore::Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let timeout = budget.remaining(self)?.min(Duration::from_secs(5));
+        self.post_wire(url, body, timeout, max_bytes)
+    }
+
+    fn refuse(&mut self) {
+        self.refused = true;
+    }
+}
+
+#[test]
+fn caught_transport_refusal_cannot_resend_and_new_model_port_keeps_send_history() {
+    let mut provider = Provider::new();
+    let request = create();
+    let body = firestore::commit_body(&selection(), &request).unwrap();
+    let url = "https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:commit";
+    let mut budget =
+        firestore::Budget::for_context(provider.sample().unwrap(), Duration::from_secs(105))
+            .unwrap();
+    provider.fault = Fault::LoseBefore;
+    assert!(budget.call(&mut provider, url, &body).is_err());
+    assert_eq!(provider.calls.len(), 1);
+    provider.fault = Fault::None;
+    assert!(budget.call(&mut provider, url, &body).is_err());
+    assert_eq!(provider.calls.len(), 1);
+    // A separate consumed model port can observe the same provider database.
+    // This fixture grants no native role or retry/adoption of a failed file.
+    provider = provider.reopen_model_transport();
+    let mut fresh_budget =
+        firestore::Budget::for_context(provider.sample().unwrap(), Duration::from_secs(105))
+            .unwrap();
+    fresh_budget.call(&mut provider, url, &body).unwrap();
+    assert_eq!(provider.calls.len(), 2);
 }
 
 fn create_pending(
@@ -543,6 +600,7 @@ fn ambiguous_sends_require_explicit_same_request_reconciliation() {
             );
         }
         provider.fault = Fault::None;
+        provider = provider.reopen_model_transport();
         let mut journal = Journal::open(&mut db).unwrap();
         let observed = provider.read(&request).unwrap();
         assert!(
@@ -635,6 +693,7 @@ fn activation_unknown_never_releases_the_accepted_holder_or_changes_request_byte
         );
         assert!(journal.accept(&selection(), &replacement).is_err());
         provider.fault = Fault::None;
+        provider = provider.reopen_model_transport();
         let current = provider.read(&request).unwrap();
         let outcome = journal
             .reconcile_attempt(

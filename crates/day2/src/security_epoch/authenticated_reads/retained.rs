@@ -7,7 +7,7 @@ use super::{AuthenticatedReads, ReadScope};
 use crate::security_epoch::{
     controller::preparation_timing::{Operation, Timings},
     credential_material::CredentialMaterial,
-    firestore::{self, EpochObservation, EpochReply, Names, Port, Sample},
+    firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
     native_identity::NativeProcessObservation,
@@ -186,6 +186,32 @@ impl ControllerEpochReads {
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.state.refuse();
     }
+
+    /// Closed authentication observation against an actual owning stage. Only
+    /// this facade borrows its own hidden material; callers cannot substitute
+    /// another material object or obtain the stage, credentials or a proof.
+    pub(in crate::security_epoch) fn check_stage(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<()> {
+        let result = (|| {
+            let borrow = self.state.gate.enter()?;
+            let mut material = self.state.material.try_borrow_mut()?;
+            ensure!(
+                material.scope == ReadScope::StorageBootstrap,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            material.check_bootstrap(stage, policy, store)?;
+            drop(material);
+            borrow.complete()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
 }
 
 impl AuthenticatedReads<'_, '_> {
@@ -354,9 +380,11 @@ impl RetainedEpochReads {
             let same_stage = self.scope.io(stage, self.store.max_lease_seconds)?;
             self.scope.join(&mut self.acquisition, same_stage)?;
             self.process.check(&mut self.acquisition)?;
-            let sample = self.acquisition.sample()?;
+            self.acquisition.sample()?;
             self.owner.check(stage)?;
-            Ok(sample)
+            // Charge the final stage check too; its parent interval may be
+            // wider than this retained view or the caller's context budget.
+            self.acquisition.sample()
         });
         if result.is_err() {
             self.refuse();
@@ -460,7 +488,7 @@ impl RetainedEpochReads {
         stage: &mut EnrolledRoleStage<'_>,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
         let result = (|| {
@@ -470,10 +498,7 @@ impl RetainedEpochReads {
             );
             self.check(stage)?;
             ensure!(
-                max_bytes == 65536
-                    && body.len() <= 65536
-                    && !timeout.is_zero()
-                    && timeout <= Duration::from_secs(5),
+                max_bytes == 65536 && body.len() <= 65536,
                 "epoch_retained_read_budget"
             );
             let route = if url.ends_with("/documents:batchGet") {
@@ -487,14 +512,19 @@ impl RetainedEpochReads {
                 self.http.matches(&route, url)?,
                 "epoch_retained_read_recipient_changed"
             );
+            let authorization = self.credential.authorization()?;
+            let timeout = budget
+                .remaining_native(&mut self.acquisition)?
+                .min(Duration::from_secs(5));
             let bytes = self.http.request_with_ceiling(
                 route,
-                &self.credential.authorization()?,
+                &authorization,
                 Some(body),
                 &mut self.acquisition,
                 timeout,
             )?;
             self.check(stage)?;
+            budget.remaining_native(&mut self.acquisition)?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
@@ -521,10 +551,22 @@ impl Port for CurrentReadPort<'_, '_, '_> {
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        self.owner.post(self.stage, url, body, timeout, max_bytes)
+        // Ordinary reads retain their previous full pre/post observations.
+        let result = (|| {
+            budget.remaining(self)?;
+            self.owner.post(self.stage, url, body, budget, max_bytes)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn refuse(&mut self) {
+        self.owner.refuse();
     }
 }
 

@@ -68,9 +68,10 @@ pub(in crate::security_epoch) enum Operation {
     BootstrapFirestoreRead,
     BootstrapFirestoreCommit,
     BootstrapFirestoreRollback,
+    BootstrapWriterExchange,
 }
 
-const OPERATIONS: [Operation; 59] = [
+const OPERATIONS: [Operation; 60] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -130,6 +131,7 @@ const OPERATIONS: [Operation; 59] = [
     Operation::BootstrapFirestoreRead,
     Operation::BootstrapFirestoreCommit,
     Operation::BootstrapFirestoreRollback,
+    Operation::BootstrapWriterExchange,
 ];
 
 #[derive(Clone, Copy)]
@@ -173,6 +175,7 @@ impl Scope {
                 | Operation::BootstrapFirestoreRead
                 | Operation::BootstrapFirestoreCommit
                 | Operation::BootstrapFirestoreRollback
+                | Operation::BootstrapWriterExchange
         );
         match self {
             Self::Preparation => !bootstrap_only,

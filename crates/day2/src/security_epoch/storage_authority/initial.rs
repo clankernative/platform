@@ -411,6 +411,23 @@ fn request_binding(
 }
 
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
+    /// Closed authentication DATA leaf. The transport must release this leaf's
+    /// material borrow, then run the unchanged FULL composite check before any
+    /// returned clock DATA, effect or authority transfer.
+    pub(in crate::security_epoch) fn check_authentication(
+        &mut self,
+        reads: &mut ControllerEpochReads,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_budget_liveness()?;
+            self.file.check_authentication(reads)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     /// A pure decoder may inspect local refusal before borrowing the original
     /// clock. This never substitutes for `check` at I/O or ownership transfer.
     pub(in crate::security_epoch) fn check_budget_liveness(&self) -> Result<()> {

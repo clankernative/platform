@@ -401,6 +401,22 @@ impl<'file> PendingPreparedFilePhase<'file> {
 }
 
 impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
+    /// Only authentication DATA, using the actual volume's hidden owning
+    /// stage. Full file validation is a separate mandatory caller obligation.
+    pub(in crate::security_epoch::storage_authority) fn check_authentication(
+        &mut self,
+        reads: &mut ControllerEpochReads,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_budget_liveness()?;
+            self.phase.check_authentication(reads)
+        })();
+        if result.is_err() {
+            self.disposition.refuse();
+        }
+        result
+    }
+
     /// Local refusal/owner liveness only, for pure decoding's clock budget.
     /// This does not inspect the file or grant physical/current authority.
     pub(in crate::security_epoch::storage_authority) fn check_budget_liveness(&self) -> Result<()> {

@@ -188,6 +188,24 @@ allocation-free canonical decimal check preserves the fresh `/proc` parser's
 previous integer range and spelling rules. Actual savings and complete-path
 margin still require new native measurements.
 
+The subsequent same-source attempt completed all provider rounds but again
+expired during the first counter read. Its ten full port samples totalled
+19.995 seconds inclusive; no complete-action margin or causal speedup follows.
+The transport now receives the caller's actual Budget in the one private post
+API. It charges all full preguards immediately before the single HTTP request,
+caps that request at the lesser of caller/parent remaining time and five seconds,
+and charges the final full postguards before accepting a reply. Central response
+checks and final clock observation also latch transport refusal. Ordinary read
+ports keep their existing full pre/post behavior.
+
+For pure full-port observations, authentication uses a closed leaf on the
+actual provider-owned stage and exact shared read-state identity. It releases
+that material borrow before the unchanged full file/provider/peer validation,
+then samples the original clock again. No role/material getter or successful
+check cache is introduced. HTTP still requires full physical admission BEFORE
+and AFTER its effect. Every actual initial-image read retains its original
+per-syscall identity, role, policy and clock guards and existing batch size.
+
 ## Preparation timing diagnosis
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
@@ -294,12 +312,17 @@ its separate named count/total/max format. Bootstrap codes are:
 | 49–52 | bootstrap_counter_after, bootstrap_slot_after, bootstrap_execution, bootstrap_announcement |
 | 53–55 | bootstrap_acknowledgement, bootstrap_peer_release, bootstrap_peer_finish |
 | 56–58 | bootstrap_firestore_read, bootstrap_firestore_commit, bootstrap_firestore_rollback |
+| 59 | bootstrap_writer_exchange |
 
 Rows remain inclusive: provider and authentication timings nest inside outer
 file/durability/writer phases, and Firestore calls nest inside counter/slot or
 mutation phases. Do not add nested durations to their parents.
-The `bootstrap_writer_sample` row counts every full Controller port observation,
-including the acquisition sample; it excludes decoding-only clock observations.
+The `bootstrap_writer_sample` row counts calls to the full port observation,
+including acquisition; it excludes decoding-only clock observations. The
+`bootstrap_writer_exchange` row measures each complete budgeted HTTP envelope,
+including its full pre/postguards, one attempted request and budget checks.
+These are different observation boundaries; changing their call counts alone
+does not establish a native performance improvement.
 `elapsed_us` covers the whole caller action from immediately before role acquisition until
 after final acknowledgement/release or refusal unwind. Its diagnostic clocks
 cannot grant authority, replace a native failure or renew an original interval.

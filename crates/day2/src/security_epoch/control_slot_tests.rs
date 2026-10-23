@@ -935,6 +935,12 @@ struct SharedPort {
 }
 
 impl SharedPort {
+    /// New model transport only; preserve the independent slot/counter state,
+    /// permanent May record and complete send observations.
+    fn reopen_model_transport(self) -> Self {
+        Self { counter: self.counter.reopen_model_transport(), ..self }
+    }
+
     fn new() -> Self {
         Self {
             counter: tests::Provider::new(),
@@ -975,16 +981,13 @@ impl SharedPort {
 
     fn pending(&mut self, selection: &EpochStore, core: &LogicalCore) {
         let body = firestore::commit_body(selection, &core.counter).unwrap();
-        self.post("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:commit",&body,Duration::from_secs(5),65_536).unwrap();
+        // Provider-side setup, not a native dispatch or an admitted port call.
+        self.post_wire("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:commit", &body, Duration::from_secs(5), 65_536).unwrap();
     }
 }
 
-impl Port for SharedPort {
-    fn sample(&mut self) -> Result<Sample> {
-        self.counter.sample()
-    }
-
-    fn post(
+impl SharedPort {
+    fn post_wire(
         &mut self,
         url: &str,
         body: &[u8],
@@ -1069,7 +1072,7 @@ impl Port for SharedPort {
                 );
             }
         }
-        let reply = self.counter.post(url, body, timeout, max_bytes)?;
+        let reply = self.counter.post_wire(url, body, timeout, max_bytes)?;
         if url.ends_with(":commit") {
             if self.expire_after_counter_commit {
                 self.counter.set_slot_fixture_time(Duration::from_secs(105));
@@ -1077,6 +1080,27 @@ impl Port for SharedPort {
             ensure!(!self.lose_counter_reply, "counter reply lost after commit");
         }
         Ok(reply)
+    }
+}
+
+impl Port for SharedPort {
+    fn sample(&mut self) -> Result<Sample> {
+        self.counter.sample()
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let timeout = budget.remaining(self)?.min(Duration::from_secs(5));
+        self.post_wire(url, body, timeout, max_bytes)
+    }
+
+    fn refuse(&mut self) {
+        self.counter.refuse();
     }
 }
 
@@ -1225,6 +1249,7 @@ fn matching_stored_may_and_rearm_ack_never_reconstruct_counter_send_authority() 
     assert!(mutation.send(&selection, &mut port).is_err());
     assert_eq!(port.counter_posts, 0);
     let may = codec::decode(&selection, &core, &port.slots.read(&name)).unwrap();
+    port = port.reopen_model_transport();
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     assert!(
         guarded::claim(

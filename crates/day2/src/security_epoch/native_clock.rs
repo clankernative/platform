@@ -488,6 +488,199 @@ mod tests {
         clock
     }
 
+    // DATA-only transport schedule over the real budget/clock arithmetic. No
+    // native role, physical file, provider identity or positive permission is
+    // constructed. Pre/post times represent work inside a guarded exchange.
+    struct BudgetTransport {
+        clock: NativeAcquisition,
+        pre: Duration,
+        post: Duration,
+        sends: usize,
+        selected: Option<Duration>,
+        transport_error: bool,
+        post_error: bool,
+        omit_post_budget: bool,
+        status: u16,
+        bytes: usize,
+    }
+
+    impl super::super::firestore::Port for BudgetTransport {
+        fn sample(&mut self) -> Result<Sample> {
+            self.clock.sample()
+        }
+
+        fn post(
+            &mut self,
+            _: &str,
+            _: &[u8],
+            budget: &mut Budget,
+            _: usize,
+        ) -> Result<super::super::firestore::EpochReply> {
+            self.clock.fixture_time = Some(self.pre);
+            let timeout = budget
+                .remaining_native(&mut self.clock)?
+                .min(Duration::from_secs(5));
+            self.selected = Some(timeout);
+            self.sends += 1;
+            self.clock.fixture_time = Some(self.post);
+            let requested = if self.transport_error {
+                Err(anyhow::anyhow!("original_model_transport_failure"))
+            } else {
+                Ok(super::super::firestore::EpochReply {
+                    status: self.status,
+                    body: vec![0; self.bytes],
+                })
+            };
+            let checked = (|| {
+                ensure!(!self.post_error, "model_full_postguard_refused");
+                if !self.omit_post_budget {
+                    budget.remaining_native(&mut self.clock)?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })();
+            let reply = requested?;
+            checked?;
+            Ok(reply)
+        }
+
+        fn refuse(&mut self) {
+            self.clock.refuse();
+        }
+    }
+
+    fn budget_transport() -> (Budget, BudgetTransport, NativeAcquisition) {
+        let mut clock = storage_fixture(AcquisitionScope::StorageBootstrap);
+        let sample = clock.sample().unwrap();
+        let budget =
+            Budget::from_native_origin(sample, clock.origin, clock.origin + Duration::from_secs(5))
+                .unwrap();
+        let sibling = clock.narrow(60, clock.deadline).unwrap();
+        (
+            budget,
+            BudgetTransport {
+                clock,
+                pre: Duration::from_secs(101),
+                post: Duration::from_secs(102),
+                sends: 0,
+                selected: None,
+                transport_error: false,
+                post_error: false,
+                omit_post_budget: false,
+                status: 200,
+                bytes: 0,
+            },
+            sibling,
+        )
+    }
+
+    #[test]
+    fn transport_charges_preguard_work_to_shorter_caller_budget_before_send() {
+        for millis in [104_999, 105_000, 106_000] {
+            let (mut budget, mut port, mut sibling) = budget_transport();
+            port.pre = Duration::from_millis(millis);
+            port.post = port.pre;
+            // The parent really remains live beyond the caller's five seconds.
+            port.clock.fixture_time = Some(port.pre);
+            assert!(port.clock.sample().is_ok());
+            let result = budget.call(&mut port, "fixed-data-model", &[]);
+            if millis < 105_000 {
+                assert!(result.is_ok());
+                assert_eq!(port.sends, 1);
+                assert_eq!(port.selected, Some(Duration::from_millis(1)));
+            } else {
+                assert!(result.is_err());
+                assert_eq!(port.sends, 0);
+                assert_eq!(
+                    sibling.sample().err().unwrap().to_string(),
+                    "epoch_native_acquisition_refused"
+                );
+            }
+            assert_eq!(port.clock.deadline, Duration::from_secs(130));
+        }
+    }
+
+    #[test]
+    fn transport_full_postwork_and_missing_post_budget_cannot_escape_expiry() {
+        for omit_post_budget in [false, true] {
+            let (mut budget, mut port, mut sibling) = budget_transport();
+            port.post = Duration::from_secs(105);
+            port.omit_post_budget = omit_post_budget;
+            assert!(budget.call(&mut port, "fixed-data-model", &[]).is_err());
+            assert_eq!(port.sends, 1);
+            // Catching the error and restoring a clock cannot revive either
+            // actual narrowed view of the original DATA clock.
+            port.clock.fixture_time = Some(Duration::from_secs(102));
+            assert!(budget.call(&mut port, "fixed-data-model", &[]).is_err());
+            assert_eq!(port.sends, 1);
+            assert_eq!(
+                sibling.sample().err().unwrap().to_string(),
+                "epoch_native_acquisition_refused"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_budget_domain_rewind_and_response_contract_failures_refuse_siblings() {
+        for fault in [
+            "domain",
+            "rewind",
+            "status",
+            "size",
+            "request-size",
+            "postguard",
+        ] {
+            let (mut budget, mut port, mut sibling) = budget_transport();
+            let mut body = Vec::new();
+            match fault {
+                "domain" => {
+                    budget = Budget::from_native_origin(
+                        Sample {
+                            domain: Digest::new(b"foreign-data-clock"),
+                            elapsed: Duration::from_secs(100),
+                        },
+                        Duration::from_secs(100),
+                        Duration::from_secs(105),
+                    )
+                    .unwrap()
+                }
+                "rewind" => {
+                    port.clock.fixture_time = Some(Duration::from_secs(102));
+                    budget.remaining_native(&mut port.clock).unwrap();
+                }
+                "status" => port.status = 503,
+                "size" => port.bytes = 65_537,
+                "request-size" => body = vec![0; 65_537],
+                _ => port.post_error = true,
+            }
+            assert!(
+                budget.call(&mut port, "fixed-data-model", &body).is_err(),
+                "{fault}"
+            );
+            assert_eq!(
+                port.sends,
+                usize::from(matches!(fault, "status" | "size" | "postguard")),
+                "{fault}"
+            );
+            assert!(sibling.sample().is_err(), "{fault}");
+        }
+    }
+
+    #[test]
+    fn attempted_transport_preserves_first_error_over_postguard_refusal() {
+        let (mut budget, mut port, mut sibling) = budget_transport();
+        port.transport_error = true;
+        port.post_error = true;
+        assert_eq!(
+            budget
+                .call(&mut port, "fixed-data-model", &[])
+                .unwrap_err()
+                .to_string(),
+            "original_model_transport_failure"
+        );
+        assert_eq!(port.sends, 1);
+        assert!(sibling.sample().is_err());
+    }
+
     #[test]
     fn both_storage_authentication_children_spend_the_first_original_five_seconds() {
         for scope in [

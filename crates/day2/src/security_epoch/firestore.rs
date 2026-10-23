@@ -41,15 +41,19 @@ pub(super) trait Port {
         self.sample()
     }
 
-    // Exactly one bounded HTTPS request; no proxy, redirect or automatic retry.
-    // A future live implementation must enforce the response limit while reading.
+    /// One guarded exchange under THIS actual caller budget. Implementations
+    /// must charge all pre-send work before selecting the timeout and all full
+    /// postchecks before returning. No proxy, redirect or automatic retry.
     fn post(
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply>;
+
+    /// Refusal only, including failures of the central response/budget contract.
+    fn refuse(&mut self);
 }
 
 pub(super) struct Budget {
@@ -157,8 +161,9 @@ impl Budget {
         self.observe(sample)
     }
 
-    /// Private pure-code checkpoint only. HTTP pre/postchecks, context/budget
-    /// issuance and observation consumers continue to use full `remaining`.
+    /// Pure clock checkpoint. A guarded post owns its full authority envelope;
+    /// this also charges its completed work centrally. Context/budget issuance
+    /// and observation consumers continue to use full `remaining`.
     fn remaining_decoding(&mut self, port: &mut impl Port) -> Result<Duration> {
         self.observe(port.decoding_sample()?)
     }
@@ -189,20 +194,30 @@ impl Budget {
     }
 
     pub(super) fn call(&mut self, port: &mut impl Port, url: &str, body: &[u8]) -> Result<Vec<u8>> {
-        ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
-        // A wider purpose interval does not widen any single HTTP request.
-        let timeout = self.remaining(port)?.min(ACQUISITION_BUDGET);
-        let response = port.post(url, body, timeout, MAX_BYTES)?;
-        self.remaining(port)?;
-        ensure!(
-            response.status == 200,
-            "security_epoch_provider_unavailable"
-        );
-        ensure!(
-            response.body.len() <= MAX_BYTES,
-            "security_epoch_response_budget"
-        );
-        Ok(response.body)
+        let result = (|| {
+            ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
+            // The closed transport spends this SAME budget inside its mandatory
+            // authority envelope; a second full envelope here would duplicate
+            // file/peer observations without adding another HTTP operation.
+            let response = port.post(url, body, self, MAX_BYTES)?;
+            // Charge all returned postwork centrally too. Ordinary ports keep
+            // their previous full sample; only the closed Controller uses its
+            // actual clock here after its mandatory full physical postguard.
+            self.remaining_decoding(port)?;
+            ensure!(
+                response.status == 200,
+                "security_epoch_provider_unavailable"
+            );
+            ensure!(
+                response.body.len() <= MAX_BYTES,
+                "security_epoch_response_budget"
+            );
+            Ok(response.body)
+        })();
+        if result.is_err() {
+            port.refuse();
+        }
+        result
     }
 }
 
@@ -682,13 +697,19 @@ mod budget_tests {
             })
         }
 
-        fn post(&mut self, _: &str, _: &[u8], _: Duration, _: usize) -> Result<EpochReply> {
+        fn post(&mut self, _: &str, _: &[u8], budget: &mut Budget, _: usize) -> Result<EpochReply> {
+            budget.remaining(self)?;
             self.posts += 1;
             self.refused |= self.refuse_after_post;
+            budget.remaining(self)?;
             Ok(EpochReply {
                 status: 200,
                 body: Vec::new(),
             })
+        }
+
+        fn refuse(&mut self) {
+            self.refused = true;
         }
     }
 
@@ -735,7 +756,7 @@ mod budget_tests {
         let (mut budget, mut port) = boundary();
         budget.remaining_decoding(&mut port).unwrap();
         budget.call(&mut port, "fixed-test-contract", &[]).unwrap();
-        assert_eq!((port.full_checks, port.clock_checks, port.posts), (2, 1, 1));
+        assert_eq!((port.full_checks, port.clock_checks, port.posts), (2, 2, 1));
     }
 
     #[test]
@@ -761,10 +782,12 @@ mod budget_tests {
         domain: Digest,
         now: Duration,
         selected: Option<Duration>,
+        refused: bool,
     }
 
     impl Port for ObservedTimeout {
         fn sample(&mut self) -> Result<Sample> {
+            ensure!(!self.refused, "model_transport_refused");
             Ok(Sample {
                 domain: self.domain.clone(),
                 elapsed: self.now,
@@ -775,15 +798,20 @@ mod budget_tests {
             &mut self,
             _url: &str,
             _body: &[u8],
-            timeout: Duration,
+            budget: &mut Budget,
             max_bytes: usize,
         ) -> Result<EpochReply> {
             assert_eq!(max_bytes, MAX_BYTES);
+            let timeout = budget.remaining(self)?.min(ACQUISITION_BUDGET);
             self.selected = Some(timeout);
             Ok(EpochReply {
                 status: 200,
                 body: Vec::new(),
             })
+        }
+
+        fn refuse(&mut self) {
+            self.refused = true;
         }
     }
 
@@ -795,6 +823,7 @@ mod budget_tests {
                 domain: domain.clone(),
                 now: Duration::from_secs(102),
                 selected: None,
+                refused: false,
             };
             let mut budget = Budget::from_original_parts(
                 port.sample().unwrap(),

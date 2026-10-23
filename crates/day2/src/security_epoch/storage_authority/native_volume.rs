@@ -1054,6 +1054,40 @@ impl CurrentVolumePhase<'_, '_> {
 }
 
 impl<'role> CurrentVolumePhase<'_, 'role> {
+    /// Authentication DATA uses the actual owned stage without recursively
+    /// acquiring file/P3 admission merely to borrow that stage. The facade must
+    /// be the SAME state retained by this phase's provider, not a same-policy
+    /// replacement. This grants no physical-file or provider permission.
+    pub(super) fn check_authentication(&mut self, reads: &mut ControllerEpochReads) -> Result<()> {
+        let result = (|| {
+            ensure!(self.resources.valid, "storage_native_volume_refused");
+            self.reader.acquisition.require_storage_bootstrap()?;
+            let ProviderAuthentication::Retained(provider) = &self.reader.authentication else {
+                anyhow::bail!("storage_provider_authenticated_purpose_required");
+            };
+            ensure!(
+                provider.matches(reads),
+                "storage_original_authentication_changed"
+            );
+            reads.check_stage(
+                &mut self.reader.stage,
+                &self.reader.policy,
+                &self.reader.store,
+            )?;
+            self.reader.acquisition.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.resources.valid = false;
+            self.reader.acquisition.refuse();
+            if let ProviderAuthentication::Retained(provider) = &mut self.reader.authentication {
+                provider.refuse();
+            }
+            reads.refuse();
+        }
+        result
+    }
+
     pub(super) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
         self.reader.check()?;
         self.reader.acquisition.remaining()?;

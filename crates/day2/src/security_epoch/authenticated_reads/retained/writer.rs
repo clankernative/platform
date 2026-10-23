@@ -178,16 +178,16 @@ impl ControllerPort<'_, '_> {
         let result = timings.measure(Operation::BootstrapWriterSample, || {
             let guard = self.reads.state.gate.guard()?;
             ensure!(self.valid, "epoch_writer_refused");
-            self.owner.try_borrow_mut()?.check()?;
             let mut phase = self.owner.try_borrow_mut()?;
-            let stage = phase.controller_stage()?;
-            let borrow = self.reads.state.gate.enter()?;
-            let mut material = self.reads.state.material.try_borrow_mut()?;
-            let sample = material.sample(stage)?;
-            drop(material);
-            borrow.complete()?;
+            // The closed leaf borrows the SAME provider state and actual
+            // owning stage. It returns no stage/material/permission and ends
+            // its exclusive material borrow before the full file/peer check.
+            phase.check_authentication(&mut self.reads)?;
+            phase.check()?;
             drop(phase);
-            self.owner.try_borrow_mut()?.check()?;
+            // Charge ALL full-check work; the leaf's earlier clock cannot be
+            // returned as if it had been sampled after those checks.
+            let sample = self.decoding_sample()?;
             guard.complete()?;
             Ok(sample)
         });
@@ -197,24 +197,42 @@ impl ControllerPort<'_, '_> {
         result
     }
 
+    /// Spend the caller's actual budget against this SAME retained original
+    /// acquisition after the full transport postguards. No native proof escapes.
+    fn remaining_budget(&mut self, budget: &mut Budget) -> Result<Duration> {
+        let guard = self.reads.state.gate.enter()?;
+        let mut material = self.reads.state.material.try_borrow_mut()?;
+        ensure!(
+            self.valid
+                && material.valid
+                && material.scope == ReadScope::StorageBootstrap
+                && material.purpose == NativeRole::EpochController,
+            "epoch_writer_refused"
+        );
+        material.acquisition.require_storage_bootstrap()?;
+        let remaining = budget.remaining_native(&mut material.acquisition)?;
+        drop(material);
+        guard.complete()?;
+        Ok(remaining)
+    }
+
     fn post(
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        let result = (|| {
+        let timings = self.timings.clone();
+        let result = timings.measure(Operation::BootstrapWriterExchange, || {
             let guard = self.reads.state.gate.guard()?;
-            self.sample()?;
             ensure!(
-                max_bytes == 65_536
-                    && body.len() <= 65_536
-                    && !timeout.is_zero()
-                    && timeout <= Duration::from_secs(5),
+                self.valid && max_bytes == 65_536 && body.len() <= 65_536,
                 "epoch_writer_budget"
             );
             let mut phase = self.owner.try_borrow_mut()?;
+            // Keep FULL physical/file/peer admission before the actual effect;
+            // the authentication-only leaf is never used in its place.
             let stage = phase.controller_stage()?;
             let borrow = self.reads.state.gate.enter()?;
             let mut material = self.reads.state.material.try_borrow_mut()?;
@@ -233,22 +251,32 @@ impl ControllerPort<'_, '_> {
             // Keep this fallible evaluation outside the diagnostic closure:
             // failure must exit before both request and post-request sampling.
             let authorization = credential.authorization()?;
+            // The caller may have a shorter context deadline than this live
+            // parent. Charge every preguard before selecting the one HTTP
+            // timeout, and fail BEFORE the request closure/post-request path.
+            let timeout = budget
+                .remaining_native(acquisition)?
+                .min(Duration::from_secs(5));
             let requested = self.timings.measure(operation, || {
                 http.request_with_ceiling(route, &authorization, Some(body), acquisition, timeout)
             });
             let checked = material.sample(stage);
+            // An attempted transport still receives its authentication
+            // postcheck, but its first error exits before completing this
+            // exclusive use or doing successful-path physical postwork.
             let bytes = requested?;
             checked?;
             drop(material);
             borrow.complete()?;
             drop(phase);
-            self.sample()?;
+            self.owner.try_borrow_mut()?.check()?;
+            self.remaining_budget(budget)?;
             guard.complete()?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
             })
-        })();
+        });
         if result.is_err() {
             self.refuse();
         }
@@ -283,10 +311,14 @@ impl Port for ControllerBorrow<'_, '_, '_> {
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        self.owner.post(url, body, timeout, max_bytes)
+        self.owner.post(url, body, budget, max_bytes)
+    }
+
+    fn refuse(&mut self) {
+        self.owner.refuse();
     }
 }
 
