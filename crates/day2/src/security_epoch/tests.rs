@@ -531,7 +531,7 @@ fn first_activation_has_distinct_cas_receipt_and_permanent_candidate() {
     let before_read = provider.calls.len();
     assert!(provider.read(&create).is_err());
     assert_eq!(provider.calls.len() - before_read, 2);
-    provider.tick = Duration::from_secs(100);
+    assert!(provider.sample().is_err());
     assert_eq!(
         active.create.as_ref().unwrap().value,
         create.receipt().unwrap()
@@ -542,15 +542,42 @@ fn first_activation_has_distinct_cas_receipt_and_permanent_candidate() {
     );
     assert_eq!(provider.documents(), 4);
     assert_eq!(provider.sends(), 2);
+    // The expired DATA transport remains refused. A separate read-only model
+    // stage observes the same database and journal at the current 105 clock;
+    // it cannot revive the earlier context or resend the activation.
+    let original_trace = provider.calls.clone();
+    provider = provider.reopen_model_transport();
+    let current = provider.read(&activate).unwrap();
+    assert_eq!(current, active);
+    let current_context = CurrentBootstrapExecution::fixture(
+        &selection(),
+        &activate,
+        &current,
+        Purpose::Reconcile,
+        provider.sample().unwrap(),
+    )
+    .unwrap();
     journal
         .reconcile_attempt(
             &selection(),
             &activate,
-            &active,
-            context(&activate, &active, Purpose::Reconcile),
+            &current,
+            current_context,
             &mut provider,
         )
         .unwrap();
+    assert_eq!(
+        &provider.calls[..original_trace.len()],
+        original_trace.as_slice()
+    );
+    assert_eq!(
+        provider
+            .calls
+            .iter()
+            .filter(|(url, _, _)| url.ends_with(":commit"))
+            .count(),
+        2
+    );
     assert_eq!(journal.state(&activate).unwrap(), ("observed".into(), 1));
     let mut replacement = activate.clone();
     if let Request::CompleteInitialFirstActivation {
@@ -783,6 +810,12 @@ fn either_conditional_record_conflict_aborts_the_entire_activation() {
             .unwrap();
         assert!(permit.send(&selection(), &mut provider).is_err());
         assert_eq!(provider.documents(), 3);
+        let original_trace = provider.calls.clone();
+        assert!(provider.read(&request).is_err());
+        assert_eq!(provider.calls, original_trace);
+        // Independent read-only reconciliation uses a consumed new DATA port;
+        // the failed CAS transport and its journal state are never revived.
+        provider = provider.reopen_model_transport();
         let snapshot = provider.read(&request).unwrap();
         assert!(reconcile(&selection(), &request, &snapshot).is_err());
         assert!(matches!(
@@ -796,6 +829,18 @@ fn either_conditional_record_conflict_aborts_the_entire_activation() {
         assert_eq!(
             journal.state(&request).unwrap(),
             ("may_have_been_sent".into(), 1)
+        );
+        assert_eq!(
+            &provider.calls[..original_trace.len()],
+            original_trace.as_slice()
+        );
+        assert_eq!(
+            provider
+                .calls
+                .iter()
+                .filter(|(url, _, _)| url.ends_with(":commit"))
+                .count(),
+            2
         );
     }
 }
