@@ -475,14 +475,14 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
     /// The fixed, successfully observed activation performs its LAST initial
     /// byte check before notifying the App that legitimate writes may begin.
     /// The SAME descriptors/provider phase remain live for physical postchecks.
-    pub(in crate::security_epoch) fn into_physical_checked(
+    pub(in crate::security_epoch) fn into_bootstrap_physical_checked(
         mut self,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
         // An initial-handshake interval cannot mint a current physical phase,
         // even if a future internal caller reaches this conversion directly.
         self.phase
             .controller_stage()?
-            .require_purpose(StagePurpose::CurrentRole)?;
+            .require_purpose(StagePurpose::StorageBootstrap)?;
         self.check()?;
         let mut physical = CurrentPhysicalFilePhase { inner: self };
         physical.check()?;

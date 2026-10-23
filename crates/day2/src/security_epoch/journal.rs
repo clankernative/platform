@@ -78,6 +78,7 @@ pub(crate) struct CurrentBootstrapExecution<'storage, 'role> {
     deadline: Duration,
     valid: bool,
     native: Option<Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>>,
+    native_budget: Option<Budget>,
     local: PhantomData<Rc<()>>,
     #[cfg(test)]
     retention: Option<Rc<()>>,
@@ -98,18 +99,26 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
                 owner.try_borrow()?.request_digest()? == request.digest()?,
                 "security_epoch_native_request_changed"
             );
+            // Preserve the actual purpose-bound budget, including all role,
+            // authentication, file and peer time already spent. Scalar context
+            // DATA must not select or renew the bootstrap interval.
+            let mut budget = port.budget()?;
             let (sample, deadline) = port.context_interval(&owner, selection)?;
+            let domain = sample.domain.clone();
+            let floor = sample.elapsed;
+            let native_budget = budget.narrow_for_context(sample, deadline)?;
             Ok(Self {
                 selection: Digest::of(selection)?,
                 request: request.digest()?,
                 snapshot: snapshot_digest(snapshot)?,
                 stage: stage(request),
                 purpose,
-                domain: sample.domain,
-                floor: sample.elapsed,
+                domain,
+                floor,
                 deadline,
                 valid: true,
                 native: Some(Rc::clone(&owner)),
+                native_budget: Some(native_budget),
                 local: PhantomData,
                 #[cfg(test)]
                 retention: None,
@@ -181,7 +190,11 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
     }
 
     pub(super) fn budget(&mut self, port: &mut impl Port) -> Result<Budget> {
-        Budget::for_context(self.sample(port)?, self.deadline)
+        let sample = self.sample(port)?;
+        match &mut self.native_budget {
+            Some(budget) => budget.narrow_for_context(sample, self.deadline),
+            None => Budget::for_context(sample, self.deadline),
+        }
     }
 
     #[cfg(test)]
@@ -208,6 +221,7 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
                 .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
             valid: true,
             native: None,
+            native_budget: None,
             local: PhantomData,
             retention: None,
         })

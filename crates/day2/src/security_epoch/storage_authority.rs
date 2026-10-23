@@ -377,8 +377,9 @@ pub(in crate::security_epoch) fn prepare_controller_initial(
 /// mount adoption, seed, private-directory/file factory, SQLite open, provider
 /// mutation or owner is returned. Existing originals are never inspected.
 /// Full Controller authentication precedes the provider path, as it does in
-/// current bootstrap, spending the SAME five-second stage that began before
-/// role acquisition. The original first-holder ten-second path is not used.
+/// bootstrap, finishing within the SAME original first five seconds as role
+/// acquisition. The separately signed metadata purpose then bounds provider
+/// I/O; it never enters the initial first-holder or actual bootstrap paths.
 /// This measures the sequential auth/provider frontier only: no App rendezvous,
 /// file/durability cost, current writer, successful bootstrap or cause is proved.
 pub(in crate::security_epoch) fn observe_preparation_read_only(
@@ -387,7 +388,7 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
     store: &EpochStore,
     trace: &BootstrapTiming,
 ) -> Result<()> {
-    let (_controller_reads, provider) =
+    let provider =
         trace
             .timings()
             .measure(Operation::BootstrapAuthentication, || {
@@ -395,16 +396,15 @@ pub(in crate::security_epoch) fn observe_preparation_read_only(
                 // This diagnostic never consumes it into the fixed writer. The actual
                 // provider metadata reads stay fresh; only this same-stage authenticated
                 // material is reused, never a preceding observation or permission.
-                let reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire(
+                let reads = crate::security_epoch::authenticated_reads::AuthenticatedReads::acquire_storage_metadata_observation(
             policy,
             store,
-            crate::security_epoch::native_enrollment::NativeRole::EpochController,
             &mut stage,
         )
-        .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_current)
+        .and_then(crate::security_epoch::authenticated_reads::AuthenticatedReads::retain_storage_metadata_observation)
         .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
                 reads
-                    .into_controller(&mut stage, policy, store, trace.timings())
+                    .into_provider_observation(&mut stage, policy, store, trace.timings())
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapTransport, error)
                     })

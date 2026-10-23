@@ -143,14 +143,42 @@ resource selection, authenticated transport and original acquisition are
 unchanged. This avoids unrelated instance metadata; it does not filter disks,
 truncate a response, retry a failed read or establish the cause of a prior
 refusal.
+
+## Purpose and original-lifetime boundaries
+
+Ordinary Current, serving, Shell and human-original consumers retain their
+five-second stage. Initial first-holder admission retains its separate
+10-second purpose. Neither purpose can substitute for the other.
+
+Only the six fixed Controller storage-bootstrap operations and their exact
+retained App responder select `storage_bootstrap`, with a nominal 10-second
+original interval. The App selects it from its local `Bootstrapping` owner,
+never from a received purpose label. Role exchange and complete Google/Kubernetes
+authentication must both finish by that same original origin plus five seconds.
+The actual successful authentication child is consumed before a fresh I/O view
+is derived from its retained parent; the five-second child is never widened.
+Configured, file and signed shorter ceilings continue to tighten the interval.
+Each provider HTTP request remains bounded by five seconds and the actual
+remaining original time. No retry, renewal or ambiguous-effect resend is added.
+
+The Controller-only operator diagnostic has the distinct signed purpose
+`storage_metadata_observation`. Its metadata-read facade cannot create a
+Controller writer facade, storage peer, initial file, original, active serving
+phase or consumer. Even a valid signed non-Current purpose with a short interval
+is refused by ordinary consumers. The nominal ceiling does not establish a
+complete-path timing margin or successful native qualification.
+
 ## Preparation timing diagnosis
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
 ordinary artifact/instance admission, role-stage exchange, complete Controller
 authentication and three fresh rounds of selected provider-metadata checks under
-one original five-second current-role interval. All rounds share the same
-genuine authenticated reader; none starts another stage or renews its acquisition.
+one original `storage_metadata_observation` interval. The origin precedes the
+role RPC. Role and full provider authentication share its first five seconds;
+provider I/O then spends the remainder of that same nominal 10-second parent.
+All rounds share the same genuine authenticated reader; none starts another
+stage or renews its acquisition.
 Each round validates the current claim, volume, node, disk and instance responses.
 Attachment checks remain strict: a detached or changed disk refuses. It opens
 neither `/state` nor a block-device descriptor,
@@ -168,8 +196,12 @@ letting the hold expire can cause Kubernetes to start another process.
 
 Its `preparation_read_only_observed` record contains the fixed
 `frontier: "auth_three_provider_rounds"`, `completed: true`, `expected_rounds: 3`
-and a `bootstrap` snapshot with `scope: "provider_read_only_current"` and
-`provider_rounds: [3, 3]`. Completion requires all three rounds and the final
+and a `bootstrap` snapshot with
+`scope: "provider_read_only_storage_metadata"`, `purpose_limit_us: 10000000` and
+`provider_rounds: [3, 3]`. The limit is nominal purpose DATA, not effective
+remaining time or permission. This is a different signed purpose from the
+earlier Current diagnostic; do not relabel either result as the other.
+Completion requires all three rounds and the final
 reader/guard postchecks to return successfully. It establishes no filesystem
 observation, bootstrap completion, readiness or current permission. It excludes
 App concurrency, physical/file checks, fsync, peer exchange and writer work, so
@@ -196,16 +228,18 @@ budget, retry or renewal. Later serving phases disable collection. The final
 retention guard is deliberately not wrapped in an ending clock read: it remains
 the last I/O before the infallible owner transfer.
 
-## Current bootstrap timing
+## Storage-bootstrap timing
 
 Each of the six bootstrap steps starts a separate diagnostic collector for its
-actual Current attempt. Entering that step clears the cached first-holder
-summary. A refusal there can carry `bootstrap` with the fixed
-`scope: "bootstrap_current"`, `last_step`, `returned`, `provider_rounds` and
-`timing`; it never reuses the earlier preparation `timing` field.
+actual storage-bootstrap attempt. Entering that step clears the cached
+first-holder summary. A refusal there can carry `bootstrap` with the fixed
+`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 10000000`, `last_step`,
+`returned`, `provider_rounds` and `timing`; it never reuses the earlier
+preparation `timing` field. Shorter effective caps are not reported as a fresh
+interval by this nominal value.
 
 `last_step` and `returned` describe the last **measured operation**, not the
-outcome of the whole Current attempt. `returned` is `true` or `false` for that
+outcome of the whole storage-bootstrap attempt. `returned` is `true` or `false` for that
 operation's native result, or `null` if it has not returned. Some later
 counter/slot reobservations and acknowledgement work are not separately timed;
 the closed `preparation.step` remains the reported native failure boundary.

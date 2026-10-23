@@ -97,7 +97,9 @@ fn run_inner(
     if read_only {
         let trace = bootstrap_timing::BootstrapTiming::provider_read_only();
         let result = trace
-            .measure(Operation::RoleStage, || role.begin_current_stage())
+            .measure(Operation::RoleStage, || {
+                role.begin_storage_metadata_observation_stage()
+            })
             .map_err(|error| PreparationFailure::at(PreparationStep::RoleStage, error))
             .and_then(|stage| {
                 trace.measure(Operation::VolumeAcquisition, || {

@@ -203,7 +203,8 @@ fn serve(
     )?;
     let (origin, _) = acquisition.interval_data()?;
     // Serving this request still has the original five-second issuer budget.
-    // Only a signed initial-holder grant carries the longer peer lifetime.
+    // A signed closed purpose may carry its separate subsequent interval;
+    // it never widens this authentication budget or another purpose.
     let deadline = origin
         .checked_add(purpose.limit())
         .ok_or_else(|| anyhow::anyhow!("native_enrollment_stage_interval_overflow"))?;

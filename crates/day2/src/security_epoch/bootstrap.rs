@@ -461,17 +461,19 @@ impl AppStorageBootstrap {
                 &request,
             )?;
             let holder = self.storage.first_holder_data()?;
-            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
-            // Authenticate read-only material while the Controller performs its
-            // fixed operation. This does not observe the epoch or acknowledge
-            // anything; both provider observations still follow actual Known.
-            let mut reads = super::AuthenticatedReads::acquire(
+            // Complete provider authentication within this stage's ORIGINAL
+            // five seconds, before file/peer work can spend the separate
+            // ten-second bootstrap interval. Retaining the successful child
+            // does not observe the epoch or acknowledge anything; both provider
+            // observations still follow the checked peer's actual Known.
+            let mut reads = super::AuthenticatedReads::acquire_storage_bootstrap(
                 &self.policy,
                 &self.store,
                 day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
                 stage,
             )?
-            .retain_current()?;
+            .retain_storage_bootstrap()?;
+            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
             phase.await_known(stage)?;
             // The Controller's signed result only unblocks a fresh coherent
             // provider read. It is not itself an activation/serving receipt.
@@ -675,7 +677,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;
@@ -713,7 +717,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;
