@@ -439,7 +439,6 @@ fn private_parent(path: &Path) -> Result<()> {
         );
     } else {
         private_parent(parent)?;
-        private_new(parent)?;
     }
     private_new(path)
 }
@@ -1312,11 +1311,10 @@ mod tests {
     }
 
     #[test]
-    fn companion_state_uses_online_sqlite_snapshots_and_restores_the_selected_subpath() -> Result<()>
-    {
+    fn companion_state_nested_subpaths_snapshot_and_restore() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let state_root = directory.path().join(".state");
-        let service_state = state_root.join("companions/executor");
+        let service_state = state_root.join("companions/services/executor");
         fs::create_dir_all(&service_state)?;
         fs::write(service_state.join("private.json"), b"operator metadata")?;
         let source_database = service_state.join("executor.sqlite");
@@ -1326,12 +1324,12 @@ mod tests {
         )?;
         let backup_root = directory.path().join("backup");
         fs::create_dir(&backup_root)?;
-        let subpaths = vec!["companions/executor".to_owned()];
-        let databases = vec!["companions/executor/executor.sqlite".to_owned()];
+        let subpaths = vec!["companions/services/executor".to_owned()];
+        let databases = vec!["companions/services/executor/executor.sqlite".to_owned()];
         let snapshot = snapshot_companion_state(&state_root, &backup_root, &subpaths, &databases)?;
         verify_companion_state(&backup_root, &snapshot)?;
         let copied_database =
-            backup_root.join("companion-state/companions/executor/executor.sqlite");
+            backup_root.join("companion-state/companions/services/executor/executor.sqlite");
         let copied =
             Connection::open_with_flags(&copied_database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         assert_eq!(
@@ -1351,15 +1349,15 @@ mod tests {
         fs::create_dir_all(&restored_root)?;
         let mut budget = CompanionBudget::default();
         copy_companion_tree(
-            &backup_root.join("companion-state/companions/executor"),
-            &restored_root.join("companions/executor"),
+            &backup_root.join("companion-state/companions/services/executor"),
+            &restored_root.join("companions/services/executor"),
             Path::new(""),
             &std::collections::BTreeSet::new(),
             &mut budget,
             0,
         )?;
         let restored = Connection::open_with_flags(
-            restored_root.join("companions/executor/executor.sqlite"),
+            restored_root.join("companions/services/executor/executor.sqlite"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         assert_eq!(
@@ -1368,11 +1366,11 @@ mod tests {
             1
         );
         assert_eq!(
-            fs::read(restored_root.join("companions/executor/private.json"))?,
+            fs::read(restored_root.join("companions/services/executor/private.json"))?,
             b"operator metadata"
         );
         fs::write(
-            backup_root.join("companion-state/companions/executor/private.json"),
+            backup_root.join("companion-state/companions/services/executor/private.json"),
             b"changed",
         )?;
         assert!(verify_companion_state(&backup_root, &snapshot).is_err());
