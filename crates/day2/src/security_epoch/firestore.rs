@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
+mod paired;
+pub(super) use paired::read_with_slot;
+
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);
 
