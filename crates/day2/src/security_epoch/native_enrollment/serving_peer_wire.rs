@@ -196,6 +196,39 @@ pub(super) enum Body {
 }
 
 impl Body {
+    #[cfg(target_os = "linux")]
+    pub(super) fn frame(&self) -> super::handshake::Frame {
+        use super::handshake::{Frame, Protocol, Step};
+        let (protocol, step, sequence) = match self {
+            Self::InitialBeginReady { .. } => (Protocol::InitialServing, Step::BeginReady, None),
+            Self::Hello { .. } => (Protocol::InitialServing, Step::Hello, None),
+            Self::Offer { .. } => (Protocol::InitialServing, Step::Offer, None),
+            Self::Confirm { .. } => (Protocol::InitialServing, Step::Confirm, None),
+            Self::Ready { .. } => (Protocol::InitialServing, Step::Ready, None),
+            Self::CurrentBeginReady { sequence, .. } => {
+                (Protocol::CurrentServing, Step::BeginReady, Some(*sequence))
+            }
+            Self::CurrentHello { sequence, .. } => {
+                (Protocol::CurrentServing, Step::Hello, Some(*sequence))
+            }
+            Self::CurrentOffer { exchange, .. } => (
+                Protocol::CurrentServing,
+                Step::Offer,
+                Some(exchange.sequence),
+            ),
+            Self::CurrentConfirm { .. } => (Protocol::CurrentServing, Step::Confirm, None),
+            Self::CurrentReady { .. } => (Protocol::CurrentServing, Step::Ready, None),
+            Self::Known { .. } => (Protocol::CurrentServing, Step::Known, None),
+            Self::Consumed { .. } => (Protocol::CurrentServing, Step::Consumed, None),
+            Self::Released { .. } => (Protocol::CurrentServing, Step::Released, None),
+        };
+        Frame {
+            protocol,
+            step,
+            sequence,
+        }
+    }
+
     pub(super) fn role(&self) -> NativeRole {
         match self {
             Self::Hello { .. }
