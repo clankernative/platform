@@ -27,11 +27,22 @@ pub(super) struct TimeOffsets {
     pub boottime: Offset,
 }
 
-fn decimal<T: std::str::FromStr + ToString>(word: &str) -> Result<T> {
+fn decimal<T: std::str::FromStr>(word: &str) -> Result<T> {
     let value = word
         .parse::<T>()
         .map_err(|_| anyhow::anyhow!("epoch_native_proc_number"))?;
-    ensure!(value.to_string() == word, "epoch_native_proc_number");
+    // All callers select integer types. Keep their range check above, then
+    // enforce the same canonical spelling without formatting each freshly
+    // observed /proc field into an allocated String. No observation is cached.
+    let digits = word.strip_prefix('-').unwrap_or(word).as_bytes();
+    ensure!(
+        word == "0"
+            || (digits
+                .first()
+                .is_some_and(|first| matches!(first, b'1'..=b'9'))
+                && digits.iter().all(u8::is_ascii_digit)),
+        "epoch_native_proc_number"
+    );
     Ok(value)
 }
 
@@ -243,4 +254,92 @@ pub(super) fn mappings(bytes: &[u8]) -> Result<Vec<Mapping>> {
     }
     ensure!(!result.is_empty(), "epoch_native_maps_shape");
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decimal;
+    use std::{fmt::Display, str::FromStr};
+
+    fn compare<T: FromStr + Display + PartialEq>(word: &str) {
+        // Independent previous parse-plus-Display oracle, including each
+        // selected integer type's actual overflow and signedness behavior.
+        let expected = word
+            .parse::<T>()
+            .ok()
+            .filter(|value| value.to_string() == word);
+        assert!(
+            decimal::<T>(word).ok() == expected,
+            "decimal spelling: {word:?}"
+        );
+    }
+
+    fn compare_all(word: &str) {
+        compare::<u32>(word);
+        compare::<u64>(word);
+        compare::<i64>(word);
+        compare::<i128>(word);
+    }
+
+    #[test]
+    fn decimal_matches_parse_display_for_all_native_integer_types() {
+        for word in [
+            "",
+            "0",
+            "-0",
+            "+0",
+            "00",
+            "01",
+            "-01",
+            "+1",
+            "1",
+            "-1",
+            "4294967295",
+            "4294967296",
+            "18446744073709551615",
+            "18446744073709551616",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "170141183460469231731687303715884105727",
+            "170141183460469231731687303715884105728",
+            "-170141183460469231731687303715884105728",
+            "-170141183460469231731687303715884105729",
+            " 1",
+            "1 ",
+            "1\n",
+            "1\0",
+            "١",
+            "１",
+            "−1",
+        ] {
+            compare_all(word);
+        }
+        // Exhaustive short malformed/canonical words, then longer bounded
+        // seeded spellings. Neither generator shares the production grammar.
+        let alphabet = b"+-01239a ";
+        for length in 1..=4 {
+            for mut index in 0..alphabet.len().pow(length) {
+                let mut word = vec![0; length as usize];
+                for byte in &mut word {
+                    *byte = alphabet[index % alphabet.len()];
+                    index /= alphabet.len();
+                }
+                compare_all(std::str::from_utf8(&word).unwrap());
+            }
+        }
+        let mut seed = 0x5d9b_20c4_a7e1_063f_u64;
+        for _ in 0..10_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let mut word = String::new();
+            for _ in 0..seed % 43 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                word.push(char::from(b"+-0123456789a \t"[(seed >> 32) as usize % 15]));
+            }
+            compare_all(&word);
+            compare_all(&seed.to_string());
+            compare_all(&format!("-{}", seed));
+        }
+    }
 }
