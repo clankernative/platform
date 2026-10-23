@@ -921,6 +921,7 @@
         "pub (super) fn begin_initial_first_holder () -> Result < Self >",
         "pub (super) fn begin_storage_bootstrap () -> Result < Self >",
         "pub (super) fn begin_storage_metadata_observation () -> Result < Self >",
+        "pub (super) fn bootstrap_context_budget (& mut self) -> Result < (Sample , Budget , Duration) >",
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >",
         "pub (super) fn exchange_current_views (& mut self , other : & mut Self) -> Result < () >",
@@ -991,6 +992,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "fn require_scope (& mut self , scope : AcquisitionScope) -> Result < () >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn bootstrap_context_budget (& mut self) -> Result < (Sample , Budget , Duration) >"
         },
         {
           "owner": "NativeAcquisition",
@@ -3020,7 +3025,7 @@
         "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads , timings : Timings) -> Result < Self >",
         "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >",
         "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < Budget >",
-        "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >",
+        "fn context_budget (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore , request : & Digest) -> Result < (Sample , Budget , Duration) >",
         "fn decoding_sample (& mut self) -> Result < Sample >",
         "fn post (& mut self , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
@@ -3052,15 +3057,15 @@
         },
         {
           "owner": "ControllerPort < 'storage , 'role >",
+          "signature": "fn context_budget (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore , request : & Digest) -> Result < (Sample , Budget , Duration) >"
+        },
+        {
+          "owner": "ControllerPort < 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >"
         },
         {
           "owner": "ControllerPort < 'storage , 'role >",
           "signature": "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < Budget >"
-        },
-        {
-          "owner": "ControllerPort < 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >"
         },
         {
           "owner": "ControllerPort < 'storage , 'role >",
