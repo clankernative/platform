@@ -1,6 +1,7 @@
 //! DATA-only schedules over the existing independent SQLite provider oracles.
 //! No native role, P3, file, readiness or current-write permission is constructed.
 use super::*;
+use crate::security_epoch::kernel::{self, Outcome};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fault {
@@ -327,10 +328,9 @@ fn paired_observations_retain_spent_budget_and_expire_before_a_new_claim() {
     let (counter, slot) = guarded::read_with_counter(&selection, &core, &mut port, budget).unwrap();
     assert!(
         port.inner
-            .counter
-            .calls
+            .selected_timeouts
             .iter()
-            .all(|(_, _, timeout)| *timeout == Duration::from_secs(1))
+            .all(|timeout| *timeout == Duration::from_secs(1))
     );
     let context = CurrentBootstrapExecution::fixture(
         &selection,

@@ -932,6 +932,7 @@ struct SharedPort {
     retained_counter_owner: Option<std::rc::Weak<()>>,
     expire_after_counter_commit: bool,
     lose_counter_reply: bool,
+    selected_timeouts: Vec<Duration>,
 }
 
 impl SharedPort {
@@ -954,6 +955,7 @@ impl SharedPort {
             retained_counter_owner: None,
             expire_after_counter_commit: false,
             lose_counter_reply: false,
+            selected_timeouts: Vec::new(),
         }
     }
 
@@ -1121,6 +1123,7 @@ impl Port for SharedPort {
         max_bytes: usize,
     ) -> Result<EpochReply> {
         let timeout = budget.remaining(self)?.min(Duration::from_secs(5));
+        self.selected_timeouts.push(timeout);
         self.post_wire(url, body, timeout, max_bytes)
     }
 
