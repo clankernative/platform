@@ -1016,7 +1016,10 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
             for seconds in [1, 5, 10, 11, 30, 31, 60] {
                 for (elapsed, at_deadline) in [
                     (Duration::ZERO, false),
-                    (Duration::from_secs(seconds) - Duration::from_nanos(1), false),
+                    (
+                        Duration::from_secs(seconds) - Duration::from_nanos(1),
+                        false,
+                    ),
                     (Duration::from_secs(seconds), true),
                 ] {
                     let mut actual = Transcript::new(protocol, Actor::Controller);
