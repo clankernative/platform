@@ -20,12 +20,36 @@ pub(crate) use transport::{
 };
 pub(crate) use transport::{TransportError, WireRequest, WireResponse};
 
+pub(crate) const MAX_FREETOOL_EXECUTOR_WIRE_BYTES: u64 = freetool_executor::MAX_EXECUTOR_WIRE_BYTES;
+
+pub(crate) struct FreetoolExecutorExchange {
+    pub response: anyhow::Result<Vec<u8>>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    /// Whether request and response payload consumption was fully measured.
+    pub known: bool,
+    pub dispatched: bool,
+}
+
+impl FreetoolExecutorExchange {
+    pub(crate) fn not_dispatched(error: anyhow::Error) -> Self {
+        Self {
+            response: Err(error),
+            request_bytes: 0,
+            response_bytes: 0,
+            known: true,
+            dispatched: false,
+        }
+    }
+}
+
 pub(crate) fn freetool_executor_request(
     endpoint: &str,
     credential: &Credentials,
     body: &[u8],
-) -> anyhow::Result<Vec<u8>> {
-    freetool_executor::send(endpoint, credential, body)
+    max_response_bytes: u64,
+) -> FreetoolExecutorExchange {
+    freetool_executor::send(endpoint, credential, body, max_response_bytes)
 }
 
 pub(crate) fn freetool_credential_request(

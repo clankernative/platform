@@ -274,6 +274,11 @@ pub(crate) fn authorized(
                 instruction,
                 &resource,
             )?;
+            quote.request_bytes = crate::freetool_executor::request_wire_bytes(&service_request)?;
+            ensure!(
+                quote.request_bytes <= resource.grant.limits.max_request_bytes,
+                "freetool_request_budget"
+            );
             Action::Freetool(service_request)
         };
         return Ok(Authorized {
@@ -753,6 +758,22 @@ pub(crate) struct ProviderResult {
 }
 
 impl ProviderResult {
+    fn freetool(outcome: crate::freetool_executor::CallOutcome) -> Self {
+        Self {
+            result: outcome.result,
+            correlation: Vec::new(),
+            pending: false,
+            usage: crate::resources::ProviderUsage {
+                calls: u64::from(outcome.dispatched),
+                request_bytes: outcome.request_bytes,
+                response_bytes: outcome.response_bytes,
+                cost_microunits: 0,
+                known: outcome.known,
+                dispatched: outcome.dispatched,
+            },
+        }
+    }
+
     fn local(result: Result<String>, request_bytes: u64) -> Self {
         let usage = crate::resources::ProviderUsage {
             calls: 1,
@@ -1082,7 +1103,7 @@ fn call_freetool(
     runtime: &Runtime,
     resource: &crate::resources::ResourceUse,
     request: crate::freetool_executor::ServiceRequest,
-) -> Result<String> {
+) -> crate::freetool_executor::CallOutcome {
     crate::freetool_executor::call(runtime, resource, request)
 }
 
@@ -1110,7 +1131,9 @@ pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) 
             };
             crate::freetool_executor::fingerprint(&instruction, &capability.resource)
         }
-        Action::Freetool(request) => call_freetool(runtime, &capability.resource, request),
+        Action::Freetool(request) => {
+            return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
+        }
         Action::WorkspaceDirectoryCapture(_)
         | Action::WorkspaceDirectoryUserPath(_)
         | Action::WorkspaceDirectoryPage { .. } => {
@@ -1170,7 +1193,9 @@ pub(crate) fn execute(
     let request_bytes = capability.quote.request_bytes;
     let result = match capability.action {
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
-        Action::Freetool(request) => call_freetool(runtime, &capability.resource, request),
+        Action::Freetool(request) => {
+            return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
+        }
         Action::Send(message) => with_world(runtime, |world| world.send(effect_id, message)),
         // A grant is computed, not dispatched, so it resolves the same way on
         // both paths: downloading authorizes a read, uploading authorizes a write,
@@ -1195,6 +1220,32 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freetool_usage_charges_wire_error_after_code_normalization() -> Result<()> {
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "state": "error",
+            "code": "synthetic_private_token_".to_owned() + &"A".repeat(4096),
+        }))?;
+        let normalized = crate::freetool_executor::response_json(
+            crate::freetool_executor::ServiceResponse::Error {
+                code: "synthetic_private_token_".to_owned() + &"A".repeat(4096),
+            },
+        )?;
+        let result = ProviderResult::freetool(crate::freetool_executor::CallOutcome {
+            result: Ok(normalized.clone()),
+            request_bytes: 37,
+            response_bytes: raw.len() as u64,
+            known: true,
+            dispatched: true,
+        });
+        assert_eq!(result.result?, normalized);
+        assert_eq!(result.usage.request_bytes, 37);
+        assert_eq!(result.usage.response_bytes, raw.len() as u64);
+        assert!(raw.len() > normalized.len());
+        assert!(result.usage.known && result.usage.dispatched);
+        Ok(())
+    }
 
     #[test]
     fn accepted_response_loss_and_duplicate_retries_preserve_one_notification() -> Result<()> {

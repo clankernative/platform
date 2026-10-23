@@ -7,6 +7,7 @@ use ring::{
 use std::io::Read;
 
 const PATH: &str = "/v1/executor";
+pub(crate) const MAX_EXECUTOR_WIRE_BYTES: u64 = 1_100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CredentialAction {
@@ -27,8 +28,39 @@ impl CredentialAction {
     }
 }
 
-pub(crate) fn send(endpoint: &str, credential: &Credentials, body: &[u8]) -> Result<Vec<u8>> {
-    send_to_path(endpoint, credential, PATH, body)
+pub(crate) fn send(
+    endpoint: &str,
+    credential: &Credentials,
+    body: &[u8],
+    max_response_bytes: u64,
+) -> super::FreetoolExecutorExchange {
+    let mut usage = WireUsage {
+        known: true,
+        ..Default::default()
+    };
+    let response = send_to_path(
+        endpoint,
+        credential,
+        PATH,
+        body,
+        Some(max_response_bytes),
+        Some(&mut usage),
+    );
+    super::FreetoolExecutorExchange {
+        response,
+        request_bytes: usage.request_bytes,
+        response_bytes: usage.response_bytes,
+        known: usage.known,
+        dispatched: usage.dispatched,
+    }
+}
+
+#[derive(Default)]
+struct WireUsage {
+    request_bytes: u64,
+    response_bytes: u64,
+    known: bool,
+    dispatched: bool,
 }
 
 pub(crate) fn send_credential(
@@ -37,7 +69,7 @@ pub(crate) fn send_credential(
     action: CredentialAction,
     body: &[u8],
 ) -> Result<Vec<u8>> {
-    send_to_path(endpoint, credential, action.path(), body)
+    send_to_path(endpoint, credential, action.path(), body, None, None)
 }
 
 fn send_to_path(
@@ -45,12 +77,31 @@ fn send_to_path(
     credential: &Credentials,
     path: &str,
     body: &[u8],
+    granted_response_bytes: Option<u64>,
+    mut usage: Option<&mut WireUsage>,
 ) -> Result<Vec<u8>> {
-    let maximum_bytes = if path == PATH { 1_100_000 } else { 16_384 };
+    let maximum_request_bytes = if path == PATH {
+        MAX_EXECUTOR_WIRE_BYTES as usize
+    } else {
+        16_384
+    };
+    let maximum_response_bytes = if path == PATH {
+        granted_response_bytes
+            .unwrap_or_default()
+            .min(MAX_EXECUTOR_WIRE_BYTES)
+    } else {
+        16_384
+    };
     ensure!(
-        body.len() <= maximum_bytes,
+        body.len() <= maximum_request_bytes,
         "freetool_service_request_budget"
     );
+    if path == PATH {
+        ensure!(
+            maximum_response_bytes > 0,
+            "freetool_service_response_budget"
+        );
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
@@ -69,6 +120,12 @@ fn send_to_path(
         .connect_timeout(std::time::Duration::from_secs(2))
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
+    if path == PATH {
+        let usage = usage.as_deref_mut().expect("executor usage meter");
+        usage.request_bytes = body.len() as u64;
+        usage.dispatched = true;
+        usage.known = false;
+    }
     let response = client
         .post(format!("{}{path}", endpoint.trim_end_matches('/')))
         .header("content-type", "application/json")
@@ -79,7 +136,8 @@ fn send_to_path(
         .body(body.to_vec())
         .send()
         .context("freetool_service_unavailable")?;
-    if path != PATH && !response.status().is_success() {
+    let status = response.status();
+    if path != PATH && !status.is_success() {
         // Translate only the HTTP status, never a service error body that might
         // accidentally include submitted credential material.
         let failure = match response.status().as_u16() {
@@ -90,26 +148,38 @@ fn send_to_path(
         };
         anyhow::bail!(failure);
     }
-    ensure!(response.status().is_success(), "freetool_service_rejected");
-    ensure!(
-        response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value
+    let json_content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
                 .split(';')
                 .next()
-                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))),
-        "freetool_service_response_invalid"
-    );
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+        });
+    if path != PATH {
+        ensure!(status.is_success(), "freetool_service_rejected");
+        ensure!(json_content_type, "freetool_service_response_invalid");
+    }
     let mut bytes = Vec::new();
-    response
-        .take((maximum_bytes + 1) as u64)
-        .read_to_end(&mut bytes)?;
+    let read_result = response
+        .take(maximum_response_bytes.saturating_add(1))
+        .read_to_end(&mut bytes);
+    if path == PATH {
+        let usage = usage.expect("executor usage meter");
+        usage.response_bytes = bytes.len() as u64;
+        usage.known = read_result.is_ok();
+    }
+    read_result.context("freetool_service_response_unavailable")?;
     ensure!(
-        bytes.len() <= maximum_bytes,
+        bytes.len() as u64 <= maximum_response_bytes,
         "freetool_service_response_budget"
     );
+    if path == PATH {
+        ensure!(status.is_success(), "freetool_service_rejected");
+        ensure!(json_content_type, "freetool_service_response_invalid");
+    }
     Ok(bytes)
 }
 
@@ -204,7 +274,17 @@ mod tests {
             Ok(())
         });
         let credential = Credentials::bearer(key_hex)?;
-        let response = send(&endpoint, &credential, &expected_body)?;
+        let exchange = send(
+            &endpoint,
+            &credential,
+            &expected_body,
+            MAX_EXECUTOR_WIRE_BYTES,
+        );
+        assert_eq!(exchange.request_bytes, expected_body.len() as u64);
+        assert!(exchange.dispatched);
+        let response = exchange.response?;
+        assert_eq!(exchange.response_bytes, response.len() as u64);
+        assert!(exchange.known);
         server
             .join()
             .map_err(|_| anyhow::anyhow!("loopback server panicked"))??;
@@ -216,6 +296,103 @@ mod tests {
             ),
             "unexpected loopback response"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn executor_transport_enforces_and_meters_granted_wire_response_limit() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let response_body = vec![b'x'; 1024];
+        let server_body = response_body.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                server_body.len()
+            )?;
+            stream.write_all(&server_body)?;
+            Ok(())
+        });
+        let body = br#"{"operation":"status"}"#;
+        let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
+        let response_limit = 128;
+        let exchange = send(&endpoint, &credential, body, response_limit);
+        assert!(exchange.response.is_err());
+        assert_eq!(exchange.request_bytes, body.len() as u64);
+        assert_eq!(exchange.response_bytes, response_limit + 1);
+        assert!(exchange.known && exchange.dispatched);
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback thread panicked"))??;
+        Ok(())
+    }
+
+    #[test]
+    fn executor_transport_meters_http_failure_body_bytes() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let response_body = vec![b'e'; 4096];
+        let server_body = response_body.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                server_body.len()
+            )?;
+            stream.write_all(&server_body)?;
+            Ok(())
+        });
+        let body = br#"{"operation":"status"}"#;
+        let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
+        let exchange = send(&endpoint, &credential, body, 8192);
+        assert!(exchange.response.is_err());
+        assert_eq!(exchange.request_bytes, body.len() as u64);
+        assert_eq!(exchange.response_bytes, response_body.len() as u64);
+        assert!(exchange.known && exchange.dispatched);
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback thread panicked"))??;
+        Ok(())
+    }
+
+    #[test]
+    fn executor_transport_charges_error_body_bytes_not_normalized_observation() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let wire_response = serde_json::to_vec(&serde_json::json!({
+            "state": "error",
+            "code": "synthetic_private_token_".to_owned() + &"A".repeat(4096),
+        }))?;
+        let server_body = wire_response.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let _ = read_request(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                server_body.len()
+            )?;
+            stream.write_all(&server_body)?;
+            Ok(())
+        });
+        let body = br#"{"operation":"status"}"#;
+        let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
+        let exchange = send(&endpoint, &credential, body, 8192);
+        let response = exchange.response?;
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback thread panicked"))??;
+        assert_eq!(exchange.request_bytes, body.len() as u64);
+        assert_eq!(exchange.response_bytes, wire_response.len() as u64);
+        assert!(exchange.known && exchange.dispatched);
+        let decoded: crate::freetool_executor::ServiceResponse = serde_json::from_slice(&response)?;
+        let normalized = crate::freetool_executor::response_json(decoded)?;
+        assert!(normalized.len() < exchange.response_bytes as usize);
         Ok(())
     }
 
@@ -325,7 +502,10 @@ mod tests {
             Ok(())
         });
         let credential = Credentials::bearer(crate::hex(&[0x31; 32]))?;
-        assert!(send(&endpoint, &credential, b"{}").is_err());
+        let exchange = send(&endpoint, &credential, b"{}", MAX_EXECUTOR_WIRE_BYTES);
+        assert!(exchange.response.is_err());
+        assert_eq!(exchange.request_bytes, 2);
+        assert!(exchange.dispatched);
         server
             .join()
             .map_err(|_| anyhow::anyhow!("loopback server panicked"))??;
