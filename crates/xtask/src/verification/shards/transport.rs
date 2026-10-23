@@ -136,6 +136,28 @@ fn add_fixtures(root: &Path, files: &mut Files, prepared: &Prepared) -> Result<(
     Ok(())
 }
 
+fn staging_roots(root: &Path, files: &mut Files) -> Result<()> {
+    let parent = root.join("artifacts");
+    ensure!(
+        fs::symlink_metadata(&parent)?.is_dir() && parent.canonicalize()? == parent,
+        "real owned artifact directory required"
+    );
+    for name in ["build", "admission"] {
+        let relative = Path::new("artifacts").join(name);
+        // A fully cached preparation has no compiler scratch. Create only the
+        // two fixed empty roots needed by the unchanged compiler admission.
+        match fs::create_dir(root.join(&relative)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        files
+            .directory(root, &relative)
+            .with_context(|| format!("required compiler staging root: {}", relative.display()))?;
+    }
+    Ok(())
+}
+
 fn verify_cli_receipt(
     receipt: &serde_json::Value,
     toolchain: &serde_json::Value,
@@ -231,9 +253,7 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
         add_auxiliaries(root, &mut common, &prepared)?;
         // Preserve the fixed compiler roots without copying their private scratch
         // or admission contents. Runtime cases create and execute their own work.
-        for directory in ["artifacts/build", "artifacts/admission"] {
-            common.directory(root, Path::new(directory))?;
-        }
+        staging_roots(root, &mut common)?;
         groups.insert("common".into(), common);
         for group in GROUPS {
             let mut files = Files::default();
@@ -253,9 +273,7 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
         if phase == "inputs" {
             add_fixtures(root, &mut files, &prepared)?;
             add_cli(root, &mut files)?;
-            for directory in ["artifacts/build", "artifacts/admission"] {
-                files.directory(root, Path::new(directory))?;
-            }
+            staging_roots(root, &mut files)?;
             files.add(root, Path::new("build-out/bin/day2-workflows"), 0)?;
             files.add(root, Path::new("build-out/bin/day2-workflows.json"), 0)?;
         } else {
@@ -399,6 +417,28 @@ mod tests {
         let mut extra = receipt;
         extra["binaries"]["other"] = serde_json::json!("digest");
         assert!(verify_cli_receipt(&extra, &toolchain, &ui).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_preparation_creates_only_fixed_empty_roots_and_never_transports_scratch() -> Result<()>
+    {
+        let scratch = tempfile::tempdir()?;
+        let root = scratch.path().canonicalize()?;
+        fs::create_dir(root.join("artifacts"))?;
+        let mut files = Files::default();
+        staging_roots(&root, &mut files)?;
+        assert_eq!(files.list()?, b"artifacts/admission\0artifacts/build\0");
+        assert_eq!(files.bytes, 0);
+        fs::write(root.join("artifacts/build/private-spool"), b"excluded")?;
+        let mut warm = Files::default();
+        staging_roots(&root, &mut warm)?;
+        assert_eq!(warm.list()?, files.list()?);
+        assert_eq!(warm.bytes, 0);
+        fs::remove_dir(root.join("artifacts/admission"))?;
+        fs::create_dir(root.join("unrelated"))?;
+        std::os::unix::fs::symlink(root.join("unrelated"), root.join("artifacts/admission"))?;
+        assert!(staging_roots(&root, &mut Files::default()).is_err());
         Ok(())
     }
 
