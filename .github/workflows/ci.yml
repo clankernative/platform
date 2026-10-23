@@ -85,7 +85,7 @@ jobs:
       CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -98,7 +98,7 @@ jobs:
           version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -162,7 +162,7 @@ jobs:
       CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -195,7 +195,7 @@ jobs:
       - name: Restore Cargo dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           # The virtual root manifest owns the compilation profiles.
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -222,9 +222,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'inputs' }}
         with:
-          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-timing-d0-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
-            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+            day2-timing-d0-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -233,7 +233,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'tests' }}
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-timing-d0-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
@@ -346,7 +346,7 @@ jobs:
       CARGO_BUILD_JOBS: '3'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-v2
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-mac-v1
       # Preserve compiler statistics through the long runtime campaigns.
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -373,7 +373,7 @@ jobs:
       - name: Restore Cargo dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-v2
+          prefix-key: day2-timing-d0-cargo-mac-v1
           # The virtual root manifest owns the compilation profiles.
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -387,9 +387,9 @@ jobs:
         id: cargo_intermediates
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ github.sha }}
+          key: day2-timing-d0-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            day2-cargo-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-
+            day2-timing-d0-intermediates-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'crates/**/Cargo.toml', 'cli/**/Cargo.toml') }}-
           path: |
             target/debug/.fingerprint
             target/debug/build
@@ -404,9 +404,9 @@ jobs:
         id: fixture_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-timing-d0-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
-            day2-fixtures-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+            day2-timing-d0-fixtures-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -414,7 +414,7 @@ jobs:
         id: test_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: day2-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-timing-d0-test-outputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', '.cargo/**', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
             artifacts/ci-test-programs
@@ -525,7 +525,7 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -603,7 +603,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
@@ -627,7 +627,7 @@ jobs:
           version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -687,7 +687,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-linux-v1
       SCCACHE_IDLE_TIMEOUT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -712,7 +712,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           shared-key: ${{ hashFiles('Cargo.toml') }}-verify
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'
@@ -806,7 +806,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: 'true'
-      SCCACHE_GHA_VERSION: day2-platform-ci-linux-v1
+      SCCACHE_GHA_VERSION: day2-timing-d0-cargo-linux-v1
       # Preserve compiler statistics through the long runtime campaigns.
       SCCACHE_IDLE_TIMEOUT: '0'
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -834,7 +834,7 @@ jobs:
       - name: Restore Cargo dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: day2-platform-ci-linux-v1
+          prefix-key: day2-timing-d0-cargo-linux-v1
           # The virtual root manifest owns the compilation profiles.
           key: ${{ hashFiles('Cargo.toml') }}
           cache-bin: 'false'

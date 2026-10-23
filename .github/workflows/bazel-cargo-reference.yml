@@ -1,7 +1,5 @@
 name: Temporary Cargo dependency and profile reference
 on:
-  push:
-    branches: [build/bazel-cargo-reference]
   workflow_dispatch:
 permissions:
   contents: read
