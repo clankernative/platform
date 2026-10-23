@@ -51,8 +51,15 @@ The following is a complete shape for one Freetool connection, one approved
 executor resource, one capability policy, the HMAC provider credential, and the
 generic companion input. Replace the example scope, IDs, secret versions,
 fingerprints, artifact, addresses, and policy owner with reviewed deployment
-values. The policy resource's `allowed_resources` are executor business resource
-IDs, not host names or SQL statements.
+values. A resource target's `scope` is a tagged object: use
+`{ kind = "explicit", allowed_resources = ["resource_id"] }` for a non-empty
+explicit set, or `{ kind = "any_app_resource" }` for Freetool resources this
+bound app registers at run time. The latter does not grant another app access
+to the service. The executor independently restricts execution to its configured
+HTTP/PostgreSQL targets, approved DNS IPs, and read-only PostgreSQL policy; the
+Platform binding limits which app may invoke which service and which credential
+managers may enroll secrets. Policy-slot `allowed_resources` still names the
+exact Platform resource catalog entries, not Freetool business resource IDs.
 
 ```hcl
 resource_catalog = {
@@ -73,19 +80,20 @@ resource_catalog = {
       revision   = 1
       connection = { id = "freetool_executor", revision = 1 }
       target = {
-        kind               = "freetool_executor"
-        service_id         = "freetool_executor"
-        allowed_resources  = ["freetool_db"]
-        credential_managers = ["operator@example.com"]
+        kind                = "freetool_executor"
+        service_id          = "freetool_executor"
+        scope               = { kind = "any_app_resource" }
+        credential_managers = ["operator@wonderly.com"]
       }
     }
   }
   policies = {
     freetool_access = {
       revision             = 1
-      owner                = "operator@example.com"
+      owner                = "operator@wonderly.com"
       delegates            = []
-      actors               = ["operator@example.com", "automation@freetool.invalid"]
+      # Requires Platform PR #245, merged to main as c4047a21.
+      actors               = ["domain:wonderly.com"]
       allowed_apps         = ["freetool"]
       max_duration_seconds = null
       slots = {
@@ -120,7 +128,7 @@ resource_policies = [
   }
 ]
 
-credential_operator = "operator@example.com"
+credential_operator = "operator@wonderly.com"
 provider_credentials = [{
   credential_ref = { id = "freetool_transport_key", revision = 1 }
   secret_version = "projects/123456789/secrets/freetool-transport-key/versions/1"
@@ -153,6 +161,16 @@ runtime_secret_ids = [
 ]
 ```
 
+For the production policy, `domain:wonderly.com` must also appear in the
+Freetool app's `readers`, `writers`, and the `actors` of both `run_app` and
+`run_result_page`; the verified identity contract must set
+`hosted_domain = "wonderly.com"`. Platform PR #245 is required for this resource
+policy and is merged to main as `c4047a21`: it admits a verified domain in
+non-delegation resource-grant
+`actors`, and `freetool_executor_resource` is a non-delegation grant. #245 leaves
+local app-delegation grants exact-actor only. Deployments on a Platform revision
+before #245 must name individual employees in the resource policy instead.
+
 The config version contains a `bind` of `127.0.0.1:43210`,
 `database` of `/var/lib/day2/loopback-state/executor.sqlite`, the matching
 `transport_key_hex`, a distinct 32-byte `credential_vault_key_hex`, and the
@@ -180,9 +198,11 @@ artifact, actor, resource revision, approved destination, grant, and custody
 version. The host rechecks the live session, current resource and edit
 permission before mutation. The ticket lifetime is at most 30 minutes.
 
-Enable `freetool.credential_enrollment_access` only for a resource grant that
-includes `FreetoolStatus`, targets the exact approved business resource IDs,
-and names the managers in `credential_managers`. The resource's `service_id`
+Enable `freetool.credential_enrollment_access` only for a resource grant whose
+scope covers the requested business resource ID, includes `FreetoolStatus`, and
+names the managers in `credential_managers`. With `any_app_resource`, the host
+still binds each enrollment to the app-registered resource and the executor's
+own configured resource policy. The resource's `service_id`
 must match its connection ID. Execution and result-read actions do not imply
 credential-management authority. The executor must independently allow the same
 installation, actor, artifact, and operation. Simulated-provider mode never
