@@ -57,7 +57,12 @@ The physical campaign projects the retained file's actual selection, policy,
 seed and marker after original validation and checks them again before returning
 those immutable inputs. Both conditional requests and the independent model use
 that exact blueprint. The input binding also includes the validated initial
-image digest and length. This projection happens once, before the history; current
+image digest and length. The complete initial image is captured once as a bounded
+history input: the real initializer contains authority entropy and a temporary
+artifact path, so rerunning it would produce different bytes. Each replay validates
+the captured image through the normal schema/core/marker decoder before preparing
+its fresh unqualified file. The saved original and reduced programs retain those
+same bytes. This projection happens once, before the history; current
 writes cannot restamp or replace it. Saved bundles also bind those fixture inputs,
 so replay refuses changed runtime fixture definitions even with the same Rust
 campaign source.

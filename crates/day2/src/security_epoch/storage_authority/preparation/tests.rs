@@ -23,6 +23,17 @@ fn layout() -> (
     ReviewedFileLayout,
     NativeAcquisition,
 ) {
+    layout_for_replay(None).unwrap()
+}
+
+fn layout_for_replay(
+    image: Option<&[u8]>,
+) -> Result<(
+    tempfile::TempDir,
+    ReviewedStorageSelection,
+    ReviewedFileLayout,
+    NativeAcquisition,
+)> {
     let (directory, runtime) = image_fixture::runtime();
     let store = epoch_fixture::selection();
     let policy = image_fixture::policy(&runtime, &store);
@@ -35,8 +46,20 @@ fn layout() -> (
     )
     .unwrap();
     let mut interval = acquisition();
-    let plan = ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval).unwrap();
-    (directory, selection, plan, interval)
+    let mut plan = ReviewedFileLayout::prepare_metadata(&runtime, &selection, &mut interval)?;
+    if let Some(bytes) = image {
+        image_fixture::replay_initial_image(
+            &mut plan.image,
+            &runtime,
+            selection.policy(),
+            selection.store(),
+            bytes,
+            &mut interval,
+        )?;
+        plan.proposal.image = Digest::new(plan.image.bytes());
+        plan.proposal.length = plan.image.bytes().len();
+    }
+    Ok((directory, selection, plan, interval))
 }
 
 #[test]

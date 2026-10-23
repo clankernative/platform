@@ -19,8 +19,13 @@ pub(in crate::security_epoch) struct FileFixture {
 }
 
 impl FileFixture {
-    pub(in crate::security_epoch) fn new() -> Result<Self> {
-        let (directory, selected, layout, mut acquisition) = layout();
+    pub(in crate::security_epoch) fn initial_image() -> Vec<u8> {
+        let (_, _, layout, _) = layout();
+        layout.image.bytes().to_vec()
+    }
+
+    pub(in crate::security_epoch) fn new(image: &[u8]) -> Result<Self> {
+        let (directory, selected, layout, mut acquisition) = layout_for_replay(Some(image))?;
         let authority = NativeStorageCreationAuthority::filesystem_fixture(
             selected,
             File::open(directory.path())?,

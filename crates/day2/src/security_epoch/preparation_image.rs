@@ -784,6 +784,102 @@ pub(super) mod tests {
         }
     }
 
+    /// Complete captured image DATA for unqualified replay fixtures only. Run
+    /// the normal bounded schema/core/marker/readback decoder before retaining
+    /// these bytes. This creates no native file, role, P3 or permission.
+    pub(in crate::security_epoch) fn replay_initial_image(
+        image: &mut InitialPreparationImage,
+        runtime: &crate::store::InitialStoreMetadata,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        bytes: &[u8],
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        ObservedInitialImage::admit(
+            runtime,
+            policy,
+            store,
+            image.core.clone(),
+            bytes,
+            &Digest::new(bytes),
+            acquisition,
+        )?;
+        image.image = FrozenPreparationImage {
+            bytes: bytes.to_vec(),
+            schema: image.core.schema_contract.clone(),
+        };
+        image.decode_exact_readback(bytes, acquisition)?;
+        Ok(())
+    }
+
+    #[test]
+    fn captured_replay_image_retains_exact_initial_bytes_and_refuses_corruption() {
+        let (_first_directory, first_runtime) = runtime();
+        let store = crate::security_epoch::tests::selection();
+        let first_policy = policy(&first_runtime, &store);
+        let first = InitialPreparationImage::prepare(
+            &first_runtime,
+            &first_policy,
+            &store,
+            incarnations(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        // The initializer records its actual temporary artifact path and
+        // authority entropy. A fresh initializer is a different input even
+        // when the logical schema, core, store and marker are identical.
+        let (_second_directory, second_runtime) = runtime();
+        let second_policy = policy(&second_runtime, &store);
+        let mut second = InitialPreparationImage::prepare(
+            &second_runtime,
+            &second_policy,
+            &store,
+            incarnations(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        assert!(first.core() == second.core());
+        assert_ne!(first.bytes(), second.bytes());
+        replay_initial_image(
+            &mut second,
+            &second_runtime,
+            &second_policy,
+            &store,
+            first.bytes(),
+            &mut acquisition(),
+        )
+        .unwrap();
+        assert_eq!(second.bytes(), first.bytes());
+
+        let mut corrupt = first.bytes().to_vec();
+        corrupt[0] ^= 1;
+        let mut refused = acquisition();
+        assert!(
+            replay_initial_image(
+                &mut second,
+                &second_runtime,
+                &second_policy,
+                &store,
+                &corrupt,
+                &mut refused,
+            )
+            .is_err()
+        );
+        assert!(refused.remaining().is_err());
+        assert!(
+            replay_initial_image(
+                &mut second,
+                &second_runtime,
+                &second_policy,
+                &store,
+                first.bytes(),
+                &mut refused,
+            )
+            .is_err()
+        );
+        assert_eq!(second.bytes(), first.bytes());
+    }
+
     #[test]
     fn operator_schema_matches_actual_complete_memory_image_contract() {
         // Synthetic contract DATA; this is not artifact/compiler or native

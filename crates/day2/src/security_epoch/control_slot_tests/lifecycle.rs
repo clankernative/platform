@@ -86,7 +86,10 @@ enum Event {
 struct Program {
     version: u32,
     seed: u64,
-    physical: bool,
+    // Complete immutable initial image DATA. Initializers contain real
+    // authority entropy and temporary artifact paths, so replay must retain
+    // the input bytes rather than initialize a different image each time.
+    physical: Option<Vec<u8>>,
     events: Vec<Event>,
 }
 
@@ -130,15 +133,13 @@ struct World {
 }
 
 impl World {
-    fn new(seed: u64, physical: bool) -> Result<Self> {
+    fn new(seed: u64, physical: Option<&[u8]>) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
-        ensure!(!physical, "physical lifecycle requires Linux");
+        ensure!(physical.is_none(), "physical lifecycle requires Linux");
         #[cfg(target_os = "linux")]
-        let mut file = if physical {
-            Some(crate::security_epoch::storage_authority::FileFixture::new()?)
-        } else {
-            None
-        };
+        let mut file = physical
+            .map(crate::security_epoch::storage_authority::FileFixture::new)
+            .transpose()?;
         #[cfg(target_os = "linux")]
         let (selection, create, image_binding) = if let Some(file) = &mut file {
             let (policy, store, original, image) = file.blueprint()?;
@@ -560,8 +561,19 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
         }),
         "lifecycle fault/operation bound"
     );
-    let mut world = World::new(program.seed, program.physical)?;
-    let mut model = model::Model::new(&world.cores, program.physical, &world.image_binding)?;
+    ensure!(
+        program
+            .physical
+            .as_ref()
+            .is_none_or(|image| (100..=16 * 1024 * 1024).contains(&image.len())),
+        "lifecycle initial image byte bound"
+    );
+    let mut world = World::new(program.seed, program.physical.as_deref())?;
+    let mut model = model::Model::new(
+        &world.cores,
+        program.physical.is_some(),
+        &world.image_binding,
+    )?;
     let mut records = Vec::new();
     for (index, &event) in program.events.iter().enumerate() {
         let actual = match world.step(event) {
@@ -616,6 +628,7 @@ fn source() -> Digest {
             include_str!("../tests/lifecycle_provider.rs"),
             include_str!("../control_slot_tests.rs"),
             include_str!("../storage_authority/preparation/tests/lifecycle_file.rs"),
+            include_str!("../storage_authority/preparation/tests.rs"),
             include_str!("../storage_authority/preparation/continuity/lifecycle_fixture.rs"),
             include_str!("../native_clock.rs"),
             include_str!("../storage_authority/preparation.rs"),
@@ -638,8 +651,13 @@ fn replayed(program: &Program) -> Result<std::result::Result<Vec<Record>, Diverg
         Err(e) => return Ok(Err(e)),
     };
     if first != second {
+        let index = first
+            .iter()
+            .zip(&second)
+            .position(|(a, b)| a != b)
+            .unwrap_or(first.len().min(second.len()));
         return Ok(Err(Divergence {
-            index: 0,
+            index,
             category: "replay",
             records: first,
             expected: serde_json::to_value(second)?,
@@ -748,7 +766,7 @@ fn successful(seed: u64) -> Program {
     Program {
         version: 1,
         seed,
-        physical: false,
+        physical: None,
         events,
     }
 }
@@ -960,7 +978,7 @@ fn replay_saved_storage_lifecycle_history() -> Result<()> {
         bundle.version == 1 && bundle.source == source(),
         "lifecycle replay source/version mismatch"
     );
-    let fixture = World::new(bundle.program.seed, bundle.program.physical)?;
+    let fixture = World::new(bundle.program.seed, bundle.program.physical.as_deref())?;
     ensure!(
         fixture.binding()? == bundle.binding,
         "lifecycle replay immutable fixture inputs changed"
@@ -1004,7 +1022,12 @@ proptest::proptest! {
 fn generated_real_file_histories_join_the_same_first_holder_and_writer_decisions() -> Result<()> {
     for seed in 0..4 {
         let mut baseline = successful(seed);
-        baseline.physical = true;
+        baseline.physical =
+            Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        // Persist/reload the actual image input before running. The complete
+        // retained bytes, not a fresh initializer or a weaker logical digest,
+        // must survive both executions and process-boundary replay.
+        let baseline: Program = serde_json::from_slice(&serde_json::to_vec(&baseline)?)?;
         check(&baseline)?;
         for change in [FileChange::Tamper, FileChange::Replace, FileChange::Shorten] {
             let mut random = seed;
