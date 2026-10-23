@@ -51,8 +51,8 @@ impl Unsigned {
     }
 }
 
-pub fn valid_row_version(value: &Value) -> bool {
-    value.as_i64().is_some_and(|number| number >= 1)
+pub fn valid_row_version(version: &Value) -> bool {
+    version.as_i64().is_some_and(|number| number >= 1)
 }
 
 pub fn row_version_schema() -> Value {

@@ -39,8 +39,8 @@ AnalyzeReport :: [].{
 
 	prepare : Context, AnalyzeReportTypes.Input -> Observe(AnalyzeReportTypes.Result)
 	prepare = |_context, input| {
-		text = input.text.to_str()
-		Observe.value({ bytes: text.count_utf8_bytes(), lines: text.split_on("\n").len() })
+		document_text = input.text.to_str()
+		Observe.value({ bytes: document_text.count_utf8_bytes(), lines: document_text.split_on("\n").len() })
 	}
 
 	decide : Context, AnalyzeReportTypes.Input, AnalyzeReportTypes.Result -> Tx(ReportView.Saved)
