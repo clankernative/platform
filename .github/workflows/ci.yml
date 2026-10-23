@@ -601,7 +601,8 @@ jobs:
       image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
       # Trusted CI setup mounts only bounded owned outputs. Inner compiler and
       # worker Landlock/seccomp, memory and launcher admission remain mandatory.
-      options: --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
+      # Reap the temporary Clippy fixture servers when they shut down.
+      options: --init --memory=6g --memory-swap=6g --cpus=4 --pids-limit=512 --cgroupns=private --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
       volumes:
         - /usr/bin/gh:/usr/local/bin/gh:ro
     defaults:
