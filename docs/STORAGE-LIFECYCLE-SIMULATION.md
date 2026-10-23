@@ -80,8 +80,10 @@ they are additional fixture controls, not a substitute for kernel conformance.
 Model/replay divergence retains an original and reduced typed history, complete
 observations through the failure and compiled source identity under
 `artifacts/storage-lifecycle-simulation/`. Reduction is bounded and preserves the
-failure category. Bundles contain only fixed synthetic fixture data, never live
-provider values, credentials, certificates or native process identities.
+failure category. A failed hosted day2 shard uploads these bundles as the
+`day2-storage-lifecycle-failures` artifact. Bundles contain only fixed synthetic
+fixture data, never live provider values, credentials, certificates or native
+process identities.
 
 ```console
 DAY2_STORAGE_LIFECYCLE_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::control_slot_tests::lifecycle::replay_saved_storage_lifecycle_history --exact
