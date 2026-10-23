@@ -257,14 +257,14 @@ fn select_grant<'a>(
     let mut matches = grants.values().filter(|grant| {
         let ResourceTarget::FreetoolExecutor {
             service_id,
-            allowed_resources,
+            scope,
             credential_managers,
         } = &grant.target
         else {
             return false;
         };
         service_id == &grant.connection.id
-            && allowed_resources.contains(resource)
+            && scope.authorizes(resource)
             && credential_managers.contains(actor)
             && grant.actors.contains(actor)
             && grant.actions.contains(&ResourceAction::FreetoolStatus)
@@ -654,7 +654,7 @@ mod tests {
             "live":{"provider":"freetool_executor","endpoint":"http://127.0.0.1:9876",
                 "credential_ref":{"id":"transport_key","revision":1}},
             "target":{"kind":"freetool_executor","service_id":"freetool_local",
-                "allowed_resources":["resource"],"credential_managers":["editor"]},
+                "scope":{"kind":"explicit","allowed_resources":["resource"]},"credential_managers":["editor"]},
             "actions":["freetool_status"],"actors":["editor"],
             "limits":{"max_request_bytes":16384,"max_response_bytes":16384,"max_calls_per_invocation":3},
             "budgets":[],"expires_at_ms":100000
@@ -668,6 +668,16 @@ mod tests {
         select_grant(&good, "editor", "resource", 99)?;
         assert!(select_grant(&good, "reader", "resource", 99).is_err());
         assert!(select_grant(&good, "editor", "other_resource", 99).is_err());
+        let mut app_wide = grant.clone();
+        if let ResourceTarget::FreetoolExecutor { scope, .. } = &mut app_wide.target {
+            *scope = day2_capabilities::resources::FreetoolResourceScope::AnyAppResource;
+        }
+        select_grant(
+            &BTreeMap::from([("custody".into(), app_wide)]),
+            "editor",
+            "resource-created-by-app",
+            99,
+        )?;
         assert!(select_grant(&good, "editor", "resource", 100).is_err());
         let mut no_management = grant.clone();
         if let ResourceTarget::FreetoolExecutor {
