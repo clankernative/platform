@@ -109,10 +109,11 @@ refused attempt is audited like any other.
 
 ### Everyone at the verified domain
 
-An app's `readers` and `writers`, and an operation's `actors`, may contain an
-entry of the exact form `domain:<hosted_domain>`, for example
-`domain:example.com`. It admits every person at that domain without naming
-them, so a new hire can use an app the day their account exists:
+An app's `readers` and `writers`, an operation's `actors` and a resource
+grant's `actors` may contain an entry of the exact form
+`domain:<hosted_domain>`, for example `domain:example.com`. It admits every
+person at that domain without naming them, so a new hire can use an app the day
+their account exists:
 
 ```json
 {
@@ -149,8 +150,16 @@ A domain is never an identity. `domain:` is refused in `admins`, in delegation
 rules (`authenticated` and `may_act_as` actors) and as an `X-Day2-Act-As` target,
 and an actor spelled as one is never admitted, even by that same entry. Row ownership, the audit and every invocation record hold
 the real address the edge verified, and `owner_or_admin` rows are compared with
-that address as before. Resource grants also name people: a person admitted
-through a domain entry may be named in one, but the entry itself may not.
+that address as before.
+
+A resource grant (a reusable resource policy's `actors`, as attached to an
+operation) may name `domain:D` so everyone at the domain can use, for example,
+a Workspace Directory read. The entry must itself appear in the operation's
+`actors` and in the matching membership (`writers`, or `readers` for a query):
+named people never cover a whole domain, and activation drops a domain entry
+that is not covered. A grant for app delegation (`local_delegation`) may not
+name a domain; delegation carries one person's request across an application
+boundary, never a domain.
 
 The activated document records the hosted domain it was resolved under
 (`hosted_domain`), and every authorization checks it against the running
