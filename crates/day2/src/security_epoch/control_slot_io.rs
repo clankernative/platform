@@ -7,7 +7,7 @@
 use super::{
     control_slot::{AttemptCore, LogicalCore, RearmCore, SettlementCore, Slot, SlotState},
     control_slot_firestore::{self as codec, VersionedSlot},
-    firestore::{Budget, EpochObservation, Port},
+    firestore::{Budget, EpochObservation, Port, Sample},
     journal::{AuthorizedDispatch, CurrentBootstrapExecution, Purpose, snapshot_digest},
     kernel::{self, Outcome, Request, UpdateTime},
 };
@@ -19,7 +19,7 @@ use day2_capabilities::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{marker::PhantomData, rc::Rc, time::Duration};
+use std::{marker::PhantomData, rc::Rc};
 
 fn endpoint(selection: &EpochStore, operation: &str) -> String {
     let EpochProvider::FirestoreNativeV1 {
@@ -42,19 +42,26 @@ pub(crate) struct SlotObservation {
 }
 
 impl SlotObservation {
-    pub(super) fn remaining(
-        &mut self,
-        selection: &EpochStore,
-        core: &LogicalCore,
-        port: &mut impl Port,
-    ) -> Result<Duration> {
-        ensure!(self.valid, "control_slot_observation_refused");
+    fn check_binding(&mut self, selection: &EpochStore, core: &LogicalCore) -> Result<()> {
         let result = (|| {
+            ensure!(self.valid, "control_slot_observation_refused");
             ensure!(
                 self.selection == Digest::of(selection)? && self.logical == core.digest()?,
                 "control_slot_observation_binding"
             );
-            self.budget.remaining(port)
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    fn constrain_budget(&mut self, budget: &mut Budget, sample: &Sample) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "control_slot_observation_refused");
+            budget.constrain_to(&mut self.budget, sample)?;
+            Ok(())
         })();
         if result.is_err() {
             self.valid = false;
@@ -136,10 +143,14 @@ pub(super) fn read_with_budget(
     #[serde(deny_unknown_fields)]
     struct Empty {}
     let _: Empty = crate::json::decode(&cleanup)?;
-    budget.remaining(port)?;
+    let selection = Digest::of(selection)?;
+    let logical = core.digest()?;
+    // Both HTTP exchanges retain full pre/post guards. This last step only
+    // charges decoding of the already received response to the same clock.
+    budget.remaining_decoding(port)?;
     Ok(SlotObservation {
-        selection: Digest::of(selection)?,
-        logical: core.digest()?,
+        selection,
+        logical,
         value: result?,
         budget,
         valid: true,
@@ -158,23 +169,38 @@ pub(crate) struct Mutation<'storage, 'role> {
 }
 
 impl<'storage, 'role> Mutation<'storage, 'role> {
-    fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
-        self.core.validate(selection)?;
-        self.counter.remaining(selection, port)?;
-        self.slot.remaining(selection, &self.core, port)?;
-        self.context.check(
-            selection,
-            &self.core.counter,
-            self.counter.snapshot(),
-            self.purpose,
-            port,
-        )?;
-        Ok(())
+    fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Sample, Budget)> {
+        let result = (|| {
+            self.core.validate(selection)?;
+            self.counter.check_binding(selection)?;
+            self.slot.check_binding(selection, &self.core)?;
+            // One full observation of this SAME context/file/peer/provider
+            // owner, after all pure binding work. It is not a reusable proof.
+            let (sample, mut budget) = self.context.check(
+                selection,
+                &self.core.counter,
+                self.counter.snapshot(),
+                self.purpose,
+                port,
+            )?;
+            self.counter.constrain_budget(&mut budget, &sample)?;
+            self.slot.constrain_budget(&mut budget, &sample)?;
+            // Charge the full observation and subsequent DATA work with an
+            // ACTUAL fresh clock from the same retained original owner.
+            let sample = self.context.clock_sample(port)?;
+            self.counter.constrain_budget(&mut budget, &sample)?;
+            self.slot.constrain_budget(&mut budget, &sample)?;
+            Ok((sample, budget))
+        })();
+        if result.is_err() {
+            self.context.refuse();
+            port.refuse();
+        }
+        result
     }
 
     fn send(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Self, UpdateTime)> {
-        self.check(selection, port)?;
-        let mut budget = self.context.budget(port)?;
+        let (_, mut budget) = self.check(selection, port)?;
         let body = serde_json::to_vec(&json!({"writes":[self.write]}))?;
         let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
         let version = commit_version(&bytes)?;
@@ -420,8 +446,16 @@ impl<'storage, 'role> SlotClaimMutation<'storage, 'role> {
 }
 
 impl<'storage, 'role> KnownClaim<'storage, 'role> {
-    pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+    pub(super) fn check(
+        &mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<(Sample, Budget)> {
         self.mutation.check(selection, port)
+    }
+
+    pub(super) fn refuse(&mut self) {
+        self.mutation.context.refuse();
     }
 
     pub(super) fn prepare(
@@ -429,8 +463,7 @@ impl<'storage, 'role> KnownClaim<'storage, 'role> {
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<(Self, Request, Budget)> {
-        self.mutation.check(selection, port)?;
-        let budget = self.mutation.context.budget(port)?;
+        let (_, budget) = self.mutation.check(selection, port)?;
         let request = self.mutation.core.counter.clone();
         Ok((self, request, budget))
     }

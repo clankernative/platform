@@ -34,6 +34,30 @@ pub(super) struct EpochReply {
 pub(super) trait Port {
     fn sample(&mut self) -> Result<Sample>;
 
+    /// A native execution context may observe only its SAME retained phase.
+    /// Unrelated/ordinary ports cannot substitute equal clock/selection DATA.
+    fn sample_for_context(
+        &mut self,
+        _owner: &Rc<
+            std::cell::RefCell<super::storage_authority::CurrentStorageBootstrapPhase<'_, '_>>,
+        >,
+    ) -> Result<Sample> {
+        self.refuse();
+        anyhow::bail!("security_epoch_native_context_port_required")
+    }
+
+    /// Clock DATA after a fixed context's full observation and pure checks.
+    /// This never supplies a physical/role observation or a reusable witness.
+    fn clock_for_context(
+        &mut self,
+        _owner: &Rc<
+            std::cell::RefCell<super::storage_authority::CurrentStorageBootstrapPhase<'_, '_>>,
+        >,
+    ) -> Result<Sample> {
+        self.refuse();
+        anyhow::bail!("security_epoch_native_context_port_required")
+    }
+
     /// DATA-only time spent decoding an already received response. The default
     /// retains full checks; only the closed Controller transport may borrow its
     /// SAME retained native clock here. This is never an authority observation.
@@ -164,8 +188,35 @@ impl Budget {
     /// Pure clock checkpoint. A guarded post owns its full authority envelope;
     /// this also charges its completed work centrally. Context/budget issuance
     /// and observation consumers continue to use full `remaining`.
-    fn remaining_decoding(&mut self, port: &mut impl Port) -> Result<Duration> {
+    pub(super) fn remaining_decoding(&mut self, port: &mut impl Port) -> Result<Duration> {
         self.observe(port.decoding_sample()?)
+    }
+
+    /// Intersect two ACTUAL retained time budgets at the supplied fresh clock
+    /// DATA. Neither origin/latest is reset, and no role or permission is made.
+    /// The caller must obtain this sample inside its same-owner full envelope.
+    pub(super) fn constrain_to(&mut self, other: &mut Self, sample: &Sample) -> Result<Duration> {
+        self.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })?;
+        other.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })?;
+        let ceiling = other
+            .start
+            .checked_add(other.limit)
+            .context("security_epoch_clock_overflow")?;
+        self.limit = self.limit.min(
+            ceiling
+                .checked_sub(self.start)
+                .context("security_epoch_acquisition_expired")?,
+        );
+        self.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })
     }
 
     pub(super) fn remaining_native(
@@ -484,13 +535,38 @@ impl EpochObservation {
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<Duration> {
-        ensure!(self.valid, "security_epoch_observation_refused");
         let result = (|| {
+            self.check_binding(selection)?;
+            self.budget.remaining(port)
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    pub(super) fn check_binding(&mut self, selection: &EpochStore) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "security_epoch_observation_refused");
             ensure!(
                 self.selection == Digest::of(selection)?,
                 "security_epoch_observation_selection_changed"
             );
-            self.budget.remaining(port)
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    /// Time DATA only, within the fixed mutation's full context observation.
+    /// The immutable selection is checked separately before that observation.
+    pub(super) fn constrain_budget(&mut self, budget: &mut Budget, sample: &Sample) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "security_epoch_observation_refused");
+            budget.constrain_to(&mut self.budget, sample)?;
+            Ok(())
         })();
         if result.is_err() {
             self.valid = false;

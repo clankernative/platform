@@ -285,6 +285,25 @@ impl ControllerPort<'_, '_> {
 }
 
 impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
+    fn check_context_owner(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<()> {
+        // Both retained Rcs stay live. Compare the actual allocations, even
+        // when their borrow lifetimes differ; no pointer or stage escapes.
+        let result = (|| {
+            ensure!(
+                std::ptr::addr_eq(Rc::as_ptr(&self.owner.owner), Rc::as_ptr(owner)),
+                "epoch_writer_original_owner_changed"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.owner.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn context_interval(
         &mut self,
         owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
@@ -301,6 +320,22 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
 impl Port for ControllerBorrow<'_, '_, '_> {
     fn sample(&mut self) -> Result<Sample> {
         self.owner.sample()
+    }
+
+    fn sample_for_context(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<Sample> {
+        self.check_context_owner(owner)?;
+        self.owner.sample()
+    }
+
+    fn clock_for_context(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<Sample> {
+        self.check_context_owner(owner)?;
+        self.owner.decoding_sample()
     }
 
     fn decoding_sample(&mut self) -> Result<Sample> {

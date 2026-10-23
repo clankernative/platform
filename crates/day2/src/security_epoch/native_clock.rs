@@ -605,6 +605,49 @@ mod tests {
     }
 
     #[test]
+    fn intersected_budget_keeps_earliest_original_deadline_through_actual_clock_transport() {
+        for shorter_outgoing in [false, true] {
+            for expire_after_send in [false, true] {
+                let (mut outgoing, mut port, mut sibling) = budget_transport();
+                let mut other = Budget::from_native_origin(
+                    port.clock.sample().unwrap(),
+                    port.clock.origin,
+                    Duration::from_secs(102),
+                )
+                .unwrap();
+                if shorter_outgoing {
+                    std::mem::swap(&mut outgoing, &mut other);
+                }
+                port.clock.fixture_time = Some(Duration::from_secs(101));
+                let sample = port.clock.sample().unwrap();
+                assert_eq!(
+                    outgoing.constrain_to(&mut other, &sample).unwrap(),
+                    Duration::from_secs(1)
+                );
+                port.pre = if expire_after_send {
+                    Duration::from_millis(101_500)
+                } else {
+                    Duration::from_secs(102)
+                };
+                port.post = Duration::from_secs(102);
+                // The actual thirty-second parent is independently live;
+                // the narrower caller must still stop before or after send.
+                port.clock.fixture_time = Some(port.pre);
+                assert!(port.clock.sample().is_ok());
+                assert!(outgoing.call(&mut port, "fixed-data-model", &[]).is_err());
+                assert_eq!(port.sends, usize::from(expire_after_send));
+                if expire_after_send {
+                    assert_eq!(port.selected, Some(Duration::from_millis(500)));
+                }
+                port.clock.fixture_time = Some(Duration::from_secs(101));
+                assert!(outgoing.call(&mut port, "fixed-data-model", &[]).is_err());
+                assert_eq!(port.sends, usize::from(expire_after_send));
+                assert!(sibling.sample().is_err());
+            }
+        }
+    }
+
+    #[test]
     fn transport_charges_preguard_work_to_shorter_caller_budget_before_send() {
         for millis in [104_999, 105_000, 106_000] {
             let (mut budget, mut port, mut sibling) = budget_transport();
