@@ -533,6 +533,7 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
         budget
             .checked_sub(started.elapsed())
             .context("Clippy budget exhausted")?,
+        self::command(root),
     )
 }
 
@@ -551,13 +552,13 @@ pub(crate) fn admit_clippy_outputs(
     labels: &[String],
     strict: bool,
     budget: Duration,
+    mut query: Command,
 ) -> Result<()> {
     use std::io::Read;
     ensure!(
         !labels.is_empty(),
         "nonempty Clippy producer inventory required"
     );
-    let mut query = command(root);
     query
         .arg(format!("--output_base={}", output_base.display()))
         .args(["cquery", "--output=files"]);

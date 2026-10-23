@@ -133,6 +133,7 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         COMPILER_TIMEOUT
             .checked_sub(started.elapsed())
             .context("strict compiler budget exhausted")?,
+        clippy_bazel_command(root),
     )?;
     println!(
         "platform kernel compiler boundary: {} strict crates",
@@ -158,11 +159,26 @@ fn admit_clippy_diagnostic(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn clippy_bazel_command(root: &Path) -> Command {
+    #[cfg(test)]
+    {
+        // Each temporary fixture owns its servers. Preserve analysis between
+        // source mutations; production compiler supervision stays in batch mode.
+        let mut command = crate::bazel::command(root);
+        command.args(["--nobatch", "--max_idle_secs=30"]);
+        command
+    }
+    #[cfg(not(test))]
+    {
+        crate::bazel::command(root)
+    }
+}
+
 fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> {
     let config = root.join("architecture").canonicalize()?;
     let target = strict_target_dir(config.parent().context("strict workspace")?, packages);
     let catalog = crate::bazel::targets(root)?;
-    let mut command = crate::bazel::command(root);
+    let mut command = clippy_bazel_command(root);
     command
         .arg(format!("--output_base={}", target.display()))
         .current_dir(root)
@@ -692,8 +708,62 @@ mod tests {
         Ok(())
     }
 
-    fn fixture() -> Result<tempfile::TempDir> {
+    struct ClippyFixture {
+        directory: tempfile::TempDir,
+        closed: bool,
+    }
+
+    impl ClippyFixture {
+        fn path(&self) -> &Path {
+            self.directory.path()
+        }
+
+        fn shutdown(&self) -> Result<()> {
+            let partitions = self.path().join("build-out/strict-clippy");
+            if !partitions.exists() {
+                return Ok(());
+            }
+            let mut result = Ok(());
+            for entry in fs::read_dir(partitions)? {
+                let mut command = clippy_bazel_command(self.path());
+                command
+                    .arg(format!("--output_base={}", entry?.path().display()))
+                    .arg("shutdown")
+                    .current_dir(self.path());
+                if let Err(error) =
+                    crate::run_with_budget(self.path(), &mut command, Duration::from_secs(90))
+                {
+                    result = Err(error);
+                }
+            }
+            result
+        }
+
+        fn close(mut self) -> Result<()> {
+            self.shutdown()?;
+            self.closed = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for ClippyFixture {
+        fn drop(&mut self) {
+            if !self.closed {
+                // Also stop servers on a failed assertion or early error,
+                // before TempDir removes the workspace and its server records.
+                if let Err(error) = self.shutdown() {
+                    eprintln!("Clippy fixture server cleanup failed: {error}");
+                }
+            }
+        }
+    }
+
+    fn fixture() -> Result<ClippyFixture> {
         let directory = tempfile::tempdir()?;
+        let directory = ClippyFixture {
+            directory,
+            closed: false,
+        };
         fs::create_dir(directory.path().join("src"))?;
         fs::create_dir(directory.path().join("architecture"))?;
         fs::write(directory.path().join("architecture/clippy.toml"), CONFIG)?;
@@ -796,7 +866,7 @@ mod tests {
         Ok(directory)
     }
 
-    fn path_contract_fixture() -> Result<tempfile::TempDir> {
+    fn path_contract_fixture() -> Result<ClippyFixture> {
         let directory = fixture()?;
         fs::create_dir(directory.path().join("contract"))?;
         fs::create_dir(directory.path().join("contract/src"))?;
@@ -854,7 +924,8 @@ mod tests {
             );
         }
         fs::write(&source, pure)?;
-        check(fixture.path(), &packages)
+        check(fixture.path(), &packages)?;
+        fixture.close()
     }
 
     #[test]
@@ -1155,7 +1226,7 @@ mod tests {
         // compiler flags. Restoring data-only paths must still compile.
         fs::write(&contract, format!("{ATTRIBUTES}{pure}"))?;
         check(fixture.path(), &packages)?;
-        Ok(())
+        fixture.close()
     }
 
     #[test]
@@ -1311,6 +1382,6 @@ mod tests {
             rejection.contains("misspelled_now"),
             "wrong supervised rejection: {rejection}"
         );
-        Ok(())
+        fixture.close()
     }
 }
