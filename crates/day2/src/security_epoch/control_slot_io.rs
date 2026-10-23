@@ -7,19 +7,18 @@
 use super::{
     control_slot::{AttemptCore, LogicalCore, RearmCore, SettlementCore, Slot, SlotState},
     control_slot_firestore::{self as codec, VersionedSlot},
-    firestore::{Budget, EpochObservation, Port},
+    firestore::{Budget, EpochObservation, Port, Sample},
     journal::{AuthorizedDispatch, CurrentBootstrapExecution, Purpose, snapshot_digest},
     kernel::{self, Outcome, Request, UpdateTime},
 };
 use anyhow::{Context, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::{
     Digest,
     security_epoch::{EpochProvider, EpochStore},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{marker::PhantomData, rc::Rc, time::Duration};
+use std::{marker::PhantomData, rc::Rc};
 
 fn endpoint(selection: &EpochStore, operation: &str) -> String {
     let EpochProvider::FirestoreNativeV1 {
@@ -42,19 +41,26 @@ pub(crate) struct SlotObservation {
 }
 
 impl SlotObservation {
-    pub(super) fn remaining(
-        &mut self,
-        selection: &EpochStore,
-        core: &LogicalCore,
-        port: &mut impl Port,
-    ) -> Result<Duration> {
-        ensure!(self.valid, "control_slot_observation_refused");
+    fn check_binding(&mut self, selection: &EpochStore, core: &LogicalCore) -> Result<()> {
         let result = (|| {
+            ensure!(self.valid, "control_slot_observation_refused");
             ensure!(
                 self.selection == Digest::of(selection)? && self.logical == core.digest()?,
                 "control_slot_observation_binding"
             );
-            self.budget.remaining(port)
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    fn constrain_budget(&mut self, budget: &mut Budget, sample: &Sample) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "control_slot_observation_refused");
+            budget.constrain_to(&mut self.budget, sample)?;
+            Ok(())
         })();
         if result.is_err() {
             self.valid = false;
@@ -71,80 +77,36 @@ impl SlotObservation {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReadEntry {
-    transaction: Option<String>,
-    read_time: Option<String>,
-    found: Option<Value>,
-    missing: Option<String>,
-}
-
-pub(super) fn read_with_budget(
+/// One coherent provider transaction supplies both observations. Each retains
+/// the same spent original budget; neither observation is native authority.
+pub(super) fn read_with_counter(
     selection: &EpochStore,
     core: &LogicalCore,
     port: &mut impl Port,
-    mut budget: Budget,
-) -> Result<SlotObservation> {
-    let name = codec::name(selection, core)?;
-    let body = serde_json::to_vec(&json!({"documents":[name],"newTransaction":{"readOnly":{}}}))?;
-    let bytes = budget.call(port, &endpoint(selection, "batchGet"), &body)?;
-    let mut entries: Vec<ReadEntry> = crate::json::decode(&bytes)?;
-    ensure!(
-        !entries.is_empty() && entries.len() <= 2,
-        "control_slot_batch_shape"
-    );
-    let token = entries[0]
-        .transaction
-        .take()
-        .context("control_slot_transaction_missing")?;
-    let decoded = STANDARD.decode(&token)?;
-    ensure!(
-        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
-        "control_slot_transaction_shape"
-    );
+    budget: Budget,
+) -> Result<(EpochObservation, SlotObservation)> {
     let result = (|| {
-        if entries[0].found.is_none() && entries[0].missing.is_none() {
-            ensure!(entries[0].read_time.is_none(), "control_slot_header_fields");
-            entries.remove(0);
-        }
-        ensure!(entries.len() == 1, "control_slot_batch_shape");
-        let entry = entries.pop().unwrap();
-        ensure!(
-            entry.transaction.is_none(),
-            "control_slot_duplicate_transaction"
-        );
-        let read_time = entry.read_time.context("control_slot_read_time_missing")?;
-        time::OffsetDateTime::parse(&read_time, &time::format_description::well_known::Rfc3339)?;
-        match (entry.found, entry.missing) {
-            (Some(document), None) => Ok(Some(codec::decode(
-                selection,
-                core,
-                &serde_json::to_vec(&document)?,
-            )?)),
-            (None, Some(missing)) => {
-                ensure!(missing == name, "control_slot_unrequested_document");
-                Ok(None)
-            }
-            _ => anyhow::bail!("control_slot_batch_shape"),
-        }
+        // Charge these binding hashes before the reader's final clock sample.
+        let selection_binding = Digest::of(selection)?;
+        let logical = core.digest()?;
+        let (counter, value, budget) =
+            super::firestore::read_with_slot(selection, core, port, budget)?;
+        Ok((
+            counter,
+            SlotObservation {
+                selection: selection_binding,
+                logical,
+                value,
+                budget,
+                valid: true,
+                local: PhantomData,
+            },
+        ))
     })();
-    // Semantic failure still closes the actual provider read transaction.
-    let rollback = serde_json::to_vec(&json!({"transaction":token}))?;
-    let cleanup = budget.call(port, &endpoint(selection, "rollback"), &rollback)?;
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Empty {}
-    let _: Empty = crate::json::decode(&cleanup)?;
-    budget.remaining(port)?;
-    Ok(SlotObservation {
-        selection: Digest::of(selection)?,
-        logical: core.digest()?,
-        value: result?,
-        budget,
-        valid: true,
-        local: PhantomData,
-    })
+    if result.is_err() {
+        port.refuse();
+    }
+    result
 }
 
 pub(crate) struct Mutation<'storage, 'role> {
@@ -158,23 +120,38 @@ pub(crate) struct Mutation<'storage, 'role> {
 }
 
 impl<'storage, 'role> Mutation<'storage, 'role> {
-    fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
-        self.core.validate(selection)?;
-        self.counter.remaining(selection, port)?;
-        self.slot.remaining(selection, &self.core, port)?;
-        self.context.check(
-            selection,
-            &self.core.counter,
-            self.counter.snapshot(),
-            self.purpose,
-            port,
-        )?;
-        Ok(())
+    fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Sample, Budget)> {
+        let result = (|| {
+            self.core.validate(selection)?;
+            self.counter.check_binding(selection)?;
+            self.slot.check_binding(selection, &self.core)?;
+            // One full observation of this SAME context/file/peer/provider
+            // owner, after all pure binding work. It is not a reusable proof.
+            let (sample, mut budget) = self.context.check(
+                selection,
+                &self.core.counter,
+                self.counter.snapshot(),
+                self.purpose,
+                port,
+            )?;
+            self.counter.constrain_budget(&mut budget, &sample)?;
+            self.slot.constrain_budget(&mut budget, &sample)?;
+            // Charge the full observation and subsequent DATA work with an
+            // ACTUAL fresh clock from the same retained original owner.
+            let sample = self.context.clock_sample(port)?;
+            self.counter.constrain_budget(&mut budget, &sample)?;
+            self.slot.constrain_budget(&mut budget, &sample)?;
+            Ok((sample, budget))
+        })();
+        if result.is_err() {
+            self.context.refuse();
+            port.refuse();
+        }
+        result
     }
 
     fn send(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Self, UpdateTime)> {
-        self.check(selection, port)?;
-        let mut budget = self.context.budget(port)?;
+        let (_, mut budget) = self.check(selection, port)?;
         let body = serde_json::to_vec(&json!({"writes":[self.write]}))?;
         let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
         let version = commit_version(&bytes)?;
@@ -420,8 +397,16 @@ impl<'storage, 'role> SlotClaimMutation<'storage, 'role> {
 }
 
 impl<'storage, 'role> KnownClaim<'storage, 'role> {
-    pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
+    pub(super) fn check(
+        &mut self,
+        selection: &EpochStore,
+        port: &mut impl Port,
+    ) -> Result<(Sample, Budget)> {
         self.mutation.check(selection, port)
+    }
+
+    pub(super) fn refuse(&mut self) {
+        self.mutation.context.refuse();
     }
 
     pub(super) fn prepare(
@@ -429,8 +414,7 @@ impl<'storage, 'role> KnownClaim<'storage, 'role> {
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<(Self, Request, Budget)> {
-        self.mutation.check(selection, port)?;
-        let budget = self.mutation.context.budget(port)?;
+        let (_, budget) = self.mutation.check(selection, port)?;
         let request = self.mutation.core.counter.clone();
         Ok((self, request, budget))
     }

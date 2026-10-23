@@ -932,9 +932,19 @@ struct SharedPort {
     retained_counter_owner: Option<std::rc::Weak<()>>,
     expire_after_counter_commit: bool,
     lose_counter_reply: bool,
+    selected_timeouts: Vec<Duration>,
 }
 
 impl SharedPort {
+    /// New model transport only; preserve the independent slot/counter state,
+    /// permanent May record and complete send observations.
+    fn reopen_model_transport(self) -> Self {
+        Self {
+            counter: self.counter.reopen_model_transport(),
+            ..self
+        }
+    }
+
     fn new() -> Self {
         Self {
             counter: tests::Provider::new(),
@@ -945,6 +955,7 @@ impl SharedPort {
             retained_counter_owner: None,
             expire_after_counter_commit: false,
             lose_counter_reply: false,
+            selected_timeouts: Vec::new(),
         }
     }
 
@@ -969,22 +980,21 @@ impl SharedPort {
         .unwrap();
         let sample = self.sample().unwrap();
         let budget = Budget::for_context(sample, Duration::from_secs(105)).unwrap();
-        let slot = guarded::read_with_budget(selection, core, self, budget).unwrap();
+        let slot = guarded::read_with_counter(selection, core, self, budget)
+            .unwrap()
+            .1;
         (counter, slot, context)
     }
 
     fn pending(&mut self, selection: &EpochStore, core: &LogicalCore) {
         let body = firestore::commit_body(selection, &core.counter).unwrap();
-        self.post("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:commit",&body,Duration::from_secs(5),65_536).unwrap();
+        // Provider-side setup, not a native dispatch or an admitted port call.
+        self.post_wire("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:commit", &body, Duration::from_secs(5), 65_536).unwrap();
     }
 }
 
-impl Port for SharedPort {
-    fn sample(&mut self) -> Result<Sample> {
-        self.counter.sample()
-    }
-
-    fn post(
+impl SharedPort {
+    fn post_wire(
         &mut self,
         url: &str,
         body: &[u8],
@@ -1000,23 +1010,42 @@ impl Port for SharedPort {
             "oracle bounded request"
         );
         let value: Value = crate::json::decode(body)?;
-        if url.ends_with(":rollback") && value == json!({"transaction":"c2xvdC10eG4="}) {
-            return Ok(EpochReply {
-                status: 200,
-                body: b"{}".to_vec(),
-            });
-        }
         if url.ends_with(":batchGet")
-            && value["documents"][0]
-                .as_str()
-                .is_some_and(|name| name.contains("/day2_credential_control_v1/"))
+            && value["documents"].as_array().is_some_and(|documents| {
+                documents.iter().any(|name| {
+                    name.as_str()
+                        .is_some_and(|name| name.contains("/day2_credential_control_v1/"))
+                })
+            })
         {
+            let documents = value["documents"].as_array().context("oracle documents")?;
             ensure!(
-                value["documents"].as_array().unwrap().len() == 1
+                (4..=5).contains(&documents.len())
                     && value["newTransaction"] == json!({"readOnly":{}}),
-                "oracle exact slot read"
+                "oracle exact joint read"
             );
-            let name = value["documents"][0].as_str().unwrap();
+            let slot_names: Vec<_> = documents
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| name.contains("/day2_credential_control_v1/"))
+                .collect();
+            ensure!(slot_names.len() == 1, "oracle one slot");
+            let name = slot_names[0];
+            let mut counter_request = value.clone();
+            counter_request["documents"] = Value::Array(
+                documents
+                    .iter()
+                    .filter(|item| item.as_str() != Some(name))
+                    .cloned()
+                    .collect(),
+            );
+            let mut reply = self.counter.post_wire(
+                url,
+                &serde_json::to_vec(&counter_request)?,
+                timeout,
+                max_bytes,
+            )?;
+            let mut entries: Vec<Value> = crate::json::decode(&reply.body)?;
             let found: bool = self.slots.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM slots WHERE name=?1)",
                 [name],
@@ -1027,11 +1056,12 @@ impl Port for SharedPort {
             } else {
                 json!({"missing":name})
             };
-            entry["readTime"] = json!("2026-10-14T00:00:00.000010Z");
-            return Ok(EpochReply {
-                status: 200,
-                body: serde_json::to_vec(&json!([{"transaction":"c2xvdC10eG4="},entry]))?,
-            });
+            // One model request observes both independent SQLite stores at
+            // this controlled schedule point; it is not a native transaction.
+            entry["readTime"] = json!("2026-10-14T00:00:00.000100Z");
+            entries.push(entry);
+            reply.body = serde_json::to_vec(&entries)?;
+            return Ok(reply);
         }
         if url.ends_with(":commit")
             && value["writes"]
@@ -1069,7 +1099,7 @@ impl Port for SharedPort {
                 );
             }
         }
-        let reply = self.counter.post(url, body, timeout, max_bytes)?;
+        let reply = self.counter.post_wire(url, body, timeout, max_bytes)?;
         if url.ends_with(":commit") {
             if self.expire_after_counter_commit {
                 self.counter.set_slot_fixture_time(Duration::from_secs(105));
@@ -1077,6 +1107,341 @@ impl Port for SharedPort {
             ensure!(!self.lose_counter_reply, "counter reply lost after commit");
         }
         Ok(reply)
+    }
+}
+
+impl Port for SharedPort {
+    fn sample(&mut self) -> Result<Sample> {
+        self.counter.sample()
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        let timeout = budget.remaining(self)?.min(Duration::from_secs(5));
+        self.selected_timeouts.push(timeout);
+        self.post_wire(url, body, timeout, max_bytes)
+    }
+
+    fn refuse(&mut self) {
+        self.counter.refuse();
+    }
+}
+
+// DATA-only clock schedules around the real conditional SQLite provider. No
+// enrolled stage, native file, P3 or network credential is constructed here.
+struct MutationClockPort {
+    inner: SharedPort,
+    full_checks: usize,
+    clock_checks: usize,
+    full_end: Option<Duration>,
+    clock_end: Option<Duration>,
+    before_send: Option<Duration>,
+    after_send: Option<Duration>,
+    foreign_domain: bool,
+}
+
+impl MutationClockPort {
+    fn at(&mut self, now: Duration) {
+        self.inner.counter.set_slot_fixture_time(now);
+    }
+
+    fn read_clock(&mut self) -> Result<Sample> {
+        let mut sample = self.inner.sample()?;
+        if self.foreign_domain {
+            sample.domain = Digest::new(b"different-mutation-clock");
+        }
+        Ok(sample)
+    }
+}
+
+impl Port for MutationClockPort {
+    fn sample(&mut self) -> Result<Sample> {
+        self.full_checks += 1;
+        if let Some(now) = self.full_end.take() {
+            self.at(now);
+        }
+        self.read_clock()
+    }
+
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        self.clock_checks += 1;
+        if let Some(now) = self.clock_end.take() {
+            self.at(now);
+        }
+        self.read_clock()
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        body: &[u8],
+        budget: &mut Budget,
+        max_bytes: usize,
+    ) -> Result<EpochReply> {
+        if let Some(now) = self.before_send.take() {
+            self.at(now);
+        }
+        let timeout = budget.remaining_decoding(self)?.min(Duration::from_secs(5));
+        let reply = self.inner.post_wire(url, body, timeout, max_bytes)?;
+        if let Some(now) = self.after_send.take() {
+            self.at(now);
+        }
+        budget.remaining_decoding(self)?;
+        Ok(reply)
+    }
+
+    fn refuse(&mut self) {
+        self.inner.refuse();
+    }
+}
+
+fn mutation_clock_evidence(
+    selection: &EpochStore,
+    core: &LogicalCore,
+    inner: &mut SharedPort,
+    counter_deadline: u64,
+    slot_deadline: u64,
+    context_origin: u64,
+) -> (
+    firestore::EpochObservation,
+    guarded::SlotObservation,
+    CurrentBootstrapExecution<'static, 'static>,
+) {
+    let names = firestore::Names::new(selection, core.counter.bootstrap(), None).unwrap();
+    let counter_budget = Budget::for_context(
+        inner.sample().unwrap(),
+        Duration::from_millis(counter_deadline),
+    )
+    .unwrap();
+    let counter = firestore::read_with_budget(inner, &names, counter_budget).unwrap();
+    let slot_budget = Budget::for_context(
+        inner.sample().unwrap(),
+        Duration::from_millis(slot_deadline),
+    )
+    .unwrap();
+    let slot = guarded::read_with_counter(selection, core, inner, slot_budget)
+        .unwrap()
+        .1;
+    let context = CurrentBootstrapExecution::fixture(
+        selection,
+        &core.counter,
+        counter.snapshot(),
+        Purpose::Dispatch,
+        Sample {
+            domain: Digest::new(b"controller-process-clock"),
+            elapsed: Duration::from_millis(context_origin),
+        },
+    )
+    .unwrap();
+    (counter, slot, context)
+}
+
+fn mutation_clock_fixture(
+    counter_deadline: u64,
+    slot_deadline: u64,
+    context_origin: u64,
+) -> (
+    EpochStore,
+    LogicalCore,
+    firestore::EpochObservation,
+    guarded::SlotObservation,
+    CurrentBootstrapExecution<'static, 'static>,
+    MutationClockPort,
+) {
+    let (selection, core) = fixture();
+    let mut inner = SharedPort::new();
+    let (counter, slot, context) = mutation_clock_evidence(
+        &selection,
+        &core,
+        &mut inner,
+        counter_deadline,
+        slot_deadline,
+        context_origin,
+    );
+    (
+        selection,
+        core,
+        counter,
+        slot,
+        context,
+        MutationClockPort {
+            inner,
+            full_checks: 0,
+            clock_checks: 0,
+            full_end: None,
+            clock_end: None,
+            before_send: None,
+            after_send: None,
+            foreign_domain: false,
+        },
+    )
+}
+
+#[test]
+fn mutation_one_full_observation_keeps_all_captured_budgets_and_known_boundaries() {
+    let (selection, core, counter, slot, context, mut port) =
+        mutation_clock_fixture(105_000, 105_000, 100_000);
+    let mutation = guarded::accept(&selection, core, counter, slot, context, &mut port).unwrap();
+    assert_eq!(port.full_checks, 1);
+    assert_eq!(port.clock_checks, 1);
+    mutation.send(&selection, &mut port).unwrap();
+    assert_eq!(port.full_checks, 3); // distinct prepare, send-pre, send-post
+    assert_eq!(port.inner.slot_posts, 1);
+    assert_eq!(port.inner.counter_posts, 0);
+}
+
+#[test]
+fn mutation_independent_counter_slot_and_context_expiry_refuse_before_send() {
+    for (counter, slot, origin, boundary) in [
+        (102_000, 105_000, 100_000, 102_000),
+        (105_000, 102_000, 100_000, 102_000),
+        (105_000, 105_000, 98_000, 103_000),
+    ] {
+        for during_clock in [false, true] {
+            let (selection, core, counter, slot, context, mut port) =
+                mutation_clock_fixture(counter, slot, origin);
+            if during_clock {
+                port.clock_end = Some(Duration::from_millis(boundary));
+            } else {
+                port.full_end = Some(Duration::from_millis(boundary));
+            }
+            assert!(guarded::accept(&selection, core, counter, slot, context, &mut port).is_err());
+            assert_eq!(port.inner.slot_posts, 0);
+            assert_eq!(port.inner.counter_posts, 0);
+            assert!(boundary < 105_000); // the independently wider parent is still live
+            port.at(Duration::from_secs(100));
+            assert!(port.sample().is_err());
+        }
+    }
+}
+
+#[test]
+fn mutation_intersection_charges_later_transport_work_without_resend() {
+    for shorter_counter in [false, true] {
+        for post in [false, true] {
+            let (selection, core, counter, slot, context, mut port) = mutation_clock_fixture(
+                if shorter_counter { 102_000 } else { 105_000 },
+                if shorter_counter { 105_000 } else { 102_000 },
+                100_000,
+            );
+            let mutation =
+                guarded::accept(&selection, core, counter, slot, context, &mut port).unwrap();
+            if post {
+                port.after_send = Some(Duration::from_secs(102));
+            } else {
+                port.before_send = Some(Duration::from_secs(102));
+            }
+            assert!(mutation.send(&selection, &mut port).is_err());
+            assert_eq!(port.inner.slot_posts, usize::from(post));
+            assert_eq!(port.inner.counter_posts, 0);
+            port.at(Duration::from_secs(100));
+            assert!(port.sample().is_err());
+            assert_eq!(port.inner.slot_posts, usize::from(post));
+        }
+    }
+}
+
+#[test]
+fn mutation_binding_domain_and_rewind_failures_poison_the_same_port() {
+    for fault in ["purpose", "domain", "rewind"] {
+        let (selection, core, counter, slot, mut context, mut port) =
+            mutation_clock_fixture(105_000, 105_000, 100_000);
+        if fault == "purpose" {
+            context = CurrentBootstrapExecution::fixture(
+                &selection,
+                &core.counter,
+                counter.snapshot(),
+                Purpose::Reconcile,
+                port.inner.sample().unwrap(),
+            )
+            .unwrap();
+        } else if fault == "domain" {
+            port.foreign_domain = true;
+        } else {
+            port.clock_end = Some(Duration::from_millis(99_999));
+        }
+        assert!(guarded::accept(&selection, core, counter, slot, context, &mut port).is_err());
+        assert_eq!(port.inner.slot_posts, 0);
+        assert_eq!(port.inner.counter_posts, 0);
+        port.foreign_domain = false;
+        port.at(Duration::from_secs(100));
+        assert!(port.sample().is_err());
+    }
+}
+
+#[test]
+fn mutation_narrow_claim_acknowledgement_and_counter_send_keep_may_without_resend() {
+    for boundary in ["slot-post", "claim-use", "counter-pre", "counter-post"] {
+        let (selection, core, counter, slot, context, mut port) =
+            mutation_clock_fixture(105_000, 105_000, 100_000);
+        guarded::accept(&selection, core.clone(), counter, slot, context, &mut port)
+            .unwrap()
+            .send(&selection, &mut port)
+            .unwrap();
+        let (counter, slot, context) = mutation_clock_evidence(
+            &selection,
+            &core,
+            &mut port.inner,
+            102_000,
+            105_000,
+            100_000,
+        );
+        let name = codec::name(&selection, &core).unwrap();
+        let before = codec::decode(&selection, &core, &port.inner.slots.read(&name)).unwrap();
+        let mutation = guarded::claim(
+            &selection,
+            core.clone(),
+            counter,
+            slot,
+            context,
+            attempt(
+                &core,
+                before.version,
+                AttemptOrdinal::first(),
+                b"narrow-clock",
+            ),
+            &mut port,
+        )
+        .unwrap();
+        if boundary == "slot-post" {
+            port.after_send = Some(Duration::from_secs(102));
+        }
+        let claim = mutation.send(&selection, &mut port);
+        if boundary == "slot-post" {
+            assert!(claim.is_err()); // no KnownClaim escapes expired acknowledgement
+        } else {
+            let claim = claim.unwrap();
+            match boundary {
+                "claim-use" => port.clock_end = Some(Duration::from_secs(102)),
+                "counter-pre" => port.before_send = Some(Duration::from_secs(102)),
+                "counter-post" => port.after_send = Some(Duration::from_secs(102)),
+                _ => unreachable!(),
+            }
+            assert!(claim.send(&selection, &mut port).is_err());
+        }
+        assert_eq!(port.inner.slot_posts, 2, "{boundary}");
+        assert_eq!(
+            port.inner.counter_posts,
+            usize::from(boundary == "counter-post")
+        );
+        let stored = codec::decode(&selection, &core, &port.inner.slots.read(&name)).unwrap();
+        assert_eq!(stored.slot.logical, core);
+        assert!(matches!(
+            stored.slot.state,
+            SlotState::MayHaveBeenSent { .. }
+        ));
+        port.at(Duration::from_secs(100));
+        assert!(port.sample().is_err());
+        assert_eq!(
+            port.inner.counter_posts,
+            usize::from(boundary == "counter-post")
+        );
+        replay_provider(&port.inner.slots.replay());
     }
 }
 
@@ -1225,6 +1590,7 @@ fn matching_stored_may_and_rearm_ack_never_reconstruct_counter_send_authority() 
     assert!(mutation.send(&selection, &mut port).is_err());
     assert_eq!(port.counter_posts, 0);
     let may = codec::decode(&selection, &core, &port.slots.read(&name)).unwrap();
+    port = port.reopen_model_transport();
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     assert!(
         guarded::claim(
@@ -1304,6 +1670,14 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
     assert!(guarded::accept(&selection, core.clone(), counter, slot, context, &mut port).is_err());
     assert_eq!(port.slot_posts, 0);
     assert_eq!(port.counter_posts, 0);
+    assert!(port.sample().is_err());
+    assert_eq!(port.slots.rows(), 0);
+    // Independent DATA-only setup for the next negative case. Consume the
+    // refused model transport, keeping its provider DBs/trace/counts; this
+    // never reconstructs a failed native CreatorFD or current permission.
+    let mut port = port.reopen_model_transport();
+    assert_eq!(port.slots.rows(), 0);
+    assert_eq!((port.slot_posts, port.counter_posts), (0, 0));
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     guarded::accept(&selection, core.clone(), counter, slot, context, &mut port)
         .unwrap()
@@ -1331,6 +1705,14 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
         .is_err()
     );
     assert_eq!(port.slot_posts, 1);
+    assert_eq!(port.counter_posts, 0);
+    assert!(port.sample().is_err());
+    let original_prepared = port.slots.read(&name);
+    // A separate DATA setup lifetime can make the known-claim expiry case;
+    // the old refused port is gone and its exact provider state is retained.
+    let mut port = port.reopen_model_transport();
+    assert_eq!(port.slots.read(&name), original_prepared);
+    assert_eq!((port.slot_posts, port.counter_posts), (1, 0));
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     let mutation = guarded::claim(
         &selection,
@@ -1343,9 +1725,20 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
     )
     .unwrap();
     let claim = mutation.send(&selection, &mut port).unwrap();
+    let original_may = port.slots.read(&name);
+    let stored = codec::decode(&selection, &core, &original_may).unwrap();
+    assert_eq!(stored.slot.logical, core);
+    assert!(matches!(
+        stored.slot.state,
+        SlotState::MayHaveBeenSent { .. }
+    ));
     port.counter.set_slot_fixture_time(Duration::from_secs(105));
     assert!(claim.send(&selection, &mut port).is_err());
     assert_eq!(port.counter_posts, 0);
+    assert_eq!(port.slots.read(&name), original_may);
+    port.counter.set_slot_fixture_time(Duration::from_secs(100));
+    assert!(port.sample().is_err());
+    assert_eq!((port.slot_posts, port.counter_posts), (2, 0));
     port.slots.persist("guarded-creator-loss-and-expiry");
     replay_provider(&port.slots.replay());
     // These are controlled context invalidation/expiry tests. Actual original
@@ -1411,3 +1804,5 @@ fn boxed_observed_receipts_keep_exact_unboxed_wire_bytes_for_both_stages() {
         );
     }
 }
+
+mod paired_reads;

@@ -104,9 +104,13 @@ impl Channel {
         }
     }
 
+    /// Observe the purpose already checked against the caller's actual signed
+    /// stage and acquisition. This selects only a DATA transcript class; no
+    /// NativeAcquisition is created, widened or reconstructed here.
     pub(in crate::security_epoch::native_enrollment) fn begin_current_handshake(
         &mut self,
         sequence: u64,
+        purpose: super::protocol::StagePurpose,
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         let result = (|| {
@@ -114,7 +118,7 @@ impl Channel {
             self.transcript
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("native_handshake_transcript_required"))?
-                .begin_current(sequence)
+                .begin_current(sequence, purpose)
         })();
         if result.is_err() {
             self.refuse();

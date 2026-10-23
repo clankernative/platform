@@ -163,6 +163,8 @@ pub(in crate::security_epoch) enum PreparationStep {
     BootstrapValidation,
     BootstrapAnnouncement,
     BootstrapRelease,
+    BootstrapSnapshotBefore,
+    BootstrapSnapshotAfter,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -481,6 +483,8 @@ enum Observation {
         operation: Digest,
         request: Digest,
         snapshot: Digest,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bootstrap: Option<BootstrapSnapshot>,
     },
     ActivationCompleted {
         operation: Digest,
@@ -627,11 +631,18 @@ impl<W: RecordOutput> Recorder<W> {
             self.first_holder && STEPS.get(self.next) == Some(&step),
             "native_evidence_bootstrap_order"
         );
+        ensure!(
+            self.bootstrap_timing
+                .as_ref()
+                .is_none_or(BootstrapSnapshot::completed_bootstrap_action),
+            "native_evidence_bootstrap_timing_incomplete"
+        );
         self.emit(Observation::BootstrapCompleted {
             step,
             operation: request.operation().clone(),
             request: request.digest()?,
             snapshot: crate::security_epoch::journal::snapshot_digest(snapshot)?,
+            bootstrap: self.bootstrap_timing.clone(),
         })?;
         self.next += 1;
         Ok(())
@@ -876,6 +887,9 @@ mod tests {
         for request in [&create, &complete] {
             for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
                 recorder.enter_bootstrap(request, action);
+                recorder.bootstrap_timing(Some(
+                    super::super::bootstrap_timing::BootstrapTiming::maximal_completed_fixture(),
+                ));
                 recorder.bootstrap(request, action, &snapshot).unwrap();
             }
         }
@@ -926,6 +940,14 @@ mod tests {
         );
         assert_eq!(rows[9]["observation"]["role"], "app");
         assert_eq!(rows[10]["observation"]["role"], "shell");
+        for row in &rows[2..8] {
+            let timing = &row["observation"]["bootstrap"];
+            assert_eq!(timing["purpose_limit_us"], 30_000_000);
+            assert_eq!(timing["elapsed_us"], u32::MAX);
+            assert_eq!(timing["last_step"], "bootstrap_release");
+            assert_eq!(timing["returned"], true);
+            assert_eq!(timing["timing_format"], "operation_count_total_us_v1");
+        }
         assert_eq!(
             rows[11]["observation"],
             serde_json::json!({"event":"refused", "at":"shell_serving"})
@@ -942,6 +964,29 @@ mod tests {
                 .is_err()
         );
         assert_eq!(records(&recorder.output).len(), 12);
+    }
+
+    #[test]
+    fn incomplete_or_read_only_timing_cannot_be_exported_as_a_completed_action() {
+        for timing in [
+            super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+            super::super::bootstrap_timing::BootstrapTiming::maximal_provider_fixture(),
+        ] {
+            let (mut recorder, seed, holder, create, _, snapshot) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.first_holder(&seed, &holder).unwrap();
+            recorder.enter_bootstrap(&create, Action::Reserve);
+            recorder.bootstrap_timing(Some(timing));
+            let error = recorder
+                .bootstrap(&create, Action::Reserve, &snapshot)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "native_evidence_bootstrap_timing_incomplete"
+            );
+            assert_eq!(recorder.next, 0);
+            assert_eq!(records(&recorder.output).len(), 2);
+        }
     }
 
     #[test]
@@ -1059,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             rows[1]["observation"]["bootstrap"]["scope"],
-            "provider_read_only_current"
+            "provider_read_only_storage_metadata"
         );
         assert!(
             rows.iter()
@@ -1625,7 +1670,7 @@ mod tests {
                 })
             );
             assert!(observation.get("timing").is_none());
-            assert_eq!(observation["bootstrap"]["scope"], "bootstrap_current");
+            assert_eq!(observation["bootstrap"]["scope"], "storage_bootstrap");
             assert!(!recorder.first_holder && !recorder.activated);
             let bytes = String::from_utf8(recorder.output).unwrap();
             assert!(!bytes.contains("epoch_native_clock") && !bytes.contains("MustNotDisplay"));
@@ -1788,7 +1833,7 @@ mod tests {
         assert!(rows[0]["observation"].get("timing").is_none());
         assert_eq!(
             rows[0]["observation"]["bootstrap"]["scope"],
-            "bootstrap_current"
+            "storage_bootstrap"
         );
         assert!(recorder.refused && !recorder.activated);
         assert!(

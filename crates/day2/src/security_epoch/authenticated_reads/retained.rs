@@ -3,11 +3,11 @@
 //! No parsed identity, renewed role, token alone or mutable caller callback can
 //! construct this owner. Its short I/O borrow remains read-only.
 
-use super::AuthenticatedReads;
+use super::{AuthenticatedReads, ReadScope};
 use crate::security_epoch::{
     controller::preparation_timing::{Operation, Timings},
     credential_material::CredentialMaterial,
-    firestore::{self, EpochObservation, EpochReply, Names, Port, Sample},
+    firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
     native_identity::NativeProcessObservation,
@@ -36,6 +36,7 @@ pub(in crate::security_epoch) use writer::ControllerBorrow;
 pub(crate) use writer::ControllerPort;
 
 pub(crate) struct RetainedEpochReads {
+    scope: ReadScope,
     owner: SameEnrolledOwner,
     policy: InitialBootstrapPolicy,
     purpose: NativeRole,
@@ -185,14 +186,60 @@ impl ControllerEpochReads {
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.state.refuse();
     }
+
+    /// Closed authentication observation against an actual owning stage. Only
+    /// this facade borrows its own hidden material; callers cannot substitute
+    /// another material object or obtain the stage, credentials or a proof.
+    pub(in crate::security_epoch) fn check_stage(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+    ) -> Result<()> {
+        let result = (|| {
+            let borrow = self.state.gate.enter()?;
+            let mut material = self.state.material.try_borrow_mut()?;
+            ensure!(
+                material.scope == ReadScope::StorageBootstrap,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            material.check_bootstrap(stage, policy, store)?;
+            drop(material);
+            borrow.complete()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
 }
 
 impl AuthenticatedReads<'_, '_> {
-    pub(in crate::security_epoch) fn retain_current(mut self) -> Result<RetainedEpochReads> {
+    pub(in crate::security_epoch) fn retain_current(self) -> Result<RetainedEpochReads> {
+        self.retain_scoped(ReadScope::Current)
+    }
+
+    pub(in crate::security_epoch) fn retain_storage_bootstrap(self) -> Result<RetainedEpochReads> {
+        self.retain_scoped(ReadScope::StorageBootstrap)
+    }
+
+    pub(in crate::security_epoch) fn retain_storage_metadata_observation(
+        self,
+    ) -> Result<RetainedEpochReads> {
+        self.retain_scoped(ReadScope::StorageMetadataObservation)
+    }
+
+    fn retain_scoped(mut self, expected: ReadScope) -> Result<RetainedEpochReads> {
+        if self.scope != expected {
+            self.acquisition.refuse();
+            anyhow::bail!("epoch_native_retained_purpose_changed");
+        }
         self.sample()?;
         let owner = self.stage.capture_same_owner()?;
         self.sample()?;
         let Self {
+            scope,
+            stage,
             policy,
             purpose,
             store,
@@ -205,7 +252,14 @@ impl AuthenticatedReads<'_, '_> {
             selection,
             ..
         } = self;
+        let acquisition = match scope {
+            ReadScope::Current => acquisition,
+            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => stage
+                .storage()?
+                .complete_storage_authentication(acquisition, store.max_lease_seconds)?,
+        };
         Ok(RetainedEpochReads {
+            scope,
             owner,
             policy,
             purpose,
@@ -234,6 +288,13 @@ impl RetainedEpochReads {
         store: &EpochStore,
         timings: Timings,
     ) -> Result<(ControllerEpochReads, ProviderEpochReads)> {
+        stage.require_purpose(
+            crate::security_epoch::native_enrollment::StagePurpose::StorageBootstrap,
+        )?;
+        if self.scope != ReadScope::StorageBootstrap {
+            self.refuse();
+            anyhow::bail!("epoch_bootstrap_read_purpose_changed");
+        }
         self.check_bootstrap(stage, policy, store)?;
         self.timings = timings;
         let state = Rc::new(ControllerReadState {
@@ -248,6 +309,32 @@ impl RetainedEpochReads {
         ))
     }
 
+    /// The operator-only observation returns only the closed metadata facade;
+    /// no Controller facade, file, peer, counter or writer is constructed.
+    pub(in crate::security_epoch) fn into_provider_observation(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        timings: Timings,
+    ) -> Result<ProviderEpochReads> {
+        stage.require_purpose(
+            crate::security_epoch::native_enrollment::StagePurpose::StorageMetadataObservation,
+        )?;
+        if self.scope != ReadScope::StorageMetadataObservation {
+            self.refuse();
+            anyhow::bail!("epoch_metadata_read_purpose_changed");
+        }
+        self.check_bootstrap(stage, policy, store)?;
+        self.timings = timings;
+        Ok(ProviderEpochReads {
+            state: Rc::new(ControllerReadState {
+                material: RefCell::new(self),
+                gate: Rc::new(SharedUseGate::new()),
+            }),
+        })
+    }
+
     /// The fixed writer must consume the SAME original read material after
     /// the actual current file/peer join, never a later stage of the same owner.
     fn check_bootstrap(
@@ -260,6 +347,7 @@ impl RetainedEpochReads {
             stage.check_selection(policy, store, NativeRole::EpochController)?;
             ensure!(
                 self.purpose == NativeRole::EpochController
+                    && self.scope != ReadScope::Current
                     && self.policy == *policy
                     && self.store == *store
                     && self.selection == Digest::of(store)?,
@@ -286,14 +374,17 @@ impl RetainedEpochReads {
             ensure!(self.valid, "epoch_retained_read_refused");
             self.owner.check(stage)?;
             stage.check_selection(&self.policy, &self.store, self.purpose)?;
+            self.scope.require(stage)?;
             // This child samples THIS actual stage's original domain; it
             // neither begins a new interval nor renews our retained owner.
-            let same_stage = stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
-            self.acquisition.join_current_view(same_stage)?;
+            let same_stage = self.scope.io(stage, self.store.max_lease_seconds)?;
+            self.scope.join(&mut self.acquisition, same_stage)?;
             self.process.check(&mut self.acquisition)?;
-            let sample = self.acquisition.sample()?;
+            self.acquisition.sample()?;
             self.owner.check(stage)?;
-            Ok(sample)
+            // Charge the final stage check too; its parent interval may be
+            // wider than this retained view or the caller's context budget.
+            self.acquisition.sample()
         });
         if result.is_err() {
             self.refuse();
@@ -308,6 +399,10 @@ impl RetainedEpochReads {
         names: &Names,
     ) -> Result<EpochObservation> {
         let result = (|| {
+            ensure!(
+                self.scope != ReadScope::StorageMetadataObservation,
+                "epoch_metadata_only_read_refused"
+            );
             ensure!(
                 self.selection == Digest::of(selection)? && names.matches_selection(selection),
                 "epoch_retained_read_selection_changed"
@@ -328,29 +423,36 @@ impl RetainedEpochReads {
         result
     }
 
-    /// The fixed slot observation stays read-only and requires the SAME actual
-    /// stage before and after its coherent provider read and rollback.
-    pub(in crate::security_epoch) fn read_slot(
+    /// The bootstrap counter and slot are one coherent read-only snapshot.
+    /// Keep the SAME actual stage before and after its read and rollback.
+    pub(in crate::security_epoch) fn read_bootstrap_snapshot(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         selection: &EpochStore,
         core: &crate::security_epoch::control_slot::LogicalCore,
-    ) -> Result<crate::security_epoch::control_slot_io::SlotObservation> {
+    ) -> Result<(
+        EpochObservation,
+        crate::security_epoch::control_slot_io::SlotObservation,
+    )> {
         let result = (|| {
+            ensure!(
+                self.scope == ReadScope::StorageBootstrap,
+                "epoch_bootstrap_read_purpose_changed"
+            );
             ensure!(
                 self.selection == Digest::of(selection)?,
                 "epoch_retained_read_selection_changed"
             );
             self.check(stage)?;
             let budget = self.acquisition.budget()?;
-            let slot = crate::security_epoch::control_slot_io::read_with_budget(
+            let pair = crate::security_epoch::control_slot_io::read_with_counter(
                 selection,
                 core,
                 &mut CurrentReadPort { owner: self, stage },
                 budget,
             )?;
             self.check(stage)?;
-            Ok(slot)
+            Ok(pair)
         })();
         if result.is_err() {
             self.refuse();
@@ -364,6 +466,10 @@ impl RetainedEpochReads {
         observation: &mut EpochObservation,
     ) -> Result<()> {
         let result = (|| {
+            ensure!(
+                self.scope != ReadScope::StorageMetadataObservation,
+                "epoch_metadata_only_read_refused"
+            );
             self.check(stage)?;
             let selection = self.store.clone();
             observation.remaining(&selection, &mut CurrentReadPort { owner: self, stage })?;
@@ -385,16 +491,17 @@ impl RetainedEpochReads {
         stage: &mut EnrolledRoleStage<'_>,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
         let result = (|| {
+            ensure!(
+                self.scope != ReadScope::StorageMetadataObservation,
+                "epoch_metadata_only_read_refused"
+            );
             self.check(stage)?;
             ensure!(
-                max_bytes == 65536
-                    && body.len() <= 65536
-                    && !timeout.is_zero()
-                    && timeout <= Duration::from_secs(5),
+                max_bytes == 65536 && body.len() <= 65536,
                 "epoch_retained_read_budget"
             );
             let route = if url.ends_with("/documents:batchGet") {
@@ -408,14 +515,19 @@ impl RetainedEpochReads {
                 self.http.matches(&route, url)?,
                 "epoch_retained_read_recipient_changed"
             );
+            let authorization = self.credential.authorization()?;
+            let timeout = budget
+                .remaining_native(&mut self.acquisition)?
+                .min(Duration::from_secs(5));
             let bytes = self.http.request_with_ceiling(
                 route,
-                &self.credential.authorization()?,
+                &authorization,
                 Some(body),
                 &mut self.acquisition,
                 timeout,
             )?;
             self.check(stage)?;
+            budget.remaining_native(&mut self.acquisition)?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
@@ -442,10 +554,22 @@ impl Port for CurrentReadPort<'_, '_, '_> {
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        self.owner.post(self.stage, url, body, timeout, max_bytes)
+        // Ordinary reads retain their previous full pre/post observations.
+        let result = (|| {
+            budget.remaining(self)?;
+            self.owner.post(self.stage, url, body, budget, max_bytes)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    fn refuse(&mut self) {
+        self.owner.refuse();
     }
 }
 

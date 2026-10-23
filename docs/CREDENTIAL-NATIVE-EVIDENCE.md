@@ -143,14 +143,92 @@ resource selection, authenticated transport and original acquisition are
 unchanged. This avoids unrelated instance metadata; it does not filter disks,
 truncate a response, retry a failed read or establish the cause of a prior
 refusal.
+
+## Purpose and original-lifetime boundaries
+
+Ordinary Current, serving, Shell and human-original consumers retain their
+five-second stage. Initial first-holder admission retains its separate
+10-second purpose. Neither purpose can substitute for the other.
+
+Only the six fixed Controller storage-bootstrap operations and their exact
+retained App responder select `storage_bootstrap`, with a nominal 30-second
+original interval. The App selects it from its local `Bootstrapping` owner,
+never from a received purpose label. Role exchange and complete Google/Kubernetes
+authentication must both finish by that same original origin plus five seconds.
+The actual successful authentication child is consumed before a fresh I/O view
+is derived from its retained parent; the five-second child is never widened.
+Configured, file and signed shorter ceilings continue to tighten the interval.
+Each provider HTTP request remains bounded by five seconds and the actual
+remaining original time. No retry, renewal or ambiguous-effect resend is added.
+
+The Controller-only operator diagnostic has the distinct signed purpose
+`storage_metadata_observation`. Its metadata-read facade cannot create a
+Controller writer facade, storage peer, initial file, original, active serving
+phase or consumer. Its separate nominal ceiling remains ten seconds. Even a valid signed non-Current purpose with a short interval
+is refused by ordinary consumers. The nominal ceiling does not establish a
+complete-path timing margin or successful native qualification. On 2026-10-23,
+the ten-second bootstrap attempt spent 7.718 seconds before writer preparation
+and then refused there after all three provider rounds, before the first
+counter read. The user approved thirty seconds per bootstrap action to qualify
+the unmeasured tail. Require repeated complete actions within 24 seconds before
+claiming margin; neither this ceiling nor successful DATA tests establish it.
+
+The subsequent thirty-second attempt refused during its counter read: the
+inclusive counter phase took 18.732 seconds, including 17.968 seconds of native
+checks and 14.317 seconds of nested authentication checks. These durations
+overlap. The timed Firestore read and rollback themselves totalled 0.126 seconds;
+that is not the complete transport/authority cost. Three pure response-decoding
+checkpoints now sample only the SAME retained original native clock, behind the
+same refusal gate and local file/process/thread liveness checks. They return
+budget DATA only. Full current file, peer, role and authentication checks still
+run at budget/context issuance, every HTTP pre/post boundary, observation
+consumption and final lifecycle transfer. No successful native check is cached,
+no initial-image read guard is removed, and no deadline is widened. A separate
+allocation-free canonical decimal check preserves the fresh `/proc` parser's
+previous integer range and spelling rules. Actual savings and complete-path
+margin still require new native measurements.
+
+The subsequent same-source attempt completed all provider rounds but again
+expired during the first counter read. Its ten full port samples totalled
+19.995 seconds inclusive; no complete-action margin or causal speedup follows.
+The transport now receives the caller's actual Budget in the one private post
+API. It charges all full preguards immediately before the single HTTP request,
+caps that request at the lesser of caller/parent remaining time and five seconds,
+and charges the final full postguards before accepting a reply. Central response
+checks and final clock observation also latch transport refusal. Ordinary read
+ports keep their existing full pre/post behavior.
+
+For pure full-port observations, authentication uses a closed leaf on the
+actual provider-owned stage and exact shared read-state identity. It releases
+that material borrow before the unchanged full file/provider/peer validation,
+then samples the original clock again. No role/material getter or successful
+check cache is introduced. HTTP still requires full physical admission BEFORE
+and AFTER its effect. Every actual initial-image read retains its original
+per-syscall identity, role, policy and clock guards and existing batch size.
+
 ## Preparation timing diagnosis
+
+Bootstrap reads its counter and control slot together in one bounded read-only
+Firestore transaction before each mutation and in another afterward. The App
+also reads the pair together after the Controller's Known message. Both decoded
+observations retain the same spent original budget. Complete requested-document,
+transaction-token and cross-stream read-time checks precede partitioning into
+the existing strict codecs; discovery discards both values and rereads the whole
+pair. Every batch and rollback retains its full native transport guards, and a
+failed or expired rollback releases no observation. No deadline or response-byte
+ceiling increases. This replaces the separate counter and slot reads; it adds no
+write retry or positive authority cache. Fewer exchanges do not establish a
+complete native action or timing margin.
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
 ordinary artifact/instance admission, role-stage exchange, complete Controller
 authentication and three fresh rounds of selected provider-metadata checks under
-one original five-second current-role interval. All rounds share the same
-genuine authenticated reader; none starts another stage or renews its acquisition.
+one original `storage_metadata_observation` interval. The origin precedes the
+role RPC. Role and full provider authentication share its first five seconds;
+provider I/O then spends the remainder of that same nominal 10-second parent.
+All rounds share the same genuine authenticated reader; none starts another
+stage or renews its acquisition.
 Each round validates the current claim, volume, node, disk and instance responses.
 Attachment checks remain strict: a detached or changed disk refuses. It opens
 neither `/state` nor a block-device descriptor,
@@ -168,8 +246,12 @@ letting the hold expire can cause Kubernetes to start another process.
 
 Its `preparation_read_only_observed` record contains the fixed
 `frontier: "auth_three_provider_rounds"`, `completed: true`, `expected_rounds: 3`
-and a `bootstrap` snapshot with `scope: "provider_read_only_current"` and
-`provider_rounds: [3, 3]`. Completion requires all three rounds and the final
+and a `bootstrap` snapshot with
+`scope: "provider_read_only_storage_metadata"`, `purpose_limit_us: 10000000` and
+`provider_rounds: [3, 3]`. The limit is nominal purpose DATA, not effective
+remaining time or permission. This is a different signed purpose from the
+earlier Current diagnostic; do not relabel either result as the other.
+Completion requires all three rounds and the final
 reader/guard postchecks to return successfully. It establishes no filesystem
 observation, bootstrap completion, readiness or current permission. It excludes
 App concurrency, physical/file checks, fsync, peer exchange and writer work, so
@@ -196,30 +278,79 @@ budget, retry or renewal. Later serving phases disable collection. The final
 retention guard is deliberately not wrapped in an ending clock read: it remains
 the last I/O before the infallible owner transfer.
 
-## Current bootstrap timing
+## Storage-bootstrap timing
 
 Each of the six bootstrap steps starts a separate diagnostic collector for its
-actual Current attempt. Entering that step clears the cached first-holder
-summary. A refusal there can carry `bootstrap` with the fixed
-`scope: "bootstrap_current"`, `last_step`, `returned`, `provider_rounds` and
-`timing`; it never reuses the earlier preparation `timing` field.
+actual storage-bootstrap attempt. Entering that step clears the cached
+first-holder summary. A refusal there can carry `bootstrap` with the fixed
+`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 30000000`, `last_step`,
+`returned`, `provider_rounds`, `elapsed_us`, `timing_format` and `timing`; it never reuses the earlier
+preparation `timing` field. Shorter effective caps are not reported as a fresh
+interval by this nominal value.
 
 `last_step` and `returned` describe the last **measured operation**, not the
-outcome of the whole Current attempt. `returned` is `true` or `false` for that
-operation's native result, or `null` if it has not returned. Some later
-counter/slot reobservations and acknowledgement work are not separately timed;
-the closed `preparation.step` remains the reported native failure boundary.
+outcome of the whole storage-bootstrap attempt. `returned` is `true` or `false` for that
+operation's native result, or `null` if it has not returned. The closed
+`preparation.step` remains the reported native failure boundary.
 No successful measurement establishes activation, serving or an accepted write.
 
 `provider_rounds` is `[attempted, fully_validated]` for the fresh provider
 observations in this attempt. A failed second or third round increments only
 the attempted count. Overflow is `null`, not zero or a completed observation.
-The timing rows retain the same inclusive and missing-value rules as preparation
-timing; authentication guard measurements can be nested inside file, provider
-and durability measurements and must not be added to their parents.
+Each of the first three provider rounds has a separate inclusive duration; any
+extra or overflowed round is recorded in the fixed `provider_round_other` bucket
+and cannot count as the completed three-round control. Writer preparation also
+records phase authentication checks, material checks and its final sample.
+Counter/slot reobservations, execution preparation, announcement, acknowledgement,
+peer release/finish and Firestore read/commit/rollback calls are timed separately.
+The latter include the actual native transport guards, not merely network RTT.
+No native check or request is removed or repeated. Final file guards remain the
+last I/O before their infallible continuation transfer.
+
+Bootstrap uses `timing_format: "operation_count_total_us_v1"`, with rows
+`[operation_code, calls, total_us]`. This compact fixed vocabulary keeps maximal
+diagnostics inside the existing 2,048-byte record ceiling. Missing, rewound or
+overflowed clocks/counters are `null`, never zero or success. Preparation keeps
+its separate named count/total/max format. Bootstrap codes are:
+
+| Codes | Operations in the same order |
+| --- | --- |
+| 0, 1, 2 | role_stage, volume_acquisition, native_check |
+| 17–21 | claim, volume, node, disk, instance |
+| 28–34 | bootstrap_ready, bootstrap_authentication, bootstrap_file, bootstrap_projection, bootstrap_durability, bootstrap_peer, bootstrap_peer_check |
+| 35–41 | bootstrap_writer, bootstrap_counter, bootstrap_slot, bootstrap_mutation, bootstrap_validation, bootstrap_release, authentication_check |
+| 42–45 | provider_round_one, provider_round_two, provider_round_three, provider_round_other |
+| 46–48 | bootstrap_writer_phase, bootstrap_writer_material, bootstrap_writer_sample |
+| 49–52 | bootstrap_counter_after, bootstrap_slot_after, bootstrap_execution, bootstrap_announcement |
+| 53–55 | bootstrap_acknowledgement, bootstrap_peer_release, bootstrap_peer_finish |
+| 56–58 | bootstrap_firestore_read, bootstrap_firestore_commit, bootstrap_firestore_rollback |
+| 59 | bootstrap_writer_exchange |
+| 60, 61 | bootstrap_snapshot, bootstrap_snapshot_after |
+
+Codes 60 and 61 time the complete paired counter/slot observations. Earlier
+single-observation code meanings remain unchanged; this source emits paired
+timings instead of codes 36, 37, 49 and 50. The failure boundaries are
+`bootstrap_snapshot_before` and `bootstrap_snapshot_after`.
+
+Rows remain inclusive: provider and authentication timings nest inside outer
+file/durability/writer phases, and Firestore calls nest inside counter/slot or
+mutation phases. Do not add nested durations to their parents.
+The `bootstrap_writer_sample` row counts calls to the full port observation,
+including acquisition; it excludes decoding-only clock observations. The
+`bootstrap_writer_exchange` row measures each complete budgeted HTTP envelope,
+including its full pre/postguards, one attempted request and budget checks.
+These are different observation boundaries; changing their call counts alone
+does not establish a native performance improvement.
+`elapsed_us` covers the whole caller action from immediately before role acquisition until
+after final acknowledgement/release or refusal unwind. Its diagnostic clocks
+cannot grant authority, replace a native failure or renew an original interval.
+An unavailable elapsed time is inconclusive for margin.
 
 The snapshot is retained only after the actual stage/file/port operation has
-returned or unwound, and exported only in its existing refusal record. It
+returned or unwound. Each completed action exports its own snapshot in the
+existing `bootstrap_completed` record; refusal exports the attempted snapshot.
+A completed timing snapshot must end at successful `bootstrap_release`, not a
+read-only metadata control or an incomplete callback. It
 changes no native call order, check, original deadline or retry rule. Sampling
 or export failure cannot replace the first native error or its failed-request
 tuple. The 2,048-byte and twelve-record ceilings remain unchanged.

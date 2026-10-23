@@ -9,7 +9,7 @@ use super::{
     control_slot_io,
     controller::evidence::{PreparationFailure, PreparationStep},
     controller::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation},
-    firestore::{self, Names, Port},
+    firestore::{Names, Port},
     journal::{CurrentBootstrapExecution, Purpose},
     kernel::{self, Outcome, Request, Snapshot},
     native_enrollment::EnrolledRoleStage,
@@ -89,48 +89,40 @@ pub(super) fn run_phase(
     let result = (|| {
         let mut transport = trace
             .measure(Operation::BootstrapWriter, || {
-                ControllerPort::acquire(Rc::clone(&owner), policy, selection, reads)
+                ControllerPort::acquire(
+                    Rc::clone(&owner),
+                    policy,
+                    selection,
+                    reads,
+                    trace.timings(),
+                )
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
-        let names = Names::new(
-            selection,
-            request.bootstrap(),
-            match request {
-                Request::CreateInitialAuthority { .. } => None,
-                Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
-            },
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapNames, error))?;
-        let counter = trace.measure(Operation::BootstrapCounter, || {
-            let counter_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
+        let (counter, slot) = trace.measure(Operation::BootstrapSnapshot, || {
+            let budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error)
             })?;
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
-            })
-        })?;
-        let slot = trace.measure(Operation::BootstrapSlot, || {
-            let slot_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error)
-            })?;
-            control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget).map_err(
-                |error| PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error),
+            control_slot_io::read_with_counter(selection, &core, &mut port, budget).map_err(
+                |error| PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error),
             )
         })?;
         let purpose = match action {
             Action::Settle => Purpose::Reconcile,
             _ => Purpose::Dispatch,
         };
-        let context = CurrentBootstrapExecution::native(
-            Rc::clone(&owner),
-            selection,
-            request,
-            counter.snapshot(),
-            purpose,
-            &mut port,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
+        let context = trace
+            .measure(Operation::BootstrapExecution, || {
+                CurrentBootstrapExecution::native(
+                    Rc::clone(&owner),
+                    selection,
+                    request,
+                    counter.snapshot(),
+                    purpose,
+                    &mut port,
+                )
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
         trace.measure(Operation::BootstrapMutation, || {
             match action {
                 Action::Reserve => {
@@ -249,18 +241,14 @@ pub(super) fn run_phase(
             }
             Ok(())
         })?;
-        let counter_budget = port.budget().map_err(|error| {
-            PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
-        })?;
-        let observed =
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
+        let (observed, slot) = trace.measure(Operation::BootstrapSnapshotAfter, || {
+            let budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSnapshotAfter, error)
             })?;
-        let slot_budget = port
-            .budget()
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
-        let slot = control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
+            control_slot_io::read_with_counter(selection, &core, &mut port, budget).map_err(
+                |error| PreparationFailure::at(PreparationStep::BootstrapSnapshotAfter, error),
+            )
+        })?;
         trace
             .measure(Operation::BootstrapValidation, || {
                 validate_after(
@@ -275,9 +263,13 @@ pub(super) fn run_phase(
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
         port.sample()
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
-        (|| owner.try_borrow_mut()?.announce_known())().map_err(|error| {
-            PreparationFailure::at(PreparationStep::BootstrapAnnouncement, error)
-        })?;
+        trace
+            .measure(Operation::BootstrapAnnouncement, || {
+                owner.try_borrow_mut()?.announce_known()
+            })
+            .map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapAnnouncement, error)
+            })?;
         Ok(observed.snapshot().clone())
     })();
     match result {
@@ -291,13 +283,17 @@ pub(super) fn run_phase(
                         && matches!(request, Request::CompleteInitialFirstActivation { .. })
                     {
                         trace
-                            .measure(Operation::BootstrapRelease, || phase.finish_activated())
+                            .measure(Operation::BootstrapRelease, || {
+                                phase.finish_activated(&trace.timings())
+                            })
                             .map_err(|error| {
                                 PreparationFailure::at(PreparationStep::BootstrapRelease, error)
                             })?;
                     } else {
                         trace
-                            .measure(Operation::BootstrapRelease, || phase.finish_checked())
+                            .measure(Operation::BootstrapRelease, || {
+                                phase.finish_checked(&trace.timings())
+                            })
                             .map_err(|error| {
                                 PreparationFailure::at(PreparationStep::BootstrapRelease, error)
                             })?;
@@ -461,23 +457,23 @@ impl AppStorageBootstrap {
                 &request,
             )?;
             let holder = self.storage.first_holder_data()?;
-            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
-            // Authenticate read-only material while the Controller performs its
-            // fixed operation. This does not observe the epoch or acknowledge
-            // anything; both provider observations still follow actual Known.
-            let mut reads = super::AuthenticatedReads::acquire(
+            // Complete provider authentication within this stage's ORIGINAL
+            // five seconds, before file/peer work can spend the separate
+            // storage-bootstrap interval. Retaining the successful child
+            // does not observe the epoch or acknowledge anything; both provider
+            // observations still follow the checked peer's actual Known.
+            let mut reads = super::AuthenticatedReads::acquire_storage_bootstrap(
                 &self.policy,
                 &self.store,
                 day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
                 stage,
             )?
-            .retain_current()?;
+            .retain_storage_bootstrap()?;
+            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
             phase.await_known(stage)?;
             // The Controller's signed result only unblocks a fresh coherent
             // provider read. It is not itself an activation/serving receipt.
-            let names = request_names(&self.store, &request)?;
-            let observed = reads.read(stage, &self.store, &names)?;
-            let slot = reads.read_slot(stage, &self.store, &core)?;
+            let (observed, slot) = reads.read_bootstrap_snapshot(stage, &self.store, &core)?;
             validate_after(
                 action,
                 &self.store,
@@ -675,7 +671,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;
@@ -713,7 +711,9 @@ pub(super) fn activate_controller(
             let trace = BootstrapTiming::new();
             let result = (|| {
                 let stage = trace
-                    .measure(Operation::RoleStage, || owner.begin_current_stage())
+                    .measure(Operation::RoleStage, || {
+                        owner.begin_storage_bootstrap_stage()
+                    })
                     .map_err(|error| {
                         PreparationFailure::at(PreparationStep::BootstrapRole, error)
                     })?;

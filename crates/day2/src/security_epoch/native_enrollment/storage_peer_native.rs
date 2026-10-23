@@ -29,9 +29,11 @@ impl Peer {
             valid: true,
         };
         match &mut owner.processes[0] {
-            StorageSender::App(process) => {
-                stage.check_storage_app_statement(&owner.statement, process.data(), acquisition)?
-            }
+            StorageSender::App(process) => stage.storage()?.check_storage_app_statement(
+                &owner.statement,
+                process.data(),
+                acquisition,
+            )?,
             StorageSender::Controller(receipt) => {
                 receipt.bind(&owner.statement, stage, acquisition)?
             }
@@ -58,12 +60,12 @@ impl Peer {
                 self.valid && !self.processes.is_empty() && self.processes.len() <= 5,
                 "storage_peer_retained_process_refused"
             );
-            stage.check_storage_acquisition(acquisition)?;
-            let local = stage.storage_statement()?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
+            let local = stage.storage()?.storage_statement()?;
             ensure!(
                 self.statement.certificate == local.certificate
                     && self.statement.stage.data.policy == local.stage.data.policy
-                    && self.statement.stage.data.role == stage.storage_peer_role()?,
+                    && self.statement.stage.data.role == stage.storage()?.storage_peer_role()?,
                 "storage_peer_original_issuer_or_role_changed"
             );
             let mut same_actor = Vec::new();
@@ -88,7 +90,7 @@ impl Peer {
                     &HashCosts::disabled(),
                 )?;
             }
-            stage.check_storage_acquisition(acquisition)
+            stage.storage()?.check_storage_acquisition(acquisition)
         })();
         if result.is_err() {
             self.valid = false;
@@ -107,7 +109,7 @@ impl Peer {
                 self.valid && !self.processes.is_empty() && self.processes.len() <= 5,
                 "storage_peer_retained_process_refused"
             );
-            stage.check_storage_acquisition(acquisition)?;
+            stage.storage()?.check_storage_acquisition(acquisition)?;
             ensure!(
                 acquisition.sample()?.elapsed
                     < std::time::Duration::from_nanos(self.statement.original.deadline_ns),
@@ -135,7 +137,7 @@ impl Peer {
                     &HashCosts::disabled(),
                 )?;
             }
-            stage.check_storage_acquisition(acquisition)
+            stage.storage()?.check_storage_acquisition(acquisition)
         })();
         if result.is_err() {
             self.valid = false;

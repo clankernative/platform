@@ -285,6 +285,21 @@ const _: () = {
         crate::security_epoch::native_enrollment::EnrolledRoleStage<'static>,
         std::fmt::Debug
     );
+    assert_consuming!(
+        crate::security_epoch::native_enrollment::EnrolledStorageStage<'static, 'static>
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledStorageStage<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledStorageStage<'static, 'static>,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledStorageStage<'static, 'static>,
+        std::fmt::Debug
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::EnrolledOriginalClock);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::EnrolledOriginalClock,

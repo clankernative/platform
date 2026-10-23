@@ -78,6 +78,7 @@ pub(crate) struct CurrentBootstrapExecution<'storage, 'role> {
     deadline: Duration,
     valid: bool,
     native: Option<Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>>,
+    native_budget: Option<Budget>,
     local: PhantomData<Rc<()>>,
     #[cfg(test)]
     retention: Option<Rc<()>>,
@@ -93,30 +94,39 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
         port: &mut super::authenticated_reads::ControllerBorrow<'_, 'storage, 'role>,
     ) -> Result<Self> {
         let result = (|| {
-            owner.try_borrow_mut()?.check()?;
-            ensure!(
-                owner.try_borrow()?.request_digest()? == request.digest()?,
-                "security_epoch_native_request_changed"
-            );
-            let (sample, deadline) = port.context_interval(&owner, selection)?;
+            // Complete all context binding DATA before the one closed native
+            // construction boundary and its final actual clock checkpoint.
+            let selection_binding = Digest::of(selection)?;
+            let request_binding = request.digest()?;
+            let snapshot_binding = snapshot_digest(snapshot)?;
+            let request_stage = stage(request);
+            let native = Some(Rc::clone(&owner));
+            let (sample, native_budget, deadline) =
+                port.context_budget(&owner, selection, &request_binding)?;
             Ok(Self {
-                selection: Digest::of(selection)?,
-                request: request.digest()?,
-                snapshot: snapshot_digest(snapshot)?,
-                stage: stage(request),
+                selection: selection_binding,
+                request: request_binding,
+                snapshot: snapshot_binding,
+                stage: request_stage,
                 purpose,
                 domain: sample.domain,
                 floor: sample.elapsed,
                 deadline,
                 valid: true,
-                native: Some(Rc::clone(&owner)),
+                native,
+                native_budget: Some(native_budget),
                 local: PhantomData,
                 #[cfg(test)]
                 retention: None,
             })
         })();
         if result.is_err() {
-            owner.try_borrow_mut()?.refuse();
+            // Preserve the original failure, including a borrow failure. The
+            // actual port/shared gate is refused even if the phase is borrowed.
+            port.refuse();
+            if let Ok(mut phase) = owner.try_borrow_mut() {
+                phase.refuse();
+            }
         }
         result
     }
@@ -128,9 +138,9 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
         snapshot: &Snapshot,
         purpose: Purpose,
         port: &mut impl Port,
-    ) -> Result<()> {
-        ensure!(self.valid, "security_epoch_execution_context_refused");
+    ) -> Result<(Sample, Budget)> {
         let result = (|| {
+            ensure!(self.valid, "security_epoch_execution_context_refused");
             ensure!(
                 self.selection == Digest::of(selection)?
                     && self.request == request.digest()?
@@ -139,49 +149,93 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
                     && self.purpose == purpose,
                 "security_epoch_execution_context_mismatch"
             );
-            self.sample(port)?;
-            Ok(())
+            let sample = self.sample(port)?;
+            let budget = self.budget_at(&sample)?;
+            Ok((sample, budget))
         })();
         if result.is_err() {
-            self.valid = false;
-            if let Some(owner) = &self.native
-                && let Ok(mut phase) = owner.try_borrow_mut()
-            {
-                phase.refuse();
-            }
+            self.refuse();
+            port.refuse();
         }
         result
     }
 
     fn sample(&mut self, port: &mut impl Port) -> Result<Sample> {
-        ensure!(self.valid, "security_epoch_execution_context_refused");
         let result = (|| {
-            if let Some(owner) = &self.native {
-                owner.try_borrow_mut()?.check()?;
-            }
-            let sample = port.sample()?;
-            ensure!(
-                sample.domain == self.domain
-                    && sample.elapsed >= self.floor
-                    && sample.elapsed < self.deadline,
-                "security_epoch_execution_context_expired_or_changed"
-            );
-            self.floor = sample.elapsed;
-            Ok(sample)
+            ensure!(self.valid, "security_epoch_execution_context_refused");
+            let sample = match &self.native {
+                Some(owner) => port.sample_for_context(owner)?,
+                None => port.sample()?,
+            };
+            self.observe_sample(sample)
         })();
         if result.is_err() {
-            self.valid = false;
-            if let Some(owner) = &self.native
-                && let Ok(mut phase) = owner.try_borrow_mut()
-            {
-                phase.refuse();
-            }
+            self.refuse();
+            port.refuse();
         }
         result
     }
 
+    /// Time DATA only, after a fixed mutation's same-owner full observation.
+    /// This cannot stand in for `check` at a later effect/transfer boundary.
+    pub(super) fn clock_sample(&mut self, port: &mut impl Port) -> Result<Sample> {
+        let result = (|| {
+            ensure!(self.valid, "security_epoch_execution_context_refused");
+            let sample = match &self.native {
+                Some(owner) => port.clock_for_context(owner)?,
+                None => port.decoding_sample()?,
+            };
+            self.observe_sample(sample)
+        })();
+        if result.is_err() {
+            self.refuse();
+            port.refuse();
+        }
+        result
+    }
+
+    fn observe_sample(&mut self, sample: Sample) -> Result<Sample> {
+        ensure!(
+            sample.domain == self.domain
+                && sample.elapsed >= self.floor
+                && sample.elapsed < self.deadline,
+            "security_epoch_execution_context_expired_or_changed"
+        );
+        self.floor = sample.elapsed;
+        Ok(sample)
+    }
+
+    pub(super) fn refuse(&mut self) {
+        self.valid = false;
+        if let Some(owner) = &self.native
+            && let Ok(mut phase) = owner.try_borrow_mut()
+        {
+            phase.refuse();
+        }
+    }
+
+    fn budget_at(&mut self, sample: &Sample) -> Result<Budget> {
+        let sample = Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        };
+        match &mut self.native_budget {
+            Some(budget) => budget.narrow_for_context(sample, self.deadline),
+            None => Budget::for_context(sample, self.deadline),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn budget(&mut self, port: &mut impl Port) -> Result<Budget> {
-        Budget::for_context(self.sample(port)?, self.deadline)
+        let result = (|| {
+            let sample = self.sample(port)?;
+            self.budget_at(&sample)
+        })();
+        if result.is_err() {
+            self.refuse();
+            port.refuse();
+        }
+        result
     }
 
     #[cfg(test)]
@@ -208,6 +262,7 @@ impl<'storage, 'role> CurrentBootstrapExecution<'storage, 'role> {
                 .ok_or_else(|| anyhow::anyhow!("fixture clock overflow"))?,
             valid: true,
             native: None,
+            native_budget: None,
             local: PhantomData,
             retention: None,
         })
@@ -269,6 +324,16 @@ pub(crate) struct CounterResponse<'storage, 'role> {
 }
 
 impl<'storage, 'role> AuthorizedDispatch<'storage, 'role> {
+    fn refuse(&mut self) {
+        match self {
+            Self::Shared(claim) => claim.refuse(),
+            #[cfg(test)]
+            Self::Create(permit) => permit.context.refuse(),
+            #[cfg(test)]
+            Self::Activate(permit) => permit.context.refuse(),
+        }
+    }
+
     pub(super) fn prepare(
         self,
         selection: &EpochStore,
@@ -310,27 +375,41 @@ impl<'storage, 'role> AuthorizedDispatch<'storage, 'role> {
 
 impl<'storage, 'role> PreparedDispatch<'storage, 'role> {
     pub(super) fn check(&mut self, selection: &EpochStore, port: &mut impl Port) -> Result<()> {
-        match &mut self.owner {
-            AuthorizedDispatch::Shared(claim) => claim.check(selection, port)?,
-            #[cfg(test)]
-            AuthorizedDispatch::Create(permit) => {
-                ensure!(
-                    permit.context.selection == Digest::of(selection)?,
-                    "security_epoch_execution_selection_changed"
-                );
-                permit.context.sample(port)?;
-            }
-            #[cfg(test)]
-            AuthorizedDispatch::Activate(permit) => {
-                ensure!(
-                    permit.context.selection == Digest::of(selection)?,
-                    "security_epoch_execution_selection_changed"
-                );
-                permit.context.sample(port)?;
-            }
+        let result = (|| {
+            let (sample, mut current) = match &mut self.owner {
+                AuthorizedDispatch::Shared(claim) => claim.check(selection, port)?,
+                #[cfg(test)]
+                AuthorizedDispatch::Create(permit) => {
+                    ensure!(
+                        permit.context.selection == Digest::of(selection)?,
+                        "security_epoch_execution_selection_changed"
+                    );
+                    let sample = permit.context.sample(port)?;
+                    let budget = permit.context.budget_at(&sample)?;
+                    (sample, budget)
+                }
+                #[cfg(test)]
+                AuthorizedDispatch::Activate(permit) => {
+                    ensure!(
+                        permit.context.selection == Digest::of(selection)?,
+                        "security_epoch_execution_selection_changed"
+                    );
+                    let sample = permit.context.sample(port)?;
+                    let budget = permit.context.budget_at(&sample)?;
+                    (sample, budget)
+                }
+            };
+            // Retain THIS prepared dispatch's original interval as well as
+            // every newly checked claim observation. Never replace it with a
+            // later context-only budget.
+            self.budget.constrain_to(&mut current, &sample)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.owner.refuse();
+            port.refuse();
         }
-        self.budget.remaining(port)?;
-        Ok(())
+        result
     }
 
     pub(super) fn send(
