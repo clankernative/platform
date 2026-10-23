@@ -1,5 +1,6 @@
 //! Native protocol conformance, with an independently conditional SQLite provider
 //! model. No Google requests or serving-build execution context is available.
+pub(super) mod lifecycle_provider;
 use super::{
     firestore::{self, EpochReply, Names, Port, Sample},
     journal::{CurrentBootstrapExecution, Journal, Purpose},

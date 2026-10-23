@@ -14,6 +14,8 @@ mod channel;
 mod executable_bytes;
 #[cfg(any(target_os = "linux", test))]
 mod handshake;
+#[cfg(test)]
+pub(in crate::security_epoch) use handshake::simulation::LifecycleHandshake;
 pub(in crate::security_epoch) mod issuer_costs;
 #[cfg(target_os = "linux")]
 mod issuer_peer;

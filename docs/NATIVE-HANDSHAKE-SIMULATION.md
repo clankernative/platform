@@ -45,7 +45,7 @@ The library campaign runs in the existing fast and full verification recipes.
 It needs no sockets, cloud resources, secrets or enrolled-owner fixtures:
 
 ```console
-cargo test --locked -p day2 --lib security_epoch::native_enrollment::handshake::simulation::
+bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::
 ```
 
 Thirty-two seeds for each enrollment/serving family and each ordinary/bootstrap
@@ -93,7 +93,7 @@ campaign/model sources. Reduction preserves the failure category within a
 credentials, response bodies or tokens enter the bundle.
 
 ```console
-DAY2_NATIVE_HANDSHAKE_REPLAY=/absolute/path/to/failure.json cargo test --locked -p day2 --lib security_epoch::native_enrollment::handshake::simulation::replay_saved_native_handshake_history -- --exact
+DAY2_NATIVE_HANDSHAKE_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::replay_saved_native_handshake_history --exact
 ```
 
 Replay rejects unsupported versions, oversized histories and a different
@@ -102,7 +102,7 @@ add its reduced semantic history as a fixed regression on the corrected source.
 
 ## Composition and limits
 
-The storage lifecycle campaign can compose at the DATA transcript boundary:
+The [storage lifecycle campaign](STORAGE-LIFECYCLE-SIMULATION.md) composes at the DATA transcript boundary:
 actor and original clock domain/interval, protocol purpose, sequence, accepted
 message prefix, pending transport observation and permanent refusal. Current
 wire messages retain their existing request/transcript digests and semantic

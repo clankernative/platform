@@ -5,6 +5,9 @@ use super::*;
 use crate::security_epoch::{preparation_image::tests as image_fixture, tests as epoch_fixture};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+pub(in crate::security_epoch) mod lifecycle_file;
+
 fn acquisition() -> NativeAcquisition {
     NativeAcquisition::fixture(
         Digest::new(b"original-file-fixture"),

@@ -2,6 +2,8 @@
 //! exact version CAS, not the production slot transition functions. These
 //! controlled tests never qualify original CreatorFD, native roles or Ready.
 
+pub(super) mod lifecycle;
+
 use super::{
     control_slot::*,
     control_slot_firestore::{self as codec, VersionedSlot},

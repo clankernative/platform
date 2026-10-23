@@ -20,6 +20,9 @@ use crate::security_epoch::{
 use anyhow::{Result, ensure};
 use std::{fs::File, thread::ThreadId};
 
+#[cfg(test)]
+pub(in crate::security_epoch) mod lifecycle_fixture;
+
 pub(crate) enum PreparedRetentionOutcome<'role> {
     Retained(Box<PreparedFileContinuity>),
     Refused {

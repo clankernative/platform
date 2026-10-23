@@ -12,7 +12,9 @@ use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Duration};
 
+mod lifecycle;
 mod model;
+pub(in crate::security_epoch) use lifecycle::LifecycleHandshake;
 
 const MAX_EVENTS: usize = 512;
 const MAX_QUEUED: usize = 64;
@@ -615,7 +617,7 @@ fn check(program: &Program) -> Result<Vec<Record>> {
                 version: 1, implementation: implementation(), original: program.clone(), reduced,
                 category: failure.category,
                 observations: serde_json::json!({"original":failure,"reduced":reduced_failure.err()}),
-                replay: "DAY2_NATIVE_HANDSHAKE_REPLAY=<path> cargo test --locked -p day2 --lib security_epoch::native_enrollment::handshake::simulation::replay_saved_native_handshake_history -- --exact".into(),
+                replay: "DAY2_NATIVE_HANDSHAKE_REPLAY=<path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::replay_saved_native_handshake_history --exact".into(),
             };
             let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../artifacts/native-handshake-simulation");
