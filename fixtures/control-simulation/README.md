@@ -21,8 +21,8 @@ negative probes, and explicit successful outcomes so refusing every request cann
 pass acceptance.
 
 ```text
-cargo run --locked -p xtask -- simulate-control 42 32
-cargo run --locked -p xtask -- replay-control TRACE.json
+bazel run //crates/xtask:xtask -- simulate-control 42 32
+bazel run //crates/xtask:xtask -- replay-control TRACE.json
 ```
 
 The runner prints its evidence directory under `artifacts/control-simulation/`.

@@ -9,7 +9,7 @@ From the platform repository root:
 
 ```console
 cd platform
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- cli
 cd ..
 ./cli/day2 app describe links --demo
 ./cli/day2 app describe reports --instance example-instance/instance.json --agent
@@ -79,7 +79,7 @@ Verification belongs to the platform:
 
 ```console
 cd platform
-cargo run --locked -p xtask -- verify-reports
+bazel run //crates/xtask:xtask -- verify-reports
 ```
 
 This includes native CLI process tests, positive/negative Roc compilation,
@@ -88,8 +88,8 @@ The broader `xtask verify` additionally builds and tests the platform's relation
 migration and HTTP conformance fixtures. Their [acceptance status](../docs/VERIFICATION-COVERAGE.md)
 defines the required native checks; a Reports-only receipt does not cover them.
 There is no independent CLI Cargo workspace or lockfile.
-For direct `cargo test -p day2-cli-checks` runs, build the prerequisites with
-`cargo run --locked -p xtask -- cli` first. The process checks use that native host
+For direct `bazel run //crates/xtask:xtask -- test-rust //cli/checks:unit_lib` runs, build the prerequisites with
+`bazel run //crates/xtask:xtask -- cli` first. The process checks use that native host
 without rebuilding it inside the test campaign.
 
 See [managed local development](../ops/LOCAL-DEVELOPMENT.md) for repo defaults,

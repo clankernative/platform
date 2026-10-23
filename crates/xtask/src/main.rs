@@ -13,6 +13,8 @@ mod architecture;
 mod architecture_dependencies;
 mod architecture_kernel;
 mod architecture_proofs;
+mod bazel;
+mod build_capture;
 mod build_native;
 mod carta_qualify;
 mod control_simulation;
@@ -231,7 +233,13 @@ fn build_recipe(
 }
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    // Bazel runs binaries in their runfiles tree. Preserve the caller's relative
+    // app, instance and replay paths before reading any command arguments.
+    if let Some(directory) = std::env::var_os("BUILD_WORKING_DIRECTORY") {
+        std::env::set_current_dir(directory)?;
+    }
+    let invocation = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = invocation.iter().cloned();
     let action = args.next().unwrap_or_else(|| "build".into());
     let mut isolated_app = None;
     let root = if action == "build-isolated" {
@@ -253,9 +261,7 @@ fn main() -> Result<()> {
         );
         root
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()?
+        day2::automation::source_root()?
     };
     // These closed native helpers read source evidence or addressed artifacts, or write only their
     // explicit new package output. They run as unprivileged tooling users and
@@ -286,7 +292,67 @@ fn main() -> Result<()> {
             .context("another xtask holds the workspace build lock")?;
         Some(lock)
     };
+    if _lock.is_some() {
+        let installed = bazel::program(&root, "xtask");
+        let current = std::env::current_exe()?.canonicalize()?;
+        if installed.canonicalize().ok().as_ref() != Some(&current) {
+            fs::create_dir_all(installed.parent().context("verifier output directory")?)?;
+            install_cli_file(&current, &installed)?;
+            if action != "install-verifier" {
+                // Bazel places package outputs in separate directories. Run
+                // operations from the admitted installation so native worker
+                // launcher discovery keeps its ordinary sibling boundary.
+                // Replacing this process preserves argv and cwd; the new entry
+                // acquires the same workspace lock rather than inheriting it.
+                drop(_lock);
+                use std::os::unix::process::CommandExt;
+                return Err(Command::new(&installed).args(&invocation).exec())
+                    .context("execute the installed verifier");
+            }
+        }
+    }
     match action.as_str() {
+        "build-tooling-image" => {
+            ensure!(
+                args.next().is_none(),
+                "tooling image compilation accepts no overrides"
+            );
+            bazel::programs(
+                &root,
+                &["day2", "day2-control", "day2-sandbox", "xtask", "day2-ops"],
+            )?;
+        }
+        "build-runtime-image-programs" | "build-enrollment-image-programs" => {
+            ensure!(
+                args.next().is_none(),
+                "runtime image compilation accepts no overrides"
+            );
+            bazel::image_programs(&root, action == "build-enrollment-image-programs")?;
+        }
+        "test-rust" | "build-rust-test" => {
+            let label = args.next().context(
+                "usage: xtask test-rust LABEL [FILTER/OPTIONS] or build-rust-test LABEL",
+            )?;
+            let remaining = args.collect::<Vec<_>>();
+            if action == "build-rust-test" {
+                ensure!(remaining.is_empty(), "build-rust-test accepts one label");
+            }
+            let executable = bazel::test_target(
+                &root,
+                &label,
+                (action == "test-rust").then_some(remaining.as_slice()),
+            )?;
+            if action == "build-rust-test" {
+                println!("{}", executable.display());
+            }
+        }
+        "install-verifier" => {
+            ensure!(
+                args.next().is_none(),
+                "verifier installation accepts no overrides"
+            );
+            bazel::dependency_inputs(&root)?;
+        }
         "verify-linux-context" => {
             ensure!(args.next().is_none(), "CI context accepts no overrides");
             verification::linux_context(&root)?;
@@ -488,12 +554,7 @@ fn main() -> Result<()> {
                 "{action} accepts no source overrides"
             );
             let check = action == "fmt-check-reports";
-            let mut cargo = Command::new("cargo");
-            cargo.args(["fmt", "--all"]);
-            if check {
-                cargo.args(["--", "--check"]);
-            }
-            run(&root, &mut cargo)?;
+            bazel::format(&root, check)?;
             let mode = if check {
                 formatting::Mode::Check
             } else {
@@ -785,6 +846,10 @@ fn main() -> Result<()> {
             );
             control_verify(&root)?;
         }
+        "lint" => {
+            ensure!(args.next().is_none(), "lint accepts no overrides");
+            bazel::lint(&root)?;
+        }
         "verify-fast" => {
             ensure!(args.next().is_none(), "verify-fast accepts no arguments");
             verification::execute(&root, "verify-fast")?;
@@ -800,7 +865,11 @@ fn main() -> Result<()> {
             );
             verification::queue_receipt(&root, &action)?;
         }
-        "verify-prepare" | "verify-prepare-join" | "verify-compose" | "verify-mac" => {
+        "verify-prepare"
+        | "verify-prepare-join"
+        | "verify-compose"
+        | "verify-mac"
+        | "verify-private-build-probe" => {
             ensure!(
                 args.next().is_none(),
                 "verification stage accepts no arguments"
@@ -1039,12 +1108,7 @@ fn main() -> Result<()> {
 }
 
 fn format_sources(root: &Path, check: bool) -> Result<()> {
-    let mut cargo = Command::new("cargo");
-    cargo.args(["fmt", "--all"]);
-    if check {
-        cargo.args(["--", "--check"]);
-    }
-    run(root, &mut cargo)?;
+    bazel::format(root, check)?;
     let mode = if check {
         formatting::Mode::Check
     } else {
@@ -1060,9 +1124,36 @@ fn verify_reports(root: &Path) -> Result<()> {
 }
 
 // Replacing an executable in place can leave macOS's cached signature bound to
-// its previous bytes. Install a fresh inode atomically, including on repeat builds.
+// its previous bytes. Install changed bytes/modes with a fresh inode atomically; identical files
+// retain their inode so the running Linux verifier stays addressable.
 fn install_cli_file(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
+    let source = source.as_ref();
     let destination = destination.as_ref();
+    if let Ok(retained) = fs::symlink_metadata(destination) {
+        let producer = fs::symlink_metadata(source)?;
+        #[cfg(unix)]
+        let same_permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            producer.permissions().mode() == retained.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let same_permissions =
+            producer.permissions().readonly() == retained.permissions().readonly();
+        if producer.file_type().is_file()
+            && retained.file_type().is_file()
+            && producer.len() == retained.len()
+        {
+            let source_digest = digest(&fs::read(source)?);
+            if source_digest == digest(&fs::read(destination)?) {
+                if !same_permissions {
+                    fs::set_permissions(destination, producer.permissions())?;
+                }
+                // Replacing the same running Linux verifier unlinks its inode:
+                // later current_exe() then names an unavailable "(deleted)" path.
+                return Ok(());
+            }
+        }
+    }
     let temporary = tempfile::NamedTempFile::new_in(
         destination.parent().context("CLI destination directory")?,
     )?;
@@ -1100,39 +1191,19 @@ fn build_cli(root: &Path) -> Result<()> {
         let effect = match request.action.as_str() {
             "cli-native" => {
                 ensure!(args.is_empty(), "native build accepts no overrides");
-                run(
-                    root,
-                    Command::new("cargo").args([
-                        "build",
-                        "--locked",
-                        "-p",
-                        "day2-ops",
-                        "--bin",
-                        "day2-host",
-                    ]),
-                )?;
-                run(
-                    root,
-                    Command::new("cargo").args([
-                        "build",
-                        "--locked",
-                        "-p",
-                        "day2-sandbox",
-                        "--bins",
-                    ]),
-                )?;
+                bazel::programs(root, &["day2-ops", "day2-sandbox"])?;
                 for name in [
                     "day2-sandbox",
                     "day2-compiler-sandbox",
                     "day2-sandbox-probe",
                 ] {
                     install_cli_file(
-                        root.join("target/debug").join(name),
+                        root.join("build-out/bin").join(name),
                         root.join("cli").join(name),
                     )?;
                 }
                 install_cli_file(
-                    root.join("target/debug/day2-host"),
+                    root.join("build-out/bin/day2-host"),
                     root.join("cli/day2-host"),
                 )?;
                 install_cli_file(std::env::current_exe()?, root.join("cli/xtask"))?;
@@ -1213,9 +1284,7 @@ fn control_verify(root: &Path) -> Result<()> {
 }
 
 fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String>) -> Result<()> {
-    if directory == root.join("crates/worker/generated")
-        || directory == root.join("cli/build-dependencies")
-    {
+    if directory == root.join("cli/build-dependencies") {
         return Ok(());
     }
     for entry in fs::read_dir(directory)? {
@@ -1229,10 +1298,17 @@ fn hash_tree(root: &Path, directory: &Path, hashes: &mut BTreeMap<String, String
             hash_tree(root, &path, hashes)?;
         } else {
             let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if ["rs", "roc", "toml", "mjs"].contains(&extension)
-                || ["assets", "deploy", "toolchains", "build-dependencies"]
-                    .iter()
-                    .any(|directory| path.starts_with(root.join(directory)))
+            if path.file_name().is_some_and(|name| name == "BUILD.bazel")
+                || ["rs", "roc", "toml", "mjs"].contains(&extension)
+                || [
+                    "assets",
+                    "deploy",
+                    "toolchains",
+                    "build-dependencies",
+                    "build/bazel",
+                ]
+                .iter()
+                .any(|directory| path.starts_with(root.join(directory)))
             {
                 hashes.insert(
                     path.strip_prefix(root)?.to_string_lossy().to_string(),
@@ -1267,6 +1343,97 @@ fn build_row_authority_adversaries(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_preserves_an_identical_executable_inode_and_replaces_changed_bytes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"first reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        install_cli_file(&source, &installed)?;
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
+        fs::write(&source, b"other reviewed executable")?;
+        install_cli_file(&source, &installed)?;
+        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_running_executable_fixture() -> Result<()> {
+        if std::env::var_os("DAY2_CLI_INSTALL_CHILD").as_deref() != Some(std::ffi::OsStr::new("1"))
+        {
+            return Ok(());
+        }
+        let executable = std::env::current_exe()?;
+        let producer = executable.with_file_name("producer-copy");
+        fs::copy(&executable, &producer)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Cache materialization and tar transport can disagree about the
+            // owner-write bit even when the executing bytes are identical.
+            let mode = fs::metadata(&producer)?.permissions().mode() ^ 0o200;
+            fs::set_permissions(&producer, fs::Permissions::from_mode(mode))?;
+        }
+        install_cli_file(&producer, &executable)?;
+        // On Linux an atomic replacement of the executing inode makes this
+        // exact lookup return a deleted pathname even though the new file exists.
+        let current = std::env::current_exe()?;
+        assert!(fs::metadata(&current)?.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_real_child_keeps_its_running_executable_addressable() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("running-verifier");
+        fs::copy(std::env::current_exe()?, &executable)?;
+        run_with_budget(
+            directory.path(),
+            Command::new(&executable)
+                .args([
+                    "--exact",
+                    "tests::cli_install_running_executable_fixture",
+                    "--nocapture",
+                ])
+                .env("DAY2_CLI_INSTALL_CHILD", "1"),
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_restores_mode_in_place_and_replaces_aliases_despite_matching_bytes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o644))?;
+        install_cli_file(&source, &installed)?;
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(
+            fs::metadata(&installed)?.permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_file(&installed)?;
+        std::os::unix::fs::symlink(&source, &installed)?;
+        install_cli_file(&source, &installed)?;
+        assert!(fs::symlink_metadata(&installed)?.file_type().is_file());
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
 
     #[test]
     fn app_snapshot_rejects_project_files_headers_and_symlinks() -> Result<()> {

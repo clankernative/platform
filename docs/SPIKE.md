@@ -14,7 +14,7 @@ logic and the compiler's own typed glue interface.
 
 ## Established Evidence
 
-The repeatable entry point is cargo run --locked -p xtask -- verify. It rebuilds
+The repeatable entry point is bazel run //crates/xtask:xtask -- verify. It rebuilds
 both schemas and runs the actual compiled Roc app; the CRM is not reimplemented
 in Rust. Verification fails rather than skipping when the required compiler,
 artifact, sandbox, or migration fixture is missing.

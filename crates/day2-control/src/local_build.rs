@@ -51,8 +51,8 @@ impl PreparedBuild {
             platform_root,
             toolchains,
             xtask,
-            rust,
-            registry,
+            bazel,
+            repositories,
         } = configuration
             .builders
             .get(builder)
@@ -60,8 +60,8 @@ impl PreparedBuild {
         let runner = TrustedRunner::capture(
             builder.clone(),
             Path::new(xtask),
-            Path::new(rust),
-            Path::new(registry),
+            Path::new(bazel),
+            Path::new(repositories),
         )?;
         let runner = runner.with_platform_inputs(Path::new(platform_root))?;
         let platform = PlatformInputs::capture(Path::new(platform_root), Path::new(toolchains))?;

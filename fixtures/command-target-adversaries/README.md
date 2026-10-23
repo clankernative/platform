@@ -22,6 +22,6 @@ verification still runs before this artifact is published.
 The host, not these handlers, must reject the operations and roll back changes.
 Never install this artifact as the ordinary reports app.
 
-Build with `cargo run --locked -p xtask -- build-command-target-adversaries`.
+Build with `bazel run //crates/xtask:xtask -- build-command-target-adversaries`.
 `xtask verify-reports` also builds this overlay; `command_adversarial` and
 `command_recovery` consume its artifact via `DAY2_TEST_REPORTS_PROBE_ARTIFACT`.

@@ -1,0 +1,7 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -10,3 +10,3 @@
+ 
+-load("@rules_rust//rust:defs.bzl", "rust_library")
++load("@@//build/bazel:cargo_context.bzl", rust_library = "cargo_context_rust_library")
+ 

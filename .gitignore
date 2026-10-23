@@ -56,3 +56,9 @@ Thumbs.db
 .idea/
 .vscode/
 /infra/local.json
+
+# Bazel output links and local user configuration.
+/bazel-*
+/.bazelrc.local
+
+/build-out/

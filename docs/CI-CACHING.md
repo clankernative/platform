@@ -1,263 +1,166 @@
 # CI compilation caches
 
-Platform CI restores two compilation caches before its first Cargo command.
-Compilation cache hits are build inputs and never a reason to skip verification.
-The separate exact merge-group receipt admission described below can reuse a
-complete full outcome on the identical landed main commit.
+Platform CI restores Bazel action and repository caches before compilation. It
+uses a commit-pinned `bazel-contrib/setup-bazel` action and GitHub Actions storage,
+restored into the runner's content-addressed disk cache. There is no cache server,
+new bucket, paid storage setting, Cargo build cache or sccache wrapper.
+`.bazelversion`, `MODULE.bazel` and the reviewed toolchain/profile declarations
+bind compiler inputs. [Build commands and profiles](BAZEL.md) describe the graph.
 
-`Swatinem/rust-cache` restores Cargo registry downloads, Git dependencies and
-compiled dependency outputs in the workspace target directory. Workspace crate
-outputs and Cargo-installed tools are excluded. Its keys include the runner OS
-and architecture, Rust compiler versions, Cargo manifests and lockfile, toolchain
-configuration and compilation environment. Commit SHAs are deliberately absent,
-so a source edit can reuse dependencies. Cargo still checks artifact freshness.
+The source-controlled disk-cache garbage-collection settings are size/age targets,
+not a hard per-snapshot bound; batch invocations do not establish that idle
+collection ran. Actual saved/restored bytes and repository eviction must be
+measured. OS/architecture partitions cannot supply another host's executables. Main
+pushes and merge-group workflows may publish shared caches. Pull requests may
+read their trusted base caches and save only under GitHub's isolated PR ref;
+those entries cannot seed main or another PR. Existing repository storage limits
+and eviction apply. No paid cache allowance is enabled.
 
-`sccache` uses GitHub Actions storage for matching Rust library compilations,
-including workspace libraries that Cargo recompiles after a fresh checkout.
-`RUSTC_WRAPPER` applies only to the hosted verification job. Incremental compilation
-remains disabled. Linked binaries, test executables and proc macros are outside
-sccache's Rust cache coverage; their compilation and linking still run.
+Action snapshots use source/run/attempt keys with same-source, role and host
+restoration prefixes; an earlier partial immutable snapshot does not prevent a
+later run from saving additional actions. Owned manual measurement runs save
+within their branch cache scope.
 
-The hosted job disables sccache's idle shutdown so its compiler statistics survive
-the long runtime campaigns. This setting is confined to the disposable CI runner;
-it does not change compiler inputs, the cache namespace or local configuration.
-
-Both actions are pinned to immutable commits. The sccache executable version is
-pinned separately. The setup action checks its release archive's SHA-256 checksum.
-The repository's `rust-toolchain.toml` remains the Rust version authority.
-
-The dependency cache is saved only after a successful job. Compiler outputs can
-be cached as compilation finishes, regardless of later test outcomes. Neither
-cache stores runtime state, exported installations or completed verification
-receipts. Separate source-bound caches below store completed fixture and test
-compiler outputs. Isolated builds retain their cleared environment, private
-target directories and offline Cargo inputs; they receive no cache service token
-or compiler wrapper from the outer job.
-
-## Scope and invalidation
-
-GitHub allows PRs to read their base/default branch's caches. A cache written by
-one PR is scoped to that PR and cannot seed other PRs or `main`. The first
-successful run on `main` populates the shared base cache; later PRs can reuse it.
-The first run in an empty namespace is still cold.
-
-`day2-platform-ci-linux-v1` is the Linux dependency/compiler namespace; the focused
-Mac lane retains `day2-platform-ci-v2`. OS and architecture remain cache inputs.
-Neither lane can admit the other host's executables.
-Change both only when deliberately retiring a cache generation. Toolchain,
-dependency and compiler input changes already invalidate the corresponding
-entries automatically; do not add a commit SHA or run ID to either namespace.
-
-The initial v1 seed failed in a live-update test after writing compiler outputs.
-The test now finishes its executor-local fault before starting the HTTP scheduler
-and asserts that rollback preserves both the live revision and application data.
-The v2 generation starts empty so that failed run is not used as a cold baseline.
-
-## Measurement
-
-Use complete hosted verification runs on fresh runners:
-
-1. Seed the empty cache namespace and retain its full log.
-2. Rerun the same commit in the same PR scope after the seed run completes.
-3. Measure a small Rust source change in that same scope while keeping the
-   compiler, manifests, lockfile, features and profile fixed.
-
-For each run, record its exact head, runner/toolchain, all verification outcomes,
-total verify job duration, initial Cargo preparation, the 29 recipe step timings,
-cache restore/save durations and archive size. The compiler cache action publishes
-hits, misses, non-cacheable requests, cache errors and read/write timings in its
-post-job log and summary. An idle server restart can reset these counters; an
-empty or partial report does not establish whole-job hit, miss or error counts.
-Include that overhead in the total, and report failures
-or weak cache reuse rather than attributing every timing difference to caching.
-
-Compare total CI time as well as compilation time. Native fixture compilation,
-control simulation and runtime campaigns remain substantial costs. A passing
-gate establishes correctness; a cache hit rate alone does not establish faster CI.
+Compilation reuse never skips a verification campaign. Test result reuse is
+disabled with `--cache_test_results=no`. Runtime, documentation, private build
+and installation outcomes remain fresh. Isolated Mac builders receive pinned
+source/repository snapshots with their environment and network confinement;
+they receive no outer action cache or cache-service credentials.
 
 ## Hosted verification campaigns
 
-The secret scan and dependency audit finish before CI starts ordinary compilation
-or looks up a main-push queue receipt. If either fails, preparation and runtime
-campaigns do not allocate runners. The required `verify` job runs its failure
-guard on Ubuntu; skipped preparation cannot produce a successful full check.
-This avoids spending native compilation time on already-rejected changes. Passing
-runs retain the full gate and incur the initial security-check wait.
+Secret scanning and dependency auditing finish before ordinary native work.
+Independent diagnostics can collect repair facts but cannot replace required
+checks. The required `verify` job rejects missing, failed or skipped preparation,
+portable campaigns or Mac obligations.
 
-Hosted `diagnostics` remains independent of those checks so maintainers can
-generate and review a dependency repair when the original lockfile fails audit.
-Diagnostics never qualify a source or replace any required check.
+Preparation runs inputs and tests jobs concurrently. Inputs retains formatting,
+CLI compilation, all required fixture builds and lint checks in their existing
+Roc order. Tests builds the complete selected normal-program/harness graph once,
+then executes documentation tests. The join requires exact current-run
+identities, disjoint and exhaustive effects, admitted fixtures and a complete
+executable inventory. Permission-preserving transport belongs to that run and
+attempt; it is separate from persistent build caches.
 
-CI preparation runs two jobs concurrently. The inputs job retains the full
-recipe's formatting, CLI, twenty-one fixture builds and lint checks, including all
-fixture dependency ordering. The tests job compiles the ordinary complete Cargo
-test package and target graph once, then runs documentation tests. The preparation
-join requires both exact current-run manifests, disjoint and exhaustive effects,
-all fixture identities and the complete executable inventory. It re-admits every
-transported executable digest and native fixture before publishing the combined
-workspace. Missing, swapped, incomplete or foreign parts fail preparation. The
-prepared binaries and fixtures travel in a permission-preserving archive scoped
-to one Actions run attempt; this is separate from the dependency/compiler caches.
+Five Linux campaigns execute the disjoint day2, control and remaining-package
+suites, control simulation and the reviewed parallel compiler probes. The three
+Linux sandbox/compilation launchers are a separate mandatory inventory. Their
+current bytes, permissions and native target are admitted before installation
+beside test supervisors and rechecked after transport. Shards execute the
+prepared programs without rebuilding their platform code.
 
-`Verify.roc` selects seven hosted campaigns. Five run on native Linux x86_64:
-disjoint serial day2, control and remaining-package tests, control simulation,
-and the reviewed four-thread compiler probes. Their ordinary default package,
-profile, target and filter inventories remain complete. The three Linux sandbox,
-compiler-sandbox and probe launchers are a separate mandatory inventory: built
-once in preparation, byte/mode/ELF-admitted and transported at their fixed native
-sibling paths. Shards never Cargo-build these launchers again.
+The native Apple Silicon lane retains the real isolated-build and installation
+campaigns, its source-owned ABI/worker/confinement/formatter/compiler inventory
+and all fixture prerequisites. Exact cases must exist in the current executable
+with the expected ignored status; zero matches cannot qualify compatibility.
+The lane compiles the ordinary default graph and executes its focused campaign
+rather than substituting a Linux result. Neither real native campaign is cached.
 
-One focused native Mac ARM64 job runs the real isolated-build and installation-build
-campaigns because the production build sandbox supports that host. It also runs
-an explicit source-owned inventory of native ABI, worker lifetime, confinement,
-formatter and compiler cases, including all three connection-use probes. Each
-exact case must exist in the actual Cargo harness with its expected ignored status;
-zero matches cannot qualify compatibility. The Mac job compiles the ordinary
-default graph once but runs this focused inventory instead of the full workspace
-runtime suite. Its native Reports, Reports-probe, relational and OAuth-calendar
-fixture prerequisites, compiler, executables and fresh case outcomes have separate
-evidence. Installation and private build outcomes are uncached.
+Linux jobs keep the pinned OCI image, private 6 GiB cgroup without swap, four CPU
+allocation, 512 PID limit and bounded artifact/generated tmpfs mounts. Trusted
+setup preserves and rechecks the checked-in ABI seed. Inner compiler/worker
+confinement and ELF/glibc/loader admission remain mandatory. This is separate
+from the production Mac private builder; no Linux production builder is added.
 
-Linux jobs use the pinned Rust OCI image on Ubuntu with a finite private cgroup,
-6 GiB memory/no swap and bounded owned artifact/generated tmpfs directories.
-Trusted outer CI setup creates those mounts and preserves the exact checked-in
-worker ABI seed across the generated-output mount. Each Linux job retains its
-current cgroup, mount and seed-digest evidence. Inner native compiler and worker
-Landlock/seccomp, memory and fixed launcher admission remain mandatory; this
-is not a port of the production Mac isolated Cargo builder. Native ELF/glibc/loader
-inputs are independently re-captured before fixture cache admission.
-
-The required `verify` job fails if either preparation part, any portable campaign,
-or the Mac job fails or skips. Its native join binds exact checkout/tree, closed
-source catalog, workflow, run and attempt across both domains. Native snapshots,
-workspace paths, compiler/configuration identities and executable digests remain
-host-specific. The joined proof carries the mandatory Mac preparation, compiler,
-focused cases and two real campaign receipts inside the existing six JSON proof
-files. Missing, foreign or incomplete native evidence fails admission. All 29
-steps and twenty-one Linux fixtures remain required; the combined Linux workspace
-campaign keeps its original 12,600-second budget.
-
-Manual `Platform CI` dispatch selects `sharded` for this complete mixed-host
-pipeline or `diagnostics` for independent hosted formatting and inventories.
-The earlier same-host comparison modes are removed. Local `xtask verify` retains
-its ordinary native maintainer recipe. Rerun every job when retrying a workflow;
-run-scoped preparation and case outcomes cannot mix attempts.
-
-Measure security wait through final join, starting preparation at the earliest
-selected native job. Include both Linux preparation jobs, their join, five
-portable campaigns, the focused Mac job, final verification, setup, queues and
-all transfers. Report Linux and Mac runner work separately. Historical Mac-only
-timings do not qualify this source or establish a mixed-host speedup.
+The native join binds checkout/tree, source catalog, workflow, run/attempt and
+all required Linux and Mac evidence. Snapshots, compiler/configuration identities,
+workspace paths and executable digests remain host-specific. The original
+campaign budgets and coverage remain required. A retry cannot mix preparation
+or outcomes from different attempts.
 
 ## Completed build outputs
 
-Preparation jobs use separate `day2-fixtures-v2` and `day2-test-outputs-v1`
-GitHub caches. Fixture keys retain shared platform, SDK, compiler configuration,
-workflow, host and architecture inputs as a common prefix. A source-specific
-suffix saves changed app and fixture trees separately. Prefix restoration may
-supply older fixture outputs; native admission decides each selected entry.
-The ordinary test output cache keeps its complete reviewed source key and has
-no prefix restoration. Dependency and compiler caches remain separate from these completed-output keys.
+The `day2-fixtures-v3-bazel` and `day2-test-outputs-v2-bazel` caches contain
+completed compilation outputs, not completed verification. Their keys include
+OS/architecture, Bazel and compiler inputs, the closed build definitions/patches,
+workflow and current source inputs. Fixture prefix restoration may supply an
+older candidate; each entry must independently pass current admission. The
+whole test-output key has no prefix restoration.
 
-The fixture cache contains only content-addressed artifact directories and the
-format-2 fixture index. Cargo's ordinary compiler dep-info captures embedded
-non-Rust inputs, and the current xtask executable digest binds the compiler
-adapter. Its source closure and the existing Rust/Cargo/C compiler, profile,
-environment, workspace and CI workflow identity must match before reuse.
-Missing or unsupported compiler evidence disables reuse and selects normal builds.
+The fixture cache stores content-addressed artifact directories and the existing
+format-2 index. `artifacts/bazel-compiler-inputs.json` binds the actual configured
+xtask producer and executable bytes with the current Bazel/module/compiler and
+platform inputs. Cargo depfiles no longer provide this identity. Missing,
+unsupported or changed compiler evidence selects ordinary fresh builds.
 
-Each candidate is loaded and its complete successful artifact verification
-required. The same native build adapter re-captures its current app and overlay,
-explicit SDK catalog, pinned Roc compiler, locked UI package/provider inputs,
-platform source hashes and consumed import contract. Its identity ledger is
-re-derived against the admitted checked types. The resulting complete source
-map must equal the artifact's source map, excluding only the host archive output
-already bound by the worker digest and exact compiler identity. A missing, added,
-changed or invalid input rebuilds through the original fixture recipe.
+Admission loads the candidate and requires complete successful artifact
+verification. The same native build adapter re-captures app/overlay sources,
+the explicit SDK catalog, Roc compiler, UI package/provider inputs, shared
+platform inputs and consumed import contracts. Checked types re-derive the
+identity ledger. The complete source map must match, excluding only the native
+archive output already bound to its compiler and digest. Missing, added,
+changed or invalid inputs rebuild through the ordinary Roc recipe.
 
-Imported fixtures retain their per-entry whole verification snapshot requirement
-because their build verification consumes a selected peer's disposable oracle.
-An unrelated source edit may reuse independently admitted standalone fixtures;
-it still rebuilds imported fixtures. CLI checks, formatting, lint, documentation,
-all runtime campaigns, current-run preparation joins and whole-source stability
-checks execute normally. This change does not narrow ordinary test target keys
-or cache private/isolated build outputs.
+Imported fixtures retain their whole verification-snapshot requirement because
+they consume a selected peer's disposable oracle. Unrelated edits can reuse only
+independently admitted standalone fixture outputs. CLI checks, formatting,
+lint, documentation, current joins, source stability and all runtime campaigns
+still execute. Private/isolated build outputs and outcomes are excluded.
 
-The test cache contains completed ordinary test harnesses, the normal programs
-Cargo builds for integration tests, and their compilation manifest, without run
-receipts or runtime state. Cargo’s authoritative compiler messages and fresh
-metadata must close both inventories. Supporting programs are cached separately
-from Cargo’s ordinary output directory; only admitted programs are restored to
-the exact `CARGO_BIN_EXE_*` paths with executable permissions preserved. The
-current-run preparation join and every campaign re-admit their byte digests and
-exact executable permissions. Linux auxiliary programs are admitted separately.
-Native admission checks the
-current full source snapshot, embedded workflow, canonical workspace, host and
-architecture, actual Rust/Cargo/C compiler versions, compiler/profile environment
-digest and repository Cargo configuration. Fresh Cargo metadata must match every
-default target and package directory. Every executable must be unique, regular,
-within the ordinary Cargo output directory and match its recorded byte digest.
-An unavailable or invalid cache compiles the original complete target graph.
-Valid outputs produce a new current-run inventory and preparation receipt;
-documentation tests and all seven runtime campaigns execute fresh. Source changes
-invalidate the completed-output proof. No source timestamps are rewritten to
-claim Cargo freshness, and isolated/private-target builds remain uncached.
+The test cache contains current harnesses, integration-supporting normal programs,
+Linux auxiliaries and their compilation manifest. Successful Bazel build evidence
+and actual configured Rust providers must close the inventory. Every declared
+producer must match its source, crate name, kind and test identity; every output
+must be unique, regular and confined to the owned compiler context. Installed
+programs use fixed `build-out` paths with executable permissions preserved.
 
-These caches can reduce repeated compilation on unchanged sources, including
-queue/push checkouts with the same inputs. A small source edit may still rebuild
-the completed outputs; the existing library/compiler cache handles matching
-compilation requests. Measure complete cold/warm runs, a nonfunctional Rust edit
-and restored-tree final qualification in one cache scope before reporting a
-speedup. Retain archive sizes, save/restore costs, current-source admission,
-coverage, compiler counters and complete pipeline latency and runner work.
+The architecture gate independently compares every manifest default program,
+bin-unit and integration harness against the declared target catalog. Prepared
+output admission additionally checks complete package/target sets, source,
+workflow, canonical workspace, host/architecture, actual configured compiler,
+profile/environment/configuration and executable digests/modes. Missing, extra,
+foreign or invalid outputs select full compilation. No timestamps are rewritten
+and no runtime result is inferred from a compiler cache hit.
 
-References: [Completed output cache action](https://github.com/actions/cache/blob/0057852bfaa89a56745cba8c7296529d2fc39830/README.md),
-[Cargo cache action](https://github.com/Swatinem/rust-cache),
-[sccache action](https://github.com/mozilla-actions/sccache-action),
-[Rust cache coverage](https://github.com/mozilla/sccache/blob/main/docs/Rust.md),
-[Pinned server idle behavior](https://github.com/mozilla/sccache/blob/v0.18.0/src/server.rs),
-[GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+## Measurement
+
+Use complete hosted runs on fresh runners. Dispatch the same source/ref first
+with `compilation_cache=empty`, then with `compilation_cache=reuse`. The empty
+selection performs cache metadata lookup without downloading prior-run action,
+fixture or harness snapshots. Repository/tool downloads and transport from the
+current preparation jobs remain enabled and must be disclosed. Measure
+representative Rust and Roc edits separately. Keep target,
+feature, profile, linker, concurrency, fixtures and test coverage matched. Record
+security/queue wait, setup, cache restore/save time and bytes, compilation, fresh
+campaign work, final join, critical-path time and runner minutes by OS. Account
+for all preparation, shard, Mac and transport work.
+
+Retain actual Bazel action summaries and cache API coverage. Do not convert Cargo
+freshness or a warm action hit into a machine-code generation count. Partial
+logs, missing counters or overlapping wrappers cannot establish whole-run hit,
+miss, error or cost totals. Compiler/bootstrap work and earlier cache activity
+must be disclosed before calling a measurement cold. Passing CI establishes
+coverage, not a speedup by itself; historical failed/warm experiments remain
+separate evidence.
 
 ## Exact merge-group receipt reuse
 
-PR and merge-group workflows always execute the complete gate. A main push first
-looks for the latest merge-group run of this repository's active `ci.yml` workflow
-at the exact checked-out SHA and tree. A different SHA with an identical tree is
-insufficient. Authenticated GitHub metadata must show a completed successful
-latest attempt, all ten successful required jobs and their actual GitHub Actions
-app15368 checks, plus the successful actual `verify-mac-compatibility` job with
-its native runner label and app pin, and its unexpired immutable full-receipt artifact. This job has
-only contents, Actions and checks read permissions; it accepts no caller-selected
+PR and merge-group workflows execute the complete gate. A main push may instead
+look up the latest successful merge-group attempt of this repository's active
+`ci.yml` workflow at the exact checked-out SHA and tree. Tree equality under a
+different SHA is insufficient. Current GitHub run/job/check identities, required
+conclusions, the genuine Mac runner label, Actions app pin and immutable receipt
+artifact must all authenticate. The read-only job accepts no caller-selected
 repository, URL, workflow, run, artifact or source override.
 
-The small receipt artifact carries both preparation parts, prepared inventory,
-compiler-input manifest, seven-campaign join and original full verification
-receipt. Native admission requires the exact current snapshot and Roc/CI workflow,
-host/architecture, canonical workspace, compiler/config/profile identity, fresh
-Cargo metadata for all default targets and supporting programs, exhaustive fixture
-and campaign evidence, original step timings and campaign budgets. Downloaded
-proof is read as confined bounded JSON; its executables are never downloaded or
-run. The authenticated latest run, jobs, checks and artifact identities are checked
-again after artifact admission. The current source independently derives the Mac
-snapshot and exact native case/target requirements; a Linux-only receipt cannot
-be reused as a complete full outcome.
+The bounded JSON receipt carries preparation, compiler/output inventory, complete
+campaign joins and original full evidence. Current source independently derives
+the package/target and Mac-case requirements. It requires exact snapshot,
+Roc/CI workflow, host/compiler/configuration, exhaustive fixtures/campaigns,
+original timings and budgets. Downloaded executables are never run. API identities
+are checked again after admission. A Linux-only receipt cannot stand for the
+complete native gate.
 
-Missing, expired, foreign, incomplete, changed or unavailable proof selects
-ordinary complete preparation and all seven fresh campaigns. A setup, lookup,
-download, admission or reuse-artifact upload failure also selects that fallback.
-The required `verify` job succeeds only after either the full preparation and all
-campaigns succeed, or the exact receipt-admission job succeeds and its proof is
-transported. The other nine required checks always run on the current source.
+Any missing, expired, changed, incomplete or unavailable proof, lookup/setup/
+download/admission/upload failure selects ordinary complete preparation and
+fresh campaigns. Independent cheap checks always execute on current source.
+Authenticated reuse is named `reused-trusted-merge-group-full`; it retains the
+original receipts and explicitly records that the main push did not run fresh
+runtime campaigns. A passing PR or synthetic test does not establish actual
+main-push reuse or a performance result.
 
-Reused evidence is named `reused-trusted-merge-group-full` and retains the original
-run/attempt and all original receipts alongside the current run identity. It
-explicitly records that this main push did not execute fresh runtime campaigns;
-it is not a new full execution or a cross-source performance result. Actual
-end-to-end reuse must be observed after an explicitly user-queued eligible PR
-lands. A passing PR full gate or synthetic admission test alone does not establish
-that runtime receipt. No unrelated merge is needed to qualify the implementation.
-
-The [workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs),
-[artifact API](https://docs.github.com/en/rest/actions/artifacts) and pinned
-[artifact download action](https://github.com/actions/download-artifact/tree/d3f86a106a0bac45b974a628896c90dbdf5c8093)
-provide the authenticated metadata and cross-run artifact transport.
+References: [Bazel caching](https://bazel.build/remote/caching),
+[setup-bazel](https://github.com/bazel-contrib/setup-bazel),
+[GitHub cache scopes and limits](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
+[workflow runs](https://docs.github.com/en/rest/actions/workflow-runs),
+[artifact API](https://docs.github.com/en/rest/actions/artifacts).

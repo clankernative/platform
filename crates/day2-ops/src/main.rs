@@ -3,12 +3,7 @@ use anyhow::{Context, Result, ensure};
 use day2_ops::{backup, infra, local_dev, maintenance, process, projection};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
+use std::{fs, path::PathBuf, process::Command, time::Duration};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,12 +22,7 @@ fn input<T: DeserializeOwned>(request: &Request) -> Result<T> {
 }
 
 fn platform() -> Result<PathBuf> {
-    // Source distribution. xtask cli versions and builds the distribution binaries
-    // together; an installed/hosted distribution will supply its own pin root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .context("platform source distribution missing")
+    day2::automation::source_root()
 }
 
 struct Operations {

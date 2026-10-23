@@ -112,8 +112,8 @@ fn decision_source() -> String {
 fn replay_command(path: &std::path::Path) -> String {
     let quoted = path.to_string_lossy().replace('\'', "'\"'\"'");
     format!(
-        "DAY2_HOST_LOOP_REPLAY='{quoted}' cargo test --locked -p day2 --lib \
-         host_loop::tests::replay_saved_host_loop_history -- --exact"
+        "DAY2_HOST_LOOP_REPLAY='{quoted}' bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib \
+         host_loop::tests::replay_saved_host_loop_history --exact"
     )
 }
 

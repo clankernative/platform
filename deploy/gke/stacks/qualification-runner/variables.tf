@@ -27,7 +27,7 @@ variable "enabled" {
 }
 
 variable "desired_status" {
-  description = "RUNNING or TERMINATED. Stop the VM between qualification runs without losing its disk (Docker build cache, cargo registry)."
+  description = "RUNNING or TERMINATED. Stop the VM between qualification runs without losing its disk (Docker and Bazel build caches)."
   type        = string
   default     = "RUNNING"
 
@@ -71,7 +71,7 @@ variable "boot_image" {
 }
 
 variable "boot_disk_gb" {
-  description = "Boot disk size. Holds Docker images/build cache for the tooling and runtime images plus the host cargo build of xtask."
+  description = "Boot disk size. Holds Docker images/build cache for the tooling and runtime images plus the host Bazel build of xtask."
   type        = number
   default     = 200
 

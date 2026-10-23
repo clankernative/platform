@@ -232,10 +232,10 @@ version destruction, or recovery of a stopped retirement barrier.
 Build the pinned private Roc runner before invoking the native test suites:
 
 ```text
-cargo run --locked -p xtask -- workflows
-cargo test --locked -p day2-control --test control_integration -- runtime_secret:: secret_retirement::
-cargo test --locked -p day2-control --test control_integration -- durable_secret_retirement::
-cargo test --locked -p day2-control --test control_integration -- simulation_retirement:: simulation_generation::
+bazel run //crates/xtask:xtask -- workflows
+bazel run //crates/xtask:xtask -- test-rust //crates/day2-control:control_integration runtime_secret:: secret_retirement::
+bazel run //crates/xtask:xtask -- test-rust //crates/day2-control:control_integration durable_secret_retirement::
+bazel run //crates/xtask:xtask -- test-rust //crates/day2-control:control_integration simulation_retirement:: simulation_generation::
 ```
 
 The durable test starts a disposable local Temporal server with persisted state,

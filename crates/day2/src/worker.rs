@@ -592,7 +592,9 @@ impl Worker {
 
 #[cfg(target_os = "linux")]
 fn sibling(name: &str) -> Result<PathBuf> {
-    let supervisor = std::env::current_exe()?.canonicalize()?;
+    let supervisor = std::env::current_exe()?
+        .canonicalize()
+        .context("current worker supervisor executable is unavailable")?;
     Ok(supervisor
         .parent()
         .context("supervisor installation directory")?

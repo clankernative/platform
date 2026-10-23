@@ -7,8 +7,8 @@ fn local_build_provider_has_no_app_selected_ui_assembly_configuration() {
         "platform_root": "/opt/platform",
         "toolchains": "/opt/toolchains",
         "xtask": "/opt/xtask",
-        "rust": "/opt/rust",
-        "registry": "/opt/registry"
+        "bazel": "/opt/bazel",
+        "repositories": "/opt/repositories"
     });
     let provider: BuildProvider = serde_json::from_value(configuration).unwrap();
     let serialized = serde_json::to_value(provider).unwrap();
@@ -19,8 +19,8 @@ fn local_build_provider_has_no_app_selected_ui_assembly_configuration() {
             "platform_root": "/opt/platform",
             "toolchains": "/opt/toolchains",
             "xtask": "/opt/xtask",
-            "rust": "/opt/rust",
-            "registry": "/opt/registry",
+            "bazel": "/opt/bazel",
+            "repositories": "/opt/repositories",
             "ui_assembly": {
                 "provider_pin": "/opt/ui/provider.json",
                 "package_root": "/opt/ui/package",

@@ -416,6 +416,7 @@ impl Session {
             }
             "linux-start-tooling" => {
                 ensure!(self.runtime_image.is_some(), "runtime image required");
+                let setup_started = Instant::now();
                 logged(
                     &self.output,
                     "start-tooling",
@@ -453,7 +454,30 @@ impl Session {
                     120,
                 )?;
                 self.tooling_started = true;
-                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024})
+                // The bounded tmpfs hides the image's source ABI input.
+                // Install the image's source-bound seed inside the live mount;
+                // Docker archive copy does not support tmpfs destinations.
+                // Fresh generator equality and all native guards remain mandatory.
+                let remaining = Duration::from_secs(120)
+                    .checked_sub(setup_started.elapsed())
+                    .context("tooling initialization deadline exhausted")?
+                    .as_secs();
+                ensure!(remaining > 0, "tooling initialization deadline exhausted");
+                logged(
+                    &self.output,
+                    "seed-tooling-abi",
+                    Command::new("docker").args([
+                        "exec",
+                        &self.container,
+                        "install",
+                        "-m",
+                        "0644",
+                        "/usr/local/lib/day2/roc_platform_abi.rs",
+                        "/workspace/platform/crates/worker/generated/roc_platform_abi.rs",
+                    ]),
+                    remaining,
+                )?;
+                json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024,"reviewed_abi_seed_staged":true})
             }
             "linux-build-check" => {
                 ensure!(self.tooling_started, "start tooling first");
@@ -516,7 +540,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -557,7 +581,7 @@ impl Session {
                     Command::new("docker").args([
                         "exec",
                         &self.container,
-                        "target/debug/xtask",
+                        "build-out/bin/xtask",
                         "linux-build-probe",
                     ]),
                     1800,
@@ -603,7 +627,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -682,7 +706,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-artifact-evidence",
                         ])
                         .arg(format!("/workspace/platform/artifacts/{hash}")),
@@ -711,7 +735,7 @@ impl Session {
                     Command::new("docker").args([
                         "exec",
                         &self.container,
-                        "target/debug/xtask",
+                        "build-out/bin/xtask",
                         command,
                     ]),
                     1800,
@@ -776,7 +800,7 @@ impl Session {
                     );
                     command.arg(format!("{variable}={}", path.display()));
                 }
-                command.args(["target/debug/xtask", "linux-test-delegation"]);
+                command.args(["build-out/bin/xtask", "linux-test-delegation"]);
                 logged(&self.output, &key, &mut command, 1800)?;
                 for (fixture, path) in paths {
                     let hash = Path::new(&path)
@@ -839,7 +863,7 @@ impl Session {
                         .args([
                             "exec",
                             &self.container,
-                            "target/debug/xtask",
+                            "build-out/bin/xtask",
                             "linux-test-suite",
                             suite,
                         ])

@@ -6,7 +6,6 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 struct Prepared {
@@ -417,6 +416,11 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
     for path in [
         "Cargo.toml",
         "Cargo.lock",
+        ".bazelrc",
+        ".bazelversion",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
         "architecture-rules.json",
         "architecture-boundaries.json",
         "architecture-proofs.json",
@@ -430,6 +434,7 @@ pub(super) fn platform_sources(root: &Path) -> Result<BTreeMap<String, String>> 
     }
     for directory in [
         "crates",
+        "build/bazel",
         "tools",
         "vendor",
         "assets",
@@ -781,27 +786,19 @@ pub fn execute(
                         metadata.is_file() && metadata.len() <= 2 * 1024 * 1024,
                         "invalid generated worker ABI"
                     );
-                    fs::write(
-                        root.join("crates/worker/generated/roc_platform_abi.rs"),
-                        fs::read(generated)?,
-                    )?;
+                    ensure!(
+                        fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))?
+                            == fs::read(generated)?,
+                        "generated worker ABI differs from the reviewed Bazel source input"
+                    );
                 }
                 "build-host" => {
                     ensure!(done.contains("build-glue"), "checked ABI required");
-                    let mut cargo = if let Some(job) = isolated_job {
-                        day2::sandbox::build_host(job, &job.join("rust/bin/cargo"))?
-                    } else {
-                        Command::new("cargo")
-                    };
-                    cargo.args(["build", "--locked"]);
-                    if isolated_job.is_some() {
-                        cargo.arg("--offline");
-                    }
-                    run(root, cargo.args(["-p", "day2-roc-worker", "--release"]))?;
+                    let archive = crate::bazel::worker_archive(root, isolated_job)?;
                     prepared.hashes.extend(native_toolchain::stage_link_inputs(
                         prepared.target,
                         stage,
-                        &root.join("target/release/libday2_roc_worker.a"),
+                        &archive,
                     )?);
                 }
                 "build-check" => {
@@ -928,6 +925,11 @@ mod platform_input_tests {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".bazelrc",
+            ".bazelversion",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
             "architecture-proofs.json",
@@ -941,6 +943,7 @@ mod platform_input_tests {
         }
         for name in [
             "crates",
+            "build/bazel",
             "tools",
             "vendor",
             "assets",
@@ -949,7 +952,7 @@ mod platform_input_tests {
             "deploy",
             "toolchains",
         ] {
-            fs::create_dir(root.join(name))?;
+            fs::create_dir_all(root.join(name))?;
         }
         let approved = platform_sources(root)?;
         assert_eq!(approved, platform_sources(root)?);

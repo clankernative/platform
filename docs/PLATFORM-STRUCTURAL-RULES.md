@@ -67,7 +67,7 @@ cloud mutation, secret access or qualification VM ownership.
 
 ## Architecture ratchet
 
-`cargo run --locked -p xtask -- architecture-check` checks the reviewed
+`bazel run //crates/xtask:xtask -- architecture-check` checks the reviewed
 `architecture-rules.json`. `architecture-inventory` reports facts to stdout; it
 does not modify policy or approve new allowances. Every native verification
 recipe checks these boundaries before execution; `verify-lint` checks them again

@@ -30,10 +30,10 @@ source-line lengths. Regression tests check parser equivalence and stable output
 On this workspace the reviewed formatter is installed. From the platform directory:
 
 ```console
-cargo run --locked -p xtask -- bootstrap-formatter
-cargo run --locked -p xtask -- fmt-reports
-cargo run --locked -p xtask -- fmt-check-reports
-cargo run --locked -p xtask -- verify-reports
+bazel run //crates/xtask:xtask -- bootstrap-formatter
+bazel run //crates/xtask:xtask -- fmt-reports
+bazel run //crates/xtask:xtask -- fmt-check-reports
+bazel run //crates/xtask:xtask -- verify-reports
 ```
 
 `fmt`, `fmt-check` and `verify` cover the public platform, fixtures and
@@ -47,7 +47,7 @@ It verifies the committed SHA-256 before atomic installation. To supply a copy
 from an authenticated download or offline mirror:
 
 ```console
-cargo run --locked -p xtask -- bootstrap-formatter /path/to/reviewed/roc
+bazel run //crates/xtask:xtask -- bootstrap-formatter /path/to/reviewed/roc
 ```
 
 Mismatched installed or supplied bytes are rejected. The formatter supports
@@ -62,7 +62,7 @@ Zig and cache paths even in a stripped optimized binary. A fresh source build ca
 therefore differ byte-for-byte without a source change. Source builds are not
 silently treated as reviewed binary releases.
 
-Maintainers can run `cargo run --locked -p xtask -- build-formatter`. It downloads
+Maintainers can run `bazel run //crates/xtask:xtask -- build-formatter`. It downloads
 digest-pinned upstream source and Zig 0.16.0 into a private build directory,
 checks the source commit and patch, runs the native formatter module tests, then
 builds Roc. It emits `artifacts/roc-formatter/<actual-hash>/roc` plus provenance,
@@ -94,8 +94,8 @@ server still has upstream formatting behavior.
 ## Regression Tests
 
 ```console
-cargo test --locked -p xtask
-cargo test --locked -p xtask formatter_native -- --ignored
+bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask
+bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask formatter_native --ignored
 ```
 
 The native patch tests paired and unannotated methods, constants, mismatched

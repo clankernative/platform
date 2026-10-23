@@ -36,6 +36,6 @@ query is not granted. Full verification builds the fixture and passes it as
 `DAY2_TEST_REDIRECT_ARTIFACT`; to run it alone:
 
 ```text
-cargo run --locked -q -p xtask -- build fixtures/redirect-conformance
-DAY2_TEST_REDIRECT_ARTIFACT=artifacts/<printed digest> cargo test --locked -p day2 --test day2_integration -- redirect_routes::
+bazel run //crates/xtask:xtask -- build fixtures/redirect-conformance
+DAY2_TEST_REDIRECT_ARTIFACT=artifacts/<printed digest> bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration redirect_routes::
 ```

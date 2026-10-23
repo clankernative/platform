@@ -1,0 +1,33 @@
+"""Read the configured Rust producer, never a guessed output filename."""
+
+def _crate(target):
+    candidates = []
+    for key, value in providers(target).items():
+        if key.endswith("%TestCrateInfo") or key == "TestCrateInfo":
+            return value.crate
+        if key.endswith("%CrateInfo") or key == "CrateInfo":
+            candidates.append(value)
+    if len(candidates) != 1:
+        fail("Expected one configured Rust crate: " + str(target.label))
+    return candidates[0]
+
+def _deps(values):
+    result = []
+    for value in values.to_list():
+        if value.crate_info == None:
+            fail("Workspace Rust dependencies require an explicitly governed Rust producer")
+        crate = value.crate_info
+        result.append({"label": str(crate.owner), "name": crate.name, "source": crate.root.path})
+    return result
+
+def format(target):
+    crate = _crate(target)
+    return json.encode({
+        "label": str(target.label),
+        "files": [crate.output.path],
+        "source": crate.root.path,
+        "crate_name": crate.name,
+        "crate_type": crate.type,
+        "test": crate.is_test,
+        "dependencies": _deps(crate.deps) + _deps(crate.proc_macro_deps),
+    })

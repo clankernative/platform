@@ -38,6 +38,7 @@ pub struct StrictCrate<'a> {
 }
 
 pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
+    let started = std::time::Instant::now();
     ensure!(
         !packages.is_empty() && packages.len() <= 128,
         "strict crate inventory budget"
@@ -85,7 +86,9 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         &mut clippy_command(root, packages)?,
         root,
         &log,
-        COMPILER_TIMEOUT,
+        COMPILER_TIMEOUT
+            .checked_sub(started.elapsed())
+            .context("strict compiler budget exhausted")?,
     );
     // The supervisor has reaped the process group before this bounded read.
     let metadata = fs::symlink_metadata(&log)?;
@@ -107,6 +110,30 @@ pub fn check(root: &Path, packages: &[StrictCrate<'_>]) -> Result<()> {
         )
     })?;
     admit_clippy_diagnostic(&diagnostic)?;
+    let catalog = crate::bazel::targets(root)?;
+    let labels = packages
+        .iter()
+        .map(|package| {
+            catalog
+                .iter()
+                .find(|target| {
+                    !target.test
+                        && target.package == package.name
+                        && target.source == Path::new(package.source)
+                })
+                .map(|target| target.label.clone())
+                .context("configured strict Clippy producer required")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::bazel::admit_clippy_outputs(
+        root,
+        &strict_target_dir(root, packages),
+        &labels,
+        true,
+        COMPILER_TIMEOUT
+            .checked_sub(started.elapsed())
+            .context("strict compiler budget exhausted")?,
+    )?;
     println!(
         "platform kernel compiler boundary: {} strict crates",
         packages.len()
@@ -133,35 +160,40 @@ fn admit_clippy_diagnostic(bytes: &[u8]) -> Result<()> {
 
 fn clippy_command(root: &Path, packages: &[StrictCrate<'_>]) -> Result<Command> {
     let config = root.join("architecture").canonicalize()?;
-    let target = strict_target_dir(
-        config.parent().context("strict compiler workspace")?,
-        packages,
-    );
-    let mut command = Command::new("cargo");
-    command.current_dir(root).env("CLIPPY_CONF_DIR", config);
-    command.args([
-        "clippy",
-        "--offline",
-        "--locked",
-        "--jobs=2",
-        "--color=never",
-        "--lib",
-        "--no-deps",
-    ]);
-    command.arg("--target-dir").arg(target);
+    let target = strict_target_dir(config.parent().context("strict workspace")?, packages);
+    let catalog = crate::bazel::targets(root)?;
+    let mut command = crate::bazel::command(root);
+    command
+        .arg(format!("--output_base={}", target.display()))
+        .current_dir(root)
+        .arg("build");
+    crate::bazel::configuration_arguments(&mut command);
+    crate::bazel::clippy_arguments(&mut command);
+    command.arg("--output_groups=clippy_checks,clippy_output");
+    command.arg("--@rules_rust//rust/settings:clippy.toml=//:architecture/clippy.toml");
     for package in packages {
-        command.args(["-p", package.name]);
+        let matches = catalog
+            .iter()
+            .filter(|target| {
+                !target.test
+                    && target.kind == ["lib"]
+                    && target.package == package.name
+                    && target.source == Path::new(package.source)
+            })
+            .collect::<Vec<_>>();
+        ensure!(
+            matches.len() == 1,
+            "one exact Bazel strict library source required"
+        );
+        command.arg(&matches[0].label);
     }
     pin_lint_flags(&mut command);
-    command.args(["--", "--cap-lints=forbid", "-Dwarnings"]);
     Ok(command)
 }
 
 fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
-    // Clippy's --no-deps changes linting according to CARGO_PRIMARY_PACKAGE,
-    // which is not a source dependency in cached dependency-only compilations.
-    // Keep those artifacts separate from any different primary package set.
-    // Names have already passed the bounded, unique inventory check above.
+    // Preserve separate analysis roots for explicit primary selections. Bazel
+    // compilation/action caches remain keyed by the actual inputs and flags.
     let names: BTreeSet<_> = packages.iter().map(|package| package.name).collect();
     let mut digest = DigestContext::new(&SHA256);
     digest.update(b"day2-strict-clippy-selection-v1\0");
@@ -169,7 +201,7 @@ fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
         digest.update(&(name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
     }
-    root.join("target").join("strict-clippy").join(
+    root.join("build-out").join("strict-clippy").join(
         digest
             .finish()
             .as_ref()
@@ -180,11 +212,15 @@ fn strict_target_dir(root: &Path, packages: &[StrictCrate<'_>]) -> PathBuf {
 }
 
 fn pin_lint_flags(command: &mut Command) {
-    // Cargo's encoded flags replace raw/environment/configured rustflags. An
-    // additional cap alone cannot raise an inherited --cap-lints=allow.
     command
         .env_remove("RUSTFLAGS")
-        .env("CARGO_ENCODED_RUSTFLAGS", "--cap-lints=forbid");
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .args([
+            "--@rules_rust//rust/settings:clippy_flag=--cap-lints=forbid",
+            "--@rules_rust//rust/settings:clippy_flag=-Dwarnings",
+        ]);
 }
 
 fn confined_source(root: &Path, source: &str) -> Result<PathBuf> {
@@ -648,23 +684,115 @@ mod tests {
         );
     }
 
+    fn fixture_build(root: &Path, dependencies: &[&str]) -> Result<()> {
+        let build = format!(
+            "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\nrust_library(name=\"lib\", crate_name=\"boundary_fixture\", edition=\"2024\", srcs=[\"lib.rs\"], crate_root=\"lib.rs\", deps={dependencies:?})\n"
+        );
+        fs::write(root.join("src/BUILD.bazel"), build)?;
+        Ok(())
+    }
+
     fn fixture() -> Result<tempfile::TempDir> {
         let directory = tempfile::tempdir()?;
         fs::create_dir(directory.path().join("src"))?;
         fs::create_dir(directory.path().join("architecture"))?;
         fs::write(directory.path().join("architecture/clippy.toml"), CONFIG)?;
-        fs::write(
-            directory.path().join("rust-toolchain.toml"),
-            include_str!("../../../rust-toolchain.toml"),
+        let platform = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
+        // A standalone fixture owns its own extension invocation. Depending on
+        // the platform module would require a second transitive crate_universe
+        // lock and could fail before Clippy ever examines the negative source.
+        fs::copy(
+            platform.join("MODULE.bazel"),
+            directory.path().join("MODULE.bazel"),
         )?;
-        fs::write(
-            directory.path().join("Cargo.toml"),
-            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
+        fs::copy(
+            platform.join("MODULE.bazel.lock"),
+            directory.path().join("MODULE.bazel.lock"),
         )?;
-        fs::write(
-            directory.path().join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\n",
+        fs::copy(
+            platform.join(".bazelversion"),
+            directory.path().join(".bazelversion"),
         )?;
+        fs::copy(platform.join(".bazelrc"), directory.path().join(".bazelrc"))?;
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(directory.path().join(".bazelrc"))?
+            .write_all(b"\ncommon --lockfile_mode=update\n")?;
+        for name in ["Cargo.toml", "Cargo.lock"] {
+            fs::copy(platform.join(name), directory.path().join(name))?;
+        }
+        let catalog = crate::bazel::targets(&platform)?;
+        let packages = catalog
+            .iter()
+            .map(|target| target.directory.clone())
+            .collect::<BTreeSet<_>>();
+        for package in packages {
+            let destination = directory.path().join(&package);
+            fs::create_dir_all(&destination)?;
+            fs::copy(
+                platform.join(&package).join("Cargo.toml"),
+                destination.join("Cargo.toml"),
+            )?;
+            fs::write(
+                destination.join("BUILD.bazel"),
+                "exports_files([\"Cargo.toml\"])\n",
+            )?;
+        }
+        // Cargo reads only dependency manifests here. Empty target roots let it
+        // identify their source kinds without copying or building product code.
+        for target in &catalog {
+            let destination = directory.path().join(&target.source);
+            fs::create_dir_all(destination.parent().context("metadata target parent")?)?;
+            fs::write(
+                destination,
+                "// Dependency-input metadata only; never a fixture build target.\n",
+            )?;
+        }
+        fs::write(
+            directory.path().join("BUILD.bazel"),
+            "exports_files([\"architecture/clippy.toml\", \"Cargo.toml\", \"Cargo.lock\"])\n",
+        )?;
+        fs::create_dir_all(directory.path().join("build/bazel"))?;
+        for name in [
+            "outputs.cquery",
+            "cargo_context.bzl",
+            "cargo_contexts.bzl",
+            "cargo_production_contexts.bzl",
+            "cargo-context-inputs.json",
+            "BUILD.bazel",
+            "rust.bzl",
+            "toolchain.json",
+        ] {
+            fs::copy(
+                platform.join("build/bazel").join(name),
+                directory.path().join("build/bazel").join(name),
+            )?;
+        }
+        fs::create_dir(directory.path().join("build/bazel/patches"))?;
+        for entry in fs::read_dir(platform.join("build/bazel/patches"))? {
+            let entry = entry?;
+            ensure!(
+                entry.file_type()?.is_file(),
+                "regular reviewed dependency patch required"
+            );
+            fs::copy(
+                entry.path(),
+                directory
+                    .path()
+                    .join("build/bazel/patches")
+                    .join(entry.file_name()),
+            )?;
+        }
+        fs::write(
+            directory.path().join("build/bazel/targets.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"format":1,"targets":[{"package":"boundary-fixture","directory":"src","target":"boundary_fixture","kind":["lib"],"label":"//src:lib","test":false,"source":"src/lib.rs"}]}),
+            )?,
+        )?;
+        fixture_build(directory.path(), &[])?;
         Ok(directory)
     }
 
@@ -673,17 +801,18 @@ mod tests {
         fs::create_dir(directory.path().join("contract"))?;
         fs::create_dir(directory.path().join("contract/src"))?;
         fs::write(
-            directory.path().join("Cargo.toml"),
-            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\nmembers = [\"contract\"]\n[dependencies]\nboundary-contract = { path = \"contract\" }\n",
+            directory.path().join("contract/BUILD.bazel"),
+            "load(\"@rules_rust//rust:defs.bzl\", \"rust_library\")\nrust_library(name=\"lib\", crate_name=\"boundary_contract\", edition=\"2024\", srcs=[\"src/lib.rs\"], crate_root=\"src/lib.rs\", visibility=[\"//visibility:public\"])\n",
         )?;
+        let mut catalog: serde_json::Value = serde_json::from_slice(&fs::read(
+            directory.path().join("build/bazel/targets.json"),
+        )?)?;
+        catalog["targets"].as_array_mut().unwrap().push(serde_json::json!({"package":"boundary-contract","directory":"contract","target":"boundary_contract","kind":["lib"],"label":"//contract:lib","test":false,"source":"contract/src/lib.rs"}));
         fs::write(
-            directory.path().join("contract/Cargo.toml"),
-            "[package]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+            directory.path().join("build/bazel/targets.json"),
+            serde_json::to_vec(&catalog)?,
         )?;
-        fs::write(
-            directory.path().join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"boundary-contract\"\nversion = \"0.0.0\"\n\n[[package]]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\ndependencies = [\"boundary-contract\"]\n",
-        )?;
+        fixture_build(directory.path(), &["//contract:lib"])?;
         // The kernel really compiles as no_std while linking a reviewed strict
         // std contract. Source no_std alone cannot prevent dependency effects.
         fs::write(
@@ -698,24 +827,12 @@ mod tests {
     #[test]
     fn real_clippy_admits_ring_digest_but_rejects_ambient_entropy() -> Result<()> {
         let fixture = fixture()?;
-        fs::write(
-            fixture.path().join("Cargo.toml"),
-            "[package]\nname = \"boundary-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nring = { version = \"=0.17.14\", default-features = false }\n",
-        )?;
+        fixture_build(fixture.path(), &["@crates//:ring"])?;
         let source = fixture.path().join("src/lib.rs");
         let pure = format!(
             "{ATTRIBUTES}pub fn hash(bytes: &[u8]) -> ring::digest::Digest {{ ring::digest::digest(&ring::digest::SHA256, bytes) }}"
         );
         fs::write(&source, &pure)?;
-        let lock = Command::new("cargo")
-            .args(["generate-lockfile", "--offline"])
-            .current_dir(fixture.path())
-            .output()?;
-        ensure!(
-            lock.status.success(),
-            "Ring fixture lock: {}",
-            String::from_utf8_lossy(&lock.stderr)
-        );
         let packages = [StrictCrate {
             name: "boundary-fixture",
             source: "src/lib.rs",
@@ -759,7 +876,7 @@ mod tests {
         assert_ne!(full, partition(&["boundary-fixture"]));
         assert_ne!(full, partition(&["boundary-fixture", "different-contract"]));
         assert_ne!(partition(&["ab", "c"]), partition(&["a", "bc"]));
-        assert!(full.starts_with(root.join("target/strict-clippy")));
+        assert!(full.starts_with(root.join("build-out/strict-clippy")));
         let digest = full.file_name().unwrap().to_str().unwrap();
         assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }

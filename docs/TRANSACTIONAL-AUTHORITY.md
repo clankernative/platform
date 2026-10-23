@@ -16,7 +16,7 @@ and document returns its original receipt; changed request contents conflict.
 
 ## Local operator commands
 
-Build the CLI distribution with `cargo run --locked -p xtask -- cli` inside
+Build the CLI distribution with `bazel run //crates/xtask:xtask -- cli` inside
 `platform/`, then run from the workspace root:
 
 ```console

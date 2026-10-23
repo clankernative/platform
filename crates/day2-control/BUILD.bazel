@@ -1,0 +1,223 @@
+load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", "platform_rust_test", "platform_rust_static_library")
+
+package(default_visibility = ["//visibility:public"])
+
+COMPILE_INPUTS = [
+    "//:Cargo.lock",
+    "//:fixtures/control-simulation/lost-publication.json",
+    "//:fixtures/control-simulation/release-readiness.json",
+    "//:fixtures/control-simulation/unknown-publication.json",
+    "//:fixtures/control-simulation/workflow-competition.json",
+    "//:fixtures/control-simulation/workflow-lost-ack.json",
+    "//:fixtures/control-simulation/workflow-secret-revision.json",
+    "//crates/day2-capabilities:src/lib.rs",
+    "//crates/day2-control:Cargo.toml",
+    "//crates/day2-control:src/build.rs",
+    "//crates/day2-control:src/build/bazel_sources.rs",
+    "//crates/day2-control:src/build/ui_assembly.rs",
+    "//crates/day2-control:src/contracts.rs",
+    "//crates/day2-control:src/engine.rs",
+    "//crates/day2-control:src/gcp_secret_conformance.rs",
+    "//crates/day2-control:src/journal.rs",
+    "//crates/day2-control:src/kernel.rs",
+    "//crates/day2-control:src/kubernetes_conformance.rs",
+    "//crates/day2-control:src/provider_conformance.rs",
+    "//crates/day2-control:src/provider_evidence.rs",
+    "//crates/day2-control:src/qualified_release_build.rs",
+    "//crates/day2-control:src/release.rs",
+    "//crates/day2-control:src/release_execution.rs",
+    "//crates/day2-control:src/release_recipe.rs",
+    "//crates/day2-control:src/runtime_secret.rs",
+    "//crates/day2-control:src/secret_retirement.rs",
+    "//crates/day2-control:src/secret_retirement_recipe.rs",
+    "//crates/day2-control:src/secrets.rs",
+    "//crates/day2-control:src/simulation/coverage.rs",
+    "//crates/day2-control:src/simulation/generation.rs",
+    "//crates/day2-control:src/simulation/mod.rs",
+    "//crates/day2-control:src/simulation/provider.rs",
+    "//crates/day2-control:src/simulation/release_provider.rs",
+    "//crates/day2-control:src/simulation/releases.rs",
+    "//crates/day2-control:src/simulation/retirements.rs",
+    "//crates/day2-control:src/simulation/shrink.rs",
+    "//crates/day2-control:src/simulation/weak_provider.rs",
+    "//crates/day2-control:src/simulation/workflows.rs",
+    "//crates/day2-control:src/simulation_campaign.rs",
+    "//crates/day2-control:src/source.rs",
+    "//crates/day2:src/json.rs"
+]
+
+INTERNAL_DEPS = [
+    "//crates/day2-contracts:lib",
+    "//crates/day2:lib",
+    "//crates/day2-capabilities:lib",
+    "//crates/day2-kernel:lib",
+    "//crates/durable-temporal:lib"
+]
+
+DEV_INTERNAL_DEPS = [
+    "//crates/day2-assets:lib"
+]
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_control",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+)
+
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_control",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+)
+
+platform_rust_binary(
+    name = "control",
+    crate_name = "control",
+    crate_root = "src/bin/control.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_control",
+    crate_name = "control",
+    crate_root = "src/bin/control.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-app-keygen",
+    crate_name = "day2_app_keygen",
+    crate_root = "src/bin/day2-app-keygen.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_app_keygen",
+    crate_name = "day2_app_keygen",
+    crate_root = "src/bin/day2-app-keygen.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-gke-release",
+    crate_name = "day2_gke_release",
+    crate_root = "src/bin/day2-gke-release.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_gke_release",
+    crate_name = "day2_gke_release",
+    crate_root = "src/bin/day2-gke-release.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-serve",
+    crate_name = "day2_serve",
+    crate_root = "src/bin/day2-serve.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_serve",
+    crate_name = "day2_serve",
+    crate_root = "src/bin/day2-serve.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-serving-snapshot",
+    crate_name = "day2_serving_snapshot",
+    crate_root = "src/bin/day2-serving-snapshot.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_serving_snapshot",
+    crate_name = "day2_serving_snapshot",
+    crate_root = "src/bin/day2-serving-snapshot.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "control_integration",
+    crate_name = "control_integration",
+    crate_root = "tests/main.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-control:control", "//crates/day2-control:day2-app-keygen", "//crates/day2-control:day2-gke-release", "//crates/day2-control:day2-serve", "//crates/day2-control:day2-serving-snapshot"],
+)
+
+exports_files([
+    "Cargo.toml",
+    "src/build.rs",
+    "src/build/bazel_sources.rs",
+    "src/build/ui_assembly.rs",
+    "src/contracts.rs",
+    "src/engine.rs",
+    "src/gcp_secret_conformance.rs",
+    "src/journal.rs",
+    "src/kernel.rs",
+    "src/kubernetes_conformance.rs",
+    "src/provider_conformance.rs",
+    "src/provider_evidence.rs",
+    "src/qualified_release_build.rs",
+    "src/release.rs",
+    "src/release_execution.rs",
+    "src/release_recipe.rs",
+    "src/runtime_secret.rs",
+    "src/secret_retirement.rs",
+    "src/secret_retirement_recipe.rs",
+    "src/secrets.rs",
+    "src/simulation/coverage.rs",
+    "src/simulation/generation.rs",
+    "src/simulation/mod.rs",
+    "src/simulation/provider.rs",
+    "src/simulation/release_provider.rs",
+    "src/simulation/releases.rs",
+    "src/simulation/retirements.rs",
+    "src/simulation/shrink.rs",
+    "src/simulation/weak_provider.rs",
+    "src/simulation/workflows.rs",
+    "src/simulation_campaign.rs",
+    "src/source.rs"
+])

@@ -613,8 +613,8 @@ mod tests {
         // A supporting program is separate from its test harness and required by
         // the integration-test package; it must never enlarge campaign selections.
         for (target, kind, path) in [
-            ("day2", "bin", "target/debug/deps/day2-harness"),
-            ("day2_integration", "test", "target/debug/deps/integration"),
+            ("day2", "bin", "build-out/tests/day2-harness"),
+            ("day2_integration", "test", "build-out/tests/integration"),
         ] {
             tests.binaries.push(Binary {
                 package: "day2".into(),
@@ -635,7 +635,7 @@ mod tests {
                 target: target.into(),
                 kind: vec![kind.into()],
                 directory: format!("crates/{package}").into(),
-                executable: format!("target/debug/deps/{target}").into(),
+                executable: format!("build-out/tests/{target}").into(),
                 digest: String::new(),
                 permissions: 0o755,
             });
@@ -664,10 +664,10 @@ mod tests {
             host: current.host.clone(),
             architecture: current.architecture.clone(),
             rustc: "rust\nhost: x86_64-unknown-linux-gnu".into(),
-            cargo: "cargo".into(),
+            bazel: "bazel".into(),
             cc: "cc".into(),
             environment: format!("sha256:{}", "d".repeat(64)),
-            cargo_configuration: BTreeMap::new(),
+            bazel_configuration: BTreeMap::new(),
             ci_workflow: "ci".into(),
         };
         let cache = BuildCache {

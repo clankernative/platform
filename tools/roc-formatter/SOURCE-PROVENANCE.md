@@ -15,7 +15,7 @@ Bootstrap checks the exact executable digest; it never promotes a fresh build.
 `xtask build-formatter` downloads pinned inputs, applies both patches, runs the
 native formatter module tests and builds a candidate with isolated caches.
 Its candidate artifact includes build provenance. Native integration checks are
-available with `cargo test --locked -p xtask formatter_native -- --ignored`.
+available with `bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask formatter_native --ignored`.
 The public full gate checks the source tree separately.
 
 This build is **not bit-for-bit reproducible**. Mach-O link UUIDs and embedded Zig

@@ -1,5 +1,5 @@
 //! Real CLI/watch smoke test. Run after `xtask cli`, outside xtask's build lock:
-//! cargo test --locked -p day2-ops --test local_dev_cli -- --ignored
+//! bazel run //crates/xtask:xtask -- test-rust //crates/day2-ops:local_dev_cli --ignored
 use anyhow::{Context, Result, ensure};
 use reqwest::{StatusCode, blocking::Client, redirect::Policy};
 use serde_json::Value;

@@ -4776,6 +4776,10 @@ mod tests {
 
     #[test]
     fn compiler_negative_assertion_detects_traits_implemented_outside_the_owner() -> Result<()> {
+        let platform = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
+        let rustc = crate::bazel::tool(&platform, "rustc")?;
         let fixture = tempfile::tempdir()?;
         let source = fixture.path().join("proof.rs");
         struct ActualMacro(Option<syn::ItemMacro>);
@@ -4820,7 +4824,7 @@ mod tests {
                 (production_only, false, false),
             ] {
                 fs::write(&source, format!("{assertion}\n{implementation}"))?;
-                let mut compiler = std::process::Command::new("rustc");
+                let mut compiler = std::process::Command::new(&rustc);
                 compiler.args(["--edition=2024", "--emit=metadata"]);
                 if test_build {
                     compiler.args(["--cfg", "test"]);

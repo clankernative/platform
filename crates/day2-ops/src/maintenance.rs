@@ -59,7 +59,7 @@ const PLAN: &str = "/srv/day2/migration-plan.json";
 const ADMISSION: &str = "/srv/day2/admission";
 const ADMISSION_INSTANCE: &str = "/srv/day2/admission/instance.json";
 const HOST: &str = "/workspace/platform/cli/day2-host";
-const DAY2: &str = "/workspace/platform/target/debug/day2";
+const DAY2: &str = "/workspace/platform/build-out/bin/day2";
 const OUTPUT_LIMIT: usize = 16 << 20;
 const LAYER_LIMIT: u64 = 1 << 30;
 /// day2-gke-release and the day2-app stack change an app's image only to the

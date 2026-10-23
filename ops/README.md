@@ -27,7 +27,7 @@ Build the distribution inside `platform/` so rustup selects its pinned toolchain
 
 ```console
 cd platform
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- cli
 cd ..
 ./cli/day2 platform --help
 ./cli/day2 platform build examples/reports
@@ -123,9 +123,9 @@ mutation. Add qualified provider capabilities to that host, not another app SDK.
 Verification is centralized; run these inside `platform/`:
 
 ```console
-cargo run --locked -p xtask -- verify-fast
-cargo run --locked -p xtask -- verify-reports
-cargo run --locked -p xtask -- verify
+bazel run //crates/xtask:xtask -- verify-fast
+bazel run //crates/xtask:xtask -- verify-reports
+bazel run //crates/xtask:xtask -- verify
 ```
 
 The fast recipe is for edit-loop feedback: formatting, workspace lint and

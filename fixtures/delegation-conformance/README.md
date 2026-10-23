@@ -10,7 +10,7 @@ The mandatory disposable app campaign uses one exact simulated peer response.
 The native HTTP suite instead installs a real callee and pins its actual schema
 digest; no simulated integration is used in that suite.
 
-`cargo run --locked -p xtask -- build-delegation` builds the peer first, resolves
+`bazel run //crates/xtask:xtask -- build-delegation` builds the peer first, resolves
 the caller's exact import lock and builds the caller through the normal pipeline.
 The two addressed artifacts are recorded in `artifacts/delegation-fixtures.json`.
 The control crate's `release_execution` HTTP suite uses independently served normal

@@ -82,9 +82,9 @@ CI recipes invoke it. Native capabilities execute one bounded schedule at a time
 and require a complete campaign before issuing evidence.
 
 ```text
-cargo run --locked -p xtask -- simulate-control
-cargo run --locked -p xtask -- simulate-control 42 32
-cargo run --locked -p xtask -- replay-control TRACE.json
+bazel run //crates/xtask:xtask -- simulate-control
+bazel run //crates/xtask:xtask -- simulate-control 42 32
+bazel run //crates/xtask:xtask -- replay-control TRACE.json
 ```
 
 Generated scenarios use format 4 with explicit request admission, weak-provider events and shared-secret

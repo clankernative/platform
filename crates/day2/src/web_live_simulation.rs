@@ -316,12 +316,8 @@ fn seeded_live_schedules_match_independent_reference_and_replay() -> Result<()> 
             let result = runtime.block_on(replay(&decoded));
             if let Err(error) = result {
                 // Persist the entire observation schedule, not just a random seed.
-                let target = std::env::var_os("CARGO_TARGET_DIR")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| {
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
-                    });
-                let directory = target.join("day2-web-live-replays");
+                let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/day2-web-live-replays");
                 std::fs::create_dir_all(&directory).unwrap();
                 let path = directory.join(format!("seed-{seed}.json"));
                 std::fs::write(&path, bytes).unwrap();

@@ -66,7 +66,7 @@ input when applicable, and fingerprints of both callback replies. Evidence can c
 application data; keep it private. Replay it with:
 
 ```console
-cargo run --locked -p day2 -- replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
+build-out/bin/day2 replay-verification 'ARTIFACT_DIRECTORY' 'EVIDENCE_DIRECTORY/verification-failure.json'
 ```
 
 This re-evaluates only the artifact-bound pure callback and typed-input validation,
@@ -146,8 +146,8 @@ compiler failure, and verifies data, login and port preservation across rebuilds
 and restarts. Run it after building the CLI, with no other xtask build running:
 
 ```console
-cargo run --locked -p xtask -- cli
-cargo test --locked -p day2-ops --test local_dev_cli -- --ignored
+bazel run //crates/xtask:xtask -- cli
+bazel run //crates/xtask:xtask -- test-rust //crates/day2-ops:local_dev_cli --ignored
 ```
 
 These commands run from `platform/`. The CLI test is separate from the gate

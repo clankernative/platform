@@ -99,9 +99,9 @@ failures never automatically become approved source changes.
 ## Running the lab
 
 ```text
-cargo run --locked -p xtask -- simulate-control
-cargo run --locked -p xtask -- simulate-control 42 8
-cargo run --locked -p xtask -- replay-control PATH/TO/TRACE.json
+bazel run //crates/xtask:xtask -- simulate-control
+bazel run //crates/xtask:xtask -- simulate-control 42 8
+bazel run //crates/xtask:xtask -- replay-control PATH/TO/TRACE.json
 ```
 
 Runs with one to seven generated cases are exploratory and explicitly marked

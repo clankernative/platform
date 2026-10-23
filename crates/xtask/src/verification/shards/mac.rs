@@ -324,7 +324,7 @@ const CASES: &[(&str, &str, &str, &str, bool)] = &[
         "day2-control",
         "control_integration",
         "test",
-        "build::cargo_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes",
+        "build::bazel_stage_sandbox_allows_private_reads_but_denies_host_data_and_writes",
         false,
     ),
     (
@@ -333,6 +333,13 @@ const CASES: &[(&str, &str, &str, &str, bool)] = &[
         "bin",
         "formatting::tests::formatter_native_spacing_width_check_idempotence_and_parse_failure",
         true,
+    ),
+    (
+        "day2",
+        "day2",
+        "lib",
+        "sandbox::tests::selected_developer_profile_keeps_outside_file_and_network_refusals",
+        false,
     ),
 ];
 const BUILD_CASES: &[(&str, &str)] = &[
@@ -370,7 +377,7 @@ pub(super) struct Proof {
 }
 
 fn preparation_effects() -> BTreeSet<String> {
-    ["cli", "test-binaries"]
+    ["bazel-controls", "cli", "test-binaries"]
         .into_iter()
         .map(String::from)
         .chain(FIXTURES.iter().map(|fixture| format!("build-{fixture}")))
@@ -443,7 +450,7 @@ fn case_binary<'a>(
         .collect();
     ensure!(
         matches.len() == 1,
-        "exact focused Mac Cargo harness required: {package}/{target}"
+        "exact focused Mac Bazel harness required: {package}/{target}"
     );
     Ok(matches[0])
 }
@@ -456,11 +463,7 @@ fn list(root: &Path, binary: &Binary, name: &str, ignored: bool) -> Result<bool>
         command.arg("--ignored");
     }
     command.stdout(Stdio::from(file.reopen()?));
-    run_with_budget(
-        &root.join(&binary.directory),
-        &mut command,
-        Duration::from_secs(60),
-    )?;
+    run_with_budget(root, &mut command, Duration::from_secs(60))?;
     let output: &fs::File = file.as_file();
     ensure!(
         output.metadata()?.len() <= 1024 * 1024,
@@ -489,21 +492,27 @@ pub(in super::super) fn focused(
     fixtures: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
     let started = Instant::now();
+    // The genuine child canaries compile their fixed probe with this exact
+    // configured tool; bare prebuilt launches do not inherit Bazel runfiles.
+    let rustc = crate::bazel::tool(root, "rustc")?;
     let mut cases = Vec::new();
     for (package, target, kind, name, ignored) in CASES {
         let binary = case_binary(prepared, package, target, kind)?;
         require_case(root, binary, name, *ignored)?;
         let mut command = Command::new(root.join(&binary.executable));
         command.args([*name, "--exact", "--nocapture"]);
+        if *package == "day2-control" && *target == "control_integration" {
+            command.env("DAY2_TEST_RUSTC", &rustc);
+        }
         if *ignored {
             command.arg("--ignored");
         }
-        configure_tests(root, "mac-native", fixtures, &mut command)?;
+        configure_tests(root, "mac-native", fixtures, None, &mut command)?;
         let remaining = Duration::from_secs(3600)
             .checked_sub(started.elapsed())
             .context("focused Mac native case allowance exhausted")?;
         let case_start = Instant::now();
-        run_with_budget(&root.join(&binary.directory), &mut command, remaining)?;
+        run_with_budget(root, &mut command, remaining)?;
         cases.push(Case {
             package: (*package).into(),
             target: (*target).into(),
@@ -623,12 +632,12 @@ pub(super) fn admit(
             && c.host == id.host
             && c.architecture == id.architecture
             && c.ci_workflow == compiler.ci_workflow
-            && c.cargo_configuration == compiler.cargo_configuration
+            && c.bazel_configuration == compiler.bazel_configuration
             && c.rustc.lines().next() == compiler.rustc.lines().next()
             && c.rustc
                 .lines()
                 .any(|line| line == "host: aarch64-apple-darwin")
-            && c.cargo.lines().next() == compiler.cargo.lines().next()
+            && c.bazel == compiler.bazel
             && !c.cc.trim().is_empty()
             && valid_digest(&c.environment),
         "Mac compiler/config/profile proof changed"
@@ -643,7 +652,7 @@ pub(super) fn admit(
             .collect();
         ensure!(
             observed == *expected && observed.len() == binaries.len(),
-            "incomplete Mac native Cargo graph"
+            "incomplete Mac native Bazel graph"
         );
         for b in binaries {
             ensure!(
@@ -659,9 +668,9 @@ pub(super) fn admit(
                         .all(|part| matches!(part, std::path::Component::Normal(_)))
                     && b.executable.parent()
                         == Some(Path::new(if programs {
-                            "target/debug"
+                            "build-out/bin"
                         } else {
-                            "target/debug/deps"
+                            "build-out/tests"
                         })),
                 "invalid Mac native executable identity"
             );
@@ -802,6 +811,9 @@ pub(super) mod tests {
             &["verify-mac"],
             |request| {
                 match request.action.as_str() {
+                    "verify-bazel-controls" => {
+                        prepared.insert("bazel-controls".into());
+                    }
                     "verify-cli" => {
                         prepared.insert("cli".into());
                     }

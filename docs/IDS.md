@@ -32,7 +32,7 @@ Use `xtask retire-model APP TABLE` when removing a model. A later new model does
 For an intentional source rename, preserve the identity before building:
 
 ```console
-cargo run --locked -p xtask -- rename-model ../my-app orders purchases Models.Purchase
+bazel run //crates/xtask:xtask -- rename-model ../my-app orders purchases Models.Purchase
 ```
 
 This updates registry metadata; update the Roc model/catalog names consistently.
@@ -73,9 +73,9 @@ artifact/host before upgrading. Back up the database and instance configuration.
 Build the new app, then use the artifact directory printed by that build:
 
 ```console
-cargo run --locked -p day2 -- migration-plan INSTANCE APP TARGET_ARTIFACT PLAN_FILE
-cargo run --locked -p day2 -- migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE
-cargo run --locked -p day2 -- activate INSTANCE APP TARGET_ARTIFACT LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID
+build-out/bin/day2 migration-plan INSTANCE APP TARGET_ARTIFACT PLAN_FILE
+build-out/bin/day2 migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE
+build-out/bin/day2 activate INSTANCE APP TARGET_ARTIFACT LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID
 ```
 
 Review the plan's `convert_ids: true` before applying. One SQLite transaction

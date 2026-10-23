@@ -1,0 +1,33 @@
+load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", "platform_rust_test", "platform_rust_static_library")
+
+package(default_visibility = ["//visibility:public"])
+
+COMPILE_INPUTS = []
+
+INTERNAL_DEPS = []
+
+DEV_INTERNAL_DEPS = []
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_capabilities",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+)
+
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_capabilities",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+)
+
+exports_files([
+    "Cargo.toml",
+    "src/lib.rs",
+    "src/oauth.rs"
+])

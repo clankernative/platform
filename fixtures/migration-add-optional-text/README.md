@@ -14,7 +14,7 @@ This fixture is not evidence that arbitrary schema changes are supported.
 Build only this fixture from the platform directory:
 
 ```text
-cargo run --locked -p xtask -- build-migration-fixture
+bazel run //crates/xtask:xtask -- build-migration-fixture
 ```
 
 Building does not migrate an existing company database or change an app binding.

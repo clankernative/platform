@@ -1,0 +1,102 @@
+load("//build/bazel:rust.bzl", "platform_rust_binary", "platform_rust_library", "platform_rust_test", "platform_rust_static_library")
+
+package(default_visibility = ["//visibility:public"])
+
+COMPILE_INPUTS = []
+
+INTERNAL_DEPS = []
+
+DEV_INTERNAL_DEPS = []
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_sandbox",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+)
+
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_sandbox",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+)
+
+platform_rust_binary(
+    name = "day2-compiler-sandbox",
+    crate_name = "day2_compiler_sandbox",
+    crate_root = "src/bin/day2-compiler-sandbox.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_compiler_sandbox",
+    crate_name = "day2_compiler_sandbox",
+    crate_root = "src/bin/day2-compiler-sandbox.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-sandbox",
+    crate_name = "day2_sandbox",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_sandbox",
+    crate_name = "day2_sandbox",
+    crate_root = "src/main.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_binary(
+    name = "day2-sandbox-probe",
+    crate_name = "day2_sandbox_probe",
+    crate_root = "src/bin/day2-sandbox-probe.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "unit_day2_sandbox_probe",
+    crate_name = "day2_sandbox_probe",
+    crate_root = "src/bin/day2-sandbox-probe.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+)
+
+platform_rust_test(
+    name = "isolation",
+    crate_name = "isolation",
+    crate_root = "tests/isolation.rs",
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], allow_empty = True),
+    compile_data = COMPILE_INPUTS,
+    internal_deps = INTERNAL_DEPS + DEV_INTERNAL_DEPS,
+    own_library = ":lib",
+    program_data = ["//crates/day2-sandbox:day2-compiler-sandbox", "//crates/day2-sandbox:day2-sandbox", "//crates/day2-sandbox:day2-sandbox-probe"],
+)
+
+exports_files([
+    "Cargo.toml"
+])

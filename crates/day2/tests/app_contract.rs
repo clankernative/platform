@@ -462,7 +462,7 @@ fn admitted_failure_principals_are_atomic_replayable_and_simulation_only() -> Re
             let bytes = serde_json::to_vec_pretty(trace)?;
             fs::write(&saved, &bytes)?;
             eprintln!(
-                "Replay: cargo run --locked -p day2 -- replay {} {}",
+                "Replay: build-out/bin/day2 replay {} {}",
                 artifact_path.display(),
                 saved.display()
             );

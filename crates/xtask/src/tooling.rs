@@ -192,20 +192,12 @@ pub fn configure_tofu(root: &Path, requested: Option<PathBuf>) -> Result<PathBuf
     Ok(path)
 }
 
-/// Generate notices from the exact locked Cargo inputs. Run after cargo fetch;
+/// Generate notices from the exact locked crate_universe dependency inputs;
 /// this includes target-specific dependencies so one notice bundle serves every
 /// supported binary. It deliberately includes more than a single target links.
 pub fn notices(root: &Path) -> Result<()> {
-    let result = Command::new("cargo")
-        .current_dir(root)
-        .args(["metadata", "--locked", "--offline", "--format-version=1"])
-        .output()?;
-    ensure!(
-        result.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let metadata: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+    let result = crate::bazel::dependency_metadata(root, false)?;
+    let metadata: serde_json::Value = serde_json::from_slice(&result)?;
     let mut packages: Vec<_> = metadata["packages"]
         .as_array()
         .context("Cargo packages")?

@@ -1,0 +1,164 @@
+load(":cargo_context.bzl", "cargo_context_controls", "cargo_context_probe", "cargo_dependency_context")
+
+exports_files(["outputs.cquery",
+    "rust.bzl",
+    "cargo_context.bzl",
+    "cargo_contexts.bzl",
+    "cargo_production_contexts.bzl",
+    "cargo-context-inputs.json",
+] + glob(["patches/*.patch"]))
+
+cargo_dependency_context(
+    name = "dependency_context",
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_x86_64_host",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_x86_64_target",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_host",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_target",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_host",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_target",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_x86_64_production_host",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_x86_64_production_target",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_production_host",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "linux_aarch64_production_target",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_production_host",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "host"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "macos_aarch64_production_target",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:aarch64"],
+    flag_values = {":dependency_context": "target"},
+    define_values = {"DAY2_PLATFORM_FEATURE_SCOPE": "production"},
+    visibility = ["//visibility:public"],
+)
+
+cargo_context_probe(
+    name = "normal_context_probe",
+    expected = "target",
+    selected = select({
+        ":linux_x86_64_host": ["host"],
+        ":linux_x86_64_production_host": ["host"],
+        ":linux_x86_64_target": ["target"],
+        ":linux_x86_64_production_target": ["target"],
+        ":linux_aarch64_host": ["host"],
+        ":linux_aarch64_production_host": ["host"],
+        ":linux_aarch64_target": ["target"],
+        ":linux_aarch64_production_target": ["target"],
+        ":macos_aarch64_host": ["host"],
+        ":macos_aarch64_production_host": ["host"],
+        ":macos_aarch64_target": ["target"],
+        ":macos_aarch64_production_target": ["target"],
+    }),
+    tags = ["manual"],
+)
+
+cargo_context_probe(
+    name = "exec_context_probe",
+    expected = "host",
+    selected = select({
+        ":linux_x86_64_host": ["host"],
+        ":linux_x86_64_production_host": ["host"],
+        ":linux_x86_64_target": ["target"],
+        ":linux_x86_64_production_target": ["target"],
+        ":linux_aarch64_host": ["host"],
+        ":linux_aarch64_production_host": ["host"],
+        ":linux_aarch64_target": ["target"],
+        ":linux_aarch64_production_target": ["target"],
+        ":macos_aarch64_host": ["host"],
+        ":macos_aarch64_production_host": ["host"],
+        ":macos_aarch64_target": ["target"],
+        ":macos_aarch64_production_target": ["target"],
+    }),
+    tags = ["manual"],
+)
+
+cargo_context_controls(
+    name = "context_controls",
+    normal = ":normal_context_probe",
+    tool = ":exec_context_probe",
+)
+
+config_setting(
+    name = "release",
+    define_values = {"DAY2_PLATFORM_RUST_PROFILE": "release"},
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["toolchain.json", "targets.json"])

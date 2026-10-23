@@ -4,7 +4,7 @@
 //! linked all of day2 and its dependencies again, so a one-line library edit
 //! relinked dozens of executables. As modules of one binary they link once.
 //! Select a former target with its module name as a filter, for example
-//! `cargo test -p day2 --test day2_integration -- admission::`.
+//! `bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration admission::`.
 
 mod admission;
 mod api_docs;

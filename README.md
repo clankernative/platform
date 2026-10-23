@@ -5,7 +5,7 @@ The platform repository is public. Each company keeps its instance configuration
 application repositories, operational state and credentials private.
 
 The supported development host is Apple Silicon macOS with Xcode Command Line
-Tools and rustup. Native Linux ARM64 and x86_64 runtime images use pinned toolchains
+Tools and Bazelisk. Native Linux ARM64 and x86_64 runtime images use pinned toolchains
 and require the documented kernel qualification. Production browser authentication
 currently uses Google IAP and one hosted domain. The application runtime uses
 single-replica SQLite; it does not promise multi-writer HA or arbitrary identity
@@ -13,16 +13,21 @@ provider support. The isolated control-plane builder is currently macOS-only.
 
 ## Start locally
 
-Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Rust **1.98.1** is
-selected by `rust-toolchain.toml`. From this repository's root:
+Install OpenTofu **1.11.5** and Temporal CLI **1.6.1** on PATH. Bazel **9.3.0** is selected by `.bazelversion`; its
+pinned rules_rust toolchain supplies Rust **1.98.1**. From this repository's root:
 
 ```console
-cargo run --locked -p xtask -- bootstrap
-cargo run --locked -p xtask -- bootstrap-formatter
-cargo run --locked -p xtask -- configure-tofu
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- bootstrap
+bazel run //crates/xtask:xtask -- bootstrap-formatter
+bazel run //crates/xtask:xtask -- configure-tofu
+bazel run //crates/xtask:xtask -- cli
 ./cli/day2 platform local-dev examples/reports --directory ../my-private-instance
 ```
+
+The native operator programs are also installed in `build-out/bin`. Invoke
+those programs directly so relative instance/artifact paths keep the caller's
+working directory. `bazel run //crates/xtask:xtask -- ...` preserves that directory
+for build and verification commands.
 
 Open the one-use login URL printed by the local server. This is loopback-only
 development authentication. The Reports app is an explicitly public teaching
@@ -40,8 +45,8 @@ ignored `.cache/tofu.json`; machine-specific paths are never source inputs.
 ## Develop and verify
 
 ```console
-cargo run --locked -p xtask -- verify-fast
-cargo run --locked -p xtask -- verify
+bazel run //crates/xtask:xtask -- verify-fast
+bazel run //crates/xtask:xtask -- verify
 ```
 
 `verify-fast` runs formatting, Clippy and fixture-free library checks. Full
@@ -54,12 +59,15 @@ It requires substantial time and disk space. Private company apps are never
 discovered or included by either command. Company acceptance suites run in their
 own private repos against the platform version they deploy.
 
+[Bazel build and cache details](docs/BAZEL.md) explain the declared targets,
+compiler profiles, focused tests and private builder.
+
 Both gates check the reviewed [platform structural rules](docs/PLATFORM-STRUCTURAL-RULES.md).
-Use `cargo run --locked -p xtask -- architecture-check` for focused feedback.
+Use `bazel run //crates/xtask:xtask -- architecture-check` for focused feedback.
 `architecture-inventory` prints source/effect facts without changing policy.
 
-Use `cargo run --locked -p xtask -- fmt` for authored Rust and Roc. Run
-`cargo run --locked -p xtask -- build /absolute/path/to/private-app` to build a
+Use `bazel run //crates/xtask:xtask -- fmt` for authored Rust and Roc. Run
+`bazel run //crates/xtask:xtask -- build /absolute/path/to/private-app` to build a
 separate app. Build outputs stay in ignored `artifacts/`; they can contain private
 application inputs and must not be uploaded as public release assets.
 

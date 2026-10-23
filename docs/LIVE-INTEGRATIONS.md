@@ -110,7 +110,7 @@ close or timeout keeps the bytes it already consumed, and a response refused
 from its headers keeps its status and `Retry-After`. Known settlement and the
 failure's correlation therefore record all provider traffic.
 
-`cargo run --locked -p xtask -- carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY`
+`bazel run //crates/xtask:xtask -- carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY`
 is the explicit operator qualification. It is not part of any verification
 recipe. The private [`ops/CartaQualification.roc`](../ops/CartaQualification.roc)
 recipe owns its step order and runs through `ops/Runner.roc`: open the inputs,
@@ -250,7 +250,7 @@ permissions. Both containers run with that UID, so an unreadable mount fails
 before registration. Keep each file available for the runtime's lifetime.
 
 ```text
-cargo run --locked -p day2 --bin day2-package -- INSTANCE APP ACTOR RUNTIME_IMAGE_DIGEST PORT NEW_DIRECTORY --provisioning PRIVATE_PROVISIONING_JSON
+build-out/bin/day2-package INSTANCE APP ACTOR RUNTIME_IMAGE_DIGEST PORT NEW_DIRECTORY --provisioning PRIVATE_PROVISIONING_JSON
 docker compose -f NEW_DIRECTORY/compose.json run --rm provision-credentials
 docker compose -f NEW_DIRECTORY/compose.json up -d app
 ```

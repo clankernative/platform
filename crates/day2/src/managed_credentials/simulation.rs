@@ -601,7 +601,7 @@ fn checked(program: &Program) -> Result<Trace> {
                 observations: error.downcast::<Divergence>().ok()
                     .map(|failure| failure.observations).unwrap_or_default(),
                 reduced, category: failure,
-                replay: "DAY2_CREDENTIAL_REPLAY=<path> cargo test --locked -p day2 --lib managed_credentials::simulation::replay_saved_credential_history -- --exact".into(),
+                replay: "DAY2_CREDENTIAL_REPLAY=<path> bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib managed_credentials::simulation::replay_saved_credential_history --exact".into(),
             };
             let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../artifacts/credential-simulation");

@@ -43,6 +43,7 @@ Verify :: [].{
 
 	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
 	inputs! = |host!| {
+		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in [
@@ -83,7 +84,7 @@ Verify :: [].{
 	all! = |host!| {
 		_ = inputs!(host!)?
 		_ = Simulation.campaign!(3_664_912_422, 32, host!)?
-		# One Cargo invocation covers the former all-runtime and control package sets.
+		# One declared Bazel build covers the former all-runtime and control package sets.
 		# Tests remain serial; the combined allowance preserves their former 9000s + 3600s ceilings.
 		_ =
 			Capability.call!(
@@ -146,9 +147,21 @@ Verify :: [].{
 		Capability.call!("verify-shard-receipt", Json.to_str({ shard: shard }), host!)
 	}
 
+	# One real private build for diagnosis. This publishes no full verification receipt.
+	private_build_probe! : (Str => Try(Str, Str)) => Try(Str, Str)
+	private_build_probe! = |host!| {
+		_ = Capability.call!("verify-cli", "{}", host!)?
+		Capability.call!(
+			"verify-tests",
+			Json.to_str({ suite: "isolated-build-probe", budget_seconds: 1800.U64 }),
+			host!,
+		)
+	}
+
 	# Only native Mac obligations stay here. Portable workspace campaigns run on Linux.
 	mac! : (Str => Try(Str, Str)) => Try(Str, Str)
 	mac! = |host!| {
+		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
 		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar", "verification-setup"] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?

@@ -127,7 +127,7 @@ HTTP authentication, CSRF and transport failures retain their HTTP status.
 Requests have the host's 64 KiB body limit; batches and duplicate JSON fields are
 rejected. Audit events and transaction evidence use the existing host path.
 
-Run `cargo run --locked -p xtask -- verify-reports` for the compiled Reports example,
+Run `bazel run //crates/xtask:xtask -- verify-reports` for the compiled Reports example,
 schema/description consistency tests, metadata drift tests and real HTTP/MCP
 authorization, replay and restart tests.
 The platform-wide `verify` recipe currently refuses pending the

@@ -1,0 +1,32 @@
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -1266,6 +1266,29 @@
+     rustc_flags.add(compilation_mode.debug_info, format = "--codegen=debuginfo=%s")
+     rustc_flags.add(compilation_mode.strip_level, format = "--codegen=strip=%s")
+ 
++    # Preserve the platform's dependency and build-tool profiles explicitly.
++    # Defines propagate through Bazel's exec transition; COMPILATION_MODE alone
++    # would silently optimize development build tools at release settings.
++    platform_release = ctx.var.get("DAY2_PLATFORM_RUST_PROFILE", "dev") == "release"
++    platform_tool = ctx.configuration.is_tool_configuration() or crate_info.type == "proc-macro"
++    rustc_flags.add("-Copt-level=%s" % ("0" if platform_tool else "3") if platform_release else "-Copt-level=2")
++    rustc_flags.add("-Cdebug-assertions=off" if platform_release else "-Cdebug-assertions=on")
++    rustc_flags.add("-Coverflow-checks=off" if platform_release else "-Coverflow-checks=on")
++    rustc_flags.add("-Cstrip=debuginfo")
++    if not _will_emit_object_file(emit):
++        # Cargo leaves native non-incremental dev units unspecified. Rust's
++        # Default partitioning differs from forcing User(16) or User(256).
++        # Test profile overrides apply to target units, never build tools.
++        units = "256" if platform_release and platform_tool else None
++        if not platform_release and not platform_tool:
++            units = ctx.var.get("DAY2_PLATFORM_CODEGEN_UNITS")
++        if units != None:
++            rustc_flags.add("-Ccodegen-units=%s" % units)
++    if not platform_release and not platform_tool and ctx.var.get("DAY2_PLATFORM_CODEGEN_UNITS") == "256":
++        rustc_flags.add("-Clto=off")
++    if platform_release:
++        rustc_flags.add("-Cpanic=unwind" if platform_tool or crate_info.is_test else "-Cpanic=abort")
++
+     # For determinism to help with build distribution and such
+     if remap_path_prefix != None:
+         # `--remap-path-prefix` flags are applied in reverse order. We need to

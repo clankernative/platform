@@ -593,7 +593,7 @@ one to its directory and exercises it in `crates/day2/tests/redirect_routes.rs`.
 Export a normally built, admitted artifact as deterministic typed JSON:
 
 ```console
-cargo run --locked -p xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
+bazel run //crates/xtask:xtask -- app-contracts artifacts/ARTIFACT_DIGEST --output app-contracts.json
 ```
 
 Schema 1 includes commands, all registered queries, routes, forms, schedules and
@@ -1023,7 +1023,7 @@ must be a six-digit hex color with adequate contrast against white text; it is
 compiled into a tiny external stylesheet, never interpolated as arbitrary CSS.
 
 ```text
-cargo run --locked -p xtask -- brand ../company-instance/branding/source ../company-instance/branding/bundles
+bazel run //crates/xtask:xtask -- brand ../company-instance/branding/source ../company-instance/branding/bundles
 ```
 
 The command prints the immutable bundle directory. Set the instance's optional

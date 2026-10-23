@@ -107,8 +107,8 @@ Run inside `platform/`, replacing the arguments with the operator-designated
 profile, private token file and evidence directory:
 
 ```text
-cargo run --locked -p xtask -- provider-conformance PROFILE TOKEN_FILE NEW_DIRECTORY
-cargo run --locked -p xtask -- provider-conformance-resume PROFILE TOKEN_FILE DIRECTORY
+bazel run //crates/xtask:xtask -- provider-conformance PROFILE TOKEN_FILE NEW_DIRECTORY
+bazel run //crates/xtask:xtask -- provider-conformance-resume PROFILE TOKEN_FILE DIRECTORY
 ```
 
 The first command validates local inputs, binds a new evidence session, builds

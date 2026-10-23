@@ -96,7 +96,7 @@ x86_64 on an x86_64 Linux host — and selects the matching compiler pin in
 Landlock ruleset qualified under Rosetta or QEMU says nothing about the target.
 
 ```text
-cargo run --locked -p xtask -- qualify-linux artifacts/linux-qualification-NEW_RUN
+bazel run //crates/xtask:xtask -- qualify-linux artifacts/linux-qualification-NEW_RUN
 ```
 
 `ops/Linux.roc` captures the platform, Reports and GoLinks inputs, builds those captured
@@ -120,7 +120,7 @@ workflows.
 After a successful campaign, exercise explicit security admission separately:
 
 ```text
-cargo run --locked -p xtask -- strict-linux QUALIFICATION_DIRECTORY NEW_OUTPUT
+bazel run //crates/xtask:xtask -- strict-linux QUALIFICATION_DIRECTORY NEW_OUTPUT
 ```
 
 This private Roc recipe consumes the actual completed `qualification.json`, checks
@@ -146,10 +146,15 @@ The tooling image contains the existing `cli/day2` distribution. Its compiler
 requires a finite memory cgroup and bounded tmpfs mounts for both staging and
 generated ABI files. Roc reserves sparse memory larger than its physical usage;
 tmpfs quotas bound real output independently of those virtual reservations.
-Use a disposable container, with `APP_SOURCE` replaced by an absolute app path:
+Use a disposable container, with `APP_SOURCE` replaced by an absolute app path.
+The generated-output tmpfs starts empty: copy the reviewed ABI seed from the
+same platform checkout used to build the image before the ordinary check. The
+build still requires fresh generator equality; no nested source bind mount is
+allowed inside the bounded output directory:
 
 ```text
 docker run -d --name day2-linux-tooling --memory=6g --cpus=4 --pids-limit=512 --cgroupns=private --tmpfs /workspace/platform/artifacts:rw,exec,nosuid,nodev,size=1g --tmpfs /workspace/platform/crates/worker/generated:rw,nosuid,nodev,size=64m --mount type=bind,source=APP_SOURCE,target=/workspace/reports-app,readonly day2-tooling:spike sleep infinity
+docker cp crates/worker/generated/roc_platform_abi.rs day2-linux-tooling:/workspace/platform/crates/worker/generated/roc_platform_abi.rs
 docker exec day2-linux-tooling cli/day2 platform check /workspace/reports-app 42 16
 ```
 
@@ -171,7 +176,7 @@ Explicitly bind that Linux artifact and the runtime profile in an operator
 instance, then export to a new directory:
 
 ```text
-cargo run --locked -p day2 --bin day2-package -- INSTANCE APP ACTOR IMAGE_DIGEST PUBLISHED_PORT NEW_DIRECTORY
+build-out/bin/day2-package INSTANCE APP ACTOR IMAGE_DIGEST PUBLISHED_PORT NEW_DIRECTORY
 docker compose -f NEW_DIRECTORY/compose.json up -d
 docker compose -f NEW_DIRECTORY/compose.json logs app
 ```

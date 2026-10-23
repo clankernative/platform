@@ -511,10 +511,10 @@ e = 12_345</pre></div>
   <h3 class="section">Running it</h3>
   <div class="pane neutral" style="border-radius:9px">
     <div class="pane-label">From <span class="note">platform/</span></div>
-    <pre>cargo run --locked -p xtask -- bootstrap-formatter   # verify pins, install reviewed binary
-cargo run --locked -p xtask -- fmt-reports          # format platform sources + Reports
-cargo run --locked -p xtask -- fmt-check-reports    # non-zero exit if anything is unformatted
-cargo test --locked -p xtask formatter_native -- --ignored
+    <pre>bazel run //crates/xtask:xtask -- bootstrap-formatter   # verify pins, install reviewed binary
+bazel run //crates/xtask:xtask -- fmt-reports          # format platform sources + Reports
+bazel run //crates/xtask:xtask -- fmt-check-reports    # non-zero exit if anything is unformatted
+bazel run //crates/xtask:xtask -- test-rust //crates/xtask:unit_xtask formatter_native --ignored
 
 # editor: external format command, document on stdin
 .toolchains/roc-fmt-day2 fmt --stdin</pre>
@@ -603,7 +603,7 @@ analyze = register_command(complete)</pre></div>
     </div>
     <p>
       The <code class="inline">verify-lint</code> step invoked by <code class="inline">ops/Verify.roc</code> is
-      <code class="inline">cargo clippy --locked --workspace --all-targets -- -D warnings</code>. It lints the
+      <code class="inline">bazel run //crates/xtask:xtask -- lint</code>. It lints the
       Rust platform crates and accepts no overrides. It says nothing about Roc source.
     </p>
     <p>

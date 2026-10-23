@@ -242,7 +242,7 @@ to be public. Behavior changes still need meaningful tests and review. Scaffoldi
 is an editing convenience, not an enforcement boundary; unfinished fields cannot
 pass the same required checks.
 
-Run `cargo run --locked -p xtask -- verify-reports` for this workspace's Reports
+Run `bazel run //crates/xtask:xtask -- verify-reports` for this workspace's Reports
 campaign, compiler negatives, shared transport tests and control checks. The full
 `verify` command additionally builds platform-owned relational, migration and HTTP
 conformance fixtures. See [coverage and acceptance](VERIFICATION-COVERAGE.md) for

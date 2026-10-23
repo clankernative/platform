@@ -111,29 +111,18 @@ fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
     Ok(())
 }
 
-// Every test campaign in the full gate selects the same Cargo packages and
-// targets. Only libtest filters change: selecting a narrower Cargo test target
-// can disable dev-dependency features and rebuild shared dependencies.
-const WORKSPACE_TEST_ARGUMENTS: &[&str] = &[
-    "-p",
+// Every full-gate campaign selects the same Bazel package/target graph. Only
+// libtest filters change, so campaigns share compiled dependencies.
+const WORKSPACE_TEST_PACKAGES: &[&str] = &[
     "day2",
-    "-p",
     "xtask",
-    "-p",
     "day2-ops",
-    "-p",
     "day2-cli-checks",
-    "-p",
     "day2-control",
-    "-p",
     "day2-assets",
-    "-p",
     "day2-contracts",
-    "-p",
     "day2-capabilities",
-    "-p",
     "day2-kernel",
-    "-p",
     "durable-temporal",
 ];
 
@@ -255,7 +244,7 @@ impl TestCampaign {
                 12600
             }
             "control" => 3600,
-            "isolated-build" | "installation-build" => 1800,
+            "isolated-build" | "installation-build" | "isolated-build-probe" => 1800,
             _ => DEFAULT_CAMPAIGN_BUDGET_SECONDS,
         };
         ensure!(
@@ -364,6 +353,14 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-bazel-controls" => {
+                ensure!(
+                    parameters.is_empty(),
+                    "compiler controls accept no overrides"
+                );
+                crate::bazel::wrapper_controls(root)?;
+                "bazel-controls".into()
+            }
             "verify-browser" => {
                 ensure!(parameters.is_empty(), "browser checks accept no overrides");
                 run_with_budget(
@@ -431,14 +428,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             }
             "verify-test-docs" => {
                 ensure!(parameters.is_empty(), "doc tests accept no overrides");
-                run_with_budget(
-                    root,
-                    Command::new("cargo")
-                        .args(["test", "--locked", "--doc"])
-                        .args(WORKSPACE_TEST_ARGUMENTS)
-                        .args(["--", "--test-threads=1"]),
-                    Duration::from_secs(12600),
-                )?;
+                crate::bazel::docs(root)?;
                 "test-docs".into()
             }
             "verify-prepared" => {
@@ -498,10 +488,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     format_sources(root, true)?;
                 } else {
                     ensure!(scope == "reports", "unknown formatter scope");
-                    run(
-                        root,
-                        Command::new("cargo").args(["fmt", "--all", "--", "--check"]),
-                    )?;
+                    crate::bazel::format(root, true)?;
                     formatting::reports(root, formatting::Mode::Check)?;
                 }
                 format!("format-{scope}")
@@ -511,18 +498,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 architecture::check(root)?;
                 architecture_dependencies::check(root)?;
                 architecture_proofs::check(root)?;
-                run(
-                    root,
-                    Command::new("cargo").args([
-                        "clippy",
-                        "--locked",
-                        "--workspace",
-                        "--all-targets",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ]),
-                )?;
+                crate::bazel::lint(root)?;
                 "lint".into()
             }
             "verify-cli" => {
@@ -838,6 +814,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-prepare-join"
         | "verify-compose"
         | "verify-mac"
+        | "verify-private-build-probe"
         | "verify-prepare-part-inputs"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
@@ -983,62 +960,39 @@ fn reusable_fixture_snapshot(imports: bool, retained: &str, current: &str) -> bo
 fn fixture_compiler_sources(root: &Path) -> Result<BTreeMap<String, String>> {
     let root = root.canonicalize()?;
     let mut sources = build_native::platform_sources(&root)?;
-    let dependency_file = fs::read_to_string(root.join("target/debug/xtask.d"))?;
-    let dependencies = compiler_dependency_paths(&dependency_file)?;
-    ensure!(
-        dependencies.contains(&root.join("crates/xtask/src/main.rs"))
-            && dependencies.contains(&root.join("crates/day2/src/development.rs")),
-        "compiler dep-info does not close the fixture adapter"
-    );
-    let executable = std::env::current_exe()?.canonicalize()?;
-    ensure!(
-        executable == root.join("target/debug/xtask").canonicalize()?,
-        "ordinary fixture compiler adapter executable required"
-    );
-    sources.insert("compiler/xtask".into(), digest(&fs::read(executable)?));
-    for path in dependencies {
-        ensure!(path.is_absolute(), "absolute compiler dependency required");
-        if let Ok(relative) = path.strip_prefix(&root) {
-            let metadata = fs::symlink_metadata(&path)?;
-            ensure!(
-                metadata.is_file() && !metadata.file_type().is_symlink(),
-                "compiler dependency must be regular"
-            );
-            ensure!(
-                path.canonicalize()?.starts_with(&root),
-                "compiler dependency escaped workspace"
-            );
-            sources.insert(
-                format!("compiler-inputs/{}", relative.to_string_lossy()),
-                digest(&fs::read(path)?),
-            );
-        }
+    for directory in ["fixtures", "cli/checks"] {
+        hash_verification_tree(
+            &root.join(directory),
+            &root.join(directory),
+            directory,
+            &mut sources,
+        )?;
     }
-    Ok(sources)
-}
-
-fn compiler_dependency_paths(contents: &str) -> Result<Vec<PathBuf>> {
-    // Cargo's normal unescaped single-line dep-info is authoritative for embedded
-    // non-Rust inputs too. Unsupported escaping disables reuse, never full builds.
-    let line = contents
-        .lines()
-        .next()
-        .context("compiler dep-info missing")?;
-    let (target, dependencies) = line
-        .split_once(": ")
-        .context("compiler dep-info target missing")?;
+    sources.extend(crate::bazel::configuration(&root)?);
+    let executable = std::env::current_exe()?.canonicalize()?;
+    // Compare the actual configured producer without installing over the
+    // running inode. A mismatch refuses cache reuse and preserves the verifier
+    // needed for fresh native artifact admission.
+    let executing = digest(&fs::read(&executable)?);
+    let compiled = crate::bazel::configured_output(&root, "//crates/xtask:xtask")?;
     ensure!(
-        !line.contains(['\\', '\r']) && Path::new(target).is_absolute(),
-        "unsupported compiler dep-info encoding"
+        executing == digest(&fs::read(&compiled)?),
+        "current configured Bazel xtask compiler adapter required"
     );
-    let paths: Vec<_> = dependencies.split_whitespace().map(PathBuf::from).collect();
-    ensure!(!paths.is_empty(), "compiler dep-info dependencies missing");
-    Ok(paths)
+    sources.insert("compiler/xtask".into(), executing);
+    Ok(sources)
 }
 
 fn fixture_compiler_identity(root: &Path) -> Result<shards::BuildIdentity> {
     let sources = fixture_compiler_sources(root)?;
-    shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))
+    let compiler = shards::build_identity(root, &digest(&serde_json::to_vec(&sources)?))?;
+    fs::write(
+        root.join("artifacts/bazel-compiler-inputs.json"),
+        serde_json::to_vec_pretty(
+            &json!({"format":1,"backend":"Bazel","source_hashes":sources,"compiler":compiler}),
+        )?,
+    )?;
+    Ok(compiler)
 }
 
 fn load_cache(root: &Path, scope: &str, snapshot: &str) -> Result<VerificationCache> {
@@ -1162,150 +1116,149 @@ pub(super) fn linux_tests(root: &Path, suite: &str, artifact: &Path, probe: &Pat
     )
 }
 
-fn test_command(suite: &str) -> Result<Command> {
-    // Each crate links its integration tests into one binary. A module filter
-    // after `--` selects the tests of what used to be a separate test target.
-    let (arguments, modules): (&[&str], &[&str]) = match suite {
-        "libraries" => (&["--workspace", "--lib"], &[]),
-        // The compile-fail checks drive the Roc compiler for about a minute;
-        // workspace-runtime and libraries keep them in the full gates.
-        "fast-libraries" => (
-            &["--workspace", "--exclude", "day2-cli-checks", "--lib"],
-            &[],
-        ),
-        "linux-sandbox" => (&["-p", "day2-sandbox", "--test", "isolation"], &[]),
-        "linux-worker" => (
-            &["-p", "day2", "--test", "day2_integration"],
-            &["linux_worker::", "property_worker::"],
-        ),
-        "linux-delegation" => (
-            &["-p", "day2-control", "--test", "control_integration"],
-            &["release_execution::"],
-        ),
-        "linux-http" => (
-            &["-p", "day2", "--test", "day2_integration"],
-            &["reports_http::", "command_recovery::"],
-        ),
-        // Matches the online backup/restore test and the runtime image's
-        // day2-backup CLI test; a renamed test drops out of this filter.
-        "linux-backup" => (
-            &["-p", "day2-ops", "--test", "reports", "online_backup_"],
-            &[],
-        ),
-        "xtask" => (&["-p", "xtask", "--bin", "xtask"], &[]),
-        "operations" => (
-            &[
-                "-p",
-                "day2-ops",
-                "--test",
-                "reports",
-                "--test",
-                "local_dev",
-                "--test",
-                "backup_scale",
-            ],
-            &[],
-        ),
-        "reports-runtime" => (
-            &["-p", "day2", "--test", "day2_integration"],
-            &[
-                "admission::",
-                "assets::",
-                "authority::",
-                "instance_capabilities::",
-                "linux_worker::",
-                "property_worker::",
-                "numeric::",
-                "output_schema::",
-                "page_sdk::",
-                "pagination::",
-                "templates::",
-                "template_routes::",
-                "web_resources::",
-                "artifact_hardening::",
-                "app_contract::",
-                "owned_runtime::",
-                "owned_web::",
-                "app_inference::",
-                "operation_catalog::",
-                "api_docs::",
-                "routing::",
-                "command_atomicity::",
-                "command_adversarial::",
-                "command_recovery::",
-                "command_simulation::",
-                "migration_commands::",
-                "reports_http::",
-                "live_updates::",
-                // Shared helper cases the selected modules used to compile in.
-                "support::",
-            ],
-        ),
-        "all-runtime" => (
-            &[
-                "-p",
-                "day2",
-                "-p",
-                "xtask",
-                "-p",
-                "day2-ops",
-                "-p",
-                "day2-cli-checks",
-            ],
-            &[],
-        ),
-        "workspace-runtime" => (&[], &[]),
-        "parallel-runtime" => (&[], PARALLEL_RUNTIME_TESTS),
-        "control" => (
-            &[
-                "-p",
-                "day2-control",
-                "-p",
-                "day2-capabilities",
-                "-p",
-                "day2-kernel",
-                "-p",
-                "durable-temporal",
-            ],
-            &[],
-        ),
-        "isolated-build" => (
-            &[],
-            &[
-                "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
-            ],
-        ),
-        "installation-build" => (
-            &[],
-            &["control_service::real_installation_export_build_and_temporal_completion"],
-        ),
-        _ => bail!("unknown test suite"),
-    };
-    let mut command = Command::new("cargo");
-    command.args(["test", "--locked"]);
-    if [
-        "workspace-runtime",
-        "parallel-runtime",
-        "isolated-build",
-        "installation-build",
-    ]
-    .contains(&suite)
-    {
-        command.args(WORKSPACE_TEST_ARGUMENTS);
-    }
-    command.args(arguments).arg("--").args(modules);
-    // libtest applies --exact to both inclusion and skip filters. With no
-    // inclusion filters, the serial campaign still runs every other test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestSelection {
+    packages: Vec<&'static str>,
+    libraries_only: bool,
+    targets: Vec<&'static str>,
+    arguments: Vec<String>,
+}
+
+fn test_selection(suite: &str) -> Result<TestSelection> {
+    let full = WORKSPACE_TEST_PACKAGES.to_vec();
+    let (packages, libraries_only, targets, filters): (Vec<&str>, bool, Vec<&str>, Vec<&str>) =
+        match suite {
+            "libraries" => (Vec::new(), true, Vec::new(), Vec::new()),
+            "fast-libraries" => (Vec::new(), true, Vec::new(), Vec::new()),
+            "linux-sandbox" => (vec!["day2-sandbox"], false, vec!["isolation"], Vec::new()),
+            "linux-worker" => (
+                vec!["day2"],
+                false,
+                vec!["day2_integration"],
+                vec!["linux_worker::", "property_worker::"],
+            ),
+            "linux-delegation" => (
+                vec!["day2-control"],
+                false,
+                vec!["control_integration"],
+                vec!["release_execution::"],
+            ),
+            "linux-http" => (
+                vec!["day2"],
+                false,
+                vec!["day2_integration"],
+                vec!["reports_http::", "command_recovery::"],
+            ),
+            "linux-backup" => (
+                vec!["day2-ops"],
+                false,
+                vec!["reports"],
+                vec!["online_backup_"],
+            ),
+            "xtask" => (vec!["xtask"], false, vec!["xtask"], Vec::new()),
+            "operations" => (
+                vec!["day2-ops"],
+                false,
+                vec!["reports", "local_dev", "backup_scale"],
+                Vec::new(),
+            ),
+            "reports-runtime" => (
+                vec!["day2"],
+                false,
+                vec!["day2_integration"],
+                REPORT_FILTERS.to_vec(),
+            ),
+            "all-runtime" => (
+                vec!["day2", "xtask", "day2-ops", "day2-cli-checks"],
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+            "workspace-runtime" => (full, false, Vec::new(), Vec::new()),
+            "parallel-runtime" => (full, false, Vec::new(), PARALLEL_RUNTIME_TESTS.to_vec()),
+            "control" => (
+                vec![
+                    "day2-control",
+                    "day2-capabilities",
+                    "day2-kernel",
+                    "durable-temporal",
+                ],
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+            "isolated-build-probe" => (
+                vec!["day2-control"],
+                false,
+                vec!["control_integration"],
+                vec![
+                    "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
+                ],
+            ),
+            "isolated-build" => (
+                full,
+                false,
+                Vec::new(),
+                vec![
+                    "build::real_isolated_owned_links_build_produces_bound_evidence_and_recovers_receipt",
+                ],
+            ),
+            "installation-build" => (
+                full,
+                false,
+                Vec::new(),
+                vec!["control_service::real_installation_export_build_and_temporal_completion"],
+            ),
+            _ => bail!("unknown test suite"),
+        };
+    let mut arguments = filters.into_iter().map(str::to_owned).collect::<Vec<_>>();
     if ["workspace-runtime", "parallel-runtime"].contains(&suite) {
-        command.arg("--exact");
+        arguments.push("--exact".into());
     }
     if suite == "workspace-runtime" {
         for test in PARALLEL_RUNTIME_TESTS {
-            command.args(["--skip", test]);
+            arguments.extend(["--skip".into(), (*test).to_owned()]);
         }
     }
-    Ok(command)
+    Ok(TestSelection {
+        packages,
+        libraries_only,
+        targets,
+        arguments,
+    })
 }
+
+const REPORT_FILTERS: &[&str] = &[
+    "admission::",
+    "assets::",
+    "authority::",
+    "instance_capabilities::",
+    "linux_worker::",
+    "property_worker::",
+    "numeric::",
+    "output_schema::",
+    "page_sdk::",
+    "pagination::",
+    "templates::",
+    "template_routes::",
+    "web_resources::",
+    "artifact_hardening::",
+    "app_contract::",
+    "owned_runtime::",
+    "owned_web::",
+    "app_inference::",
+    "operation_catalog::",
+    "api_docs::",
+    "routing::",
+    "command_atomicity::",
+    "command_adversarial::",
+    "command_recovery::",
+    "command_simulation::",
+    "migration_commands::",
+    "reports_http::",
+    "live_updates::",
+    "support::",
+];
 
 fn tests(
     root: &Path,
@@ -1313,35 +1266,109 @@ fn tests(
     fixtures: &BTreeMap<String, PathBuf>,
     budget: std::time::Duration,
 ) -> Result<()> {
+    let selection = test_selection(suite)?;
+    let started = std::time::Instant::now();
+    let catalog = crate::bazel::targets(root)?;
+    let selected = catalog
+        .iter()
+        .filter(|target| {
+            target.test
+                && (selection.packages.is_empty()
+                    || selection.packages.contains(&target.package.as_str()))
+                && (!selection.libraries_only
+                    || target.kind == ["lib"]
+                    || target.kind == ["staticlib"])
+                && (selection.targets.is_empty()
+                    || selection.targets.contains(&target.target.as_str()))
+                && (suite != "fast-libraries" || target.package != "day2-cli-checks")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(!selected.is_empty(), "test suite has no declared harnesses");
+    let mut compile = selected.clone();
+    compile.extend(
+        catalog
+            .iter()
+            .filter(|target| {
+                !target.test
+                    && target.kind == ["bin"]
+                    && (selection.packages.is_empty()
+                        || selection.packages.contains(&target.package.as_str())
+                        || target.package == "day2-sandbox")
+            })
+            .cloned(),
+    );
+    let outputs = crate::bazel::build(root, &compile, budget)?;
     #[cfg(target_os = "linux")]
-    prepare_linux_test_installation(root)?;
-    let mut command = test_command(suite)?;
-    configure_tests(root, suite, fixtures, &mut command)?;
-    run_with_budget(root, &mut command, budget)
+    install_linux_test_programs(root, &outputs)?;
+    let private_build = prepare_private_build_inputs(root, suite)?;
+    for target in selected {
+        let mut command = Command::new(
+            root.join(
+                outputs
+                    .get(&target.label)
+                    .context("built test target required")?,
+            ),
+        );
+        command.args(&selection.arguments);
+        if cfg!(target_os = "macos")
+            && target.package == "day2-control"
+            && target.target == "control_integration"
+        {
+            command.env("DAY2_TEST_RUSTC", crate::bazel::tool(root, "rustc")?);
+        }
+        configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
+        let remaining = budget
+            .checked_sub(started.elapsed())
+            .context("test campaign budget exhausted")?;
+        run_with_budget(root, &mut command, remaining)?;
+    }
+    Ok(())
+}
+
+struct PrivateBuildInputs {
+    bazel: PathBuf,
+    repositories: tempfile::TempDir,
+    verifier: PathBuf,
+}
+
+fn prepare_private_build_inputs(root: &Path, suite: &str) -> Result<Option<PrivateBuildInputs>> {
+    if ![
+        "isolated-build",
+        "installation-build",
+        "isolated-build-probe",
+    ]
+    .contains(&suite)
+    {
+        return Ok(None);
+    }
+    let bazel = crate::bazel::standalone(root)?;
+    let vendor = crate::bazel::offline_repositories(root)?;
+    let repositories = tempfile::tempdir_in(root.join(".cache"))?;
+    day2_control::build::prepare_bazel_repositories(&vendor, &repositories.path().join("sources"))?;
+    Ok(Some(PrivateBuildInputs {
+        bazel,
+        repositories,
+        verifier: std::env::current_exe()?,
+    }))
 }
 
 fn configure_tests(
     root: &Path,
     suite: &str,
     fixtures: &BTreeMap<String, PathBuf>,
+    private_build: Option<&PrivateBuildInputs>,
     command: &mut Command,
 ) -> Result<()> {
-    if ["isolated-build", "installation-build"].contains(&suite) {
-        let rust = Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .current_dir(root)
-            .output()?;
-        ensure!(rust.status.success(), "resolve pinned Rust sysroot");
-        let rust = PathBuf::from(String::from_utf8(rust.stdout)?.trim());
-        let cargo_cache = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
-            .context("Cargo cache required")?;
+    if let Some(inputs) = private_build {
         command
             .args(["--ignored", "--exact"])
-            .env("DAY2_TEST_BUILD_XTASK", std::env::current_exe()?)
-            .env("DAY2_TEST_BUILD_RUST", rust)
-            .env("DAY2_TEST_BUILD_REGISTRY", cargo_cache.join("registry"));
+            .env("DAY2_TEST_BUILD_XTASK", &inputs.verifier)
+            .env("DAY2_TEST_BUILD_BAZEL", &inputs.bazel)
+            .env(
+                "DAY2_TEST_BUILD_REPOSITORIES",
+                inputs.repositories.path().join("sources"),
+            );
     }
     // Library unit tests own their temporary state, so the fast gate uses
     // libtest's default parallelism; the reviewed probes use four threads.
@@ -1489,13 +1516,15 @@ fn configure_tests(
     Ok(())
 }
 
-/// Cargo places integration tests in `deps`, while normal executables live one
-/// directory above it. Install the freshly built trusted launchers beside the
+/// Install the freshly built trusted Linux launchers beside the
 /// test supervisors so tests use the same fixed-sibling lookup as deployment.
 /// Production worker lookup and confinement are unchanged.
 #[cfg(target_os = "linux")]
-fn prepare_linux_test_installation(root: &Path) -> Result<()> {
-    shards::prepare_linux_installation(root)
+pub(super) fn install_linux_test_programs(
+    root: &Path,
+    outputs: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    shards::install_built_linux_auxiliaries(root, outputs)
 }
 
 fn receipt(
@@ -1663,6 +1692,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "test-installation-build",
         ],
         "all" => &[
+            "bazel-controls",
             "control-simulation",
             "format-all",
             "lint",
@@ -1713,6 +1743,11 @@ mod tests {
         for name in [
             "Cargo.toml",
             "Cargo.lock",
+            ".bazelrc",
+            ".bazelversion",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
             "architecture-rules.json",
             "architecture-boundaries.json",
             "architecture-proofs.json",
@@ -1731,6 +1766,7 @@ mod tests {
         }
         for name in [
             "crates",
+            "build/bazel",
             "tools",
             "vendor",
             "assets",
@@ -1818,7 +1854,7 @@ mod tests {
     fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
         let producer = ci_job("verify-prepare-parts");
         let prepared = producer
-            .find("      - run: cargo run --locked -p xtask -- verify-prepare-part ${{ matrix.part }}\n")
+            .find("      - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}\n")
             .expect("fresh native preparation precedes verifier transport");
         let archived = producer
             .find("      - name: Archive the current run verifier only\n")
@@ -1830,7 +1866,7 @@ mod tests {
         let archive = ci_step(&producer, "Archive the current run verifier only");
         assert!(archive.contains("if: ${{ matrix.part == 'inputs' }}"));
         assert!(archive.contains(
-            "run: tar -czf /tmp/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" target/debug/xtask"
+            "run: tar -czf /tmp/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" build-out/bin/xtask"
         ));
         let upload = ci_step(&producer, "Retain the current run verifier only");
         assert!(upload.contains("if: ${{ matrix.part == 'inputs' }}"));
@@ -1852,7 +1888,7 @@ mod tests {
                 .expect("authenticated current run/attempt archive");
             let bootstrap = ci_step(&job, "Restore the current run verifier only");
             assert!(bootstrap.contains(
-                "run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" target/debug/xtask"
+                "run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" build-out/bin/xtask"
             ));
             let bootstrap_at = job
                 .find("      - name: Restore the current run verifier only\n")
@@ -1861,8 +1897,8 @@ mod tests {
                 &job,
                 "Establish the mandatory bounded native Linux compiler context",
             );
-            assert!(context.contains("run: target/debug/xtask verify-linux-context"));
-            assert!(!job.contains("cargo run --locked -p xtask -- verify-linux-context"));
+            assert!(context.contains("run: build-out/bin/xtask verify-linux-context"));
+            assert!(!job.contains("bazel run //crates/xtask:xtask -- verify-linux-context"));
             let context_at = job
                 .find(
                     "      - name: Establish the mandatory bounded native Linux compiler context\n",
@@ -1886,17 +1922,18 @@ mod tests {
     }
 
     #[test]
-    fn single_file_verifier_archive_materializes_cargo_hard_links_without_restoring_outputs()
-    -> Result<()> {
+    fn single_file_verifier_archive_materializes_hard_links_without_restoring_outputs() -> Result<()>
+    {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let scratch = tempfile::tempdir()?;
         let source = scratch.path().join("source");
         let destination = scratch.path().join("destination");
-        let verifier = "target/debug/xtask";
-        let hashed = "target/debug/deps/xtask-82a2d84eb585bdf5";
+        let verifier = "build-out/bin/xtask";
+        let hashed = "build-out/tests/xtask-82a2d84eb585bdf5";
         let abi = "crates/worker/generated/roc_platform_abi.rs";
-        fs::create_dir_all(source.join("target/debug/deps"))?;
+        fs::create_dir_all(source.join("build-out/tests"))?;
+        fs::create_dir_all(source.join("build-out/bin"))?;
         fs::create_dir_all(source.join("artifacts"))?;
         fs::create_dir_all(destination.join("crates/worker/generated"))?;
         fs::write(source.join(hashed), b"current-run-verifier")?;
@@ -1926,10 +1963,10 @@ mod tests {
                 (entry.path().ok()?.as_ref() == Path::new(verifier))
                     .then(|| entry.header().entry_type())
             })
-            .context("Cargo verifier archive entry")?;
+            .context("verifier archive entry")?;
         assert!(
             linked.is_hard_link(),
-            "fixture must reproduce Cargo's tar hard link"
+            "fixture must reproduce a transported hard link"
         );
 
         let single = scratch.path().join("day2-linux-verifier.tgz");
@@ -1978,61 +2015,80 @@ mod tests {
     }
 
     #[test]
-    fn mac_intermediate_cache_warms_cargo_without_replacing_executable_admission_or_tests() {
+    fn remote_bazel_cache_cannot_publish_shared_pr_outputs_or_skip_fresh_mac_checks() {
         let job = ci_job("verify-mac-compatibility");
-        let restore = ci_step(&job, "Restore compatible Cargo intermediates");
-        let save = ci_step(&job, "Save compatible Cargo intermediates");
-        let paths = |step: &str| {
-            step.split_once("          path: |\n")
-                .unwrap()
-                .1
-                .lines()
-                .take_while(|line| line.starts_with("            "))
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            paths(restore),
-            vec![
-                "target/debug/.fingerprint",
-                "target/debug/build",
-                "target/debug/deps/*.rlib",
-                "target/debug/deps/*.rmeta",
-                "target/debug/deps/*.d",
-                "target/debug/deps/*.dylib",
-            ]
+        let cache = ci_step(&job, "Restore Bazel compilation and repository caches");
+        assert!(cache.contains("disk-cache: false"));
+        let actions = ci_step(&job, "Restore source-keyed compiled actions");
+        assert!(actions.contains("path: ~/.cache/bazel-disk"));
+        assert!(actions.contains("lookup-only: ${{ inputs.compilation_cache == 'empty' }}"));
+        assert!(
+            actions.contains("-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}")
         );
-        assert_eq!(paths(restore), paths(save));
-        let (key, fallback) = restore.split_once("          restore-keys: |\n").unwrap();
-        for binding in [
-            "runner.os",
-            "runner.arch",
-            "Cargo.toml",
-            "Cargo.lock",
-            "rust-toolchain.toml",
-            ".cargo/**",
+        let publish = ci_step(
+            &job,
+            "Persist newly compiled actions under the captured source key",
+        );
+        assert!(publish.contains("!cancelled()"));
+        assert!(publish.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
+        assert!(publish.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
+        assert!(publish.contains("github.event_name == 'merge_group'"));
+        assert!(publish.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(publish.contains(
+            "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
+        ));
+        for consumer in [
+            "verify-prepare",
+            "verify-shards",
+            "verify",
+            "verify-queue-receipt",
         ] {
-            assert!(key.contains(binding) && fallback.contains(binding));
+            assert!(
+                !ci_job(consumer)
+                    .contains("Persist newly compiled actions under the captured source key")
+            );
         }
-        assert!(key.contains("github.sha") && !fallback.contains("github.sha"));
-        assert!(save.contains("key: ${{ steps.cargo_intermediates.outputs.cache-primary-key }}"));
-        assert!(save.contains("if: ${{ steps.cargo_intermediates.outputs.cache-hit != 'true' }}"));
-        let warm = job
-            .find("      - name: Restore compatible Cargo intermediates\n")
-            .unwrap();
-        let exact = job
-            .find("      - name: Restore completed test executables\n")
-            .unwrap();
-        let source = job
-            .find("      - run: cargo run --locked -p xtask -- source-check\n")
-            .unwrap();
-        let verify = job.find("      - run: cargo run --locked -p xtask -- verify-mac\n        id: native_preparation").unwrap();
-        let saved = job
-            .find("      - name: Save compatible Cargo intermediates\n")
-            .unwrap();
-        assert!(warm < exact && exact < source && source < verify && verify < saved);
+        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+            let job = ci_job(consumer);
+            let prepared = ci_step(
+                &job,
+                "Restore compiled actions from this run preparation only",
+            );
+            assert!(prepared.contains("path: ~/.cache/bazel-disk"));
+            assert!(prepared.contains(
+                "key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+            ));
+            assert!(!prepared.contains("restore-keys:") && !prepared.contains("lookup-only:"));
+            if consumer == "verify" {
+                assert!(prepared.contains(
+                    "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}"
+                ));
+            } else {
+                assert!(!prepared.contains("        if:"));
+            }
+        }
+        assert!(
+            !ci_job("verify-queue-receipt")
+                .contains("Restore compiled actions from this run preparation only")
+        );
+        assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
+        assert!(cache.contains("github.event_name == 'merge_group'"));
+        assert!(cache.contains(
+            "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
+        ));
+        assert!(!cache.contains("github.event_name != 'pull_request'"));
+        let native = job
+            .split_once("      - run: build-out/bin/xtask verify-mac\n")
+            .expect("fresh native Mac recipe remains mandatory")
+            .1;
+        assert!(native.starts_with("        id: native_preparation\n"));
+        let native = native.split("\n      - ").next().unwrap();
+        assert!(
+            !native.contains("        if:"),
+            "native checks cannot depend on cache status"
+        );
+        assert!(!job.contains("rust-cache@") && !job.contains("sccache-action@"));
+        assert!(include_str!("../../../.bazelrc").contains("test --cache_test_results=no"));
     }
 
     #[test]
@@ -2051,23 +2107,17 @@ mod tests {
     }
 
     #[test]
-    fn full_gate_filters_keep_the_same_cargo_package_and_target_graph() -> Result<()> {
-        let cargo_arguments = |command: &Command| {
-            command
-                .get_args()
-                .take_while(|argument| *argument != "--")
-                .map(|argument| argument.to_os_string())
-                .collect::<Vec<_>>()
-        };
-        let expected = cargo_arguments(&test_command("workspace-runtime")?);
-        assert!(expected.iter().any(|argument| argument == "day2"));
-        assert!(expected.iter().any(|argument| argument == "day2-control"));
-        assert!(!expected.iter().any(|argument| argument == "--test"));
+    fn full_gate_filters_keep_the_same_package_and_target_graph() -> Result<()> {
+        let expected = test_selection("workspace-runtime")?;
+        assert!(expected.packages.contains(&"day2"));
+        assert!(expected.packages.contains(&"day2-control"));
+        assert!(expected.targets.is_empty());
         for suite in ["parallel-runtime", "isolated-build", "installation-build"] {
-            let command = test_command(suite)?;
-            assert_eq!(cargo_arguments(&command), expected, "{suite}");
+            let selection = test_selection(suite)?;
+            assert_eq!(selection.packages, expected.packages, "{suite}");
+            assert_eq!(selection.targets, expected.targets, "{suite}");
         }
-        assert!(test_command("unknown").is_err());
+        assert!(test_selection("unknown").is_err());
         Ok(())
     }
 
@@ -2350,28 +2400,6 @@ mod fixture_cache_tests {
         assert!(reusable_fixture_snapshot(false, "old", "current"));
         assert!(reusable_fixture_snapshot(true, "current", "current"));
         assert!(!reusable_fixture_snapshot(true, "old", "current"));
-    }
-
-    #[test]
-    fn compiler_dep_info_preserves_embedded_fixture_inputs_and_rejects_unknown_encoding()
-    -> Result<()> {
-        let paths = compiler_dependency_paths(
-            "/work/platform/target/debug/xtask: /work/platform/crates/xtask/src/main.rs /work/platform/fixtures/authority-policies/reports.json\n",
-        )?;
-        assert!(paths.contains(&PathBuf::from(
-            "/work/platform/fixtures/authority-policies/reports.json"
-        )));
-        for contents in [
-            "",
-            "missing target",
-            "/xtask: ",
-            "relative: /input",
-            "/xtask: /escaped\\ input",
-            "/xtask: /first \\\n/second",
-        ] {
-            assert!(compiler_dependency_paths(contents).is_err(), "{contents:?}");
-        }
-        Ok(())
     }
 
     #[test]

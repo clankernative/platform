@@ -3,7 +3,11 @@
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 const POLICY: &str = "architecture-boundaries.json";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -80,6 +84,7 @@ struct CargoPackage {
 
 #[derive(Deserialize)]
 struct CargoTarget {
+    test: bool,
     name: String,
     kind: Vec<String>,
     src_path: String,
@@ -107,26 +112,14 @@ fn relative(root: &Path, value: &str) -> Result<String> {
         .to_owned())
 }
 
-fn metadata(root: &Path) -> Result<Vec<Package>> {
-    let output = Command::new("cargo")
-        .current_dir(root)
-        .args([
-            "metadata",
-            "--locked",
-            "--offline",
-            "--no-deps",
-            "--format-version",
-            "1",
-        ])
-        .output()
-        .context("read Cargo dependency boundaries")?;
-    ensure!(output.status.success(), "Cargo dependency inventory failed");
-    ensure!(
-        output.stdout.len() <= MAX_BYTES,
-        "dependency inventory budget"
-    );
-    let metadata: Metadata = serde_json::from_slice(&output.stdout)?;
+type DefaultTarget = (String, String, Vec<String>, String, bool);
+
+fn metadata(root: &Path, check_bazel_catalog: bool) -> Result<Vec<Package>> {
+    let output = crate::bazel::dependency_metadata(root, true)?;
+    ensure!(output.len() <= MAX_BYTES, "dependency inventory budget");
+    let metadata: Metadata = serde_json::from_slice(&output)?;
     let mut packages = Vec::new();
+    let mut default_targets = BTreeSet::new();
     for package in metadata.packages {
         if !metadata.workspace_members.contains(&package.id) {
             continue;
@@ -141,6 +134,47 @@ fn metadata(root: &Path) -> Result<Vec<Package>> {
                 Path::new(&source).starts_with(package_root),
                 "Cargo target leaves inventoried package root"
             );
+            if check_bazel_catalog {
+                ensure!(
+                    [
+                        vec!["lib".to_owned()],
+                        vec!["staticlib".to_owned()],
+                        vec!["bin".to_owned()],
+                        vec!["test".to_owned()]
+                    ]
+                    .contains(&target.kind),
+                    "new manifest target kind requires an explicit Bazel coverage declaration"
+                );
+                if target.kind != ["test"] {
+                    ensure!(
+                        default_targets.insert((
+                            package.name.clone(),
+                            target.name.clone(),
+                            target.kind.clone(),
+                            source.clone(),
+                            false
+                        )),
+                        "duplicate manifest production target"
+                    );
+                }
+                if target.test {
+                    ensure!(
+                        default_targets.insert((
+                            package.name.clone(),
+                            target.name.clone(),
+                            target.kind.clone(),
+                            source.clone(),
+                            true
+                        )),
+                        "duplicate manifest test harness"
+                    );
+                } else {
+                    ensure!(
+                        target.kind != ["test"],
+                        "disabled integration target requires explicit coverage review"
+                    );
+                }
+            }
             if !target
                 .kind
                 .iter()
@@ -193,7 +227,36 @@ fn metadata(root: &Path) -> Result<Vec<Package>> {
         });
     }
     packages.sort_by(|left, right| left.name.cmp(&right.name));
+    if check_bazel_catalog {
+        let catalog = crate::bazel::targets(root)?;
+        let declared = catalog
+            .iter()
+            .map(|target| {
+                (
+                    target.package.clone(),
+                    target.target.clone(),
+                    target.kind.clone(),
+                    target.source.to_string_lossy().into_owned(),
+                    target.test,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        require_default_targets(&default_targets, &declared)?;
+    }
     Ok(packages)
+}
+
+fn require_default_targets(
+    expected: &BTreeSet<DefaultTarget>,
+    actual: &BTreeSet<DefaultTarget>,
+) -> Result<()> {
+    ensure!(
+        !expected.is_empty() && expected == actual,
+        "Bazel catalog must cover every manifest default program and test harness with exact source/kind; missing={:?}; extra={:?}",
+        expected.difference(actual).collect::<Vec<_>>(),
+        actual.difference(expected).collect::<Vec<_>>()
+    );
+    Ok(())
 }
 
 fn validate_manifest(manifest: &str) -> Result<()> {
@@ -345,10 +408,95 @@ fn compare(policy: &Policy, actual: &[Package]) -> Result<()> {
     Ok(())
 }
 
+fn compare_bazel(
+    policy: &Policy,
+    catalog: &[crate::bazel::Target],
+    dependencies: &BTreeMap<String, Vec<crate::bazel::Dependency>>,
+) -> Result<()> {
+    let expected = catalog
+        .iter()
+        .filter(|target| !target.test)
+        .map(|target| target.label.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure!(
+        dependencies
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected,
+        "complete Bazel production dependency inventory required"
+    );
+    for target in catalog.iter().filter(|target| !target.test) {
+        let package = policy
+            .packages
+            .iter()
+            .find(|package| package.name == target.package)
+            .context("Bazel package outside reviewed dependency policy")?;
+        ensure!(
+            package
+                .production_targets
+                .iter()
+                .any(|expected| expected.name == target.target
+                    && expected.kind == target.kind
+                    && Path::new(&expected.source) == target.source),
+            "Bazel production target differs from reviewed manifest source/kind"
+        );
+        for dependency in &dependencies[&target.label] {
+            let label = dependency
+                .label
+                .strip_prefix("@@")
+                .unwrap_or(&dependency.label);
+            if label.starts_with("//") {
+                let producer = catalog
+                    .iter()
+                    .find(|producer| {
+                        !producer.test
+                            && producer.label == label
+                            && producer.source == dependency.source
+                    })
+                    .context("Bazel dependency has no reviewed workspace producer")?;
+                if producer.package == target.package {
+                    continue;
+                }
+                ensure!(
+                    package
+                        .dependencies
+                        .iter()
+                        .any(|allowed| allowed.kind == "normal"
+                            && allowed.name == producer.package
+                            && allowed
+                                .local_path
+                                .as_ref()
+                                .is_some_and(|path| Path::new(path) == producer.directory)),
+                    "Bazel crosses an undeclared workspace dependency boundary"
+                );
+            } else {
+                ensure!(
+                    dependency.source.starts_with("external")
+                        && package
+                            .dependencies
+                            .iter()
+                            .any(|allowed| allowed.kind == "normal"
+                                && allowed.local_path.is_none()
+                                && allowed.name.replace('-', "_") == dependency.name),
+                    "Bazel adds an external Rust dependency absent from reviewed declarations"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
+    crate::bazel::dependency_inputs(&root)?;
     let policy = read_policy(&root)?;
-    compare(&policy, &metadata(&root)?)?;
+    compare(&policy, &metadata(&root, true)?)?;
+    compare_bazel(
+        &policy,
+        &crate::bazel::targets(&root)?,
+        &crate::bazel::production_dependencies(&root)?,
+    )?;
     let effects = super::architecture::inventory(&root)?;
     for package in &policy.packages {
         if package.role.strict() {
@@ -403,7 +551,7 @@ pub fn inventory(root: &Path) -> Result<serde_json::Value> {
     let root = root.canonicalize()?;
     Ok(serde_json::to_value(Policy {
         version: 1,
-        packages: metadata(&root)?,
+        packages: metadata(&root, false)?,
     })?)
 }
 
@@ -536,6 +684,49 @@ mod tests {
         assert!(compare(&policy, &[]).is_err());
         policy.packages.push(actual[0].clone());
         assert!(validate_policy(&policy).is_err());
+    }
+
+    #[test]
+    fn coverage_refuses_missing_bin_unit_integration_and_extra_targets() -> Result<()> {
+        let expected = BTreeSet::from([
+            (
+                "package".into(),
+                "program".into(),
+                vec!["bin".into()],
+                "crates/package/src/main.rs".into(),
+                false,
+            ),
+            (
+                "package".into(),
+                "program".into(),
+                vec!["bin".into()],
+                "crates/package/src/main.rs".into(),
+                true,
+            ),
+            (
+                "package".into(),
+                "integration".into(),
+                vec!["test".into()],
+                "crates/package/tests/main.rs".into(),
+                true,
+            ),
+        ]);
+        require_default_targets(&expected, &expected)?;
+        for target in &expected {
+            let mut missing = expected.clone();
+            missing.remove(target);
+            assert!(require_default_targets(&expected, &missing).is_err());
+        }
+        let mut extra = expected.clone();
+        extra.insert((
+            "foreign".into(),
+            "program".into(),
+            vec!["bin".into()],
+            "crates/foreign/src/main.rs".into(),
+            false,
+        ));
+        assert!(require_default_targets(&expected, &extra).is_err());
+        Ok(())
     }
 
     #[test]

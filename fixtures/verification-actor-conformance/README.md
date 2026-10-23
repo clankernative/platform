@@ -20,17 +20,17 @@ denial with authorized command/query positive controls.
 From the platform root:
 
 ```sh
-cargo run --locked -p xtask -- build fixtures/verification-actor-conformance
+bazel run //crates/xtask:xtask -- build fixtures/verification-actor-conformance
 DAY2_TEST_VERIFICATION_ACTORS_ARTIFACT=/absolute/path/to/admitted/artifact \
-  cargo test --locked -p day2 --test day2_integration \
-  app_contract::admitted_failure_principals_are_atomic_replayable_and_simulation_only -- --exact --nocapture
+  bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration \
+  app_contract::admitted_failure_principals_are_atomic_replayable_and_simulation_only --exact --nocapture
 ```
 
 The test retains histories under unique `artifacts/verification-actors-*`
 directories and prints the one-command saved-file replay beside each trace:
 
 ```sh
-cargo run --locked -p day2 -- replay ARTIFACT TRACE_FILE
+build-out/bin/day2 replay ARTIFACT TRACE_FILE
 ```
 
 Replay validates the stored request and deterministic decisions; it does not

@@ -32,7 +32,7 @@ impl Granted {
     /// One application holding a grant to read one operation of another.
     ///
     /// Built from a contract rather than a compiled artifact, so this runs in an
-    /// ordinary `cargo test` with no fixture environment: what it exercises is
+    /// ordinary Rust harness execution with no fixture environment: what it exercises is
     /// the authorization path, which needs a registered operation and a resolved
     /// grant, not a worker.
     fn new() -> Result<Self> {

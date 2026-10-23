@@ -235,7 +235,7 @@ fn implementation() -> String {
 pub(super) fn command(path: &Path) -> String {
     let quoted = path.to_string_lossy().replace('\'', "'\"'\"'");
     format!(
-        "DAY2_RUNTIME_INPUT_REPLAY='{quoted}' cargo test --locked -p day2 --lib store::input_replay_tests::replay_saved_runtime_input_history -- --exact"
+        "DAY2_RUNTIME_INPUT_REPLAY='{quoted}' bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib store::input_replay_tests::replay_saved_runtime_input_history --exact"
     )
 }
 

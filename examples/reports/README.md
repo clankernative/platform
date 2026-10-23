@@ -39,7 +39,7 @@ deterministic model and idempotent adapter can be used by other admitted apps.
 From the platform repository root:
 
 ```console
-cargo run --locked -p xtask -- cli
+bazel run //crates/xtask:xtask -- cli
 ./cli/day2 platform local-dev examples/reports --directory /tmp/reports-command-demo --detach
 ```
 
@@ -79,4 +79,4 @@ The [layout guide](../../docs/APP-LAYOUT.md) covers adjacent nominal request
 types and generated handles. Preserve `model-identities.json`: reports retain
 their `rep_` UUIDv7 identity and `RowVersion` revision contracts.
 
-From the repository root, run `cargo run --locked -p xtask -- verify` for the complete public gate.
+From the repository root, run `bazel run //crates/xtask:xtask -- verify` for the complete public gate.
