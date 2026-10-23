@@ -24,16 +24,16 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .to_owned()
+            .canonicalize()
+            .expect("current CLI source directory")
     }
 
     fn binary() -> &'static PathBuf {
         static BINARY: OnceLock<PathBuf> = OnceLock::new();
         BINARY.get_or_init(|| {
             let root = root();
-            // Keep the host installed by the gate with its distribution receipt.
-            // A nested, narrower Cargo build would replace the workspace's
-            // dependency artifacts and force the next campaign to rebuild them.
+            // Use the gate installation with its source-bound distribution receipt.
+            // CLI checks do not compile another Rust host.
             assert!(
                 root.join("day2-host").is_file(),
                 "run xtask cli before CLI checks"

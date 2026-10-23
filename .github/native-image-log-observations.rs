@@ -95,6 +95,23 @@ const MARKERS: &[(&str, &str)] = &[
         "pinned_Roc_compiler_unavailable",
     ),
     ("managed UI source expansion", "managed_UI_expansion_failed"),
+    (
+        "native glue stage platform write",
+        "glue_stage_platform_write",
+    ),
+    (
+        "native glue reviewed ABI directory",
+        "glue_reviewed_directory",
+    ),
+    ("native glue output directory", "glue_output_directory"),
+    ("native glue compiler command", "glue_compiler_command"),
+    ("native glue generator process", "glue_generator_process"),
+    ("native glue reviewed ABI read", "glue_reviewed_abi_read"),
+    ("native glue emitted ABI read", "glue_emitted_abi_read"),
+    (
+        "Rust glue did not emit the required worker ABI",
+        "glue_output_metadata",
+    ),
     ("Bazel build failed: primary=", "bazel_command_failed"),
     ("primary=exit, code=Some(1)", "reported_bazel_exit1"),
     ("native_link_failed", "reported_native_link_failure"),

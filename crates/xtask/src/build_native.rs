@@ -798,9 +798,12 @@ pub fn execute(
                         // The pure ABI is always Str -> Str and does not import
                         // authored App code. Product linking still requires both
                         // final native admission profiles below.
-                        fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
-                        fs::create_dir_all(root.join("crates/worker/generated"))?;
-                        let output = tempfile::tempdir_in(stage)?;
+                        fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())
+                            .context("native glue stage platform write")?;
+                        fs::create_dir_all(root.join("crates/worker/generated"))
+                            .context("native glue reviewed ABI directory")?;
+                        let output =
+                            tempfile::tempdir_in(stage).context("native glue output directory")?;
                         run(
                             root,
                             day2::sandbox::glue_compiler(
@@ -808,12 +811,14 @@ pub fn execute(
                                 stage,
                                 roc,
                                 day2::sandbox::CompilerCache::RustGlue,
-                            )?
+                            )
+                            .context("native glue compiler command")?
                             .arg("glue")
                             .arg(prepared.rust_glue)
                             .arg(output.path())
                             .arg("sdk/main.roc"),
-                        )?;
+                        )
+                        .context("native glue generator process")?;
                         let generated = output.path().join("roc_platform_abi.rs");
                         let metadata = fs::symlink_metadata(&generated)
                             .context("Rust glue did not emit the required worker ABI")?;
@@ -822,8 +827,9 @@ pub fn execute(
                             "invalid generated worker ABI"
                         );
                         ensure!(
-                            fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))?
-                                == fs::read(generated)?,
+                            fs::read(root.join("crates/worker/generated/roc_platform_abi.rs"))
+                                .context("native glue reviewed ABI read")?
+                                == fs::read(generated).context("native glue emitted ABI read")?,
                             "generated worker ABI differs from the reviewed Bazel source input"
                         );
                     }

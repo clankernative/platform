@@ -49,6 +49,7 @@ exports_files([
     "ops/Backup.roc",
     "ops/Build.roc",
     "ops/Capability.roc",
+    "ops/CartaQualification.roc",
     "ops/Check.roc",
     "ops/Ci.roc",
     "ops/Delegation.roc",

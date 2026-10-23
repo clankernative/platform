@@ -600,3 +600,205 @@ fn every_base_declares_a_claim_and_an_external_origin() {
         assert!(!base.bytes.is_empty());
     }
 }
+
+/// Carta has no published example yet: these bases are reconstructed from the
+/// production client that consumed Carta's responses, which is external to this
+/// adapter and its simulation. See `CARTA-PROVENANCE.md`; the gap test below
+/// keeps that limitation visible until a redacted playground recording lands.
+const CARTA_TOKEN: RecordedBase = RecordedBase::from_repository(
+    "the client-credentials endpoint returns access_token, token_type, expires_in and scope",
+    "reconstructed from nexusbird-equity Types.fs CartaTokenResponse (see CARTA-PROVENANCE.md)",
+    include_bytes!("../../fixtures/provider-responses/carta.access_token.json"),
+);
+
+const CARTA_STAKEHOLDERS: RecordedBase = RecordedBase::from_repository(
+    "a stakeholders page carries stakeholder objects with nullable employeeId, group and address and a nextPageToken",
+    "reconstructed from nexusbird-equity Types.fs StakeholdersResponse (see CARTA-PROVENANCE.md)",
+    include_bytes!("../../fixtures/provider-responses/carta.stakeholders.json"),
+);
+
+const CARTA_OPTION_GRANTS: RecordedBase = RecordedBase::from_repository(
+    "an optionGrants page carries grants with value-wrapped dates and quantities, nested vesting events and exercises",
+    "reconstructed from nexusbird-equity Types.fs OptionGrantsResponse (see CARTA-PROVENANCE.md)",
+    include_bytes!("../../fixtures/provider-responses/carta.optionGrants.json"),
+);
+
+/// Replays recorded Carta bodies to the live pipeline in request order.
+struct CartaReplay(std::collections::VecDeque<Vec<u8>>);
+
+impl crate::carta_live::CartaPort for CartaReplay {
+    fn token(
+        &mut self,
+        _form: &str,
+        _max_bytes: usize,
+    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::TransportFailure> {
+        Ok(self.reply())
+    }
+
+    fn page(
+        &mut self,
+        _collection: crate::carta_live::Collection,
+        _query: Option<&str>,
+        _token: &crate::carta_live::AccessToken,
+        _max_bytes: usize,
+    ) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::TransportFailure> {
+        Ok(self.reply())
+    }
+}
+
+impl CartaReplay {
+    fn reply(&mut self) -> crate::carta_live::Reply {
+        crate::carta_live::Reply {
+            status: 200,
+            json: true,
+            body: self.0.pop_front().expect("no unplanned Carta request"),
+            retry_after_seconds: None,
+        }
+    }
+}
+
+fn carta_against(
+    children: day2_capabilities::resources::CartaChildren,
+    token: Vec<u8>,
+    stakeholders: Vec<u8>,
+    grants: Vec<u8>,
+) -> Result<crate::carta::Snapshot> {
+    let plan = crate::carta_live::CapturePlan::authorize(
+        "parity/app",
+        &reference(),
+        &LiveConnection::Carta {
+            credential_ref: reference(),
+            client_id: "parity-client".into(),
+            environment: day2_capabilities::integrations::CartaEnvironment::Playground,
+            max_pages_per_collection: 1,
+        },
+        "1234567",
+        children,
+        false,
+    )?;
+    let mut replay = CartaReplay(vec![token, stakeholders, grants].into());
+    let capture = crate::carta_live::collect_complete(
+        &plan,
+        &mut replay,
+        crate::carta_live::MAX_PAGE_RESPONSE_BYTES,
+    )
+    .0?;
+    Ok(capture.snapshot().clone())
+}
+
+#[test]
+fn carta_parses_the_reconstructed_provider_responses() -> Result<()> {
+    use day2_capabilities::resources::CartaChildren;
+    let include = carta_against(
+        CartaChildren::Include,
+        CARTA_TOKEN.bytes.to_vec(),
+        CARTA_STAKEHOLDERS.bytes.to_vec(),
+        CARTA_OPTION_GRANTS.bytes.to_vec(),
+    )?;
+    assert_eq!(
+        (
+            include.stakeholder_count,
+            include.grant_count,
+            include.vesting_event_count,
+            include.exercise_count
+        ),
+        (2, 1, 1, 1)
+    );
+    let omit = carta_against(
+        CartaChildren::Omit,
+        CARTA_TOKEN.bytes.to_vec(),
+        CARTA_STAKEHOLDERS.bytes.to_vec(),
+        CARTA_OPTION_GRANTS.bytes.to_vec(),
+    )?;
+    assert_eq!((omit.record_count, omit.vesting_event_count), (3, 0));
+    Ok(())
+}
+
+/// Each mutation of a Carta base names the failure it must produce.
+#[test]
+fn mutating_the_carta_responses_is_rejected_in_the_named_way() -> Result<()> {
+    use day2_capabilities::resources::CartaChildren;
+    struct Case {
+        name: &'static str,
+        apply: fn(&mut Value, &mut Value, &mut Value),
+        expect: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "a token that is not a bearer",
+            apply: |token, _, _| token["token_type"] = json!("mac"),
+            expect: "carta_authentication_failed",
+        },
+        Case {
+            name: "a granted scope missing securities",
+            apply: |token, _, _| token["scope"] = json!("read_issuer_stakeholders"),
+            expect: "carta_scope_denied",
+        },
+        Case {
+            name: "a stakeholder without an email",
+            apply: |_, stakeholders, _| {
+                stakeholders["stakeholders"][0]
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("email");
+            },
+            expect: "carta_response_invalid",
+        },
+        Case {
+            name: "a stakeholder of another issuer",
+            apply: |_, stakeholders, _| stakeholders["stakeholders"][1]["issuerId"] = json!("1"),
+            expect: "carta_issuer_scope_mismatch",
+        },
+        Case {
+            name: "an unwrapped quantity",
+            apply: |_, _, grants| grants["optionGrants"][0]["quantity"] = json!("48000"),
+            expect: "carta_response_invalid",
+        },
+        Case {
+            name: "a null exercise price",
+            apply: |_, _, grants| grants["optionGrants"][0]["exercisePrice"] = Value::Null,
+            expect: "carta_response_invalid",
+        },
+        Case {
+            name: "a continuation beyond the one admitted page",
+            apply: |_, stakeholders, _| stakeholders["nextPageToken"] = json!("more"),
+            expect: "carta_page_budget",
+        },
+    ];
+    for case in cases {
+        let mut token = CARTA_TOKEN.value()?;
+        let mut stakeholders = CARTA_STAKEHOLDERS.value()?;
+        let mut grants = CARTA_OPTION_GRANTS.value()?;
+        (case.apply)(&mut token, &mut stakeholders, &mut grants);
+        let outcome = carta_against(
+            CartaChildren::Include,
+            token.to_string().into_bytes(),
+            stakeholders.to_string().into_bytes(),
+            grants.to_string().into_bytes(),
+        );
+        assert_eq!(
+            outcome.err().map(|error| error.to_string()).as_deref(),
+            Some(case.expect),
+            "mutation was not rejected as expected: {}",
+            case.name
+        );
+    }
+    Ok(())
+}
+
+/// The gap, as an executable statement: no Carta base is a provider recording
+/// yet. When a redacted playground recording replaces these files, its origin
+/// becomes the recording and this test is updated with it.
+#[test]
+fn carta_bases_are_reconstructions_until_a_playground_recording_lands() {
+    for base in [&CARTA_TOKEN, &CARTA_STAKEHOLDERS, &CARTA_OPTION_GRANTS] {
+        assert!(base.claim.len() > 20, "claim is not a real sentence");
+        assert!(
+            base.origin
+                .starts_with("reconstructed from nexusbird-equity"),
+            "a Carta base's origin must say what it is: {}",
+            base.origin
+        );
+        assert!(!base.bytes.is_empty());
+    }
+}

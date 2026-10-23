@@ -1,0 +1,6 @@
+{
+  "access_token": "EXAMPLE_ACCESS_TOKEN_0123456789",
+  "expires_in": 3600,
+  "token_type": "Bearer",
+  "scope": "read_issuer_stakeholders read_issuer_securities"
+}

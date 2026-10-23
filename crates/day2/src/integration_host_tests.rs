@@ -1598,6 +1598,8 @@ mod carta_live {
             "budgets":{"carta_daily":{"revision":1,"scope":"connection","period_seconds":86_400,
                 "limits":{"calls":100,"bytes":setup.budget_bytes,"concurrency":1}}}});
         let instance = json!({"installation":"cartaco","environment":"test","resources":catalog,
+            "control":{"version":1,"state_directory":directory.path().join("control"),"operators":["it"],
+                "sources":{"repo":{"kind":"local_git","repository":directory.path().join("repo")}},"apps":{"app":{"source":"repo"}}},
             "apps":{"app":{"artifact":artifact_directory,"readers":[ACTOR],"writers":[ACTOR],"authority":policy,
                 "resource_policies":[
                     {"policy":{"id":"carta_capture","revision":1},"operation":"capture","bindings":{"carta":{"id":"issuer","revision":1}}},
@@ -1987,16 +1989,58 @@ mod carta_live {
     }
 
     #[test]
-    fn a_native_host_without_the_admitted_adapter_dispatches_nothing() -> Result<()> {
-        let (_directory, runtime) = carta_runtime(Setup {
+    fn a_native_host_resolves_only_its_mounted_basic_secret_and_never_falls_back() -> Result<()> {
+        let (directory, runtime) = carta_runtime(Setup {
             simulated: false,
             ..Setup::default()
         })?;
-        let refused = capture(&runtime, "native")?;
-        assert_eq!(refused.observation.error, "carta_unavailable");
+        let refused = capture(&runtime, "native-unmounted")?;
+        assert_eq!(refused.observation.error, "carta_credential_unavailable");
         assert_eq!(refused.usage.calls, 0);
         assert!(!refused.usage.dispatched);
         assert_eq!(calls(&runtime)?, 0, "the simulated world is not a fallback");
+
+        let live: LiveConnection = serde_json::from_value(
+            json!({"provider":"carta","credential_ref":{"id":"carta-secret","revision":1},
+                "client_id":"playground-client","environment":"playground","max_pages_per_collection":3}),
+        )?;
+        let file = directory.path().join("carta-secret");
+        fs::write(&file, b"SYNTHETIC_NEVER_EXPORT_CARTA_SECRET\n")?;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+        crate::integration_host::mount(
+            runtime.instance_path(),
+            "it",
+            &crate::integration_host::Mount {
+                connection: live.clone(),
+                reference: None,
+                credential_file: file,
+                expected_fingerprint: None,
+            },
+        )?;
+        let mounts = crate::integration_host::MountedCredentials::new(runtime.instance_path())?;
+        assert!(mounts.carta_client_secret(&live).is_ok());
+        // The same bytes are never resolvable as a transmittable bearer.
+        assert!(integrations::CredentialResolver::resolve(&mounts, &live).is_err());
+        let LiveConnection::Carta {
+            credential_ref,
+            environment,
+            max_pages_per_collection,
+            ..
+        } = live
+        else {
+            unreachable!()
+        };
+        let retargeted = LiveConnection::Carta {
+            credential_ref,
+            client_id: "another-client".into(),
+            environment,
+            max_pages_per_collection,
+        };
+        assert_eq!(
+            mounts.carta_client_secret(&retargeted).err(),
+            Some(crate::carta_live::Failure::CredentialUnavailable),
+            "a secret mounted for one client cannot authenticate another"
+        );
         Ok(())
     }
 }

@@ -931,12 +931,10 @@ fn carta_capture(
                 Err(error) => return (Err(error), Default::default()),
             }
         } else {
-            // The native HTTPS adapter is admitted separately; until then a live
-            // host refuses rather than reaching any provider.
-            return (
-                Err(crate::carta_live::Failure::Unavailable.into()),
-                Default::default(),
-            );
+            match native_carta_port(runtime, resource, plan) {
+                Ok(port) => Box::new(port),
+                Err(failure) => return (Err(failure.into()), Default::default()),
+            }
         };
     let page_limit =
         usize::try_from(resource.grant.limits.max_response_bytes).unwrap_or(usize::MAX);
@@ -952,6 +950,26 @@ fn carta_capture(
         Ok(serde_json::to_string(complete.snapshot())?)
     });
     (result, meter)
+}
+
+/// The native adapter with the connection's mounted client secret. The secret
+/// is re-checked against the reviewed profile and fingerprint, and is only ever
+/// held as a Basic-authentication value.
+fn native_carta_port(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    plan: &crate::carta_live::CapturePlan,
+) -> std::result::Result<crate::carta_http::NativeCartaPort, crate::carta_live::Failure> {
+    use crate::carta_live::Failure;
+    let Some(connection @ day2_capabilities::integrations::LiveConnection::Carta { client_id, .. }) =
+        resource.grant.live.as_ref()
+    else {
+        return Err(Failure::CredentialUnavailable);
+    };
+    let secret = crate::integration_host::MountedCredentials::new(runtime.instance_path())
+        .map_err(|_| Failure::CredentialUnavailable)?
+        .carta_client_secret(connection)?;
+    crate::carta_http::NativeCartaPort::new(plan, client_id, secret)
 }
 
 fn workspace_directory_page(
