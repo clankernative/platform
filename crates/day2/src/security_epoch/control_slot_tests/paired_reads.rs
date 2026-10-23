@@ -7,6 +7,7 @@ enum Fault {
     None,
     TokenWithDocument,
     ReverseDocuments,
+    IncreasingInterleaved,
     DuplicateDocument,
     DuplicateSlot,
     MissingDocument,
@@ -142,6 +143,13 @@ impl Port for PairPort {
                 entries[0]["transaction"] = header["transaction"].clone();
             }
             Fault::ReverseDocuments => entries[1..].reverse(),
+            Fault::IncreasingInterleaved => {
+                let entry = entries.remove(slot);
+                entries.insert(2, entry);
+                for (index, entry) in entries.iter_mut().enumerate().skip(1) {
+                    entry["readTime"] = json!(format!("2026-10-14T00:00:00.{:06}Z", 100 + index));
+                }
+            }
             Fault::DuplicateDocument => entries[2] = entries[1].clone(),
             Fault::DuplicateSlot => entries[1] = entries[slot].clone(),
             Fault::MissingDocument => { entries.remove(1); }
@@ -186,6 +194,7 @@ fn pair_uses_one_exact_read_transaction_and_rollback_with_unordered_or_first_doc
             Fault::None,
             Fault::TokenWithDocument,
             Fault::ReverseDocuments,
+            Fault::IncreasingInterleaved,
         ] {
             let (selection, core, mut port) = PairPort::new(with_slot);
             port.fault = fault;
