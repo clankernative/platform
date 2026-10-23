@@ -609,6 +609,7 @@ pub fn execute(
     isolated_job: Option<&Path>,
     import_context: Option<&BuildImportContext>,
     runner: &Path,
+    budget: BuildCampaignBudget,
 ) -> Result<PathBuf> {
     let mut prepared = None;
     let mut bound = None;
@@ -630,7 +631,7 @@ pub fn execute(
             let stage = &prepared.stage;
             let roc = &prepared.roc;
             match request.action.as_str() {
-                "build-schema" => run(
+                "build-schema" => run_build(
                     root,
                     day2::sandbox::glue_compiler(
                         root,
@@ -642,6 +643,7 @@ pub fn execute(
                     .arg(root.join("tools/SchemaGlue.roc"))
                     .arg(stage)
                     .arg(stage.join("app/schema-platform.roc")),
+                    budget,
                 )?,
                 "build-data" => {
                     ensure!(done.contains("build-schema"), "checked types required");
@@ -657,7 +659,7 @@ pub fn execute(
                         done.contains(prerequisite),
                         "missing app inference prerequisite: {prerequisite}"
                     );
-                    run(
+                    run_build(
                         root,
                         day2::sandbox::glue_compiler(
                             root,
@@ -669,6 +671,7 @@ pub fn execute(
                         .arg(root.join("tools/SchemaGlue.roc"))
                         .arg(stage)
                         .arg(stage.join("app/app-platform.roc")),
+                        budget,
                     )?;
                     if request.action == "build-app-check" {
                         let bound = bound.as_mut().context("bound app required")?;
@@ -720,12 +723,13 @@ pub fn execute(
                         let source = stage.join("app/connection-probe.roc");
                         let executable = stage.join("connection-probe");
                         fs::write(&source, day2::connection_codegen::probe(&catalog))?;
-                        run(
+                        run_build(
                             root,
                             day2::sandbox::compiler(root, stage, roc)?
                                 .arg("build")
                                 .arg(&source)
                                 .arg(format!("--output={}", executable.display())),
+                            budget,
                         )?;
                         // This worker can only evaluate the pure projection.
                         // No runtime, authority provider or effect dispatcher
@@ -748,11 +752,12 @@ pub fn execute(
                         "final app reflection required"
                     );
                     let admission = root.join("artifacts/admission");
-                    run(
+                    run_build(
                         root,
                         day2::sandbox::compiler(root, &admission, roc)?
                             .args(["check", "--no-cache"])
                             .arg(admission.join("app/main.roc")),
+                        budget,
                     )?;
                 }
                 "build-glue" => {
@@ -766,7 +771,7 @@ pub fn execute(
                     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
                     fs::create_dir_all(root.join("crates/worker/generated"))?;
                     let output = tempfile::tempdir_in(stage)?;
-                    run(
+                    run_build(
                         root,
                         day2::sandbox::glue_compiler(
                             root,
@@ -778,6 +783,7 @@ pub fn execute(
                         .arg(prepared.rust_glue)
                         .arg(output.path())
                         .arg("sdk/main.roc"),
+                        budget,
                     )?;
                     let generated = output.path().join("roc_platform_abi.rs");
                     let metadata = fs::symlink_metadata(&generated)
@@ -794,7 +800,8 @@ pub fn execute(
                 }
                 "build-host" => {
                     ensure!(done.contains("build-glue"), "checked ABI required");
-                    let archive = crate::bazel::worker_archive(root, isolated_job)?;
+                    let archive =
+                        crate::bazel::worker_archive(root, isolated_job, budget.duration())?;
                     prepared.hashes.extend(native_toolchain::stage_link_inputs(
                         prepared.target,
                         stage,
@@ -804,11 +811,12 @@ pub fn execute(
                 "build-check" => {
                     ensure!(done.contains("build-admission"), "final admission required");
                     ensure!(bound.is_some(), "bound schema required");
-                    run(
+                    run_build(
                         root,
                         day2::sandbox::compiler(root, stage, roc)?
                             .args(["check", "--no-cache"])
                             .arg(stage.join("app/main.roc")),
+                        budget,
                     )?;
                 }
                 "build-link" => {
@@ -818,12 +826,13 @@ pub fn execute(
                             && done.contains("build-admission"),
                         "checked app and native host required"
                     );
-                    run(
+                    run_build(
                         root,
                         day2::sandbox::compiler(root, stage, roc)?
                             .arg("build")
                             .arg(stage.join("app/main.roc"))
                             .arg(format!("--output={}", stage.join("worker").display())),
+                        budget,
                     )?;
                 }
                 "build-publish" => {
