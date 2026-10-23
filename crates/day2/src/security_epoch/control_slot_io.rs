@@ -12,7 +12,6 @@ use super::{
     kernel::{self, Outcome, Request, UpdateTime},
 };
 use anyhow::{Context, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::{
     Digest,
     security_epoch::{EpochProvider, EpochStore},
@@ -78,84 +77,36 @@ impl SlotObservation {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReadEntry {
-    transaction: Option<String>,
-    read_time: Option<String>,
-    found: Option<Value>,
-    missing: Option<String>,
-}
-
-pub(super) fn read_with_budget(
+/// One coherent provider transaction supplies both observations. Each retains
+/// the same spent original budget; neither observation is native authority.
+pub(super) fn read_with_counter(
     selection: &EpochStore,
     core: &LogicalCore,
     port: &mut impl Port,
-    mut budget: Budget,
-) -> Result<SlotObservation> {
-    let name = codec::name(selection, core)?;
-    let body = serde_json::to_vec(&json!({"documents":[name],"newTransaction":{"readOnly":{}}}))?;
-    let bytes = budget.call(port, &endpoint(selection, "batchGet"), &body)?;
-    let mut entries: Vec<ReadEntry> = crate::json::decode(&bytes)?;
-    ensure!(
-        !entries.is_empty() && entries.len() <= 2,
-        "control_slot_batch_shape"
-    );
-    let token = entries[0]
-        .transaction
-        .take()
-        .context("control_slot_transaction_missing")?;
-    let decoded = STANDARD.decode(&token)?;
-    ensure!(
-        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
-        "control_slot_transaction_shape"
-    );
+    budget: Budget,
+) -> Result<(EpochObservation, SlotObservation)> {
     let result = (|| {
-        if entries[0].found.is_none() && entries[0].missing.is_none() {
-            ensure!(entries[0].read_time.is_none(), "control_slot_header_fields");
-            entries.remove(0);
-        }
-        ensure!(entries.len() == 1, "control_slot_batch_shape");
-        let entry = entries.pop().unwrap();
-        ensure!(
-            entry.transaction.is_none(),
-            "control_slot_duplicate_transaction"
-        );
-        let read_time = entry.read_time.context("control_slot_read_time_missing")?;
-        time::OffsetDateTime::parse(&read_time, &time::format_description::well_known::Rfc3339)?;
-        match (entry.found, entry.missing) {
-            (Some(document), None) => Ok(Some(codec::decode(
-                selection,
-                core,
-                &serde_json::to_vec(&document)?,
-            )?)),
-            (None, Some(missing)) => {
-                ensure!(missing == name, "control_slot_unrequested_document");
-                Ok(None)
-            }
-            _ => anyhow::bail!("control_slot_batch_shape"),
-        }
+        // Charge these binding hashes before the reader's final clock sample.
+        let selection_binding = Digest::of(selection)?;
+        let logical = core.digest()?;
+        let (counter, value, budget) =
+            super::firestore::read_with_slot(selection, core, port, budget)?;
+        Ok((
+            counter,
+            SlotObservation {
+                selection: selection_binding,
+                logical,
+                value,
+                budget,
+                valid: true,
+                local: PhantomData,
+            },
+        ))
     })();
-    // Semantic failure still closes the actual provider read transaction.
-    let rollback = serde_json::to_vec(&json!({"transaction":token}))?;
-    let cleanup = budget.call(port, &endpoint(selection, "rollback"), &rollback)?;
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Empty {}
-    let _: Empty = crate::json::decode(&cleanup)?;
-    let selection = Digest::of(selection)?;
-    let logical = core.digest()?;
-    // Both HTTP exchanges retain full pre/post guards. This last step only
-    // charges decoding of the already received response to the same clock.
-    budget.remaining_decoding(port)?;
-    Ok(SlotObservation {
-        selection,
-        logical,
-        value: result?,
-        budget,
-        valid: true,
-        local: PhantomData,
-    })
+    if result.is_err() {
+        port.refuse();
+    }
+    result
 }
 
 pub(crate) struct Mutation<'storage, 'role> {

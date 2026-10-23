@@ -208,6 +208,18 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 
 ## Preparation timing diagnosis
 
+Bootstrap reads its counter and control slot together in one bounded read-only
+Firestore transaction before each mutation and in another afterward. The App
+also reads the pair together after the Controller's Known message. Both decoded
+observations retain the same spent original budget. Complete requested-document,
+transaction-token and cross-stream read-time checks precede partitioning into
+the existing strict codecs; discovery discards both values and rereads the whole
+pair. Every batch and rollback retains its full native transport guards, and a
+failed or expired rollback releases no observation. No deadline or response-byte
+ceiling increases. This replaces the separate counter and slot reads; it adds no
+write retry or positive authority cache. Fewer exchanges do not establish a
+complete native action or timing margin.
+
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
 ordinary artifact/instance admission, role-stage exchange, complete Controller
@@ -313,6 +325,12 @@ its separate named count/total/max format. Bootstrap codes are:
 | 53–55 | bootstrap_acknowledgement, bootstrap_peer_release, bootstrap_peer_finish |
 | 56–58 | bootstrap_firestore_read, bootstrap_firestore_commit, bootstrap_firestore_rollback |
 | 59 | bootstrap_writer_exchange |
+| 60, 61 | bootstrap_snapshot, bootstrap_snapshot_after |
+
+Codes 60 and 61 time the complete paired counter/slot observations. Earlier
+single-observation code meanings remain unchanged; this source emits paired
+timings instead of codes 36, 37, 49 and 50. The failure boundaries are
+`bootstrap_snapshot_before` and `bootstrap_snapshot_after`.
 
 Rows remain inclusive: provider and authentication timings nest inside outer
 file/durability/writer phases, and Firestore calls nest inside counter/slot or

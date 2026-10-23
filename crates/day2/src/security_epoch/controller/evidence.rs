@@ -163,6 +163,8 @@ pub(in crate::security_epoch) enum PreparationStep {
     BootstrapValidation,
     BootstrapAnnouncement,
     BootstrapRelease,
+    BootstrapSnapshotBefore,
+    BootstrapSnapshotAfter,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME

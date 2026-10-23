@@ -423,18 +423,18 @@ impl RetainedEpochReads {
         result
     }
 
-    /// The fixed slot observation stays read-only and requires the SAME actual
-    /// stage before and after its coherent provider read and rollback.
-    pub(in crate::security_epoch) fn read_slot(
+    /// The bootstrap counter and slot are one coherent read-only snapshot.
+    /// Keep the SAME actual stage before and after its read and rollback.
+    pub(in crate::security_epoch) fn read_bootstrap_snapshot(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         selection: &EpochStore,
         core: &crate::security_epoch::control_slot::LogicalCore,
-    ) -> Result<crate::security_epoch::control_slot_io::SlotObservation> {
+    ) -> Result<(EpochObservation, crate::security_epoch::control_slot_io::SlotObservation)> {
         let result = (|| {
             ensure!(
-                self.scope != ReadScope::StorageMetadataObservation,
-                "epoch_metadata_only_read_refused"
+                self.scope == ReadScope::StorageBootstrap,
+                "epoch_bootstrap_read_purpose_changed"
             );
             ensure!(
                 self.selection == Digest::of(selection)?,
@@ -442,14 +442,14 @@ impl RetainedEpochReads {
             );
             self.check(stage)?;
             let budget = self.acquisition.budget()?;
-            let slot = crate::security_epoch::control_slot_io::read_with_budget(
+            let pair = crate::security_epoch::control_slot_io::read_with_counter(
                 selection,
                 core,
                 &mut CurrentReadPort { owner: self, stage },
                 budget,
             )?;
             self.check(stage)?;
-            Ok(slot)
+            Ok(pair)
         })();
         if result.is_err() {
             self.refuse();

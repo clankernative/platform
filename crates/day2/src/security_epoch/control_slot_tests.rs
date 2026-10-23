@@ -978,7 +978,7 @@ impl SharedPort {
         .unwrap();
         let sample = self.sample().unwrap();
         let budget = Budget::for_context(sample, Duration::from_secs(105)).unwrap();
-        let slot = guarded::read_with_budget(selection, core, self, budget).unwrap();
+        let slot = guarded::read_with_counter(selection, core, self, budget).unwrap().1;
         (counter, slot, context)
     }
 
@@ -1006,38 +1006,38 @@ impl SharedPort {
             "oracle bounded request"
         );
         let value: Value = crate::json::decode(body)?;
-        if url.ends_with(":rollback") && value == json!({"transaction":"c2xvdC10eG4="}) {
-            return Ok(EpochReply {
-                status: 200,
-                body: b"{}".to_vec(),
-            });
-        }
         if url.ends_with(":batchGet")
-            && value["documents"][0]
-                .as_str()
-                .is_some_and(|name| name.contains("/day2_credential_control_v1/"))
+            && value["documents"].as_array().is_some_and(|documents| {
+                documents.iter().any(|name| name.as_str().is_some_and(|name| {
+                    name.contains("/day2_credential_control_v1/")
+                }))
+            })
         {
-            ensure!(
-                value["documents"].as_array().unwrap().len() == 1
-                    && value["newTransaction"] == json!({"readOnly":{}}),
-                "oracle exact slot read"
-            );
-            let name = value["documents"][0].as_str().unwrap();
+            let documents = value["documents"].as_array().context("oracle documents")?;
+            ensure!((4..=5).contains(&documents.len())
+                && value["newTransaction"] == json!({"readOnly":{}}),
+                "oracle exact joint read");
+            let slot_names: Vec<_> = documents.iter().filter_map(Value::as_str)
+                .filter(|name| name.contains("/day2_credential_control_v1/")).collect();
+            ensure!(slot_names.len()==1,"oracle one slot");
+            let name = slot_names[0];
+            let mut counter_request = value.clone();
+            counter_request["documents"] = Value::Array(documents.iter()
+                .filter(|item| item.as_str()!=Some(name)).cloned().collect());
+            let mut reply = self.counter.post_wire(url,
+                &serde_json::to_vec(&counter_request)?,timeout,max_bytes)?;
+            let mut entries: Vec<Value> = crate::json::decode(&reply.body)?;
             let found: bool = self.slots.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM slots WHERE name=?1)",
-                [name],
-                |r| r.get(0),
-            )?;
+                "SELECT EXISTS(SELECT 1 FROM slots WHERE name=?1)",[name],|r| r.get(0))?;
             let mut entry = if found {
                 json!({"found":serde_json::from_slice::<Value>(&self.slots.read(name))?})
-            } else {
-                json!({"missing":name})
-            };
-            entry["readTime"] = json!("2026-10-14T00:00:00.000010Z");
-            return Ok(EpochReply {
-                status: 200,
-                body: serde_json::to_vec(&json!([{"transaction":"c2xvdC10eG4="},entry]))?,
-            });
+            } else { json!({"missing":name}) };
+            // One model request observes both independent SQLite stores at
+            // this controlled schedule point; it is not a native transaction.
+            entry["readTime"] = json!("2026-10-14T00:00:00.000100Z");
+            entries.push(entry);
+            reply.body=serde_json::to_vec(&entries)?;
+            return Ok(reply);
         }
         if url.ends_with(":commit")
             && value["writes"]
@@ -1199,7 +1199,7 @@ fn mutation_clock_evidence(
         Duration::from_millis(slot_deadline),
     )
     .unwrap();
-    let slot = guarded::read_with_budget(selection, core, inner, slot_budget).unwrap();
+    let slot = guarded::read_with_counter(selection, core, inner, slot_budget).unwrap().1;
     let context = CurrentBootstrapExecution::fixture(
         selection,
         &core.counter,
@@ -1777,3 +1777,5 @@ fn boxed_observed_receipts_keep_exact_unboxed_wire_bytes_for_both_stages() {
         );
     }
 }
+
+mod paired_reads;

@@ -69,9 +69,11 @@ pub(in crate::security_epoch) enum Operation {
     BootstrapFirestoreCommit,
     BootstrapFirestoreRollback,
     BootstrapWriterExchange,
+    BootstrapSnapshot,
+    BootstrapSnapshotAfter,
 }
 
-const OPERATIONS: [Operation; 60] = [
+const OPERATIONS: [Operation; 62] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -132,6 +134,8 @@ const OPERATIONS: [Operation; 60] = [
     Operation::BootstrapFirestoreCommit,
     Operation::BootstrapFirestoreRollback,
     Operation::BootstrapWriterExchange,
+    Operation::BootstrapSnapshot,
+    Operation::BootstrapSnapshotAfter,
 ];
 
 #[derive(Clone, Copy)]
@@ -166,6 +170,8 @@ impl Scope {
                 | Operation::BootstrapWriterMaterial
                 | Operation::BootstrapWriterSample
                 | Operation::BootstrapCounterAfter
+                | Operation::BootstrapSnapshot
+                | Operation::BootstrapSnapshotAfter
                 | Operation::BootstrapSlotAfter
                 | Operation::BootstrapExecution
                 | Operation::BootstrapAnnouncement
@@ -353,13 +359,15 @@ mod tests {
             (Operation::ProviderRoundTwo, 22),
             (Operation::ProviderRoundThree, 33),
             (Operation::BootstrapAcknowledgement, 44),
+            (Operation::BootstrapSnapshot, 55),
+            (Operation::BootstrapSnapshotAfter, 66),
         ] {
             let mut times = [Duration::ZERO, Duration::from_micros(micros)].into_iter();
             assert_eq!(timings.measure_with(operation, || 17, || times.next()), 17);
         }
         assert_eq!(
             serde_json::to_value(timings.summary().compact()).unwrap(),
-            serde_json::json!([[42, 1, 11], [43, 1, 22], [44, 1, 33], [53, 1, 44]])
+            serde_json::json!([[42, 1, 11], [43, 1, 22], [44, 1, 33], [53, 1, 44], [60, 1, 55], [61, 1, 66]])
         );
         let inconclusive = Summary(vec![(
             Operation::BootstrapFirestoreCommit,

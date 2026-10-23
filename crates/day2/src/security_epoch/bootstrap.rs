@@ -9,7 +9,7 @@ use super::{
     control_slot_io,
     controller::evidence::{PreparationFailure, PreparationStep},
     controller::{bootstrap_timing::BootstrapTiming, preparation_timing::Operation},
-    firestore::{self, Names, Port},
+    firestore::{Names, Port},
     journal::{CurrentBootstrapExecution, Purpose},
     kernel::{self, Outcome, Request, Snapshot},
     native_enrollment::EnrolledRoleStage,
@@ -99,29 +99,12 @@ pub(super) fn run_phase(
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
-        let names = Names::new(
-            selection,
-            request.bootstrap(),
-            match request {
-                Request::CreateInitialAuthority { .. } => None,
-                Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
-            },
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapNames, error))?;
-        let counter = trace.measure(Operation::BootstrapCounter, || {
-            let counter_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
+        let (counter, slot) = trace.measure(Operation::BootstrapSnapshot, || {
+            let budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error)
             })?;
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterBefore, error)
-            })
-        })?;
-        let slot = trace.measure(Operation::BootstrapSlot, || {
-            let slot_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error)
-            })?;
-            control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget).map_err(
-                |error| PreparationFailure::at(PreparationStep::BootstrapSlotBefore, error),
+            control_slot_io::read_with_counter(selection, &core, &mut port, budget).map_err(
+                |error| PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error),
             )
         })?;
         let purpose = match action {
@@ -258,20 +241,13 @@ pub(super) fn run_phase(
             }
             Ok(())
         })?;
-        let observed = trace.measure(Operation::BootstrapCounterAfter, || {
-            let counter_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
+        let (observed, slot) = trace.measure(Operation::BootstrapSnapshotAfter, || {
+            let budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSnapshotAfter, error)
             })?;
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
-            })
-        })?;
-        let slot = trace.measure(Operation::BootstrapSlotAfter, || {
-            let slot_budget = port.budget().map_err(|error| {
-                PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error)
-            })?;
-            control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
-                .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))
+            control_slot_io::read_with_counter(selection, &core, &mut port, budget).map_err(
+                |error| PreparationFailure::at(PreparationStep::BootstrapSnapshotAfter, error),
+            )
         })?;
         trace
             .measure(Operation::BootstrapValidation, || {
@@ -497,9 +473,7 @@ impl AppStorageBootstrap {
             phase.await_known(stage)?;
             // The Controller's signed result only unblocks a fresh coherent
             // provider read. It is not itself an activation/serving receipt.
-            let names = request_names(&self.store, &request)?;
-            let observed = reads.read(stage, &self.store, &names)?;
-            let slot = reads.read_slot(stage, &self.store, &core)?;
+            let (observed, slot) = reads.read_bootstrap_snapshot(stage, &self.store, &core)?;
             validate_after(
                 action,
                 &self.store,
