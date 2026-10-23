@@ -36,7 +36,7 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
   }
 
   assert {
-    condition = length(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/loopback-services-sha256"]) == 64
+    condition     = length(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/loopback-services-sha256"]) == 64
     error_message = "A companion config or image change triggers a pod rollout."
   }
 
@@ -51,12 +51,12 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
   }
 
   assert {
-    condition = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[0] == "serve"
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[0] == "serve"
     error_message = "The companion starts the service command."
   }
 
   assert {
-    condition = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[1] == "/run/day2/private-config.json"
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[1] == "/run/day2/private-config.json"
     error_message = "The companion receives the mounted private config file as its argument."
   }
 
