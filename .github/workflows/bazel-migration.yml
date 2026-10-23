@@ -50,7 +50,8 @@ jobs:
       - name: Enforce the exact current native source policy before image work
         run: build-out/bin/xtask architecture-check
       - name: Requalify the whole verification control module including current cache guards
-        run: build-out/bin/xtask test-rust //crates/xtask:unit_xtask verification::tests:: --test-threads=1
+        run: |
+          build-out/bin/xtask test-rust //crates/xtask:unit_xtask verification::tests:: --test-threads=1
       - name: Bootstrap current native inputs
         run: build-out/bin/xtask bootstrap
       - name: Qualify actual native tooling and runtime images
