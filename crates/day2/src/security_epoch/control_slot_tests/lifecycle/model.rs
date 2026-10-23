@@ -113,6 +113,7 @@ impl Model {
         }
         Ok(Self {
             state: State {
+                binding: Digest::of(cores)?,
                 continuation: true,
                 first_holder: false,
                 current: 0,

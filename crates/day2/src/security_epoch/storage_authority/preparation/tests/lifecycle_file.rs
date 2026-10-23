@@ -75,6 +75,35 @@ impl FileFixture {
         result
     }
 
+    /// Project immutable fixture inputs once, while the original is still
+    /// exact. This is DATA, not a native role, P3 or permission factory. Current
+    /// operations retain these inputs and never project a modified file again.
+    pub(in crate::security_epoch) fn blueprint(
+        &mut self,
+    ) -> Result<(
+        day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        EpochStore,
+        OriginalSeedCore,
+    )> {
+        self.check(false)?;
+        let selected = &self.creator.authority.selection;
+        ensure!(
+            self.creator.proposal == self.layout.proposal
+                && self.layout.proposal.core == *selected.seed()
+                && self.layout.proposal.marker == selected.seed().marker()?
+                && self.layout.proposal.selection == *selected.digest()
+                && self.layout.proposal.store == *selected.store(),
+            "lifecycle original fixture blueprint changed"
+        );
+        let data = (
+            selected.policy().clone(),
+            selected.store().clone(),
+            selected.seed().clone(),
+        );
+        self.check(false)?;
+        Ok(data)
+    }
+
     pub(in crate::security_epoch) fn change(&mut self, change: FileChange) -> Result<()> {
         let leaf = self.directory.path().join(INITIAL_FILE);
         let retained = self.directory.path().join("held-original.sqlite");

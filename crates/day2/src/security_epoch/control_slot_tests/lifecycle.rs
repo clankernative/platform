@@ -93,6 +93,7 @@ struct Program {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
+    binding: Digest,
     continuation: bool,
     first_holder: bool,
     current: usize,
@@ -131,8 +132,54 @@ impl World {
     fn new(seed: u64, physical: bool) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
         ensure!(!physical, "physical lifecycle requires Linux");
+        #[cfg(target_os = "linux")]
+        let mut file = if physical {
+            Some(crate::security_epoch::storage_authority::FileFixture::new()?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let (selection, create) = if let Some(file) = &mut file {
+            let (policy, store, original) = file.blueprint()?;
+            let request = Request::CreateInitialAuthority {
+                bootstrap: original.bootstrap()?,
+            };
+            let core = LogicalCore::new(&store, policy, original, &request)?;
+            (store, core)
+        } else {
+            fixture()
+        };
+        #[cfg(not(target_os = "linux"))]
         let (selection, create) = fixture();
-        let complete = completion(&create);
+        ensure!(
+            selection == tests::selection(),
+            "conditional fixture provider selection changed"
+        );
+        let mut counter = Request::CompleteInitialFirstActivation {
+            bootstrap: create.counter.bootstrap().clone(),
+            operation: Digest::new(b"uncomputed"),
+            parent_receipt: create.counter.receipt()?.digest()?,
+            before: Versions {
+                root: version(1),
+                sentinel: version(1),
+            },
+            holder: Holder {
+                principal: Digest::new(b"app-principal"),
+                pod_uid: "11234567-89ab-4cde-8fab-0123456789ab".into(),
+                process_incarnation: Digest::new(b"original-app-process"),
+                ephemeral_key: Digest::new(b"original-app-key"),
+            },
+        };
+        let operation = complete_operation(&counter, &create.seed.digest()?)?;
+        if let Request::CompleteInitialFirstActivation { operation: id, .. } = &mut counter {
+            *id = operation;
+        }
+        let complete = LogicalCore::new(
+            &selection,
+            create.policy.clone(),
+            create.seed.clone(),
+            &counter,
+        )?;
         let directory = tempfile::tempdir()?;
         let mut port = SharedPort::new();
         port.counter = counter_fixture::open(&directory.path().join("counter.sqlite"));
@@ -148,11 +195,7 @@ impl World {
             activation: None,
             handshake: LifecycleHandshake::new(seed)?,
             #[cfg(target_os = "linux")]
-            file: if physical {
-                Some(crate::security_epoch::storage_authority::FileFixture::new()?)
-            } else {
-                None
-            },
+            file,
         })
     }
 
@@ -436,6 +479,7 @@ impl World {
         Ok(Record {
             accepted,
             state: State {
+                binding: Digest::of(&self.cores)?,
                 continuation: self.continuation,
                 first_holder: self.first_holder,
                 current: self.current,
@@ -596,6 +640,7 @@ fn replayed(program: &Program) -> Result<std::result::Result<Vec<Record>, Diverg
 struct Bundle {
     version: u32,
     source: Digest,
+    binding: Digest,
     program: Program,
     reduced: Program,
     failure: Value,
@@ -629,6 +674,13 @@ fn check(program: &Program) -> Result<Vec<Record>> {
     let bundle = Bundle {
         version: 1,
         source: source(),
+        binding: failure
+            .records
+            .first()
+            .context("lifecycle failure snapshot absent")?
+            .state
+            .binding
+            .clone(),
         program: program.clone(),
         reduced,
         failure: serde_json::to_value(&failure)?,
@@ -895,6 +947,12 @@ fn replay_saved_storage_lifecycle_history() -> Result<()> {
         bundle.version == 1 && bundle.source == source(),
         "lifecycle replay source/version mismatch"
     );
+    let fixture = World::new(bundle.program.seed, bundle.program.physical)?;
+    ensure!(
+        Digest::of(&fixture.cores)? == bundle.binding,
+        "lifecycle replay immutable fixture inputs changed"
+    );
+    drop(fixture);
     check(&bundle.program)?;
     check(&bundle.reduced)?;
     Ok(())

@@ -53,6 +53,14 @@ control does not assert SQLite schema or data integrity. OS identities are
 compared as retained identity relationships, so replay does not depend on coincidentally reused file
 descriptor or inode numbers.
 
+The physical campaign projects the retained file's actual selection, policy,
+seed and marker after original validation and checks them again before returning
+those immutable inputs. Both conditional requests and the independent model use
+that exact blueprint. This projection happens once, before the history; current
+writes cannot restamp or replace it. Saved bundles also bind those fixture inputs,
+so replay refuses changed runtime fixture definitions even with the same Rust
+campaign source.
+
 ## Running and replaying
 
 ```console
