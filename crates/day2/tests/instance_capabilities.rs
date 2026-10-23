@@ -25,7 +25,7 @@ fn fixture(root: &Path) -> Result<Value> {
                 "platform":Digest::new(b"fixture platform"),"recipe":Digest::new(b"fixture recipe")
             }}},
             "builders":{"local-builder":{"kind":"local_macos","platform_root":root.join("platform"),
-                "toolchains":root.join("toolchains"),"xtask":root.join("xtask"),"rust":root.join("rust"),"registry":root.join("registry")}},
+                "toolchains":root.join("toolchains"),"xtask":root.join("xtask"),"bazel":root.join("bazel"),"repositories":root.join("repositories")}},
             "runtimes":{"local-temporal":{"kind":"temporal_local","endpoint":"127.0.0.1:7233","namespace":"example","task_queue":"reports-builds"}}
         }
     }))

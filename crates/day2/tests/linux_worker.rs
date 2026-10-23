@@ -9,10 +9,7 @@ use std::{
 
 fn start() -> Result<Worker> {
     let executable = std::env::current_exe()?;
-    let directory = executable
-        .parent()
-        .and_then(|path| path.parent())
-        .context("test binary directory")?;
+    let directory = executable.parent().context("test binary directory")?;
     Worker::start_with_trusted_launcher(
         &directory.join("day2-sandbox-probe"),
         &directory.join("day2-sandbox"),
@@ -103,10 +100,7 @@ fn timeout_eof_oversize_and_bad_input_poison_and_reap_worker() -> Result<()> {
 #[test]
 fn property_worker_uses_qualified_limits_and_keeps_invocation_profile_unchanged() -> Result<()> {
     let executable = std::env::current_exe()?;
-    let directory = executable
-        .parent()
-        .and_then(|path| path.parent())
-        .context("test binary directory")?;
+    let directory = executable.parent().context("test binary directory")?;
     let probe = directory.join("day2-sandbox-probe");
     let launcher = directory.join("day2-sandbox");
 

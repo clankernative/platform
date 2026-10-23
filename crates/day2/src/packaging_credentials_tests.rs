@@ -206,7 +206,7 @@ fn operator_only_control_rejects_each_dormant_provider_map() -> Result<()> {
         ),
         (
             "builders",
-            json!({"kind":"local_macos","platform_root":"/private/platform","toolchains":"/private/toolchains","xtask":"/private/xtask","rust":"/private/rust","registry":"/private/registry"}),
+            json!({"kind":"local_macos","platform_root":"/private/platform","toolchains":"/private/toolchains","xtask":"/private/xtask","bazel":"/private/bazel","repositories":"/private/repositories"}),
         ),
         (
             "runtimes",
