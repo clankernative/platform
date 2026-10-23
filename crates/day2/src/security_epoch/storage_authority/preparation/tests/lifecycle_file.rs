@@ -60,7 +60,7 @@ impl FileFixture {
                     "lifecycle current physical identity changed"
                 );
                 ensure!(
-                    self.snapshot()?.named_original,
+                    self.named_original()?,
                     "lifecycle current physical leaf changed"
                 );
                 self.creator.authority.check_current(&mut self.acquisition)
@@ -94,6 +94,13 @@ impl FileFixture {
                 let db = rusqlite::Connection::open(&leaf)?;
                 db.execute_batch("PRAGMA user_version=42")?;
             }
+            FileChange::Shorten => {
+                ensure!(
+                    self.layout.image.bytes().len() > 4096,
+                    "shorter-file control must change length"
+                );
+                self.creator.file.set_len(4096)?;
+            }
             FileChange::Restore => {
                 if retained.exists() {
                     std::fs::remove_file(&leaf)?;
@@ -120,14 +127,24 @@ impl FileFixture {
 
     pub(in crate::security_epoch) fn snapshot(&self) -> Result<FileState> {
         let metadata = self.creator.file.metadata()?;
-        let named = std::fs::symlink_metadata(self.directory.path().join(INITIAL_FILE))?;
-        let mut bytes = vec![0; self.layout.image.bytes().len()];
-        self.creator.file.read_exact_at(&mut bytes, 0)?;
+        let image_exact = if metadata.len() == self.layout.image.bytes().len() as u64 {
+            let mut bytes = vec![0; self.layout.image.bytes().len()];
+            self.creator.file.read_exact_at(&mut bytes, 0)?;
+            bytes == self.layout.image.bytes()
+        } else {
+            false
+        };
         Ok(FileState {
             held_original: self.creator.file.as_raw_fd() == self.descriptor
                 && metadata.ino() == self.inode,
-            named_original: named.ino() == metadata.ino() && named.dev() == metadata.dev(),
-            image_exact: metadata.len() == bytes.len() as u64 && bytes == self.layout.image.bytes(),
+            named_original: self.named_original()?,
+            image_exact,
         })
+    }
+
+    fn named_original(&self) -> Result<bool> {
+        let held = self.creator.file.metadata()?;
+        let named = std::fs::symlink_metadata(self.directory.path().join(INITIAL_FILE))?;
+        Ok(named.ino() == held.ino() && named.dev() == held.dev())
     }
 }

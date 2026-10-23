@@ -47,8 +47,10 @@ the production full-file validator. Current physical checks use its actual
 identity observer on the held descriptor and named leaf. Generated substitution
 and byte-tampering cuts retain that descriptor; restoration cannot clear an
 observed refusal. A legitimate same-inode SQLite write is a positive control for
-the distinct current physical contract. OS identities are compared as retained
-identity relationships, so replay does not depend on coincidentally reused file
+the distinct current physical contract. A shorter same-inode file is accepted
+only by the physical observer; initial image checks still refuse it. This physical
+control does not assert SQLite schema or data integrity. OS identities are
+compared as retained identity relationships, so replay does not depend on coincidentally reused file
 descriptor or inode numbers.
 
 ## Running and replaying

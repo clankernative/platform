@@ -261,7 +261,9 @@ impl Model {
                     .as_mut()
                     .context("physical fixture required")?;
                 match change {
-                    FileChange::Tamper | FileChange::AppWrite => file.image_exact = false,
+                    FileChange::Tamper | FileChange::AppWrite | FileChange::Shorten => {
+                        file.image_exact = false
+                    }
                     FileChange::Replace => file.named_original = false,
                     FileChange::Restore => {
                         file.image_exact = true;

@@ -68,6 +68,6 @@ impl LifecycleHandshake {
     }
 
     pub(in crate::security_epoch) fn snapshot(&self) -> serde_json::Value {
-        self.actual.snapshot()
+        serde_json::json!({"actual":self.actual.snapshot(),"oracle":self.oracle.snapshot()})
     }
 }

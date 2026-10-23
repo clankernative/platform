@@ -44,6 +44,7 @@ pub(in crate::security_epoch) enum FileChange {
     Tamper,
     Replace,
     AppWrite,
+    Shorten,
     Restore,
 }
 
@@ -427,6 +428,10 @@ impl World {
             }
         };
         let counter = counter_fixture::snapshot(&self.port.counter);
+        self.record(accepted, counter)
+    }
+
+    fn record(&self, accepted: bool, counter: Value) -> Result<Record> {
         let provider = self.port.slots.replay();
         Ok(Record {
             accepted,
@@ -502,7 +507,21 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
     let mut model = model::Model::new(&world.cores, program.physical)?;
     let mut records = Vec::new();
     for (index, &event) in program.events.iter().enumerate() {
-        let actual = world.step(event)?;
+        let actual = match world.step(event) {
+            Ok(record) => record,
+            Err(_) => {
+                // Preserve the schedule even when a nested handshake oracle or
+                // physical-fixture expectation fails before the outer model
+                // comparison. Raw adapter errors never enter the bundle.
+                records.push(world.record(false, counter_fixture::snapshot(&world.port.counter))?);
+                return Ok(Err(Divergence {
+                    index,
+                    category: "adapter",
+                    records,
+                    expected: json!({"observation":"closed adapter and handshake model agreement"}),
+                }));
+            }
+        };
         let expected = model.step(event)?;
         records.push(actual.clone());
         if (actual.accepted, &actual.state) != (expected.0, &expected.1) {
@@ -518,33 +537,37 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
 }
 
 fn source() -> Digest {
-    Digest::of(&[
-        include_str!("lifecycle.rs"),
-        include_str!("lifecycle/model.rs"),
-        include_str!("../control_slot.rs"),
-        include_str!("../control_slot_io.rs"),
-        include_str!("../control_slot_firestore.rs"),
-        include_str!("../kernel.rs"),
-        include_str!("../firestore.rs"),
-        include_str!("../journal.rs"),
-        include_str!("../bootstrap.rs"),
-        include_str!("../storage_authority/preparation/continuity.rs"),
-        include_str!("../native_enrollment/handshake.rs"),
-        include_str!("../native_enrollment/handshake/simulation.rs"),
-        include_str!("../native_enrollment/handshake/simulation/model.rs"),
-        include_str!("../native_enrollment/handshake/simulation/lifecycle.rs"),
-        include_str!("../tests.rs"),
-        include_str!("../tests/lifecycle_provider.rs"),
-        include_str!("../control_slot_tests.rs"),
-        include_str!("../storage_authority/preparation/tests/lifecycle_file.rs"),
-        include_str!("../storage_authority/preparation/continuity/lifecycle_fixture.rs"),
-        include_str!("../native_clock.rs"),
-        include_str!("../storage_authority/preparation.rs"),
-        include_str!("../storage_authority.rs"),
-        include_str!("../storage_authority/native_volume.rs"),
-        include_str!("../preparation_image.rs"),
-        include_str!("../seed_core.rs"),
-    ])
+    Digest::of(&(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        [
+            include_str!("lifecycle.rs"),
+            include_str!("lifecycle/model.rs"),
+            include_str!("../control_slot.rs"),
+            include_str!("../control_slot_io.rs"),
+            include_str!("../control_slot_firestore.rs"),
+            include_str!("../kernel.rs"),
+            include_str!("../firestore.rs"),
+            include_str!("../journal.rs"),
+            include_str!("../bootstrap.rs"),
+            include_str!("../storage_authority/preparation/continuity.rs"),
+            include_str!("../native_enrollment/handshake.rs"),
+            include_str!("../native_enrollment/handshake/simulation.rs"),
+            include_str!("../native_enrollment/handshake/simulation/model.rs"),
+            include_str!("../native_enrollment/handshake/simulation/lifecycle.rs"),
+            include_str!("../tests.rs"),
+            include_str!("../tests/lifecycle_provider.rs"),
+            include_str!("../control_slot_tests.rs"),
+            include_str!("../storage_authority/preparation/tests/lifecycle_file.rs"),
+            include_str!("../storage_authority/preparation/continuity/lifecycle_fixture.rs"),
+            include_str!("../native_clock.rs"),
+            include_str!("../storage_authority/preparation.rs"),
+            include_str!("../storage_authority.rs"),
+            include_str!("../storage_authority/native_volume.rs"),
+            include_str!("../preparation_image.rs"),
+            include_str!("../seed_core.rs"),
+        ],
+    ))
     .unwrap()
 }
 
@@ -857,10 +880,17 @@ fn replay_saved_storage_lifecycle_history() -> Result<()> {
     };
     let file = std::fs::File::open(path)?;
     ensure!(
-        file.metadata()?.len() <= MAX_BUNDLE,
+        file.metadata()?.is_file() && file.metadata()?.len() <= MAX_BUNDLE,
         "lifecycle replay byte bound"
     );
-    let bundle: Bundle = serde_json::from_reader(file)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(MAX_BUNDLE + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_BUNDLE,
+        "lifecycle replay byte bound"
+    );
+    let bundle: Bundle = serde_json::from_slice(&bytes)?;
     ensure!(
         bundle.version == 1 && bundle.source == source(),
         "lifecycle replay source/version mismatch"
@@ -905,7 +935,7 @@ fn generated_real_file_histories_join_the_same_first_holder_and_writer_decisions
         let mut baseline = successful(seed);
         baseline.physical = true;
         check(&baseline)?;
-        for change in [FileChange::Tamper, FileChange::Replace] {
+        for change in [FileChange::Tamper, FileChange::Replace, FileChange::Shorten] {
             let mut random = seed;
             let cuts = baseline
                 .events
@@ -945,22 +975,19 @@ fn generated_real_file_histories_join_the_same_first_holder_and_writer_decisions
         }
         // A legitimate same-inode SQLite mutation is accepted by current
         // physical checks, while initial-image admission stays exact.
-        let mut current = baseline;
-        let index = current
-            .events
-            .iter()
-            .position(|e| matches!(e, Event::Current { .. }))
-            .unwrap();
-        current.events.insert(
-            index,
-            Event::File {
-                change: FileChange::AppWrite,
-            },
-        );
-        ensure!(
-            check(&current)?.last().unwrap().state.current == 3,
-            "physical current check rejected legitimate SQLite write"
-        );
+        for change in [FileChange::AppWrite, FileChange::Shorten] {
+            let mut current = baseline.clone();
+            let index = current
+                .events
+                .iter()
+                .position(|e| matches!(e, Event::Current { .. }))
+                .unwrap();
+            current.events.insert(index, Event::File { change });
+            ensure!(
+                check(&current)?.last().unwrap().state.current == 3,
+                "physical current check incorrectly required initial bytes/length"
+            );
+        }
     }
     Ok(())
 }
