@@ -1095,6 +1095,9 @@ mod tests {
             assert!(budget.remaining_native(&mut actual).is_err());
             actual.fixture_time = Some(Duration::from_millis(now));
             assert!(actual.bootstrap_context_budget().is_err());
+            let restored = Duration::from_millis(now);
+            assert!(restored >= parent.observation.get().latest && restored < parent.deadline);
+            parent.fixture_time = Some(restored);
             assert!(parent.sample().is_err());
         }
     }
@@ -1125,7 +1128,13 @@ mod tests {
             }
             assert!(clock.bootstrap_context_budget().is_err(), "{fault}");
             clock.process = std::process::id();
-            clock.fixture_time = Some(Duration::from_secs(100));
+            // Restore a live, non-rewinding time in BOTH views, so a new
+            // clock fault cannot explain their continued shared refusal.
+            let restored = Duration::from_secs(103);
+            assert!(restored >= clock.observation.get().latest && restored < clock.deadline);
+            assert!(restored >= sibling.observation.get().latest && restored < sibling.deadline);
+            clock.fixture_time = Some(restored);
+            sibling.fixture_time = Some(restored);
             assert!(clock.bootstrap_context_budget().is_err(), "{fault}");
             assert!(sibling.sample().is_err(), "{fault}");
         }
