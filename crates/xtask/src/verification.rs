@@ -1960,6 +1960,8 @@ mod tests {
         );
         assert!(shards.contains("build-out/bin/xtask verify-shard ${{ matrix.shard }}"));
         for job in [producer, shards, ci_job("verify")] {
+            assert!(job.contains("path: /__w/${{ github.event.repository.name }}/.toolchains"));
+            assert!(!job.contains("path: ../.toolchains"));
             assert!(!job.contains("name: day2-verify-${{ github.run_id }}"));
             assert!(!job.contains("platform/build-out platform/artifacts"));
             let steps = job.split("      - ").skip(1).collect::<Vec<_>>();

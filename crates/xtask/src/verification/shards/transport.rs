@@ -12,6 +12,15 @@ use std::{
 const OUTPUT: &str = "/tmp/day2-verification-transport";
 const GROUPS: [&str; 3] = ["workspace-day2", "workspace-control", "workspace-other"];
 const MAX_FILES: usize = 100_000;
+const CLI_BINARIES: &[&str] = &[
+    "day2",
+    "day2-host",
+    "xtask",
+    "day2-workflows",
+    "day2-sandbox",
+    "day2-compiler-sandbox",
+    "day2-sandbox-probe",
+];
 
 #[derive(Default, Serialize)]
 struct Files {
@@ -20,6 +29,28 @@ struct Files {
 }
 
 impl Files {
+    fn directory(&mut self, root: &Path, relative: &Path) -> Result<()> {
+        ensure!(
+            !relative.as_os_str().is_empty()
+                && relative.components().count() <= 32
+                && relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_))),
+            "transport directory must stay within the workspace"
+        );
+        let path = root.join(relative);
+        ensure!(
+            fs::symlink_metadata(&path)?.is_dir() && path.canonicalize()? == path,
+            "real transport staging directory required"
+        );
+        self.entries.insert(relative.into());
+        ensure!(
+            self.entries.len() <= MAX_FILES,
+            "transport file inventory exhausted"
+        );
+        Ok(())
+    }
+
     fn add(&mut self, root: &Path, relative: &Path, depth: usize) -> Result<()> {
         ensure!(
             depth <= 32
@@ -105,6 +136,69 @@ fn add_fixtures(root: &Path, files: &mut Files, prepared: &Prepared) -> Result<(
     Ok(())
 }
 
+fn verify_cli_receipt(
+    receipt: &serde_json::Value,
+    toolchain: &serde_json::Value,
+    ui_dependency: &serde_json::Value,
+) -> Result<()> {
+    ensure!(
+        receipt["format"] == 1
+            && receipt["protocol"] == 1
+            && receipt["kind"] == "local-source-distribution"
+            && receipt["workflow"] == day2::automation::source_digest()
+            && receipt["toolchain"] == *toolchain
+            && receipt["ui_dependency"] == *ui_dependency,
+        "current CLI source, compiler and UI distribution receipt required"
+    );
+    let binaries = receipt["binaries"]
+        .as_object()
+        .context("CLI binary digests required")?;
+    ensure!(
+        binaries.keys().map(String::as_str).collect::<BTreeSet<_>>()
+            == CLI_BINARIES.iter().copied().collect(),
+        "exact CLI distribution binary set required"
+    );
+    Ok(())
+}
+
+fn add_cli(root: &Path, files: &mut Files) -> Result<()> {
+    let receipt: serde_json::Value =
+        day2::json::decode_evidence(&fs::read(root.join("cli/distribution.json"))?)?;
+    let ui_dependency = day2::build_dependencies::installed(root)?;
+    verify_cli_receipt(
+        &receipt,
+        &crate::native_toolchain::load(root)?.value,
+        &ui_dependency.identity(),
+    )?;
+    for name in CLI_BINARIES {
+        ensure!(
+            receipt["binaries"][*name].as_str()
+                == Some(day2::digest(&fs::read(root.join("cli").join(name))?).as_str()),
+            "CLI distribution executable bytes changed"
+        );
+        files.add(root, &Path::new("cli").join(name), 0)?;
+    }
+    for name in [
+        "distribution.json",
+        "day2-workflows.json",
+        "LICENSE",
+        "THIRD-PARTY-NOTICES.txt",
+        "dependency-inventory.json",
+    ] {
+        files.add(root, &Path::new("cli").join(name), 0)?;
+    }
+    files.add(
+        root,
+        day2::build_dependencies::installation_path(root)?.strip_prefix(root)?,
+        0,
+    )?;
+    Ok(())
+}
+
+pub(super) fn admit_cli(root: &Path) -> Result<()> {
+    add_cli(root, &mut Files::default())
+}
+
 pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) -> Result<()> {
     let part = match phase {
         "inputs" | "tests" => phase,
@@ -135,10 +229,18 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
         }
         add_fixtures(root, &mut common, &prepared)?;
         add_auxiliaries(root, &mut common, &prepared)?;
+        // Preserve the fixed compiler roots without copying their private scratch
+        // or admission contents. Runtime cases create and execute their own work.
+        for directory in ["artifacts/build", "artifacts/admission"] {
+            common.directory(root, Path::new(directory))?;
+        }
         groups.insert("common".into(), common);
         for group in GROUPS {
             let mut files = Files::default();
             add_outputs(root, &mut files, &grouped_outputs(&prepared, group)?)?;
+            if group == "workspace-other" {
+                add_cli(root, &mut files)?;
+            }
             ensure!(
                 !files.entries.is_empty(),
                 "nonempty compiler transport partition required"
@@ -150,6 +252,10 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
         files.add(root, Path::new(super::preparation_path(part)?), 0)?;
         if phase == "inputs" {
             add_fixtures(root, &mut files, &prepared)?;
+            add_cli(root, &mut files)?;
+            for directory in ["artifacts/build", "artifacts/admission"] {
+                files.directory(root, Path::new(directory))?;
+            }
             files.add(root, Path::new("build-out/bin/day2-workflows"), 0)?;
             files.add(root, Path::new("build-out/bin/day2-workflows.json"), 0)?;
         } else {
@@ -250,9 +356,49 @@ mod tests {
         files.add(&root, Path::new("fixture"), 0)?;
         assert_eq!(files.bytes, 13);
         assert_eq!(files.list()?, b"fixture\0fixture/input\0");
+        let mut directory_only = Files::default();
+        directory_only.directory(&root, Path::new("fixture"))?;
+        assert_eq!(directory_only.list()?, b"fixture\0");
+        assert_eq!(directory_only.bytes, 0);
         assert!(files.add(&root, Path::new("../outside"), 0).is_err());
         std::os::unix::fs::symlink(root.join("fixture"), root.join("alias"))?;
         assert!(files.add(&root, Path::new("alias/input"), 0).is_err());
+        assert!(directory_only.directory(&root, Path::new("alias")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_transport_refuses_incomplete_or_foreign_distribution_receipts() -> Result<()> {
+        let toolchain = serde_json::json!({"pin":"reviewed"});
+        let ui = serde_json::json!({"bundle":"reviewed"});
+        let receipt = serde_json::json!({
+            "format":1, "protocol":1, "kind":"local-source-distribution",
+            "workflow":day2::automation::source_digest(), "toolchain":toolchain,
+            "ui_dependency":ui,
+            "binaries":CLI_BINARIES.iter().map(|name| (*name, "digest")).collect::<BTreeMap<_,_>>(),
+        });
+        verify_cli_receipt(&receipt, &toolchain, &ui)?;
+        for field in [
+            "format",
+            "protocol",
+            "kind",
+            "workflow",
+            "toolchain",
+            "ui_dependency",
+        ] {
+            let mut wrong = receipt.clone();
+            wrong[field] = serde_json::json!("foreign");
+            assert!(verify_cli_receipt(&wrong, &toolchain, &ui).is_err());
+        }
+        let mut missing = receipt.clone();
+        missing["binaries"]
+            .as_object_mut()
+            .unwrap()
+            .remove("day2-host");
+        assert!(verify_cli_receipt(&missing, &toolchain, &ui).is_err());
+        let mut extra = receipt;
+        extra["binaries"]["other"] = serde_json::json!("digest");
+        assert!(verify_cli_receipt(&extra, &toolchain, &ui).is_err());
         Ok(())
     }
 

@@ -982,6 +982,9 @@ pub(super) fn load(root: &Path, snapshot: &str, shard: Option<&str>) -> Result<P
     );
     validate_preparation(&prepared, "all")?;
     admit_outputs(root, &prepared, shard)?;
+    if shard.is_none_or(|shard| matches!(shard, "workspace-other" | "parallel-runtime")) {
+        transport::admit_cli(root)?;
+    }
     Ok(prepared)
 }
 

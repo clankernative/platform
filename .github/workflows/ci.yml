@@ -282,7 +282,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ matrix.part == 'inputs' }}
         with:
-          path: ../.toolchains
+          path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
       - run: build-out/bin/xtask bootstrap
       - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
@@ -293,7 +293,7 @@ jobs:
         if: ${{ matrix.part == 'inputs' && steps.native_tools.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ../.toolchains
+          path: /__w/${{ github.event.repository.name }}/.toolchains
           key: ${{ steps.native_tools.outputs.cache-primary-key }}
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
@@ -648,7 +648,7 @@ jobs:
         id: native_tools
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ../.toolchains
+          path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
       - name: Download pinned compiler inputs on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
@@ -878,7 +878,7 @@ jobs:
         id: native_tools
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ../.toolchains
+          path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
       - name: Download pinned compiler inputs on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
@@ -1081,7 +1081,7 @@ jobs:
         id: native_tools
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ../.toolchains
+          path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
       - name: Download pinned compiler inputs on cache miss
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
