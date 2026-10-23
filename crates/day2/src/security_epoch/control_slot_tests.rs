@@ -1643,6 +1643,14 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
     assert!(guarded::accept(&selection, core.clone(), counter, slot, context, &mut port).is_err());
     assert_eq!(port.slot_posts, 0);
     assert_eq!(port.counter_posts, 0);
+    assert!(port.sample().is_err());
+    assert_eq!(port.slots.rows(), 0);
+    // Independent DATA-only setup for the next negative case. Consume the
+    // refused model transport, keeping its provider DBs/trace/counts; this
+    // never reconstructs a failed native CreatorFD or current permission.
+    let mut port = port.reopen_model_transport();
+    assert_eq!(port.slots.rows(), 0);
+    assert_eq!((port.slot_posts, port.counter_posts), (0, 0));
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     guarded::accept(&selection, core.clone(), counter, slot, context, &mut port)
         .unwrap()
@@ -1670,6 +1678,14 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
         .is_err()
     );
     assert_eq!(port.slot_posts, 1);
+    assert_eq!(port.counter_posts, 0);
+    assert!(port.sample().is_err());
+    let original_prepared = port.slots.read(&name);
+    // A separate DATA setup lifetime can make the known-claim expiry case;
+    // the old refused port is gone and its exact provider state is retained.
+    let mut port = port.reopen_model_transport();
+    assert_eq!(port.slots.read(&name), original_prepared);
+    assert_eq!((port.slot_posts, port.counter_posts), (1, 0));
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Dispatch);
     let mutation = guarded::claim(
         &selection,
@@ -1682,9 +1698,20 @@ fn lost_original_creator_fixture_refuses_even_absent_reservation_and_known_claim
     )
     .unwrap();
     let claim = mutation.send(&selection, &mut port).unwrap();
+    let original_may = port.slots.read(&name);
+    let stored = codec::decode(&selection, &core, &original_may).unwrap();
+    assert_eq!(stored.slot.logical, core);
+    assert!(matches!(
+        stored.slot.state,
+        SlotState::MayHaveBeenSent { .. }
+    ));
     port.counter.set_slot_fixture_time(Duration::from_secs(105));
     assert!(claim.send(&selection, &mut port).is_err());
     assert_eq!(port.counter_posts, 0);
+    assert_eq!(port.slots.read(&name), original_may);
+    port.counter.set_slot_fixture_time(Duration::from_secs(100));
+    assert!(port.sample().is_err());
+    assert_eq!((port.slot_posts, port.counter_posts), (2, 0));
     port.slots.persist("guarded-creator-loss-and-expiry");
     replay_provider(&port.slots.replay());
     // These are controlled context invalidation/expiry tests. Actual original
