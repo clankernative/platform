@@ -16,6 +16,7 @@ mod architecture_proofs;
 mod bazel;
 mod build_capture;
 mod build_native;
+mod carta_qualify;
 mod control_simulation;
 mod formatter_bootstrap;
 mod formatting;
@@ -453,6 +454,14 @@ fn main() -> Result<()> {
                 &evidence,
                 action.ends_with("-resume"),
             )?;
+        }
+        "carta-qualify" => {
+            let usage = "usage: xtask carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY";
+            let profile = PathBuf::from(args.next().context(usage)?);
+            let secret = PathBuf::from(args.next().context(usage)?);
+            let evidence = PathBuf::from(args.next().context(usage)?);
+            ensure!(args.next().is_none(), "{usage}");
+            carta_qualify::execute(&root, &profile, &secret, &evidence)?;
         }
         "simulate-control" => {
             let seed = args

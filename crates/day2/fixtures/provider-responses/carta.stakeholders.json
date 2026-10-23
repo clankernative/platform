@@ -1,0 +1,29 @@
+{
+  "stakeholders": [
+    {
+      "id": "1001",
+      "issuerId": "1234567",
+      "fullName": "Example Holder One",
+      "email": "holder.one@example.test",
+      "employeeId": "E-0001",
+      "relationship": "EMPLOYEE",
+      "group": "Engineering",
+      "entityType": "INDIVIDUAL",
+      "address": {
+        "country": "US"
+      }
+    },
+    {
+      "id": "1002",
+      "issuerId": "1234567",
+      "fullName": "Example Holder Two",
+      "email": "holder.two@example.test",
+      "employeeId": null,
+      "relationship": "ADVISOR",
+      "group": null,
+      "entityType": "INDIVIDUAL",
+      "address": null
+    }
+  ],
+  "nextPageToken": null
+}
