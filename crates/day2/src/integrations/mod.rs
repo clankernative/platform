@@ -1,6 +1,7 @@
 //! Closed live adapters. Only already-authorized, pinned profiles enter here.
 //! Provider wire data and credentials never become error strings or logs.
 
+mod freetool_executor;
 mod gitea_actions;
 mod github_actions;
 mod linear_work;
@@ -12,11 +13,53 @@ mod slack_webhook;
 mod snowflake;
 mod transport;
 
+pub(crate) use freetool_executor::CredentialAction as FreetoolCredentialAction;
 pub use transport::LocalSecret;
 pub(crate) use transport::{
     Authorization, CredentialResolver, Credentials, HttpTransport, Method, Transport,
 };
 pub(crate) use transport::{TransportError, WireRequest, WireResponse};
+
+pub(crate) const MAX_FREETOOL_EXECUTOR_WIRE_BYTES: u64 = freetool_executor::MAX_EXECUTOR_WIRE_BYTES;
+
+pub(crate) struct FreetoolExecutorExchange {
+    pub response: anyhow::Result<Vec<u8>>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    /// Whether request and response payload consumption was fully measured.
+    pub known: bool,
+    pub dispatched: bool,
+}
+
+impl FreetoolExecutorExchange {
+    pub(crate) fn not_dispatched(error: anyhow::Error) -> Self {
+        Self {
+            response: Err(error),
+            request_bytes: 0,
+            response_bytes: 0,
+            known: true,
+            dispatched: false,
+        }
+    }
+}
+
+pub(crate) fn freetool_executor_request(
+    endpoint: &str,
+    credential: &Credentials,
+    body: &[u8],
+    max_response_bytes: u64,
+) -> FreetoolExecutorExchange {
+    freetool_executor::send(endpoint, credential, body, max_response_bytes)
+}
+
+pub(crate) fn freetool_credential_request(
+    endpoint: &str,
+    credential: &Credentials,
+    action: freetool_executor::CredentialAction,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    freetool_executor::send_credential(endpoint, credential, action, body)
+}
 
 use day2_capabilities::{
     integrations::LiveConnection,

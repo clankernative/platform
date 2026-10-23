@@ -166,6 +166,8 @@ enum Action {
         url: String,
         key: String,
     },
+    FreetoolFingerprint(String),
+    Freetool(crate::freetool_executor::ServiceRequest),
 }
 
 impl Authorized {
@@ -193,6 +195,7 @@ impl Authorized {
         matches!(self.action, Action::Send(_))
             || matches!(&self.action, Action::People(action) if action.is_write())
             || matches!(&self.action, Action::Delegate(call) if call.purpose == crate::delegation::Purpose::Send)
+            || matches!(&self.action, Action::Freetool(_))
     }
 }
 
@@ -239,6 +242,51 @@ pub(crate) fn authorized(
         response_bytes: resource.grant.limits.max_response_bytes,
         cost_microunits: Some(0),
     };
+    if instruction.model.starts_with("freetool.") {
+        let service_id = match &resource.grant.target {
+            ResourceTarget::FreetoolExecutor { service_id, .. } => service_id,
+            _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
+        };
+        ensure!(
+            service_id == &resource.grant.connection.id,
+            crate::error::Failure::ResourceForbidden
+        );
+        let connection = resource
+            .grant
+            .live
+            .as_ref()
+            .context(crate::error::Failure::ResourceForbidden)?;
+        ensure!(
+            matches!(connection, LiveConnection::FreetoolExecutor { .. }),
+            crate::error::Failure::ResourceForbidden
+        );
+        ensure!(
+            instruction.data.len() as u64 <= resource.grant.limits.max_request_bytes,
+            "freetool_request_budget"
+        );
+        resource.planned_calls = 1;
+        let action = if instruction.model == "freetool.fingerprint.v1" {
+            Action::FreetoolFingerprint(instruction.data.clone())
+        } else {
+            let (service_request, _) = crate::freetool_executor::trusted_request(
+                runtime,
+                request,
+                instruction,
+                &resource,
+            )?;
+            quote.request_bytes = crate::freetool_executor::request_wire_bytes(&service_request)?;
+            ensure!(
+                quote.request_bytes <= resource.grant.limits.max_request_bytes,
+                "freetool_request_budget"
+            );
+            Action::Freetool(service_request)
+        };
+        return Ok(Authorized {
+            action,
+            resource,
+            quote,
+        });
+    }
     let action = match instruction.model.as_str() {
         "slack.read.v1"
         | "slack.post.v1"
@@ -710,6 +758,22 @@ pub(crate) struct ProviderResult {
 }
 
 impl ProviderResult {
+    fn freetool(outcome: crate::freetool_executor::CallOutcome) -> Self {
+        Self {
+            result: outcome.result,
+            correlation: Vec::new(),
+            pending: false,
+            usage: crate::resources::ProviderUsage {
+                calls: u64::from(outcome.dispatched),
+                request_bytes: outcome.request_bytes,
+                response_bytes: outcome.response_bytes,
+                cost_microunits: 0,
+                known: outcome.known,
+                dispatched: outcome.dispatched,
+            },
+        }
+    }
+
     fn local(result: Result<String>, request_bytes: u64) -> Self {
         let usage = crate::resources::ProviderUsage {
             calls: 1,
@@ -1053,6 +1117,14 @@ fn grant_result(url: &str, key: &str) -> String {
 /// request would name one object for both. The
 /// segment goes immediately after the prefix so the key stays inside the grant
 /// by construction, and the name — extension included — survives unchanged.
+fn call_freetool(
+    runtime: &Runtime,
+    resource: &crate::resources::ResourceUse,
+    request: crate::freetool_executor::ServiceRequest,
+) -> crate::freetool_executor::CallOutcome {
+    crate::freetool_executor::call(runtime, resource, request)
+}
+
 fn unique_upload_key(effect: &str, prefix: &str, requested: &str) -> Result<String> {
     ensure!(!effect.is_empty(), "upload_grant_requires_an_effect");
     let rest = requested
@@ -1070,6 +1142,16 @@ fn unique_upload_key(effect: &str, prefix: &str, requested: &str) -> Result<Stri
 pub(crate) fn observe(runtime: &Runtime, capability: Authorized, attempt: &str) -> ProviderResult {
     let request_bytes = capability.quote.request_bytes;
     let result = match capability.action {
+        Action::FreetoolFingerprint(data) => {
+            let instruction = crate::protocol::Instruction {
+                data,
+                ..Default::default()
+            };
+            crate::freetool_executor::fingerprint(&instruction, &capability.resource)
+        }
+        Action::Freetool(request) => {
+            return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
+        }
         Action::WorkspaceDirectoryCapture(_)
         | Action::WorkspaceDirectoryUserPath(_)
         | Action::WorkspaceDirectoryPage { .. } => {
@@ -1129,6 +1211,9 @@ pub(crate) fn execute(
     let request_bytes = capability.quote.request_bytes;
     let result = match capability.action {
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
+        Action::Freetool(request) => {
+            return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));
+        }
         Action::Send(message) => with_world(runtime, |world| world.send(effect_id, message)),
         // A grant is computed, not dispatched, so it resolves the same way on
         // both paths: downloading authorizes a read, uploading authorizes a write,
@@ -1153,6 +1238,32 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freetool_usage_charges_wire_error_after_code_normalization() -> Result<()> {
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "state": "error",
+            "code": "synthetic_private_token_".to_owned() + &"A".repeat(4096),
+        }))?;
+        let normalized = crate::freetool_executor::response_json(
+            crate::freetool_executor::ServiceResponse::Error {
+                code: "synthetic_private_token_".to_owned() + &"A".repeat(4096),
+            },
+        )?;
+        let result = ProviderResult::freetool(crate::freetool_executor::CallOutcome {
+            result: Ok(normalized.clone()),
+            request_bytes: 37,
+            response_bytes: raw.len() as u64,
+            known: true,
+            dispatched: true,
+        });
+        assert_eq!(result.result?, normalized);
+        assert_eq!(result.usage.request_bytes, 37);
+        assert_eq!(result.usage.response_bytes, raw.len() as u64);
+        assert!(raw.len() > normalized.len());
+        assert!(result.usage.known && result.usage.dispatched);
+        Ok(())
+    }
 
     #[test]
     fn accepted_response_loss_and_duplicate_retries_preserve_one_notification() -> Result<()> {

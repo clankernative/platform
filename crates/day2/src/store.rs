@@ -27,6 +27,7 @@ use std::{
 };
 
 const MAX_STEPS: usize = 64;
+const MAX_AFFECTED_ROWS: usize = 4_096;
 
 #[cfg(test)]
 #[path = "app_effect_tests.rs"]
@@ -1916,6 +1917,7 @@ impl Runtime {
             .map(|contract| &contract.domains)
             .unwrap_or(&empty_domains);
         let mut writes = 0;
+        let mut affected_rows: usize = 0;
         let mut effect_failed = request
             .observations
             .iter()
@@ -2026,8 +2028,14 @@ impl Runtime {
                         });
                     }
                     let mutation = step.mutation();
+                    let affected = step.affected_rows()?;
                     let result = (|| -> Result<String> {
                         ensure!(!mutation || kind != "query", "query_write_forbidden");
+                        ensure!(
+                            !mutation
+                                || affected_rows.saturating_add(affected) <= MAX_AFFECTED_ROWS,
+                            crate::error::Failure::TransactionRowBudget
+                        );
                         if matches!(
                             step,
                             Step::Database(Database::Write { .. }) | Step::Request { .. }
@@ -2103,13 +2111,17 @@ impl Runtime {
                     });
                     phase = next_phase;
                     if mutation {
-                        writes += 1;
+                        let previous_writes = writes;
+                        writes += affected;
+                        affected_rows += affected;
                         match fault {
-                            Fault::ExitAfterWrite(n) if n == writes => std::process::exit(86),
-                            Fault::InterruptAfterWrite(n) if n == writes => {
+                            Fault::ExitAfterWrite(n) if previous_writes < n && n <= writes => {
+                                std::process::exit(86)
+                            }
+                            Fault::InterruptAfterWrite(n) if previous_writes < n && n <= writes => {
                                 return Err(fault.interruption("simulated_process_loss"));
                             }
-                            Fault::FailAfterWrite(n) if n == writes => {
+                            Fault::FailAfterWrite(n) if previous_writes < n && n <= writes => {
                                 let observation =
                                     request.observations.last_mut().context("missing write")?;
                                 observation.result.clear();
@@ -2806,6 +2818,51 @@ fn check_app_effect(
     input: &Value,
     invocation: &str,
 ) -> Result<()> {
+    if matches!(
+        instruction.kind.as_str(),
+        "create_many" | "update_many" | "soft_delete_many"
+    ) {
+        let rows: Vec<Value> = serde_json::from_str(&instruction.data)?;
+        ensure!(!rows.is_empty() && rows.len() <= 256, "invalid_batch_bound");
+        for row in rows {
+            let (kind, id, version, data) = if instruction.kind == "create_many" {
+                ("create", crate::identity::Id::default(), 0, row)
+            } else if instruction.kind == "soft_delete_many" {
+                (
+                    "soft_delete",
+                    crate::identity::Id::from_text(
+                        row["id"].as_str().context("invalid_batch_instruction")?,
+                    )?,
+                    row["expected_version"]
+                        .as_i64()
+                        .context("invalid_batch_instruction")?,
+                    Value::Null,
+                )
+            } else {
+                let id = crate::identity::Id::from_text(
+                    row["id"].as_str().context("invalid_batch_instruction")?,
+                )?;
+                let version = row["expected_version"]
+                    .as_i64()
+                    .context("invalid_batch_instruction")?;
+                ("update", id, version, row["data"].clone())
+            };
+            let single = Instruction {
+                kind: kind.into(),
+                model: instruction.model.clone(),
+                id,
+                expected_version: version,
+                data: if kind == "soft_delete" {
+                    String::new()
+                } else {
+                    data.to_string()
+                },
+                ..Instruction::default()
+            };
+            check_app_effect(connection, schema, execution, &single, input, invocation)?;
+        }
+        return Ok(());
+    }
     if matches!(
         instruction.kind.as_str(),
         "update" | "soft_delete" | "restore"
@@ -4981,12 +5038,33 @@ pub(crate) struct StorageContract<'a> {
 
 pub(crate) fn effect(
     connection: &Connection,
-    StorageContract { schema, domains }: StorageContract<'_>,
+    contract: StorageContract<'_>,
     scope: &str,
     request: &Request,
     instruction: &Instruction,
     context: EffectContext<'_>,
 ) -> Result<String> {
+    effect_at(
+        connection,
+        contract,
+        scope,
+        request,
+        instruction,
+        context,
+        (request.observations.len(), 0),
+    )
+}
+
+fn effect_at(
+    connection: &Connection,
+    StorageContract { schema, domains }: StorageContract<'_>,
+    scope: &str,
+    request: &Request,
+    instruction: &Instruction,
+    context: EffectContext<'_>,
+    location: (usize, usize),
+) -> Result<String> {
+    let (sequence, row_index) = location;
     let EffectContext {
         scope: context_scope,
         policy,
@@ -5122,12 +5200,77 @@ pub(crate) fn effect(
                 Write::SoftDelete { id, .. } | Write::Restore { id, .. } => {
                     Some(get_any(connection, model, record, id)?)
                 }
-                Write::Create => None,
+                Write::Create | Write::CreateMany | Write::UpdateMany | Write::SoftDeleteMany => {
+                    None
+                }
             };
             // A deletion change carries no payload, so the row's current value
             // stands in. That keeps the authority check below meaningful — it
             // sees a real before-and-after — without letting the instruction
             // alter a single field.
+            if matches!(
+                change,
+                Write::CreateMany | Write::UpdateMany | Write::SoftDeleteMany
+            ) {
+                let rows: Vec<Value> = serde_json::from_str(data)?;
+                ensure!(!rows.is_empty() && rows.len() <= 256, "invalid_batch_bound");
+                let mut created = Vec::with_capacity(rows.len());
+                for (index, row) in rows.into_iter().enumerate() {
+                    let (kind, id, version, value) = if change == Write::CreateMany {
+                        ("create", crate::identity::Id::default(), 0, row)
+                    } else if change == Write::SoftDeleteMany {
+                        (
+                            "soft_delete",
+                            crate::identity::Id::from_text(
+                                row["id"].as_str().context("invalid_batch_instruction")?,
+                            )?,
+                            row["expected_version"]
+                                .as_i64()
+                                .context("invalid_batch_instruction")?,
+                            Value::Null,
+                        )
+                    } else {
+                        (
+                            "update",
+                            crate::identity::Id::from_text(
+                                row["id"].as_str().context("invalid_batch_instruction")?,
+                            )?,
+                            row["expected_version"]
+                                .as_i64()
+                                .context("invalid_batch_instruction")?,
+                            row["data"].clone(),
+                        )
+                    };
+                    let single = Instruction {
+                        kind: kind.into(),
+                        model: model.into(),
+                        id,
+                        expected_version: version,
+                        data: if kind == "soft_delete" {
+                            String::new()
+                        } else {
+                            value.to_string()
+                        },
+                        ..Instruction::default()
+                    };
+                    let response = effect_at(
+                        connection,
+                        StorageContract { schema, domains },
+                        scope,
+                        request,
+                        &single,
+                        EffectContext {
+                            scope,
+                            policy,
+                            operation,
+                            entropy,
+                        },
+                        (sequence, index),
+                    )?;
+                    created.push(serde_json::from_str::<Value>(&response)?);
+                }
+                return Ok(serde_json::to_string(&created)?);
+            }
             let value: Value = if data.is_empty() {
                 serde_json::from_str(&before.as_ref().context("missing_row_for_deletion")?.data)?
             } else {
@@ -5161,6 +5304,11 @@ pub(crate) fn effect(
             let id;
             match change {
                 Write::Create => {
+                    let generated_sequence = if row_index == 0 {
+                        sequence as u64
+                    } else {
+                        (1_u64 << 63) | ((sequence as u64) << 8) | u64::try_from(row_index)?
+                    };
                     id = if let Some(identity) = &record.identity {
                         let seed: Vec<u8> = connection.query_row(
                             "SELECT seed FROM day2_id_seeds WHERE invocation=?1",
@@ -5179,7 +5327,7 @@ pub(crate) fn effect(
                                 &seed,
                                 millis,
                                 &identity.key,
-                                request.observations.len() as u64,
+                                generated_sequence,
                             )?,
                         )?
                     } else {
@@ -5188,7 +5336,7 @@ pub(crate) fn effect(
                             &serde_json::to_vec(&(
                                 scope,
                                 &request.context.invocation_id,
-                                request.observations.len(),
+                                generated_sequence,
                                 model,
                             ))?,
                         );
@@ -5286,6 +5434,9 @@ pub(crate) fn effect(
                             == 1,
                         crate::error::Failure::Conflict
                     );
+                }
+                Write::CreateMany | Write::UpdateMany | Write::SoftDeleteMany => {
+                    bail!("invalid_batch_instruction")
                 }
             }
             let after = get_any(connection, model, record, id)?;

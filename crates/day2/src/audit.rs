@@ -722,11 +722,16 @@ pub(crate) fn record_change(
         .filter(|(name, value)| old.get(name.as_str()) != Some(value))
         .map(|(name, _)| name)
         .collect();
+    let ordinal: i64 = db.query_row(
+        "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM day2_audit_changes WHERE invocation=?1",
+        params![request.context.invocation_id],
+        |row| row.get(0),
+    )?;
     db.execute(
         "INSERT INTO day2_audit_changes VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![
             request.context.invocation_id,
-            i64::try_from(request.observations.len())?,
+            ordinal,
             model,
             after.id.to_string(),
             before.map(|row| row.version),

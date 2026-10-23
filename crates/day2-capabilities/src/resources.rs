@@ -64,6 +64,52 @@ impl TopicScope {
     }
 }
 
+/// Which Freetool business resource IDs this application may submit to its
+/// bound executor service. `AnyAppResource` is limited to resources registered
+/// by this application; the executor still enforces its configured targets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FreetoolResourceScope {
+    Explicit { allowed_resources: BTreeSet<String> },
+    AnyAppResource,
+}
+
+impl FreetoolResourceScope {
+    pub fn authorizes(&self, resource_id: &str) -> bool {
+        match self {
+            Self::Explicit { allowed_resources } => allowed_resources.contains(resource_id),
+            Self::AnyAppResource => true,
+        }
+    }
+
+    pub fn is_subset_of(&self, parent: &Self) -> bool {
+        match (self, parent) {
+            (Self::AnyAppResource, Self::AnyAppResource) => true,
+            (Self::Explicit { .. }, Self::AnyAppResource) => true,
+            (
+                Self::Explicit { allowed_resources },
+                Self::Explicit {
+                    allowed_resources: parent,
+                },
+            ) => allowed_resources.is_subset(parent),
+            (Self::AnyAppResource, Self::Explicit { .. }) => false,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Self::Explicit { allowed_resources } = self {
+            ensure!(
+                !allowed_resources.is_empty() && allowed_resources.len() <= 256,
+                "invalid_freetool_resource_scope"
+            );
+            for resource in allowed_resources {
+                bounded_text(resource, 256)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceTarget {
@@ -158,6 +204,17 @@ pub enum ResourceTarget {
     OpenAiText {
         profile: crate::integrations::OpenAiText,
     },
+    /// Private Freetool executor service and the app-owned business resources
+    /// this application binding may submit.
+    FreetoolExecutor {
+        service_id: String,
+        scope: FreetoolResourceScope,
+        /// Explicit native-browser custody authority, separate from execution
+        /// and result reads. The native host also requires current Roc edit
+        /// permission. Empty by default; an executor grant alone cannot enroll.
+        #[serde(default)]
+        credential_managers: BTreeSet<String>,
+    },
 }
 
 /// Whether a live Carta capture publishes grant child records.
@@ -237,6 +294,7 @@ impl ResourceTarget {
             Self::SlackChannel { .. } => ResourceKind::SlackChannel,
             Self::SnowflakeView { .. } => ResourceKind::SnowflakeView,
             Self::OpenAiText { .. } => ResourceKind::OpenAiText,
+            Self::FreetoolExecutor { .. } => ResourceKind::FreetoolExecutorResource,
             Self::ObjectBucket { .. } => ResourceKind::ObjectBucket,
             Self::AppOperation { .. } => ResourceKind::AppOperation,
         }
@@ -285,6 +343,26 @@ impl ResourceTarget {
             Self::SlackChannel { channel } => channel.validate(),
             Self::SnowflakeView { query } => query.validate(),
             Self::OpenAiText { profile } => profile.validate(),
+            Self::FreetoolExecutor {
+                service_id,
+                scope,
+                credential_managers,
+            } => {
+                name(service_id)?;
+                scope.validate()?;
+                ensure!(
+                    credential_managers.len() <= 256,
+                    "freetool_credential_manager_budget"
+                );
+                for actor in credential_managers {
+                    bounded_text(actor, 256)?;
+                    ensure!(
+                        actor.bytes().all(|b| b.is_ascii_graphic()),
+                        "invalid_freetool_credential_manager"
+                    );
+                }
+                Ok(())
+            }
             Self::NotificationMailbox { topics } => topics.validate(),
             Self::CartaIssuer { issuer_id, .. } => bounded_text(issuer_id, 256),
             Self::ObjectBucket { bucket, key_prefix } => {
@@ -387,6 +465,22 @@ impl ResourceTarget {
             }
             (Self::OpenAiText { profile }, Self::OpenAiText { profile: parent }) => {
                 profile == parent
+            }
+            (
+                Self::FreetoolExecutor {
+                    service_id,
+                    scope,
+                    credential_managers,
+                },
+                Self::FreetoolExecutor {
+                    service_id: parent_service,
+                    scope: parent_scope,
+                    credential_managers: parent_managers,
+                },
+            ) => {
+                service_id == parent_service
+                    && scope.is_subset_of(parent_scope)
+                    && credential_managers.is_subset(parent_managers)
             }
             (
                 Self::NotificationMailbox { topics },
@@ -843,7 +937,8 @@ fn validate_connection(
         | (Provider::GiteaActions, Some(value @ LiveConnection::GiteaActions { .. }))
         | (Provider::OpenAi, Some(value @ LiveConnection::OpenAi { .. }))
         | (Provider::Carta, Some(value @ LiveConnection::Carta { .. }))
-        | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. })) => value.validate(),
+        | (Provider::WorkspaceDirectory, Some(value @ LiveConnection::WorkspaceDirectory { .. }))
+        | (Provider::FreetoolExecutor, Some(value @ LiveConnection::FreetoolExecutor { .. })) => value.validate(),
         (
             Provider::LocalNotifications
             // Delegation reaches another application in this same instance, so

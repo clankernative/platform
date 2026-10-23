@@ -89,6 +89,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "ebfe0deb809a2cbc56ce4fdd6d23db36a7354a35309517c31d2f83cd30169682",
     ),
     (
+        "FreetoolExecutor.roc",
+        "",
+        "14f6bea669cc8f00e668f7dc57f833cd43edc245f498d13ec776a30275fad4ca",
+    ),
+    (
         "SlackWebhook.roc",
         "",
         "198ee562a477efee5d456d72a95fbf2d83674d8c59a0f8cfb512530150fbaec8",
@@ -251,7 +256,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Tx.roc",
         "evaluate",
-        "510664a26964d768a2b081d12cc98115251c278396f67e95aba52abf2d799cea",
+        "9bae186525220793f4804f9a0188861e75e5a71dd9c55d5c4ef9672a8d208a0f",
     ),
     (
         "Operation.roc",

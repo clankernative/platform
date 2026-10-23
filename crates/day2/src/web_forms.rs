@@ -119,6 +119,8 @@ pub(crate) struct Control {
     pub(crate) input_type: String,
     pub(crate) checked: bool,
     pub(crate) disabled: bool,
+    pub(crate) multiple: bool,
+    pub(crate) choices: Vec<String>,
 }
 
 /// A field may repeat only when the operation declares it a list of text. A list
@@ -176,6 +178,26 @@ pub(crate) fn native_field(
     controls: &[&Control],
     kind: &crate::schema::Kind,
 ) -> Result<Option<(security::NativeField, bool)>> {
+    if controls.len() == 1 && controls[0].tag == "select" && controls[0].multiple {
+        let control = &controls[0];
+        ensure!(
+            !control.disabled && scalar_list(kind),
+            "native_form_schema_mismatch"
+        );
+        ensure!(
+            control.choices.iter().all(|choice| !choice.is_empty())
+                && control.choices.iter().collect::<BTreeSet<_>>().len() == control.choices.len(),
+            "invalid_or_duplicate_native_choice"
+        );
+        return Ok(Some((
+            security::NativeField {
+                mode: security::NativeMode::MultipleSelect,
+                omitted: Value::Array(Vec::new()),
+                choices: control.choices.clone(),
+            },
+            false,
+        )));
+    }
     let native_count = controls
         .iter()
         .filter(|control| matches!(control.input_type.as_str(), "checkbox" | "radio"))
@@ -512,8 +534,9 @@ pub(crate) fn controls(form: ElementRef<'_>) -> Result<Vec<Control>> {
                 && controls.len() < MAX_FORM_CONTROLS,
             "invalid_or_duplicate_form_field"
         );
+        let multiple = value.attr("multiple").is_some();
         ensure!(
-            value.attr("multiple").is_none(),
+            !multiple || value.name() == "select",
             "omitted_or_multiple_form_fields_unsupported"
         );
         let kind = value.attr("type").unwrap_or("text").to_ascii_lowercase();
@@ -557,9 +580,63 @@ pub(crate) fn controls(form: ElementRef<'_>) -> Result<Vec<Control>> {
             input_type: kind,
             checked: value.attr("checked").is_some(),
             disabled,
+            multiple,
+            choices: if value.name() == "select" && multiple {
+                let options = element
+                    .descendants()
+                    .filter_map(ElementRef::wrap)
+                    .filter(|option| option.value().name() == "option")
+                    .map(|option| {
+                        ensure!(
+                            !effectively_disabled(option),
+                            "multiple_select_disabled_choice"
+                        );
+                        option
+                            .value()
+                            .attr("value")
+                            .context("multiple_select_option_requires_value")
+                            .map(str::to_owned)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                ensure!(
+                    options.len() <= crate::input_shape::MAX_LIST_ITEMS,
+                    "multiple_select_choice_bound"
+                );
+                options
+            } else {
+                Vec::new()
+            },
         });
     }
     Ok(controls)
+}
+
+fn restore_select(document: &mut Html, control: &Control, values: &[String]) -> Result<()> {
+    let options: Vec<_> = document
+        .tree
+        .get(control.id)
+        .context("select")?
+        .descendants()
+        .filter_map(ElementRef::wrap)
+        .filter(|element| element.value().name() == "option")
+        .map(|element| {
+            (
+                element.id(),
+                element
+                    .value()
+                    .attr("value")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| element.text().collect()),
+            )
+        })
+        .collect();
+    for (id, option) in options {
+        remove_attr(document, id, "selected")?;
+        if values.contains(&option) {
+            set_attr(document, id, "selected", "")?;
+        }
+    }
+    Ok(())
 }
 
 fn restore(document: &mut Html, control: &Control, value: &str) -> Result<()> {
@@ -586,32 +663,7 @@ fn restore(document: &mut Html, control: &Control, value: &str) -> Result<()> {
                 .context("textarea")?
                 .append(Node::Text(scraper::node::Text { text: value.into() }));
         }
-        "select" => {
-            let options: Vec<_> = document
-                .tree
-                .get(control.id)
-                .context("select")?
-                .descendants()
-                .filter_map(ElementRef::wrap)
-                .filter(|element| element.value().name() == "option")
-                .map(|element| {
-                    (
-                        element.id(),
-                        element
-                            .value()
-                            .attr("value")
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| element.text().collect()),
-                    )
-                })
-                .collect();
-            for (id, option) in options {
-                remove_attr(document, id, "selected")?;
-                if option == value {
-                    set_attr(document, id, "selected", "")?;
-                }
-            }
-        }
+        "select" => restore_select(document, control, &[value.to_owned()])?,
         _ => unreachable!(),
     }
     Ok(())
@@ -873,15 +925,19 @@ pub(crate) fn bind(view: &View<'_>, markup: &str) -> Result<Markup> {
                         .get(&control.name)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    let checked = match native_field.mode {
-                        security::NativeMode::BooleanCheckbox => {
-                            values.iter().any(|value| value == "true")
+                    if native_field.mode == security::NativeMode::MultipleSelect {
+                        restore_select(&mut document, control, values)?;
+                    } else {
+                        let checked = match native_field.mode {
+                            security::NativeMode::BooleanCheckbox => {
+                                values.iter().any(|value| value == "true")
+                            }
+                            _ => values.iter().any(|value| value == &control.value),
+                        };
+                        remove_attr(&mut document, control.id, "checked")?;
+                        if checked {
+                            set_attr(&mut document, control.id, "checked", "")?;
                         }
-                        _ => values.iter().any(|value| value == &control.value),
-                    };
-                    remove_attr(&mut document, control.id, "checked")?;
-                    if checked {
-                        set_attr(&mut document, control.id, "checked", "")?;
                     }
                 } else if let Some(value) =
                     submitted.value(&operation, &ticket.bound, &control.name)
@@ -1023,6 +1079,62 @@ mod query_form_tests {
             domains: BTreeMap::new(),
         };
         crate::routing::Catalog::compile(&[root, page], &operations, &schema).unwrap()
+    }
+
+    #[test]
+    fn multiple_select_is_bound_only_to_scalar_lists_with_closed_option_choices() {
+        let html = Html::parse_fragment(
+            r#"<form><select name="members" multiple><option value="u1">One</option><option value="u2">Two</option></select></form>"#,
+        );
+        let form = html.select(&selector("form")).next().unwrap();
+        let fields = controls(form).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].multiple);
+        assert_eq!(fields[0].choices, ["u1", "u2"]);
+        let kind = Kind::InputShape {
+            shape: crate::output_schema::Type::List(Box::new(crate::output_schema::Type::String)),
+            roc_type: "Members".into(),
+        };
+        let metadata = native_field(&[&fields[0]], &kind).unwrap().unwrap();
+        assert_eq!(metadata.0.mode, security::NativeMode::MultipleSelect);
+        assert_eq!(metadata.0.omitted, Value::Array(Vec::new()));
+        let empty =
+            Html::parse_fragment(r#"<form><select name="members" multiple></select></form>"#);
+        let empty_controls = controls(empty.select(&selector("form")).next().unwrap()).unwrap();
+        let empty_metadata = native_field(&[&empty_controls[0]], &kind).unwrap().unwrap();
+        assert!(empty_metadata.0.choices.is_empty());
+        assert_eq!(empty_metadata.0.omitted, Value::Array(Vec::new()));
+        assert_eq!(
+            security::field_values(&kind, &[]).unwrap(),
+            Value::Array(Vec::new())
+        );
+        let mut restored = Html::parse_fragment(
+            r#"<form><select name="members" multiple><option value="u1" selected>One</option><option value="u2">Two</option></select></form>"#,
+        );
+        let form = restored.select(&selector("form")).next().unwrap();
+        let control = controls(form).unwrap().remove(0);
+        restore_select(&mut restored, &control, &["u2".to_owned()]).unwrap();
+        let selected: Vec<_> = restored
+            .select(&selector("option[selected]"))
+            .map(|option| option.value().attr("value").unwrap().to_owned())
+            .collect();
+        assert_eq!(selected, ["u2"]);
+        assert!(
+            restored
+                .select(&selector("select[checked]"))
+                .next()
+                .is_none()
+        );
+        assert!(native_field(&[&fields[0]], &Kind::Text).is_err());
+        let missing_value = Html::parse_fragment(
+            r#"<form><select name="members" multiple><option>One</option></select></form>"#,
+        );
+        assert!(controls(missing_value.select(&selector("form")).next().unwrap()).is_err());
+        let duplicate = Html::parse_fragment(
+            r#"<form><select name="members" multiple><option value="u1">One</option><option value="u1">Duplicate</option></select></form>"#,
+        );
+        let fields = controls(duplicate.select(&selector("form")).next().unwrap()).unwrap();
+        assert!(native_field(&[&fields[0]], &kind).is_err());
     }
 
     #[test]

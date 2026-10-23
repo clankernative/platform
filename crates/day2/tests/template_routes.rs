@@ -191,6 +191,51 @@ fn checked_route_calls_validate_names_arguments_types_and_contexts() -> Result<(
 }
 
 #[test]
+fn freetool_credential_navigation_is_typed_and_canonical() -> Result<()> {
+    let templates = Templates::new(
+        "<a href=\"{{ platform.freetool_credentials(resource_id=link.id) }}\">Credentials</a>",
+    )?;
+    templates.admit()?;
+    let mut value = context();
+    let resource = "res_0000000000e008000000000001";
+    value["link"]["id"] = json!(resource);
+    let rendered = templates.render(value.clone())?;
+    let html = web_templates::parse_checked(&rendered)?;
+    let link = html.select(&Selector::parse("a").unwrap()).next().unwrap();
+    assert_eq!(
+        link.attr("href"),
+        Some(format!("/__freetool/credentials/{resource}").as_str())
+    );
+    for invalid in [
+        "",
+        "7",
+        "spa_0000000000e008000000000001",
+        "../audit",
+        "res_0000000000e008000000000001?redirect=//evil.test",
+    ] {
+        value["link"]["id"] = json!(invalid);
+        assert!(
+            templates.render(value.clone()).is_err(),
+            "invalid resource accepted: {invalid}"
+        );
+    }
+    for markup in [
+        "<a href=\"{{ platform.freetool_credentials() }}\">Missing</a>",
+        "<a href=\"{{ platform.freetool_credentials(link.id) }}\">Positional</a>",
+        "<a href=\"{{ platform.freetool_credentials(resource_id=link.version) }}\">Wrong type</a>",
+        "<a href=\"{{ platform.freetool_credentials(resource_id=link.id, extra='x') }}\">Extra</a>",
+        "<a href=\"/prefix{{ platform.freetool_credentials(resource_id=link.id) }}\">Prefix</a>",
+        "<span>{{ platform.freetool_credentials(resource_id=link.id) }}</span>",
+    ] {
+        assert!(
+            Templates::new(markup)?.admit().is_err(),
+            "invalid navigation admitted: {markup}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn route_helpers_use_the_shared_codec_for_whole_urls() -> Result<()> {
     let templates = Templates::new(
         "<a id=\"search\" href=\"{{ routes.links(search=company.name,limit=10) }}\">Search</a><a id=\"detail\" href=\"{{ routes.link(link_id=link.id) }}\">Link</a><a id=\"audit\" href=\"{{ platform.audit() }}\">Audit</a><a id=\"docs\" href=\"{{ platform.docs() }}\">API docs</a><a id=\"spec\" href=\"{{ platform.openapi() }}\">OpenAPI</a>",

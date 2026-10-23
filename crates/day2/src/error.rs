@@ -111,6 +111,7 @@ failures! {
     // The pinned code asked one transaction for more steps than the host
     // interprets. Replay asks again, so this is an outcome, never a retry.
     TransactionStepBudget => ("transaction_step_budget", Internal),
+    TransactionRowBudget => ("transaction_row_budget", Internal),
     PreparationDeadline => ("preparation_deadline", Timeout),
     ExternalAmbiguous => ("external_outcome_ambiguous", Internal),
     StorageBusy => ("storage_busy", Unavailable),

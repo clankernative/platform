@@ -121,6 +121,10 @@ locals {
     memory            = "${var.runtime_resources.memory_mib}Mi"
     ephemeral-storage = "256Mi"
   }
+
+  loopback_config_path = "/run/day2/private-config.json"
+  loopback_config_dir  = "/run/day2/loopback-service-configs"
+  loopback_source_dir  = "/run/day2/loopback-config-sources"
 }
 
 resource "kubernetes_config_map_v1" "instance" {
@@ -190,6 +194,11 @@ resource "kubernetes_config_map_v1" "instance" {
       condition     = length(local.instance_json) <= 1048576
       error_message = "day2 refuses instance files larger than 1 MiB."
     }
+
+    precondition {
+      condition     = length(local.loopback_services) == 0 || var.native_enrollment_placement == null
+      error_message = "loopback services are unavailable in native enrollment mode, whose storage owner and backup path are separate."
+    }
   }
 }
 
@@ -231,7 +240,9 @@ resource "kubernetes_stateful_set_v1" "day2" {
           "day2.dev/instance-sha256" = sha256(local.instance_json)
           }, local.has_credentials ? {
           "day2.dev/credentials-sha256" = sha256(local.provisioning_plan_json)
-        } : {}, var.app_calls == null ? {} : { "day2.dev/app-calls-sha256" = sha256(jsonencode(local.app_call_config)) }, local.release_template_annotations)
+          } : {}, length(local.loopback_services) == 0 ? {} : {
+          "day2.dev/loopback-services-sha256" = sha256(jsonencode(var.loopback_services))
+        }, var.app_calls == null ? {} : { "day2.dev/app-calls-sha256" = sha256(jsonencode(local.app_call_config)) }, local.release_template_annotations)
       }
 
       spec {
@@ -413,6 +424,85 @@ resource "kubernetes_stateful_set_v1" "day2" {
             volume_mount {
               name       = "credentials"
               mount_path = local.credential_dir
+            }
+          }
+        }
+
+        dynamic "init_container" {
+          for_each = length(local.loopback_services) == 0 ? [] : [true]
+
+          content {
+            name              = "loopback-service-config-files"
+            image             = var.state_ownership_image
+            image_pull_policy = "IfNotPresent"
+            command = concat(
+              ["/busybox/install", "-o", "10001", "-g", "10001", "-m", "0600", "-t", local.loopback_config_dir],
+              [for name in sort(keys(local.loopback_services)) : "${local.loopback_source_dir}/${name}.json"],
+            )
+
+            security_context {
+              run_as_non_root            = false
+              run_as_user                = 0
+              run_as_group               = 0
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+              capabilities {
+                drop = ["ALL"]
+                add  = ["CHOWN", "FOWNER"]
+              }
+              seccomp_profile { type = "RuntimeDefault" }
+            }
+
+            resources {
+              requests = { cpu = "50m", memory = "32Mi", ephemeral-storage = "16Mi" }
+              limits   = { cpu = "100m", memory = "32Mi", ephemeral-storage = "16Mi" }
+            }
+
+            volume_mount {
+              name       = "loopback-config-sources"
+              mount_path = local.loopback_source_dir
+              read_only  = true
+            }
+            volume_mount {
+              name       = "loopback-service-configs"
+              mount_path = local.loopback_config_dir
+            }
+          }
+        }
+
+        dynamic "init_container" {
+          for_each = local.loopback_services
+
+          content {
+            name              = "loopback-state-${init_container.key}"
+            image             = var.state_ownership_image
+            image_pull_policy = "IfNotPresent"
+            command           = ["/busybox/chown", "10001:10001", "/loopback-state"]
+
+            security_context {
+              run_as_non_root            = false
+              run_as_user                = 0
+              run_as_group               = 0
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+              capabilities {
+                drop = ["ALL"]
+                add  = ["CHOWN"]
+              }
+              seccomp_profile { type = "RuntimeDefault" }
+            }
+
+            resources {
+              requests = { cpu = "50m", memory = "32Mi", ephemeral-storage = "16Mi" }
+              limits   = { cpu = "100m", memory = "32Mi", ephemeral-storage = "16Mi" }
+            }
+
+            volume_mount {
+              name       = "state"
+              mount_path = "/loopback-state"
+              sub_path   = init_container.value.state_subpath
             }
           }
         }
@@ -623,6 +713,73 @@ resource "kubernetes_stateful_set_v1" "day2" {
           }
         }
 
+        dynamic "container" {
+          for_each = local.loopback_services
+          content {
+            name              = container.key
+            image             = container.value.image
+            image_pull_policy = "IfNotPresent"
+            args              = ["serve", local.loopback_config_path]
+
+            port {
+              name           = container.key
+              container_port = container.value.port
+              protocol       = "TCP"
+            }
+
+            security_context {
+              run_as_non_root            = true
+              run_as_user                = 10001
+              run_as_group               = 10001
+              allow_privilege_escalation = false
+              read_only_root_filesystem  = true
+              privileged                 = false
+              capabilities {
+                drop = ["ALL"]
+              }
+              seccomp_profile { type = "RuntimeDefault" }
+            }
+
+            resources {
+              requests = {
+                cpu               = "${container.value.resources.cpu_millis}m"
+                memory            = "${container.value.resources.memory_mib}Mi"
+                ephemeral-storage = "64Mi"
+              }
+              limits = {
+                cpu               = "${container.value.resources.cpu_millis}m"
+                memory            = "${container.value.resources.memory_mib}Mi"
+                ephemeral-storage = "64Mi"
+              }
+            }
+
+            volume_mount {
+              name       = "loopback-service-configs"
+              mount_path = local.loopback_config_path
+              sub_path   = container.value.config_key
+              read_only  = true
+            }
+            volume_mount {
+              name       = "state"
+              mount_path = "/var/lib/day2/loopback-state"
+              sub_path   = container.value.state_subpath
+            }
+
+            liveness_probe {
+              exec {
+                command = concat(
+                  container.value.health_check.command,
+                  ["http://127.0.0.1:${container.value.port}${container.value.health_check.path}"],
+                )
+              }
+              initial_delay_seconds = 10
+              period_seconds        = 10
+              timeout_seconds       = 2
+              failure_threshold     = 3
+            }
+          }
+        }
+
         volume {
           name = "instance"
 
@@ -780,6 +937,31 @@ resource "kubernetes_stateful_set_v1" "day2" {
         }
 
         dynamic "volume" {
+          for_each = length(local.loopback_services) == 0 ? [] : [true]
+          content {
+            name = "loopback-config-sources"
+            csi {
+              driver    = "secrets-store-gke.csi.k8s.io"
+              read_only = true
+              volume_attributes = {
+                secretProviderClass = kubernetes_manifest.loopback_service_secrets[0].manifest.metadata.name
+              }
+            }
+          }
+        }
+
+        dynamic "volume" {
+          for_each = length(local.loopback_services) == 0 ? [] : [true]
+          content {
+            name = "loopback-service-configs"
+            empty_dir {
+              medium     = "Memory"
+              size_limit = "4Mi"
+            }
+          }
+        }
+
+        dynamic "volume" {
           for_each = local.has_credentials ? [true] : []
 
           content {
@@ -829,11 +1011,12 @@ locals {
   })
   backup_output = "/backup"
   # day2-backup appends /<UTC yyyymmddThhmmssZ> to the object prefix itself.
-  backup_args = [
-    local.instance_path, var.app_id, "${local.backup_output}/snapshot",
-    "--upload-gcs", var.backup_bucket,
-    "--object-prefix", var.app_id,
-  ]
+  backup_args = concat(
+    [local.instance_path, var.app_id, "${local.backup_output}/snapshot"],
+    flatten([for subpath in local.loopback_state_subpaths : ["--include-state-subpath", subpath]]),
+    flatten([for path in local.loopback_sqlite_state : ["--include-state-sqlite", path]]),
+    ["--upload-gcs", var.backup_bucket, "--object-prefix", var.app_id],
+  )
 }
 
 resource "kubernetes_cron_job_v1" "backup" {

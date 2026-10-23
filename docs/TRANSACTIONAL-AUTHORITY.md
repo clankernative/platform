@@ -50,8 +50,9 @@ null`, and `apply` accepts literal `null` as the expected stamp only in that sta
 It does not assign that new stamp to old invocations. Historical pending work
 requires explicit recovery; new authority must not silently revive it.
 
-Restore accepts only format-2 backups, which include an authority stamp. Older
-backup bundles are unsupported; no automatic conversion is provided.
+Restore accepts only format-3 backups, which include an authority stamp and
+digested companion state. Older backup bundles are unsupported; no automatic
+conversion is provided.
 
 Backups bind their manifest to the active artifact, policy and authority stamp
 read from the completed SQLite snapshot. Desired file edits cannot change what

@@ -247,6 +247,15 @@ fn parse<'a>(source: &'a str, path: &'a str) -> Result<ast::Stmt<'a>> {
         .with_context(|| format!("ui/{path}: template syntax"))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RootFieldPath(Vec<String>);
+
+#[derive(Clone, Debug)]
+struct Variant {
+    markup: String,
+    cases: BTreeMap<RootFieldPath, bool>,
+}
+
 #[derive(Clone)]
 struct Dynamic {
     shape: Type,
@@ -265,6 +274,7 @@ struct Analysis<'a> {
     repeated_live_regions: bool,
     repeated_live_forms: bool,
     presentations: crate::presentation::Catalog,
+    root_fields: BTreeSet<String>,
 }
 
 fn integer_literal(value: &minijinja::Value) -> bool {
@@ -308,6 +318,16 @@ impl Analysis<'_> {
             .routes
             .context("template_routes_require_explicit_routing")?;
         if namespace.id == "platform" {
+            if method.name == "freetool_credentials" {
+                let [ast::CallArg::Kwarg("resource_id", value)] = call.args.as_slice() else {
+                    bail!("template_freetool_credentials_resource_argument_required")
+                };
+                ensure!(
+                    self.expression(value, context)? == Type::String,
+                    "template_freetool_credentials_resource_string_required"
+                );
+                return Ok(true);
+            }
             ensure!(
                 ["audit", "docs", "openapi"].contains(&method.name) && call.args.is_empty(),
                 "template_unknown_platform_navigation"
@@ -690,7 +710,7 @@ impl Analysis<'_> {
         }
     }
 
-    fn template(&mut self, path: &str, context: &Type) -> Result<Vec<String>> {
+    fn template(&mut self, path: &str, context: &Type) -> Result<Vec<Variant>> {
         path_name(path)?;
         ensure!(
             self.stack.len() < 16 && !self.stack.iter().any(|name| name == path),
@@ -709,19 +729,25 @@ impl Analysis<'_> {
         result
     }
 
-    fn statements(&mut self, statements: &[ast::Stmt<'_>], context: &Type) -> Result<Vec<String>> {
-        let mut variants = vec![String::new()];
+    fn statements(&mut self, statements: &[ast::Stmt<'_>], context: &Type) -> Result<Vec<Variant>> {
+        let mut variants = vec![Variant {
+            markup: String::new(),
+            cases: BTreeMap::new(),
+        }];
         for statement in statements {
             variants = combine(variants, self.statement(statement, context)?)?;
         }
         Ok(variants)
     }
 
-    fn statement(&mut self, statement: &ast::Stmt<'_>, context: &Type) -> Result<Vec<String>> {
+    fn statement(&mut self, statement: &ast::Stmt<'_>, context: &Type) -> Result<Vec<Variant>> {
         use ast::{Expr as E, Stmt as S};
         match statement {
             S::Template(template) => self.statements(&template.children, context),
-            S::EmitRaw(raw) => Ok(vec![raw.raw.into()]),
+            S::EmitRaw(raw) => Ok(vec![Variant {
+                markup: raw.raw.into(),
+                cases: BTreeMap::new(),
+            }]),
             S::EmitExpr(emit) => {
                 let navigation = self.navigation(&emit.expr, context)?;
                 let shape = if navigation {
@@ -745,7 +771,10 @@ impl Analysis<'_> {
                         },
                     },
                 );
-                Ok(vec![marker])
+                Ok(vec![Variant {
+                    markup: marker,
+                    cases: BTreeMap::new(),
+                }])
             }
             S::IfCond(branch) => {
                 ensure!(
@@ -799,12 +828,12 @@ impl Analysis<'_> {
                         ("length".into(), Type::Integer),
                     ])),
                 );
-                let mut variants = self.statements(&loop_.body, &Type::Record(fields))?;
+                let variants = self.statements(&loop_.body, &Type::Record(fields))?;
                 // A repeated body must return to the same HTML element stack.
                 // Checking this independently makes the invariant hold for every iteration.
                 for variant in &variants {
-                    balanced(variant)?;
-                    let html = Html::parse_fragment(variant);
+                    balanced(&variant.markup)?;
+                    let html = Html::parse_fragment(&variant.markup);
                     if html
                         .select(&Selector::parse("[data-live]").expect("static selector"))
                         .next()
@@ -820,9 +849,28 @@ impl Analysis<'_> {
                         self.repeated_live_forms = true;
                     }
                 }
-                variants.extend(self.statements(&loop_.else_body, context)?);
-                ensure!(variants.len() <= MAX_VARIANTS, "template_branch_budget");
-                Ok(variants)
+                let else_variants = self.statements(&loop_.else_body, context)?;
+                let path = root_field_path(&loop_.iter)
+                    .filter(|path| self.root_fields.contains(&path.0[0]));
+                let mut projected = Vec::new();
+                for mut variant in variants {
+                    if let Some(path) = &path
+                        && !constrain(&mut variant.cases, path.clone(), true)
+                    {
+                        continue;
+                    }
+                    projected.push(variant);
+                }
+                for mut variant in else_variants {
+                    if let Some(path) = &path
+                        && !constrain(&mut variant.cases, path.clone(), false)
+                    {
+                        continue;
+                    }
+                    projected.push(variant);
+                }
+                ensure!(projected.len() <= MAX_VARIANTS, "template_branch_budget");
+                Ok(projected)
             }
             S::Include(include) => {
                 ensure!(
@@ -846,22 +894,69 @@ impl Analysis<'_> {
     }
 }
 
-fn combine(left: Vec<String>, right: Vec<String>) -> Result<Vec<String>> {
+fn combine(left: Vec<Variant>, right: Vec<Variant>) -> Result<Vec<Variant>> {
+    const MAX_PAIR_WORK: usize = MAX_VARIANTS * MAX_VARIANTS;
     ensure!(
-        left.len().saturating_mul(right.len()) <= MAX_VARIANTS,
-        "template_branch_budget: simplify independently conditional HTML (maximum {MAX_VARIANTS} structural variants)"
+        left.len().saturating_mul(right.len()) <= MAX_PAIR_WORK,
+        "template_variant_pair_budget"
     );
     let mut variants = Vec::new();
     for a in &left {
         for b in &right {
+            let mut cases = a.cases.clone();
+            if !merge_cases(&mut cases, &b.cases) {
+                continue;
+            }
             ensure!(
-                a.len() + b.len() <= MAX_HTML_BYTES,
+                a.markup.len() + b.markup.len() <= MAX_HTML_BYTES,
                 "template_markup_budget"
             );
-            variants.push(format!("{a}{b}"));
+            variants.push(Variant {
+                markup: format!("{}{}", a.markup, b.markup),
+                cases,
+            });
+            ensure!(
+                variants.len() <= MAX_VARIANTS,
+                "template_branch_budget: simplify independently conditional HTML (maximum {MAX_VARIANTS} structural variants)"
+            );
         }
     }
     Ok(variants)
+}
+
+fn constrain(
+    cases: &mut BTreeMap<RootFieldPath, bool>,
+    path: RootFieldPath,
+    present: bool,
+) -> bool {
+    match cases.get(&path) {
+        Some(existing) => *existing == present,
+        None => {
+            cases.insert(path, present);
+            true
+        }
+    }
+}
+
+fn merge_cases(
+    target: &mut BTreeMap<RootFieldPath, bool>,
+    source: &BTreeMap<RootFieldPath, bool>,
+) -> bool {
+    source
+        .iter()
+        .all(|(path, present)| constrain(target, path.clone(), *present))
+}
+
+fn root_field_path(expr: &ast::Expr<'_>) -> Option<RootFieldPath> {
+    match expr {
+        ast::Expr::Var(var) => Some(RootFieldPath(vec![var.id.to_owned()])),
+        ast::Expr::GetAttr(attr) => {
+            let mut path = root_field_path(&attr.expr)?;
+            path.0.push(attr.name.to_owned());
+            Some(path)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -936,12 +1031,24 @@ fn analyze_with_presentations<'a>(
         repeated_live_regions: false,
         repeated_live_forms: false,
         presentations,
+        root_fields: match context {
+            Type::Record(fields) => fields.keys().cloned().collect(),
+            _ => BTreeSet::new(),
+        },
     };
     let variants = analysis.template(path, context)?;
-    for markup in &variants {
-        check_html_policy(markup, Some(&analysis.dynamic), routes.is_some(), false)?;
+    for variant in &variants {
+        check_html_policy(
+            &variant.markup,
+            Some(&analysis.dynamic),
+            routes.is_some(),
+            false,
+        )?;
     }
-    Ok((analysis, variants))
+    Ok((
+        analysis,
+        variants.into_iter().map(|variant| variant.markup).collect(),
+    ))
 }
 
 pub fn validate_page(
@@ -2297,6 +2404,14 @@ impl minijinja::value::Object for Platform {
         method: &str,
         args: &[minijinja::Value],
     ) -> std::result::Result<minijinja::Value, minijinja::Error> {
+        if method == "freetool_credentials" {
+            let (kwargs,): (minijinja::value::Kwargs,) = minijinja::value::from_args(args)?;
+            let resource: String = kwargs.get("resource_id")?;
+            kwargs.assert_all_used()?;
+            let path = crate::freetool_executor::credential_management_path(&resource)
+                .map_err(template_error)?;
+            return Ok(minijinja::Value::from_object(Navigation(path)));
+        }
         if !args.is_empty() {
             return Err(template_error("template_unknown_platform_navigation"));
         }
@@ -2637,6 +2752,125 @@ mod tests {
                 .unwrap()
                 .render(serde_json::json!({"value": 1.5}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_root_collection_loops_share_structural_presence_cases() {
+        let repeated = (0..14)
+            .map(|index| format!("<select>{{% for row in rows %}}<option>{index}:{{{{ row }}}}</option>{{% else %}}<option>Empty</option>{{% endfor %}}</select>"))
+            .collect::<String>();
+        let sources = BTreeMap::from([("pages/repeated.html".into(), repeated)]);
+        let context = Type::Record(BTreeMap::from([(
+            "rows".into(),
+            Type::List(Box::new(Type::String)),
+        )]));
+        let (_, variants) = analyze(
+            &sources,
+            "pages/repeated.html",
+            &context,
+            &assets::Catalog::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(variants.len(), 2);
+    }
+
+    #[test]
+    fn independent_root_collections_remain_bounded_by_variant_budget() {
+        let loops = (0..9)
+            .map(|index| format!("{{% for row in rows_{index} %}}<p>{{{{ row }}}}</p>{{% else %}}<p>Empty</p>{{% endfor %}}"))
+            .collect::<String>();
+        let sources = BTreeMap::from([("pages/independent.html".into(), loops)]);
+        let context = Type::Record(
+            (0..9)
+                .map(|index| (format!("rows_{index}"), Type::List(Box::new(Type::String))))
+                .collect(),
+        );
+        let error = analyze(
+            &sources,
+            "pages/independent.html",
+            &context,
+            &assets::Catalog::new(),
+            None,
+        )
+        .err()
+        .expect("nine independent collections exceed the structural variant budget");
+        assert!(format!("{error:#}").contains("template_branch_budget"));
+    }
+
+    #[test]
+    fn projection_does_not_correlate_distinct_fields_or_loop_local_aliases() {
+        let sources = BTreeMap::from([("pages/independent.html".into(), "{% for row in rows %}<p>{{ row }}</p>{% else %}<p>Rows empty</p>{% endfor %}{% for item in other %}<p>{{ item }}</p>{% else %}<p>Other empty</p>{% endfor %}".into())]);
+        let context = Type::Record(BTreeMap::from([
+            ("rows".into(), Type::List(Box::new(Type::String))),
+            ("other".into(), Type::List(Box::new(Type::String))),
+        ]));
+        let (_, variants) = analyze(
+            &sources,
+            "pages/independent.html",
+            &context,
+            &assets::Catalog::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(variants.len(), 4);
+
+        let nested = BTreeMap::from([("pages/local.html".into(), "{% for row in rows %}{% for child in row.children %}<p>{{ child }}</p>{% else %}<p>No children</p>{% endfor %}{% else %}<p>No rows</p>{% endfor %}".into())]);
+        let child = Type::Record(BTreeMap::from([(
+            "children".into(),
+            Type::List(Box::new(Type::String)),
+        )]));
+        let nested_context = Type::Record(BTreeMap::from([(
+            "rows".into(),
+            Type::List(Box::new(child)),
+        )]));
+        let (_, variants) = analyze(
+            &nested,
+            "pages/local.html",
+            &nested_context,
+            &assets::Catalog::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(variants.len(), 3);
+    }
+
+    #[test]
+    fn contradictory_projection_cases_are_pruned_but_reachable_branches_remain_checked() {
+        let source = "{% for row in rows %}{% for again in rows %}<p>Present</p>{% else %}<p>Impossible</p>{% endfor %}{% else %}<p>Empty</p>{% endfor %}";
+        let sources = BTreeMap::from([("pages/contradictory.html".into(), source.into())]);
+        let context = Type::Record(BTreeMap::from([(
+            "rows".into(),
+            Type::List(Box::new(Type::String)),
+        )]));
+        let (_, variants) = analyze(
+            &sources,
+            "pages/contradictory.html",
+            &context,
+            &assets::Catalog::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(variants.len(), 2);
+        assert!(variants.iter().all(|markup| !markup.contains("Impossible")));
+        assert!(variants.iter().any(|markup| markup.contains("Present")));
+        assert!(variants.iter().any(|markup| markup.contains("Empty")));
+
+        let reachable_bad = BTreeMap::from([(
+            "pages/reachable.html".into(),
+            "{% if ready %}<p>Good</p>{% else %}<p><div>Bad</p>{% endif %}".into(),
+        )]);
+        let branch_context = Type::Record(BTreeMap::from([("ready".into(), Type::Boolean)]));
+        assert!(
+            analyze(
+                &reachable_bad,
+                "pages/reachable.html",
+                &branch_context,
+                &assets::Catalog::new(),
+                None
+            )
+            .is_err()
         );
     }
 

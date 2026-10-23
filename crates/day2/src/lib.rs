@@ -32,6 +32,7 @@ pub mod development;
 pub mod domain;
 mod error;
 mod execution;
+mod freetool_executor;
 mod host;
 pub mod host_inputs;
 mod host_loop;

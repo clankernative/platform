@@ -146,6 +146,26 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 	create = |model, value| request({ ..Wire.empty, kind: "create", model: model.name(), data: model.encode(value) })
 		.and_then(|raw| decode_entity(model, raw))
 
+	# One admitted transaction instruction for a bounded homogeneous create batch.
+	# Row validation, authorization, references and audit remain per-row host duties.
+	create_many : Model(a), List(a) -> Tx(List(Model.Entity(a)))
+	create_many = |model, values| {
+		if values.is_empty() {
+			Tx.succeed([])
+		} else if values.len() > 256 {
+			Tx.host_reject("invalid_batch_bound")
+		} else {
+			encoded = values.map(|value| model.encode(value))
+			request({
+				..Wire.empty,
+				kind: "create_many",
+				model: model.name(),
+				data: json_array(encoded),
+			})
+				.and_then(|raw| decode_entities(model, raw))
+		}
+	}
+
 	# Mark a row deleted without removing it.
 	#
 	# **Nothing in this platform removes a row.** There is no hard delete, and
@@ -172,6 +192,24 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 	})
 		.and_then(|raw| decode_entity(model, raw))
 
+	soft_delete_many : Model(a), List(Model.Entity(a)) -> Tx(List(Model.Entity(a)))
+	soft_delete_many = |model, rows| {
+		if rows.is_empty() {
+			Tx.succeed([])
+		} else if rows.len() > 256 {
+			Tx.host_reject("invalid_batch_bound")
+		} else {
+			encoded = rows.map(|row| { id: row.id.to_str(), expected_version: row.version.to_i64() })
+			request({
+				..Wire.empty,
+				kind: "soft_delete_many",
+				model: model.name(),
+				data: Json.to_str(encoded),
+			})
+				.and_then(|raw| decode_entities(model, raw))
+		}
+	}
+
 	# Bring a soft-deleted row back. Refused if the row is not deleted.
 	restore : Model(a), Model.Entity(a) -> Tx(Model.Entity(a))
 	restore = |model, row| request({
@@ -185,6 +223,33 @@ Tx(a) :: { resume : List(Wire.Observation), U64 -> Step(a) }.{
 
 	# Compare against the observed row revision. A caller's edit precondition is a
 	# separate host-policy check; transaction CAS alone does not detect stale forms.
+	# Every row carries its observed version; one stale or unauthorized row refuses
+	# the whole batch, which the host executes in the surrounding transaction.
+	update_many : Model(a), List({ row : Model.Entity(a), value : a }) -> Tx(List(Model.Entity(a)))
+	update_many = |model, changes| {
+		if changes.is_empty() {
+			Tx.succeed([])
+		} else if changes.len() > 256 {
+			Tx.host_reject("invalid_batch_bound")
+		} else {
+			encoded = changes.map(
+				|change| {
+					id = Json.to_str(change.row.id.to_str())
+					version = change.row.version.to_i64().to_str()
+					value = model.encode(change.value)
+					"{\"id\":${id},\"expected_version\":${version},\"data\":${value}}"
+				},
+			)
+			request({
+				..Wire.empty,
+				kind: "update_many",
+				model: model.name(),
+				data: json_array(encoded),
+			})
+				.and_then(|raw| decode_entities(model, raw))
+		}
+	}
+
 	update : Model(a), Model.Entity(a), a -> Tx(Model.Entity(a))
 	update =
 		|
@@ -289,6 +354,22 @@ request = |instruction| {
 			}
 		}
 	},
+}
+
+json_array : List(Str) -> Str
+json_array = |encoded| {
+	contents = encoded.fold("", |joined, value| if joined == "" value else "${joined},${value}")
+	"[${contents}]"
+}
+
+decode_entities : Model(a), Str -> Tx(List(Model.Entity(a)))
+decode_entities = |model, raw| {
+	parsed : Try(List(Wire.Row), _)
+	parsed = Json.parse(raw)
+	match parsed {
+		Ok(rows) => Tx.from_host(rows.map_try(|row| model.decode_row(row)))
+		Err(_) => Tx.host_reject("invalid_storage_response")
+	}
 }
 
 decode_entity : Model(a), Str -> Tx(Model.Entity(a))
