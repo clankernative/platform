@@ -57,6 +57,13 @@ coverage gate, implementation-bound replay, and durable schema upgrades are
 documented in [OAuth simulation and durable invariants](OAUTH-SIMULATION.md).
 They run in both library gates and complement real adapter/crash qualification.
 
+Native enrollment, storage-peer and serving-peer protocol decisions also share
+a production reducer with a seeded independent wire-prefix oracle. The library
+campaign controls transport and time, splits syscall return from final checks,
+compares complete bounded state and retains source-bound failure histories.
+See [native handshake simulation](NATIVE-HANDSHAKE-SIMULATION.md) for coverage,
+replay and the separate kernel/storage qualification requirements.
+
 Private native host-loop campaigns share the production supervisor reducer and
 retain source-bound event histories with independent-oracle snapshots. Replay a
 saved history from the repository root with:

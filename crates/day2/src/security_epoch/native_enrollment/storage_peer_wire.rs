@@ -345,6 +345,40 @@ pub(super) enum CompletionKind {
 }
 
 impl Body {
+    #[cfg(target_os = "linux")]
+    pub(super) fn frame(&self) -> super::handshake::Frame {
+        use super::handshake::{Frame, Protocol, Step};
+        let (protocol, step, sequence) = match self {
+            Self::InitialReady { .. } => (Protocol::InitialStorage, Step::BeginReady, None),
+            Self::Hello { .. } => (Protocol::InitialStorage, Step::Hello, None),
+            Self::Offer { .. } => (Protocol::InitialStorage, Step::Offer, None),
+            Self::Confirm { .. } => (Protocol::InitialStorage, Step::Confirm, None),
+            Self::Complete { .. } => (Protocol::InitialStorage, Step::Complete, None),
+            Self::Accepted { .. } => (Protocol::InitialStorage, Step::Accepted, None),
+            Self::CurrentBeginReady { sequence, .. } => {
+                (Protocol::CurrentStorage, Step::BeginReady, Some(*sequence))
+            }
+            Self::CurrentHello { sequence, .. } => {
+                (Protocol::CurrentStorage, Step::Hello, Some(*sequence))
+            }
+            Self::CurrentOffer { exchange, .. } => (
+                Protocol::CurrentStorage,
+                Step::Offer,
+                Some(exchange.sequence),
+            ),
+            Self::CurrentAck { .. } => (Protocol::CurrentStorage, Step::Ack, None),
+            Self::CurrentReady { .. } => (Protocol::CurrentStorage, Step::Ready, None),
+            Self::CurrentResult { .. } => (Protocol::CurrentStorage, Step::Known, None),
+            Self::CurrentConsumed { .. } => (Protocol::CurrentStorage, Step::Consumed, None),
+            Self::CurrentReleased { .. } => (Protocol::CurrentStorage, Step::Released, None),
+        };
+        Frame {
+            protocol,
+            step,
+            sequence,
+        }
+    }
+
     pub(super) fn stage_purpose(&self) -> StagePurpose {
         match self {
             Self::InitialReady { .. }

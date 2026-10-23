@@ -417,6 +417,9 @@ impl ControllerServingPeer {
                     &mut acquisition,
                 )?;
                 self.owner.check_resources(stage, &mut acquisition)?;
+                self.owner
+                    .channel
+                    .begin_current_handshake(sequence, &mut acquisition)?;
                 let nonce = {
                     let mut session = Session {
                         channel: &mut self.owner.channel,
@@ -582,6 +585,9 @@ fn begin_shell(
     #[cfg(target_os = "linux")]
     {
         let mut acquisition = acquisition;
+        owner
+            .channel
+            .begin_current_handshake(sequence, &mut acquisition)?;
         let mut session = Session {
             channel: &mut owner.channel,
             stage,

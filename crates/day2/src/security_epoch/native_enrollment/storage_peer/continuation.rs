@@ -241,6 +241,9 @@ impl RetainedPeer {
         );
         local.require_new_grant(&self.last_local_grant)?;
         self.check_resources(stage, &mut acquisition)?;
+        #[cfg(target_os = "linux")]
+        self.channel
+            .begin_current_handshake(sequence, &mut acquisition)?;
         Ok((acquisition, local, sequence))
     }
 

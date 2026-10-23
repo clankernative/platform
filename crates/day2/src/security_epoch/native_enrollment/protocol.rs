@@ -141,6 +141,27 @@ pub(super) enum Packet {
     },
 }
 
+#[cfg(target_os = "linux")]
+impl Packet {
+    pub(super) fn frame(&self) -> Option<super::handshake::Frame> {
+        use super::handshake::{Frame, Protocol, Step};
+        let step = match self {
+            Self::StageHello { .. } => Step::Hello,
+            Self::StageNonce { .. } => Step::Challenge,
+            Self::StageBind { .. } => Step::Bind,
+            Self::StageGrant { .. } => Step::Grant,
+            Self::BirthChallenge { .. } | Self::BirthKey { .. } | Self::BirthGrant { .. } => {
+                return None;
+            }
+        };
+        Some(Frame {
+            protocol: Protocol::Enrollment,
+            step,
+            sequence: None,
+        })
+    }
+}
+
 /// Key possession belongs to one native executor. It is never a wire value.
 pub(super) struct KeyOwner {
     key: Ed25519KeyPair,
