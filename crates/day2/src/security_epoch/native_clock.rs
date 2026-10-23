@@ -521,6 +521,46 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_peer_wait_cannot_defer_provider_authentication_past_original_five_seconds() {
+        for elapsed in [Duration::from_secs(5), Duration::from_millis(6_300)] {
+            let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
+            let mut role = parent.narrow_authentication().unwrap();
+            role.fixture_time = Some(parent.origin + Duration::from_millis(1_400));
+            parent.fixture_time = role.fixture_time;
+            parent.complete_authentication(role).unwrap();
+            // The bootstrap interval itself is still live. A peer wait is not
+            // authentication completion and cannot issue a new five seconds.
+            parent.fixture_time = Some(parent.origin + elapsed);
+            assert!(parent.remaining().is_ok());
+            let error = parent.narrow_authentication().err().unwrap();
+            assert_eq!(
+                error.to_string(),
+                "epoch_native_narrowed_acquisition_expired"
+            );
+            assert!(parent.remaining().is_err());
+        }
+
+        let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
+        let mut role = parent.narrow_authentication().unwrap();
+        role.fixture_time = Some(parent.origin + Duration::from_millis(1_400));
+        parent.fixture_time = role.fixture_time;
+        parent.complete_authentication(role).unwrap();
+        let mut provider = parent.narrow_authentication().unwrap();
+        provider.fixture_time = Some(parent.origin + Duration::from_millis(2_300));
+        parent.fixture_time = provider.fixture_time;
+        parent.complete_authentication(provider).unwrap();
+        // Authenticate first, consume that actual successful child, then spend
+        // peer/file I/O time on the same original ten-second parent.
+        let mut io = parent.narrow(30, parent.deadline).unwrap();
+        io.fixture_time = Some(parent.origin + Duration::from_millis(6_300));
+        parent.fixture_time = io.fixture_time;
+        parent.join_storage_bootstrap_view(io).unwrap();
+        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(3_700));
+        parent.fixture_time = Some(parent.origin + STORAGE_BOOTSTRAP_LIMIT);
+        assert!(parent.remaining().is_err());
+    }
+
+    #[test]
     fn storage_authentication_expiry_or_foreign_kind_permanently_refuses_parent() {
         for scope in [
             AcquisitionScope::StorageBootstrap,

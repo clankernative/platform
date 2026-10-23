@@ -461,10 +461,11 @@ impl AppStorageBootstrap {
                 &request,
             )?;
             let holder = self.storage.first_holder_data()?;
-            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
-            // Authenticate read-only material while the Controller performs its
-            // fixed operation. This does not observe the epoch or acknowledge
-            // anything; both provider observations still follow actual Known.
+            // Complete provider authentication within this stage's ORIGINAL
+            // five seconds, before file/peer work can spend the separate
+            // ten-second bootstrap interval. Retaining the successful child
+            // does not observe the epoch or acknowledge anything; both provider
+            // observations still follow the checked peer's actual Known.
             let mut reads = super::AuthenticatedReads::acquire_storage_bootstrap(
                 &self.policy,
                 &self.store,
@@ -472,6 +473,7 @@ impl AppStorageBootstrap {
                 stage,
             )?
             .retain_storage_bootstrap()?;
+            let mut phase = self.storage.begin_bootstrap(stage, &self.store, &request)?;
             phase.await_known(stage)?;
             // The Controller's signed result only unblocks a fresh coherent
             // provider read. It is not itself an activation/serving receipt.
