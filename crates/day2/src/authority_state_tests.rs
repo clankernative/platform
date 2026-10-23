@@ -1029,3 +1029,173 @@ fn domain_membership_admits_only_under_the_document_s_verified_domain() -> Resul
     );
     Ok(())
 }
+
+#[test]
+fn domain_resource_grants_stay_within_domain_membership_and_never_delegate() -> Result<()> {
+    let artifact = LoadedArtifact::from_contract_for_tests(
+        "domain-resource-test".into(),
+        "/admitted/domain-resource".into(),
+        serde_json::from_value(serde_json::json!({
+            "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,"roc_version":"domain-resource-test",
+            "worker_digest":"domain-resource-test","schema_digest":"domain-resource-test",
+            "schema":{"models":{},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "operations":[
+                {"name":"items.read","kind":"query","input_type":"input","output_type":""},
+                {"name":"items.write","kind":"command","input_type":"input","output_type":""}],
+            "sources":{},"admission":"local-spike-only"}))?,
+    );
+    let read = artifact.route("items.read")?.clone();
+    let everyone = String::from("domain:wonderly.com");
+    let grant = |operation: &str, provider_target: serde_json::Value, actors: &[&str]| {
+        let mut grant = serde_json::json!({
+            "policy":{"id":"reading","revision":1},
+            "resource":{"id":"directory","revision":1},
+            "connection":{"id":"local","revision":1},
+            "actors":actors,
+            "limits":{"max_request_bytes":1024,"max_response_bytes":1024,"max_calls_per_invocation":5},
+            "budgets":[],"expires_at_ms":null
+        });
+        grant
+            .as_object_mut()
+            .unwrap()
+            .extend(provider_target.as_object().unwrap().clone());
+        serde_json::json!({"operations":{operation:{"directory":grant}},"budgets":{}})
+    };
+    let notifications = serde_json::json!({
+        "provider":"local_notifications",
+        "target":{"kind":"notification_mailbox","topics":{"kind":"any"}},
+        "actions":["notifications_resolve"]
+    });
+    let mut doc = document();
+    doc.hosted_domain = Some("wonderly.com".into());
+    doc.readers.insert(everyone.clone());
+    let approved = doc
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap();
+    approved.actors.insert(everyone.clone());
+    approved
+        .observations
+        .insert("notifications.recipient.v1".into());
+    doc.resources = serde_json::from_value(grant(
+        "items.read",
+        notifications.clone(),
+        &[everyone.as_str(), "viewer"],
+    ))?;
+    doc.validate(&artifact)?;
+
+    // Activation keeps the domain entry, and the bound grant then admits a
+    // person of that domain while refusing lookalikes and the entry itself.
+    let mut effective = doc.clone();
+    effective.attenuate_resources(&artifact.contract().operations)?;
+    let actors = &effective.resources.operations["items.read"]["directory"].actors;
+    assert_eq!(actors, &BTreeSet::from([everyone.clone(), "viewer".into()]));
+    assert!(crate::authority::admits(actors, "newhire@wonderly.com"));
+    assert!(crate::authority::admits(actors, "viewer"));
+    for outsider in [
+        "newhire@sub.wonderly.com",
+        "newhire@wonderly.com.evil.com",
+        "NewHire@wonderly.com",
+        "app:links@wonderly.com",
+        "domain:wonderly.com",
+    ] {
+        assert!(!crate::authority::admits(actors, outsider), "{outsider}");
+    }
+    effective.authorize(&read, "newhire@wonderly.com")?;
+
+    // A domain is covered only by the same domain: naming people in the
+    // operation or membership does not stretch to everyone at the domain.
+    type Narrow = fn(&mut AuthorityDocument, &str);
+    let narrowings: [(&str, Narrow); 2] = [
+        ("membership", |doc, entry| {
+            doc.readers.remove(entry);
+        }),
+        ("operation", |doc, entry| {
+            doc.policy
+                .as_mut()
+                .unwrap()
+                .operations
+                .get_mut("items.read")
+                .unwrap()
+                .actors
+                .remove(entry);
+        }),
+    ];
+    for (narrowing, narrow) in narrowings {
+        let mut narrowed = doc.clone();
+        narrow(&mut narrowed, &everyone);
+        assert!(narrowed.validate(&artifact).is_err(), "{narrowing}");
+        narrowed.attenuate_resources(&artifact.contract().operations)?;
+        assert_eq!(
+            narrowed.resources.operations["items.read"]["directory"].actors,
+            BTreeSet::from(["viewer".into()]),
+            "{narrowing}"
+        );
+    }
+
+    // A command's grant is covered by writers only: a domain that may read
+    // the app does not reach a resource bound to one of its commands.
+    let mut command = doc.clone();
+    let approved = command
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.write")
+        .unwrap();
+    approved.actors.insert(everyone.clone());
+    approved
+        .observations
+        .insert("notifications.recipient.v1".into());
+    command.resources = serde_json::from_value(grant(
+        "items.write",
+        notifications.clone(),
+        &[everyone.as_str(), "alice"],
+    ))?;
+    assert!(command.validate(&artifact).is_err());
+    let mut attenuated = command.clone();
+    attenuated.attenuate_resources(&artifact.contract().operations)?;
+    assert_eq!(
+        attenuated.resources.operations["items.write"]["directory"].actors,
+        BTreeSet::from(["alice".into()])
+    );
+    command.writers.insert(everyone.clone());
+    command.validate(&artifact)?;
+
+    // The entry must name the verified hosted domain, which membership
+    // already requires of the entry that covers it.
+    let mut unverified = doc.clone();
+    unverified.hosted_domain = None;
+    assert!(unverified.validate(&artifact).is_err());
+    let mut elsewhere = doc.clone();
+    elsewhere.hosted_domain = Some("example.com".into());
+    assert!(elsewhere.validate(&artifact).is_err());
+
+    // App delegation never carries a domain across an application boundary.
+    let mut delegated = doc.clone();
+    delegated
+        .policy
+        .as_mut()
+        .unwrap()
+        .operations
+        .get_mut("items.read")
+        .unwrap()
+        .observations
+        .insert("app.query.v1".into());
+    delegated.resources = serde_json::from_value(grant(
+        "items.read",
+        serde_json::json!({
+            "provider":"local_delegation",
+            "target":{"kind":"app_operation","app":"callee","operation":"callee.list",
+                "schema_digest":format!("sha256:{}", "1".repeat(64))},
+            "actions":["delegate_query"]
+        }),
+        &[everyone.as_str()],
+    ))?;
+    let error = delegated.validate(&artifact).unwrap_err();
+    assert!(format!("{error:#}").contains("app delegation"), "{error:#}");
+    Ok(())
+}
