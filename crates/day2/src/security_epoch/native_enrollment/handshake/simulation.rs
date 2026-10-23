@@ -1007,7 +1007,7 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
             StagePurpose::StorageMetadataObservation,
             StagePurpose::InitialFirstHolder,
         ] {
-            for seconds in [1, 5, 10] {
+            for seconds in [1, 5, 10, 11, 30] {
                 for at_deadline in [false, true] {
                     let mut actual = Transcript::new(protocol, Actor::Controller);
                     let mut expected = model::Model::new(protocol, Actor::Controller);
