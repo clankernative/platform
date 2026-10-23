@@ -74,8 +74,9 @@ impl StagePurpose {
             Self::InitialFirstHolder => {
                 crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
             }
-            Self::StorageBootstrap | Self::StorageMetadataObservation => {
-                crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+            Self::StorageBootstrap => crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+            Self::StorageMetadataObservation => {
+                crate::security_epoch::native_clock::STORAGE_METADATA_OBSERVATION_LIMIT
             }
         }
     }

@@ -17,12 +17,18 @@ const MAX_ACQUISITION: Duration = Duration::from_secs(5);
 pub(in crate::security_epoch) const INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT: Duration =
     Duration::from_secs(10);
 
-/// Separate storage-bootstrap candidate, never an ordinary Current allowance.
-/// The measured Current control spent 3.063s on role acquisition and 1.191s on
-/// full authentication, then refused in metadata round two of three at 5s.
-/// Both authentication children still finish by the SAME original origin+5.
-/// Ten seconds is a qualification candidate, not demonstrated full-path margin.
-pub(in crate::security_epoch) const STORAGE_BOOTSTRAP_LIMIT: Duration = Duration::from_secs(10);
+/// User-approved ceiling for EACH original storage-bootstrap action only.
+/// The 2026-10-23 run spent 7.718s before writer preparation, then exhausted
+/// 10s there after all three provider rounds, before its first counter read.
+/// Thirty seconds permits qualification of the unmeasured tail; margin is not
+/// established until repeated complete actions finish within 24s. Role and
+/// provider authentication still share the SAME original origin+5 deadline.
+pub(in crate::security_epoch) const STORAGE_BOOTSTRAP_LIMIT: Duration = Duration::from_secs(30);
+
+/// Read-only metadata diagnostics retain their separate existing ten seconds.
+/// They cannot create a file, join the bootstrap peer or install a writer.
+pub(in crate::security_epoch) const STORAGE_METADATA_OBSERVATION_LIMIT: Duration =
+    Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AcquisitionScope {
@@ -37,7 +43,8 @@ impl AcquisitionScope {
         match self {
             Self::Current => MAX_ACQUISITION,
             Self::InitialFirstHolder => INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
-            Self::StorageBootstrap | Self::StorageMetadataObservation => STORAGE_BOOTSTRAP_LIMIT,
+            Self::StorageBootstrap => STORAGE_BOOTSTRAP_LIMIT,
+            Self::StorageMetadataObservation => STORAGE_METADATA_OBSERVATION_LIMIT,
         }
     }
 }
@@ -96,7 +103,7 @@ impl NativeAcquisition {
     pub(super) fn begin_storage_metadata_observation() -> Result<Self> {
         Self::begin_bounded(
             AcquisitionScope::StorageMetadataObservation,
-            STORAGE_BOOTSTRAP_LIMIT,
+            STORAGE_METADATA_OBSERVATION_LIMIT,
         )
     }
 
@@ -475,7 +482,7 @@ mod tests {
             Digest::new(b"storage-bootstrap-clock"),
             std::process::id(),
             Duration::from_secs(100),
-            STORAGE_BOOTSTRAP_LIMIT,
+            scope.limit(),
         );
         clock.scope = scope;
         clock
@@ -513,7 +520,7 @@ mod tests {
                 .unwrap();
             // The completed authentication child is gone. Subsequent I/O is
             // derived from THIS actual parent, never by widening that child.
-            let mut io = parent.narrow(30, Duration::from_secs(110)).unwrap();
+            let mut io = parent.narrow(30, parent.deadline).unwrap();
             io.fixture_time = Some(Duration::from_millis(106_300));
             parent.fixture_time = io.fixture_time;
             match scope {
@@ -525,9 +532,12 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert_eq!(parent.remaining().unwrap(), Duration::from_millis(3_700));
+            assert_eq!(
+                parent.remaining().unwrap(),
+                scope.limit() - Duration::from_millis(6_300)
+            );
             assert_eq!(parent.origin, Duration::from_secs(100));
-            assert_eq!(parent.deadline, Duration::from_secs(110));
+            assert_eq!(parent.deadline, parent.origin + scope.limit());
         }
     }
 
@@ -561,12 +571,12 @@ mod tests {
         parent.fixture_time = provider.fixture_time;
         parent.complete_authentication(provider).unwrap();
         // Authenticate first, consume that actual successful child, then spend
-        // peer/file I/O time on the same original ten-second parent.
+        // peer/file I/O time on the same original bootstrap parent.
         let mut io = parent.narrow(30, parent.deadline).unwrap();
         io.fixture_time = Some(parent.origin + Duration::from_millis(6_300));
         parent.fixture_time = io.fixture_time;
         parent.join_storage_bootstrap_view(io).unwrap();
-        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(3_700));
+        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(23_700));
         parent.fixture_time = Some(parent.origin + STORAGE_BOOTSTRAP_LIMIT);
         assert!(parent.remaining().is_err());
     }
@@ -666,15 +676,20 @@ mod tests {
 
     #[test]
     fn storage_deadline_and_shorter_caps_refuse_equality_without_recovery() {
-        assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(10));
+        assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(30));
+        assert_eq!(STORAGE_METADATA_OBSERVATION_LIMIT, Duration::from_secs(10));
+        assert_eq!(
+            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
+            Duration::from_secs(10)
+        );
         assert_eq!(MAX_ACQUISITION, Duration::from_secs(5));
         for scope in [
             AcquisitionScope::StorageBootstrap,
             AcquisitionScope::StorageMetadataObservation,
         ] {
-            for seconds in [7, 10] {
+            for seconds in [7, scope.limit().as_secs().try_into().unwrap()] {
                 let mut parent = storage_fixture(scope);
-                let mut child = parent.narrow(seconds, Duration::from_secs(110)).unwrap();
+                let mut child = parent.narrow(seconds, parent.deadline).unwrap();
                 let original = (child.domain.clone(), child.origin, child.deadline);
                 child.fixture_time = Some(Duration::from_secs(100 + u64::from(seconds)));
                 assert!(child.remaining().is_err());
@@ -684,6 +699,33 @@ mod tests {
                 assert!(parent.remaining().is_err());
             }
         }
+    }
+
+    #[test]
+    fn only_bootstrap_spends_thirty_seconds_and_every_original_deadline_is_exclusive() {
+        for (scope, seconds) in [
+            (AcquisitionScope::Current, 5),
+            (AcquisitionScope::InitialFirstHolder, 10),
+            (AcquisitionScope::StorageMetadataObservation, 10),
+            (AcquisitionScope::StorageBootstrap, 30),
+        ] {
+            assert_eq!(scope.limit(), Duration::from_secs(seconds));
+            let mut clock = storage_fixture(scope);
+            let identity = (clock.domain.clone(), clock.origin, clock.deadline);
+            clock.fixture_time = Some(clock.deadline - Duration::from_nanos(1));
+            assert_eq!(clock.remaining().unwrap(), Duration::from_nanos(1));
+            clock.fixture_time = Some(clock.deadline);
+            assert!(clock.remaining().is_err());
+            clock.fixture_time = Some(clock.origin + Duration::from_secs(1));
+            assert!(clock.remaining().is_err());
+            assert_eq!((clock.domain, clock.origin, clock.deadline), identity);
+        }
+        let mut bootstrap = storage_fixture(AcquisitionScope::StorageBootstrap);
+        bootstrap.fixture_time = Some(bootstrap.origin + Duration::from_secs(11));
+        assert_eq!(bootstrap.remaining().unwrap(), Duration::from_secs(19));
+        // A live bootstrap purpose cannot start late provider authentication.
+        assert!(bootstrap.narrow_authentication().is_err());
+        assert!(bootstrap.remaining().is_err());
     }
 
     #[test]
@@ -706,9 +748,9 @@ mod tests {
         let mut budget = actual.budget().unwrap();
         assert_eq!(
             budget.remaining_native(&mut actual).unwrap(),
-            Duration::from_millis(3_700)
+            Duration::from_millis(23_700)
         );
-        actual.fixture_time = Some(Duration::from_secs(110));
+        actual.fixture_time = Some(Duration::from_secs(130));
         assert!(budget.remaining_native(&mut actual).is_err());
         assert!(actual.remaining().is_err());
 

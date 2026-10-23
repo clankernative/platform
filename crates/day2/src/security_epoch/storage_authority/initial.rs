@@ -460,28 +460,48 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
         self.check()
     }
 
-    pub(in crate::security_epoch) fn finish_checked(mut self) -> Result<()> {
+    pub(in crate::security_epoch) fn finish_checked(
+        mut self,
+        timings: &crate::security_epoch::controller::preparation_timing::Timings,
+    ) -> Result<()> {
         self.check()?;
-        self.peer
-            .await_acknowledgement(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapAcknowledgement, || {
+            self.peer
+                .await_acknowledgement(self.file.controller_stage()?)
+        })?;
         self.check()?;
-        self.peer.release_known(self.file.controller_stage()?)?;
-        self.peer.finish_checked(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapPeerRelease, || {
+            self.peer.release_known(self.file.controller_stage()?)
+        })?;
+        timings.measure(Operation::BootstrapPeerFinish, || {
+            self.peer.finish_checked(self.file.controller_stage()?)
+        })?;
+        // Preserve the final native file guard as the last I/O before transfer.
         self.file.finish_checked()?;
         *self.continuation = true;
         Ok(())
     }
 
-    pub(in crate::security_epoch) fn finish_activated(mut self) -> Result<()> {
+    pub(in crate::security_epoch) fn finish_activated(
+        mut self,
+        timings: &crate::security_epoch::controller::preparation_timing::Timings,
+    ) -> Result<()> {
         self.check()?;
-        self.peer
-            .await_acknowledgement(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapAcknowledgement, || {
+            self.peer
+                .await_acknowledgement(self.file.controller_stage()?)
+        })?;
         self.check()?;
         // The App remains blocked on release until this last initial-byte
         // check. Once released, only physical identity is required here.
         let mut physical = self.file.into_bootstrap_physical_checked()?;
-        self.peer.release_known(physical.controller_stage()?)?;
-        self.peer.finish_checked(physical.controller_stage()?)?;
+        timings.measure(Operation::BootstrapPeerRelease, || {
+            self.peer.release_known(physical.controller_stage()?)
+        })?;
+        timings.measure(Operation::BootstrapPeerFinish, || {
+            self.peer.finish_checked(physical.controller_stage()?)
+        })?;
+        // No diagnostic ending clock read between the final guard and transfer.
         physical.finish_checked()?;
         *self.continuation = true;
         Ok(())

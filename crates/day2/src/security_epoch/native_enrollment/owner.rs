@@ -298,7 +298,7 @@ impl EnrolledProcessRoleOwner {
                     policy_interpretation,
                 };
                 stage.check()?;
-                // A ten-second peer interval never gives role authentication
+                // A longer peer interval never gives role authentication
                 // more than its original five-second acquisition. No reset.
                 if let Err(error) = stage.acquisition.complete_authentication(authentication) {
                     stage.owner.refused = true;

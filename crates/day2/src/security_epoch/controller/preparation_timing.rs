@@ -7,6 +7,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub(in crate::security_epoch) enum Operation {
     RoleStage,
     VolumeAcquisition,
@@ -50,9 +51,26 @@ pub(in crate::security_epoch) enum Operation {
     BootstrapValidation,
     BootstrapRelease,
     AuthenticationCheck,
+    ProviderRoundOne,
+    ProviderRoundTwo,
+    ProviderRoundThree,
+    ProviderRoundOther,
+    BootstrapWriterPhase,
+    BootstrapWriterMaterial,
+    BootstrapWriterSample,
+    BootstrapCounterAfter,
+    BootstrapSlotAfter,
+    BootstrapExecution,
+    BootstrapAnnouncement,
+    BootstrapAcknowledgement,
+    BootstrapPeerRelease,
+    BootstrapPeerFinish,
+    BootstrapFirestoreRead,
+    BootstrapFirestoreCommit,
+    BootstrapFirestoreRollback,
 }
 
-const OPERATIONS: [Operation; 42] = [
+const OPERATIONS: [Operation; 59] = [
     Operation::RoleStage,
     Operation::VolumeAcquisition,
     Operation::NativeCheck,
@@ -95,6 +113,23 @@ const OPERATIONS: [Operation; 42] = [
     Operation::BootstrapValidation,
     Operation::BootstrapRelease,
     Operation::AuthenticationCheck,
+    Operation::ProviderRoundOne,
+    Operation::ProviderRoundTwo,
+    Operation::ProviderRoundThree,
+    Operation::ProviderRoundOther,
+    Operation::BootstrapWriterPhase,
+    Operation::BootstrapWriterMaterial,
+    Operation::BootstrapWriterSample,
+    Operation::BootstrapCounterAfter,
+    Operation::BootstrapSlotAfter,
+    Operation::BootstrapExecution,
+    Operation::BootstrapAnnouncement,
+    Operation::BootstrapAcknowledgement,
+    Operation::BootstrapPeerRelease,
+    Operation::BootstrapPeerFinish,
+    Operation::BootstrapFirestoreRead,
+    Operation::BootstrapFirestoreCommit,
+    Operation::BootstrapFirestoreRollback,
 ];
 
 #[derive(Clone, Copy)]
@@ -121,6 +156,23 @@ impl Scope {
                 | Operation::BootstrapValidation
                 | Operation::BootstrapRelease
                 | Operation::AuthenticationCheck
+                | Operation::ProviderRoundOne
+                | Operation::ProviderRoundTwo
+                | Operation::ProviderRoundThree
+                | Operation::ProviderRoundOther
+                | Operation::BootstrapWriterPhase
+                | Operation::BootstrapWriterMaterial
+                | Operation::BootstrapWriterSample
+                | Operation::BootstrapCounterAfter
+                | Operation::BootstrapSlotAfter
+                | Operation::BootstrapExecution
+                | Operation::BootstrapAnnouncement
+                | Operation::BootstrapAcknowledgement
+                | Operation::BootstrapPeerRelease
+                | Operation::BootstrapPeerFinish
+                | Operation::BootstrapFirestoreRead
+                | Operation::BootstrapFirestoreCommit
+                | Operation::BootstrapFirestoreRollback
         );
         match self {
             Self::Preparation => !bootstrap_only,
@@ -160,6 +212,23 @@ impl Measurement {
 
 #[derive(Clone, Debug, Serialize)]
 pub(in crate::security_epoch) struct Summary(Vec<(Operation, Measurement)>);
+
+/// Fixed operation code, call count, inclusive total microseconds. Compact
+/// bootstrap DATA keeps even maximal counters inside the unchanged 2048-byte
+/// record ceiling. Preparation's named count/total/max rows remain separate.
+#[derive(Clone, Debug, Serialize)]
+pub(in crate::security_epoch) struct CompactSummary(Vec<(u8, Option<u32>, Option<u32>)>);
+
+impl Summary {
+    pub(super) fn compact(self) -> CompactSummary {
+        CompactSummary(
+            self.0
+                .into_iter()
+                .map(|(operation, value)| (operation as u8, value.0, value.1))
+                .collect(),
+        )
+    }
+}
 
 /// One explicitly scoped collector for preparation, listener and first holder.
 /// Other current/serving phases use disabled(), with no allocation, clock
@@ -269,6 +338,35 @@ impl Timings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_round_and_tail_codes_preserve_counts_totals_and_inconclusive_values() {
+        for (index, operation) in OPERATIONS.iter().enumerate() {
+            assert_eq!(*operation as usize, index);
+        }
+        let timings = Timings::bootstrap();
+        for (operation, micros) in [
+            (Operation::ProviderRoundOne, 11),
+            (Operation::ProviderRoundTwo, 22),
+            (Operation::ProviderRoundThree, 33),
+            (Operation::BootstrapAcknowledgement, 44),
+        ] {
+            let mut times = [Duration::ZERO, Duration::from_micros(micros)].into_iter();
+            assert_eq!(timings.measure_with(operation, || 17, || times.next()), 17);
+        }
+        assert_eq!(
+            serde_json::to_value(timings.summary().compact()).unwrap(),
+            serde_json::json!([[42, 1, 11], [43, 1, 22], [44, 1, 33], [53, 1, 44]])
+        );
+        let inconclusive = Summary(vec![(
+            Operation::BootstrapFirestoreCommit,
+            Measurement(None, None, None),
+        )]);
+        assert_eq!(
+            serde_json::to_value(inconclusive.compact()).unwrap(),
+            serde_json::json!([[57, null, null]])
+        );
+    }
 
     #[test]
     fn error_outcomes_are_unchanged_and_inclusive_nested_measurements_stay_separate() {

@@ -5,6 +5,7 @@
 use super::{ControllerEpochReads, RetainedEpochReads};
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
+    controller::preparation_timing::{Operation, Timings},
     firestore::{Budget, EpochReply, Port, Sample},
     transport::Route,
 };
@@ -20,6 +21,7 @@ pub(crate) struct ControllerPort<'storage, 'role> {
     reads: ControllerEpochReads,
     selection: Digest,
     valid: bool,
+    timings: Timings,
 }
 
 /// A short-lived borrow only; it cannot outlive or reconstruct the actual
@@ -38,6 +40,7 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         reads: ControllerEpochReads,
+        timings: Timings,
     ) -> Result<Self> {
         let state = Rc::clone(&reads.state);
         let guard = state.gate.guard()?;
@@ -45,11 +48,15 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
             let mut phase = owner.try_borrow_mut()?;
             // Resolve the actual phase BEFORE borrowing shared material:
             // phase checks themselves reborrow that same provider context.
-            phase.check_authenticated_reads(&reads)?;
+            timings.measure(Operation::BootstrapWriterPhase, || {
+                phase.check_authenticated_reads(&reads)
+            })?;
             let stage = phase.controller_stage()?;
             let borrow = state.gate.enter()?;
             let mut material = state.material.try_borrow_mut()?;
-            material.check_bootstrap(stage, policy, store)?;
+            timings.measure(Operation::BootstrapWriterMaterial, || {
+                material.check_bootstrap(stage, policy, store)
+            })?;
             let selection = material.selection.clone();
             drop(material);
             borrow.complete()?;
@@ -59,8 +66,9 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 reads,
                 selection,
                 valid: true,
+                timings: timings.clone(),
             };
-            port.sample()?;
+            timings.measure(Operation::BootstrapWriterSample, || port.sample())?;
             guard.complete()?;
             Ok(port)
         })();
@@ -174,7 +182,7 @@ impl ControllerPort<'_, '_> {
             let borrow = self.reads.state.gate.enter()?;
             let mut material = self.reads.state.material.try_borrow_mut()?;
             material.sample(stage)?;
-            let route = writer_route(url)?;
+            let (route, operation) = writer_route(url)?;
             ensure!(
                 material.http.matches(&route, url)?,
                 "epoch_writer_recipient_changed"
@@ -185,13 +193,15 @@ impl ControllerPort<'_, '_> {
                 acquisition,
                 ..
             } = &mut *material;
-            let requested = http.request_with_ceiling(
-                route,
-                &credential.authorization()?,
-                Some(body),
-                acquisition,
-                timeout,
-            );
+            let requested = self.timings.measure(operation, || {
+                http.request_with_ceiling(
+                    route,
+                    &credential.authorization()?,
+                    Some(body),
+                    acquisition,
+                    timeout,
+                )
+            });
             let checked = material.sample(stage);
             let bytes = requested?;
             checked?;
@@ -244,13 +254,13 @@ impl Port for ControllerBorrow<'_, '_, '_> {
 
 // Route selection is DATA; NativeHttp additionally requires the exact selected
 // project/database URL. This function cannot issue a request or mint a writer.
-fn writer_route(url: &str) -> Result<Route<'static>> {
+fn writer_route(url: &str) -> Result<(Route<'static>, Operation)> {
     if url.ends_with("/documents:batchGet") {
-        Ok(Route::EpochRead)
+        Ok((Route::EpochRead, Operation::BootstrapFirestoreRead))
     } else if url.ends_with("/documents:rollback") {
-        Ok(Route::EpochRollback)
+        Ok((Route::EpochRollback, Operation::BootstrapFirestoreRollback))
     } else if url.ends_with("/documents:commit") {
-        Ok(Route::EpochCommit)
+        Ok((Route::EpochCommit, Operation::BootstrapFirestoreCommit))
     } else {
         anyhow::bail!("epoch_writer_route_refused")
     }

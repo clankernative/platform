@@ -229,11 +229,11 @@ fn storage_stage_purposes_are_closed_and_role_restricted_independent_of_duration
     );
     assert_eq!(
         StagePurpose::StorageBootstrap.limit(),
-        crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+        std::time::Duration::from_secs(30)
     );
     assert_eq!(
         StagePurpose::StorageMetadataObservation.limit(),
-        crate::security_epoch::native_clock::STORAGE_BOOTSTRAP_LIMIT
+        std::time::Duration::from_secs(10)
     );
 }
 

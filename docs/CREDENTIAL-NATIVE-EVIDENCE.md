@@ -151,7 +151,7 @@ five-second stage. Initial first-holder admission retains its separate
 10-second purpose. Neither purpose can substitute for the other.
 
 Only the six fixed Controller storage-bootstrap operations and their exact
-retained App responder select `storage_bootstrap`, with a nominal 10-second
+retained App responder select `storage_bootstrap`, with a nominal 30-second
 original interval. The App selects it from its local `Bootstrapping` owner,
 never from a received purpose label. Role exchange and complete Google/Kubernetes
 authentication must both finish by that same original origin plus five seconds.
@@ -164,9 +164,14 @@ remaining original time. No retry, renewal or ambiguous-effect resend is added.
 The Controller-only operator diagnostic has the distinct signed purpose
 `storage_metadata_observation`. Its metadata-read facade cannot create a
 Controller writer facade, storage peer, initial file, original, active serving
-phase or consumer. Even a valid signed non-Current purpose with a short interval
+phase or consumer. Its separate nominal ceiling remains ten seconds. Even a valid signed non-Current purpose with a short interval
 is refused by ordinary consumers. The nominal ceiling does not establish a
-complete-path timing margin or successful native qualification.
+complete-path timing margin or successful native qualification. On 2026-10-23,
+the ten-second bootstrap attempt spent 7.718 seconds before writer preparation
+and then refused there after all three provider rounds, before the first
+counter read. The user approved thirty seconds per bootstrap action to qualify
+the unmeasured tail. Require repeated complete actions within 24 seconds before
+claiming margin; neither this ceiling nor successful DATA tests establish it.
 
 ## Preparation timing diagnosis
 
@@ -233,27 +238,61 @@ the last I/O before the infallible owner transfer.
 Each of the six bootstrap steps starts a separate diagnostic collector for its
 actual storage-bootstrap attempt. Entering that step clears the cached
 first-holder summary. A refusal there can carry `bootstrap` with the fixed
-`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 10000000`, `last_step`,
-`returned`, `provider_rounds` and `timing`; it never reuses the earlier
+`scope: "storage_bootstrap"`, nominal `purpose_limit_us: 30000000`, `last_step`,
+`returned`, `provider_rounds`, `elapsed_us`, `timing_format` and `timing`; it never reuses the earlier
 preparation `timing` field. Shorter effective caps are not reported as a fresh
 interval by this nominal value.
 
 `last_step` and `returned` describe the last **measured operation**, not the
 outcome of the whole storage-bootstrap attempt. `returned` is `true` or `false` for that
-operation's native result, or `null` if it has not returned. Some later
-counter/slot reobservations and acknowledgement work are not separately timed;
-the closed `preparation.step` remains the reported native failure boundary.
+operation's native result, or `null` if it has not returned. The closed
+`preparation.step` remains the reported native failure boundary.
 No successful measurement establishes activation, serving or an accepted write.
 
 `provider_rounds` is `[attempted, fully_validated]` for the fresh provider
 observations in this attempt. A failed second or third round increments only
 the attempted count. Overflow is `null`, not zero or a completed observation.
-The timing rows retain the same inclusive and missing-value rules as preparation
-timing; authentication guard measurements can be nested inside file, provider
-and durability measurements and must not be added to their parents.
+Each of the first three provider rounds has a separate inclusive duration; any
+extra or overflowed round is recorded in the fixed `provider_round_other` bucket
+and cannot count as the completed three-round control. Writer preparation also
+records phase authentication checks, material checks and its final sample.
+Counter/slot reobservations, execution preparation, announcement, acknowledgement,
+peer release/finish and Firestore read/commit/rollback calls are timed separately.
+The latter include the actual native transport guards, not merely network RTT.
+No native check or request is removed or repeated. Final file guards remain the
+last I/O before their infallible continuation transfer.
+
+Bootstrap uses `timing_format: "operation_count_total_us_v1"`, with rows
+`[operation_code, calls, total_us]`. This compact fixed vocabulary keeps maximal
+diagnostics inside the existing 2,048-byte record ceiling. Missing, rewound or
+overflowed clocks/counters are `null`, never zero or success. Preparation keeps
+its separate named count/total/max format. Bootstrap codes are:
+
+| Codes | Operations in the same order |
+| --- | --- |
+| 0, 1, 2 | role_stage, volume_acquisition, native_check |
+| 18–22 | claim, volume, node, disk, instance |
+| 28–34 | bootstrap_ready, bootstrap_authentication, bootstrap_file, bootstrap_projection, bootstrap_durability, bootstrap_peer, bootstrap_peer_check |
+| 35–41 | bootstrap_writer, bootstrap_counter, bootstrap_slot, bootstrap_mutation, bootstrap_validation, bootstrap_release, authentication_check |
+| 42–45 | provider_round_one, provider_round_two, provider_round_three, provider_round_other |
+| 46–48 | bootstrap_writer_phase, bootstrap_writer_material, bootstrap_writer_sample |
+| 49–52 | bootstrap_counter_after, bootstrap_slot_after, bootstrap_execution, bootstrap_announcement |
+| 53–55 | bootstrap_acknowledgement, bootstrap_peer_release, bootstrap_peer_finish |
+| 56–58 | bootstrap_firestore_read, bootstrap_firestore_commit, bootstrap_firestore_rollback |
+
+Rows remain inclusive: provider and authentication timings nest inside outer
+file/durability/writer phases, and Firestore calls nest inside counter/slot or
+mutation phases. Do not add nested durations to their parents. `elapsed_us`
+covers the whole caller action from immediately before role acquisition until
+after final acknowledgement/release or refusal unwind. Its diagnostic clocks
+cannot grant authority, replace a native failure or renew an original interval.
+An unavailable elapsed time is inconclusive for margin.
 
 The snapshot is retained only after the actual stage/file/port operation has
-returned or unwound, and exported only in its existing refusal record. It
+returned or unwound. Each completed action exports its own snapshot in the
+existing `bootstrap_completed` record; refusal exports the attempted snapshot.
+A completed timing snapshot must end at successful `bootstrap_release`, not a
+read-only metadata control or an incomplete callback. It
 changes no native call order, check, original deadline or retry rule. Sampling
 or export failure cannot replace the first native error or its failed-request
 tuple. The 2,048-byte and twelve-record ceilings remain unchanged.

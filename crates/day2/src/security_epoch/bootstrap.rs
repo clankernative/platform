@@ -89,7 +89,13 @@ pub(super) fn run_phase(
     let result = (|| {
         let mut transport = trace
             .measure(Operation::BootstrapWriter, || {
-                ControllerPort::acquire(Rc::clone(&owner), policy, selection, reads)
+                ControllerPort::acquire(
+                    Rc::clone(&owner),
+                    policy,
+                    selection,
+                    reads,
+                    trace.timings(),
+                )
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
@@ -122,15 +128,18 @@ pub(super) fn run_phase(
             Action::Settle => Purpose::Reconcile,
             _ => Purpose::Dispatch,
         };
-        let context = CurrentBootstrapExecution::native(
-            Rc::clone(&owner),
-            selection,
-            request,
-            counter.snapshot(),
-            purpose,
-            &mut port,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
+        let context = trace
+            .measure(Operation::BootstrapExecution, || {
+                CurrentBootstrapExecution::native(
+                    Rc::clone(&owner),
+                    selection,
+                    request,
+                    counter.snapshot(),
+                    purpose,
+                    &mut port,
+                )
+            })
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
         trace.measure(Operation::BootstrapMutation, || {
             match action {
                 Action::Reserve => {
@@ -249,18 +258,21 @@ pub(super) fn run_phase(
             }
             Ok(())
         })?;
-        let counter_budget = port.budget().map_err(|error| {
-            PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
-        })?;
-        let observed =
-            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
+        let observed = trace.measure(Operation::BootstrapCounterAfter, || {
+            let counter_budget = port.budget().map_err(|error| {
                 PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
             })?;
-        let slot_budget = port
-            .budget()
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
-        let slot = control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))?;
+            firestore::read_with_budget(&mut port, &names, counter_budget).map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapCounterAfter, error)
+            })
+        })?;
+        let slot = trace.measure(Operation::BootstrapSlotAfter, || {
+            let slot_budget = port.budget().map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error)
+            })?;
+            control_slot_io::read_with_budget(selection, &core, &mut port, slot_budget)
+                .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapSlotAfter, error))
+        })?;
         trace
             .measure(Operation::BootstrapValidation, || {
                 validate_after(
@@ -275,9 +287,13 @@ pub(super) fn run_phase(
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
         port.sample()
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapValidation, error))?;
-        (|| owner.try_borrow_mut()?.announce_known())().map_err(|error| {
-            PreparationFailure::at(PreparationStep::BootstrapAnnouncement, error)
-        })?;
+        trace
+            .measure(Operation::BootstrapAnnouncement, || {
+                owner.try_borrow_mut()?.announce_known()
+            })
+            .map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapAnnouncement, error)
+            })?;
         Ok(observed.snapshot().clone())
     })();
     match result {
@@ -291,13 +307,17 @@ pub(super) fn run_phase(
                         && matches!(request, Request::CompleteInitialFirstActivation { .. })
                     {
                         trace
-                            .measure(Operation::BootstrapRelease, || phase.finish_activated())
+                            .measure(Operation::BootstrapRelease, || {
+                                phase.finish_activated(&trace.timings())
+                            })
                             .map_err(|error| {
                                 PreparationFailure::at(PreparationStep::BootstrapRelease, error)
                             })?;
                     } else {
                         trace
-                            .measure(Operation::BootstrapRelease, || phase.finish_checked())
+                            .measure(Operation::BootstrapRelease, || {
+                                phase.finish_checked(&trace.timings())
+                            })
                             .map_err(|error| {
                                 PreparationFailure::at(PreparationStep::BootstrapRelease, error)
                             })?;
