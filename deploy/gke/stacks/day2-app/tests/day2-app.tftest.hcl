@@ -130,6 +130,60 @@ run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
   }
 }
 
+run "two_loopback_companions_keep_private_config_isolated" {
+  command = plan
+  variables {
+    loopback_services = {
+      executor = {
+        image                 = "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        port                  = 43210
+        config_secret_version = "projects/example-tools/secrets/executor-private-config/versions/4"
+        state_subpath         = "companions/executor"
+        health_check          = { path = "/healthz", command = ["/usr/local/bin/executor", "healthcheck"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+      vault = {
+        image                 = "registry.example.com/freetool/vault@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        port                  = 43211
+        config_secret_version = "projects/example-tools/secrets/vault-private-config/versions/7"
+        state_subpath         = "companions/vault"
+        health_check          = { path = "/healthz", command = ["/usr/local/bin/vault", "healthcheck"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+    }
+  }
+
+  assert {
+    condition = length([
+      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount
+      if mount.name == "loopback-service-configs"
+    ]) == 0
+    error_message = "The main day2 host must not mount any companion's private configuration."
+  }
+
+  assert {
+    condition = alltrue([
+      for companion_name in ["executor", "vault"] :
+      length([
+        for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container : container
+        if container.name == companion_name && length([
+          for mount in container.volume_mount : mount
+          if mount.name == "loopback-service-configs" && mount.sub_path == "${companion_name}.json" && mount.read_only
+        ]) == 1
+      ]) == 1
+    ])
+    error_message = "Each companion must receive exactly its own read-only private config file."
+  }
+
+  assert {
+    condition = alltrue([
+      for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container :
+      length(container.volume_mount) == length(distinct([for mount in container.volume_mount : mount.mount_path]))
+    ])
+    error_message = "Mount paths must be unique within every container."
+  }
+}
+
 run "rejects_floating_loopback_image_and_secret_version" {
   command = plan
   variables {

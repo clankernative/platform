@@ -685,16 +685,6 @@ resource "kubernetes_stateful_set_v1" "day2" {
             }
           }
 
-          dynamic "volume_mount" {
-            for_each = local.loopback_services
-            content {
-              name       = "loopback-service-configs"
-              mount_path = local.loopback_config_path
-              sub_path   = volume_mount.value.config_key
-              read_only  = true
-            }
-          }
-
           # /srv/day2/artifacts/<artifact_id> is baked into the image and read-only
           # through readOnlyRootFilesystem; no volume may be mounted under it.
 
