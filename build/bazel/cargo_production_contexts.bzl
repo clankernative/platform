@@ -420,7 +420,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                     "@crates__serde_json-1.0.151//:serde_json",
                     "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
                     "@crates__sync_wrapper-1.0.2//:sync_wrapper",
-                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-1.53.3//:tokio",
                     "@crates__tokio-rustls-0.26.5//:tokio_rustls",
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
@@ -643,7 +643,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
-        "tokio@1.53.1": {
+        "tokio@1.53.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -1099,7 +1099,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                     "@crates__serde_json-1.0.151//:serde_json",
                     "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
                     "@crates__sync_wrapper-1.0.2//:sync_wrapper",
-                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-1.53.3//:tokio",
                     "@crates__tokio-rustls-0.26.5//:tokio_rustls",
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
@@ -1322,7 +1322,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
-        "tokio@1.53.1": {
+        "tokio@1.53.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -1752,7 +1752,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                     "@crates__serde_json-1.0.151//:serde_json",
                     "@crates__serde_urlencoded-0.7.1//:serde_urlencoded",
                     "@crates__sync_wrapper-1.0.2//:sync_wrapper",
-                    "@crates__tokio-1.53.1//:tokio",
+                    "@crates__tokio-1.53.3//:tokio",
                     "@crates__tokio-rustls-0.26.5//:tokio_rustls",
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
@@ -1981,7 +1981,7 @@ CARGO_PRODUCTION_CONTEXTS = {
                 "proc_macro_deps": []
             }
         },
-        "tokio@1.53.1": {
+        "tokio@1.53.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
