@@ -715,7 +715,15 @@
     {
       "source": "crates/day2/src/security_epoch/firestore.rs",
       "type_name": "EpochObservation",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/firestore/paired.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/firestore.rs",
+            "module": "paired"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn check_binding (& mut self , selection : & EpochStore) -> Result < () >",
         "pub (super) fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >",
@@ -724,6 +732,10 @@
         "pub (super) fn snapshot (& self) -> & Snapshot"
       ],
       "factories": [
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch) fn read_with_slot (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget) -> Result < (EpochObservation , Option < VersionedSlot > , Budget) >"
+        },
         {
           "owner": null,
           "signature": "pub (super) fn read (port : & mut impl Port , names : & Names) -> Result < EpochObservation >"
@@ -1116,7 +1128,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (super) fn read_with_budget (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget) -> Result < SlotObservation >"
+          "signature": "pub (super) fn read_with_counter (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , SlotObservation) >"
         }
       ],
       "material_uses": [
@@ -3269,7 +3281,7 @@
         "pub (in crate :: security_epoch) fn into_provider_observation (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < ProviderEpochReads >",
         "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
-        "pub (in crate :: security_epoch) fn read_slot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < crate :: security_epoch :: control_slot_io :: SlotObservation >",
+        "pub (in crate :: security_epoch) fn read_bootstrap_snapshot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < (EpochObservation , crate :: security_epoch :: control_slot_io :: SlotObservation ,) >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Sample >"
       ],
@@ -3326,7 +3338,7 @@
         },
         {
           "owner": "RetainedEpochReads",
-          "signature": "pub (in crate :: security_epoch) fn read_slot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < crate :: security_epoch :: control_slot_io :: SlotObservation >"
+          "signature": "pub (in crate :: security_epoch) fn read_bootstrap_snapshot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < (EpochObservation , crate :: security_epoch :: control_slot_io :: SlotObservation ,) >"
         },
         {
           "owner": "RetainedEpochReads",
