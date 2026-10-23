@@ -209,6 +209,17 @@ pub(crate) fn identity(
     )
 }
 
+fn authorize_resource_scope(
+    scope: &day2_capabilities::resources::FreetoolResourceScope,
+    resource_id: &str,
+) -> Result<()> {
+    ensure!(
+        scope.authorizes(resource_id),
+        crate::error::Failure::ResourceForbidden
+    );
+    Ok(())
+}
+
 fn authorize_input(
     runtime: &crate::store::Runtime,
     request: &crate::protocol::Request,
@@ -220,16 +231,12 @@ fn authorize_input(
         input.handle == grant.handle,
         crate::error::Failure::ResourceForbidden
     );
-    let day2_capabilities::resources::ResourceTarget::FreetoolExecutor {
-        allowed_resources, ..
-    } = &grant.grant.target
+    let day2_capabilities::resources::ResourceTarget::FreetoolExecutor { scope, .. } =
+        &grant.grant.target
     else {
         anyhow::bail!(crate::error::Failure::ResourceForbidden)
     };
-    ensure!(
-        allowed_resources.contains(&input.run.resource_id),
-        crate::error::Failure::ResourceForbidden
-    );
+    authorize_resource_scope(scope, &input.run.resource_id)?;
     ensure!(
         input.run.immutable_version > 0,
         "invalid_freetool_configuration_version"
@@ -751,6 +758,20 @@ mod tests {
             },
         )?;
         assert!(matches!(denied, ServiceResponse::Error { code } if code == "result_unavailable"));
+        Ok(())
+    }
+
+    #[test]
+    fn resource_scope_is_enforced_before_dispatch() -> Result<()> {
+        use day2_capabilities::resources::FreetoolResourceScope;
+
+        let explicit = FreetoolResourceScope::Explicit {
+            allowed_resources: std::collections::BTreeSet::from(["resource-1".into()]),
+        };
+        authorize_resource_scope(&explicit, "resource-1")?;
+        assert!(authorize_resource_scope(&explicit, "resource-2").is_err());
+
+        authorize_resource_scope(&FreetoolResourceScope::AnyAppResource, "resource-2")?;
         Ok(())
     }
 

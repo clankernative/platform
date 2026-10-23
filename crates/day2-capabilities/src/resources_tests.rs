@@ -855,10 +855,81 @@ mod narrowing {
             },
             ResourceKind::FreetoolExecutorResource => ResourceTarget::FreetoolExecutor {
                 service_id: "freetool_local".into(),
-                allowed_resources: BTreeSet::from(["resource_test".into()]),
+                scope: FreetoolResourceScope::Explicit {
+                    allowed_resources: BTreeSet::from(["resource_test".into()]),
+                },
                 credential_managers: BTreeSet::new(),
             },
         }
+    }
+
+    #[test]
+    fn freetool_resource_scope_is_explicit_or_app_wide_and_narrows_correctly() -> Result<()> {
+        let explicit: ResourceTarget = serde_json::from_value(json!({
+            "kind":"freetool_executor",
+            "service_id":"freetool_local",
+            "scope":{"kind":"explicit","allowed_resources":["api_resource","postgres_resource"]}
+        }))?;
+        let app_wide: ResourceTarget = serde_json::from_value(json!({
+            "kind":"freetool_executor",
+            "service_id":"freetool_local",
+            "scope":{"kind":"any_app_resource"}
+        }))?;
+        explicit.validate()?;
+        app_wide.validate()?;
+
+        let ResourceTarget::FreetoolExecutor {
+            scope: explicit_scope,
+            ..
+        } = &explicit
+        else {
+            unreachable!();
+        };
+        let ResourceTarget::FreetoolExecutor {
+            scope: app_wide_scope,
+            ..
+        } = &app_wide
+        else {
+            unreachable!();
+        };
+        assert!(explicit_scope.authorizes("api_resource"));
+        assert!(!explicit_scope.authorizes("new_resource"));
+        assert!(app_wide_scope.authorizes("new_resource"));
+        assert!(explicit.is_subset_of(&app_wide));
+        assert!(!app_wide.is_subset_of(&explicit));
+        let narrower: ResourceTarget = serde_json::from_value(json!({
+            "kind":"freetool_executor",
+            "service_id":"freetool_local",
+            "scope":{"kind":"explicit","allowed_resources":["api_resource"]}
+        }))?;
+        assert!(narrower.is_subset_of(&explicit));
+        assert!(!explicit.is_subset_of(&narrower));
+
+        let empty: ResourceTarget = serde_json::from_value(json!({
+            "kind":"freetool_executor",
+            "service_id":"freetool_local",
+            "scope":{"kind":"explicit","allowed_resources":[]}
+        }))?;
+        assert_eq!(
+            empty.validate().unwrap_err().to_string(),
+            "invalid_freetool_resource_scope"
+        );
+        assert!(
+            serde_json::from_value::<ResourceTarget>(json!({
+                "kind":"freetool_executor",
+                "service_id":"freetool_local"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ResourceTarget>(json!({
+                "kind":"freetool_executor",
+                "service_id":"freetool_local",
+                "scope":{"kind":"unrestricted"}
+            }))
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]

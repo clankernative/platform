@@ -64,6 +64,52 @@ impl TopicScope {
     }
 }
 
+/// Which Freetool business resource IDs this application may submit to its
+/// bound executor service. `AnyAppResource` is limited to resources registered
+/// by this application; the executor still enforces its configured targets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FreetoolResourceScope {
+    Explicit { allowed_resources: BTreeSet<String> },
+    AnyAppResource,
+}
+
+impl FreetoolResourceScope {
+    pub fn authorizes(&self, resource_id: &str) -> bool {
+        match self {
+            Self::Explicit { allowed_resources } => allowed_resources.contains(resource_id),
+            Self::AnyAppResource => true,
+        }
+    }
+
+    pub fn is_subset_of(&self, parent: &Self) -> bool {
+        match (self, parent) {
+            (Self::AnyAppResource, Self::AnyAppResource) => true,
+            (Self::Explicit { .. }, Self::AnyAppResource) => true,
+            (
+                Self::Explicit { allowed_resources },
+                Self::Explicit {
+                    allowed_resources: parent,
+                },
+            ) => allowed_resources.is_subset(parent),
+            (Self::AnyAppResource, Self::Explicit { .. }) => false,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Self::Explicit { allowed_resources } = self {
+            ensure!(
+                !allowed_resources.is_empty() && allowed_resources.len() <= 256,
+                "invalid_freetool_resource_scope"
+            );
+            for resource in allowed_resources {
+                bounded_text(resource, 256)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceTarget {
@@ -158,11 +204,11 @@ pub enum ResourceTarget {
     OpenAiText {
         profile: crate::integrations::OpenAiText,
     },
-    /// Private Freetool executor service and the business resource IDs the
-    /// operator allows this application binding to submit.
+    /// Private Freetool executor service and the app-owned business resources
+    /// this application binding may submit.
     FreetoolExecutor {
         service_id: String,
-        allowed_resources: BTreeSet<String>,
+        scope: FreetoolResourceScope,
         /// Explicit native-browser custody authority, separate from execution
         /// and result reads. The native host also requires current Roc edit
         /// permission. Empty by default; an executor grant alone cannot enroll.
@@ -299,17 +345,11 @@ impl ResourceTarget {
             Self::OpenAiText { profile } => profile.validate(),
             Self::FreetoolExecutor {
                 service_id,
-                allowed_resources,
+                scope,
                 credential_managers,
             } => {
                 name(service_id)?;
-                ensure!(
-                    !allowed_resources.is_empty() && allowed_resources.len() <= 256,
-                    "invalid_freetool_resource_scope"
-                );
-                for resource in allowed_resources {
-                    bounded_text(resource, 256)?;
-                }
+                scope.validate()?;
                 ensure!(
                     credential_managers.len() <= 256,
                     "freetool_credential_manager_budget"
@@ -429,17 +469,17 @@ impl ResourceTarget {
             (
                 Self::FreetoolExecutor {
                     service_id,
-                    allowed_resources,
+                    scope,
                     credential_managers,
                 },
                 Self::FreetoolExecutor {
                     service_id: parent_service,
-                    allowed_resources: parent_resources,
+                    scope: parent_scope,
                     credential_managers: parent_managers,
                 },
             ) => {
                 service_id == parent_service
-                    && allowed_resources.is_subset(parent_resources)
+                    && scope.is_subset_of(parent_scope)
                     && credential_managers.is_subset(parent_managers)
             }
             (

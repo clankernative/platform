@@ -1458,3 +1458,46 @@ run "refuses_fractional_trace_retention" {
   }
   expect_failures = [var.journal_trace_hours]
 }
+
+run "renders_freetool_app_resource_scope" {
+  command = plan
+  variables {
+    resource_catalog = {
+      version = 1
+      connections = {
+        freetool_executor = {
+          revision = 1
+          provider = "freetool_executor"
+          live = {
+            provider       = "freetool_executor"
+            endpoint       = "http://127.0.0.1:43210"
+            credential_ref = { id = "freetool_transport_key", revision = 1 }
+          }
+        }
+      }
+      resources = {
+        freetool_resource = {
+          revision   = 1
+          connection = { id = "freetool_executor", revision = 1 }
+          target = {
+            kind                = "freetool_executor"
+            service_id          = "freetool_executor"
+            scope               = { kind = "any_app_resource" }
+            credential_managers = ["operator@example.com"]
+          }
+        }
+      }
+      policies = {}
+      budgets  = {}
+    }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).resources.resources.freetool_resource.target == {
+      kind                = "freetool_executor"
+      service_id          = "freetool_executor"
+      scope               = { kind = "any_app_resource" }
+      credential_managers = ["operator@example.com"]
+    }
+    error_message = "day2-app must render the explicit any_app_resource Freetool scope without rewriting it."
+  }
+}

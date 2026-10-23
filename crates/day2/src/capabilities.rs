@@ -243,12 +243,8 @@ pub(crate) fn authorized(
         cost_microunits: Some(0),
     };
     if instruction.model.starts_with("freetool.") {
-        let (service_id, allowed_resources) = match &resource.grant.target {
-            ResourceTarget::FreetoolExecutor {
-                service_id,
-                allowed_resources,
-                ..
-            } => (service_id, allowed_resources),
+        let service_id = match &resource.grant.target {
+            ResourceTarget::FreetoolExecutor { service_id, .. } => service_id,
             _ => anyhow::bail!(crate::error::Failure::ResourceForbidden),
         };
         ensure!(
@@ -278,19 +274,6 @@ pub(crate) fn authorized(
                 instruction,
                 &resource,
             )?;
-            if let Some(resource_id) = match &service_request {
-                crate::freetool_executor::ServiceRequest::Register { identity, .. }
-                | crate::freetool_executor::ServiceRequest::Execute { identity }
-                | crate::freetool_executor::ServiceRequest::Status { identity }
-                | crate::freetool_executor::ServiceRequest::ResultPage { identity, .. } => {
-                    Some(&identity.resource_id)
-                }
-            } {
-                ensure!(
-                    allowed_resources.contains(resource_id),
-                    crate::error::Failure::ResourceForbidden
-                );
-            }
             Action::Freetool(service_request)
         };
         return Ok(Authorized {
