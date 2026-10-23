@@ -539,6 +539,11 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore compiled actions from this run preparation only
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/bazel-disk
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require the selected complete preparation pipeline
         run: test "$PARALLEL" = success
@@ -642,6 +647,11 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore compiled actions from this run preparation only
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/bazel-disk
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
@@ -733,6 +743,12 @@ jobs:
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore compiled actions from this run preparation only
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/bazel-disk
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Require security checks and complete verification
         run: test "$SECRETS:$DEPENDENCIES:$REUSED" = success:success:true -o "$SECRETS:$DEPENDENCIES:$PREPARATION:$SHARDS:$MAC" = success:success:success:success:success

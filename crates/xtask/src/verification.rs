@@ -2048,6 +2048,29 @@ mod tests {
                     .contains("Persist newly compiled actions under the captured source key")
             );
         }
+        for consumer in ["verify-prepare", "verify-shards", "verify"] {
+            let job = ci_job(consumer);
+            let prepared = ci_step(
+                &job,
+                "Restore compiled actions from this run preparation only",
+            );
+            assert!(prepared.contains("path: ~/.cache/bazel-disk"));
+            assert!(prepared.contains(
+                "key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+            ));
+            assert!(!prepared.contains("restore-keys:") && !prepared.contains("lookup-only:"));
+            if consumer == "verify" {
+                assert!(prepared.contains(
+                    "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}"
+                ));
+            } else {
+                assert!(!prepared.contains("        if:"));
+            }
+        }
+        assert!(
+            !ci_job("verify-queue-receipt")
+                .contains("Restore compiled actions from this run preparation only")
+        );
         assert!(cache.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(cache.contains("github.event_name == 'merge_group'"));
         assert!(cache.contains(

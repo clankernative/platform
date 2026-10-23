@@ -88,6 +88,34 @@ struct BuildCache {
     auxiliaries: Vec<Binary>,
 }
 
+fn bazel_engine_version(output: &str) -> Result<String> {
+    let mut lines = output.lines();
+    let first = lines.next().context("missing Bazel engine version")?;
+    let engine = if let Some(launcher) = first.strip_prefix("Bazelisk ") {
+        let components: Vec<_> = launcher.split('.').collect();
+        ensure!(
+            components.len() == 3
+                && components
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+            "unexpected Bazelisk launcher version"
+        );
+        lines
+            .next()
+            .context("missing launched Bazel engine version")?
+    } else {
+        first
+    };
+    // Bazelisk reports its own version before the engine's GNU version on Mac.
+    // Compare the pinned engine across hosts, never the launcher presentation.
+    let expected = format!("bazel {}", include_str!("../../../../.bazelversion").trim());
+    ensure!(
+        engine == expected && lines.next().is_none(),
+        "exact pinned Bazel engine version required"
+    );
+    Ok(format!("{engine}\n"))
+}
+
 pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentity> {
     let version = |tool: &str, verbose: bool| -> Result<String> {
         let mut command = Command::new(tool);
@@ -157,7 +185,7 @@ pub(super) fn build_identity(root: &Path, snapshot: &str) -> Result<BuildIdentit
                 .output()
                 .context("execute Bazel version for compiler cache identity")?;
             ensure!(output.status.success(), "actual Bazel version required");
-            String::from_utf8(output.stdout)?
+            bazel_engine_version(&String::from_utf8(output.stdout)?)?
         },
         cc: version("cc", false)?,
         environment: digest(&serde_json::to_vec(&environment)?),
@@ -1248,6 +1276,32 @@ pub(super) fn join(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bazel_identity_accepts_the_same_pinned_engine_through_bazelisk_and_rejects_foreign_output()
+    -> Result<()> {
+        let engine = format!(
+            "bazel {}\n",
+            include_str!("../../../../.bazelversion").trim()
+        );
+        assert_eq!(bazel_engine_version(&engine)?, engine);
+        assert_eq!(
+            bazel_engine_version(&format!("Bazelisk 1.29.0\n{engine}"))?,
+            engine
+        );
+        for invalid in [
+            String::new(),
+            "Bazelisk 1.29.0\n".into(),
+            "bazel 0.0.0\n".into(),
+            "Bazelisk 1.29.0\nbazel 0.0.0\n".into(),
+            format!("Bazelisk unknown\n{engine}"),
+            format!("{engine}{engine}"),
+            format!("{engine}unexpected trailing output\n"),
+        ] {
+            assert!(bazel_engine_version(&invalid).is_err());
+        }
+        Ok(())
+    }
 
     pub(super) fn sample_identity() -> Identity {
         Identity {

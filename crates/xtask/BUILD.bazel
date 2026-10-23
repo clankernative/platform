@@ -4,6 +4,7 @@ package(default_visibility = ["//visibility:public"])
 
 COMPILE_INPUTS = [
     "//:.bazelrc",
+    "//:.bazelversion",
     "//:.github/workflows/ci.yml",
     "//:architecture/clippy.toml",
     "//:fixtures/authority-policies/reports.json",
