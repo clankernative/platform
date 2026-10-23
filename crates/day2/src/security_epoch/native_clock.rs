@@ -1067,9 +1067,7 @@ mod tests {
         // time. No enrolled Controller, file, peer or P3 is manufactured.
         for (ceiling, now) in [(130_000, 106_300), (104_500, 104_400)] {
             let mut parent = storage_fixture(AcquisitionScope::StorageBootstrap);
-            let mut actual = parent
-                .narrow(60, Duration::from_millis(ceiling))
-                .unwrap();
+            let mut actual = parent.narrow(60, Duration::from_millis(ceiling)).unwrap();
             let original = (
                 actual.domain.clone(),
                 actual.origin,
@@ -1087,8 +1085,10 @@ mod tests {
                 budget.remaining_native(&mut actual).unwrap(),
                 Duration::from_millis(ceiling - now)
             );
-            assert_eq!((actual.domain.clone(), actual.origin, actual.deadline),
-                (original.0, original.1, original.2));
+            assert_eq!(
+                (actual.domain.clone(), actual.origin, actual.deadline),
+                (original.0, original.1, original.2)
+            );
             assert!(Rc::ptr_eq(&actual.observation, &original.3));
             assert_eq!(actual.observation.get().latest, sample.elapsed);
             actual.fixture_time = Some(deadline);
