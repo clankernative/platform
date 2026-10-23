@@ -104,6 +104,21 @@ private loader still refuses every alias and rechecks the complete byte/mode
 manifest under its existing input limits. This does not certify a hostile or
 concurrently changing filesystem.
 
+## Native images
+
+The Native image qualification workflow executes the existing `qualify-linux`
+Roc recipe and separately builds the native enrollment runtime image. It runs
+on Dockerfile/workflow pull-request changes and supports manual dispatch. Its
+artifacts contain image identities and public qualification receipts; protected
+operation logs remain local to the job. It adds no installation prerequisite or
+cloud resource. Ordinary full platform CI retains its existing test selection.
+
+The tooling image keeps its reviewed worker ABI seed outside the generated-output
+tmpfs and installs it inside the running container. Docker archive copy does not
+support tmpfs destinations. Fresh glue generation still compares exact bytes
+against that seed before the Bazel worker archive is built; no pin is inferred or
+changed and all native confinement limits remain mandatory.
+
 ## CI cache and measurements
 
 The commit-pinned setup-bazel action persists Bazel action/repository caches in

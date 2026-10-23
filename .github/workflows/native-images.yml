@@ -1,0 +1,84 @@
+name: Native image qualification
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-images.yml
+      - deploy/linux-sqlite/Dockerfile
+      - deploy/gke/images/native-enrollment/Dockerfile
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-images-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-tooling-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Download the pinned Linux Bazel executable
+        run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Verify the pinned Linux Bazel bytes
+        run: echo 'd302d22ed77ee5658b87857249baa579db84300ecebe0a1e9a357b5b20f80eb8  /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64' | sha256sum --check
+      - name: Install the pinned Linux Bazel executable
+        run: sudo install -m 0555 /tmp/day2-bazel-tools/bazel-9.3.0-linux-x86_64 /usr/local/bin/bazel
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3
+        with:
+          bazelisk-cache: false
+          repository-cache: true
+          disk-cache: false
+          cache-save: true
+      - name: Restore compiled image qualification tools
+        id: bazel_actions
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/bazel-disk
+          key: day2-bazel-native-images-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            day2-bazel-native-images-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-
+            day2-bazel-native-images-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Compile and install the current verifier
+        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" run --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/xtask:xtask -- install-verifier
+      - name: Enforce current native source policy and dependency proofs
+        run: build-out/bin/xtask architecture-check
+      - name: Bootstrap current pinned native inputs
+        run: build-out/bin/xtask bootstrap
+      - name: Execute the ordinary Linux image and native admission recipe
+        run: build-out/bin/xtask qualify-linux artifacts/native-images
+      - name: Retain image identities and public qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-image-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          # Protected operation/build logs in nested directories stay job-local.
+          path: |
+            artifacts/native-images/*.json
+            artifacts/native-images/*.log
+            artifacts/native-images/*.id
+          if-no-files-found: warn
+      - name: Persist compiled tools without caching native outcomes
+        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/bazel-disk
+          key: ${{ steps.bazel_actions.outputs.cache-primary-key }}
+  native-enrollment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build the source-bound native enrollment runtime image
+        run: docker build --target runtime --iidfile /tmp/day2-enrollment-image.id -f deploy/gke/images/native-enrollment/Dockerfile .
+      - name: Retain the actual enrollment image identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-enrollment-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-enrollment-image.id
+          if-no-files-found: error
