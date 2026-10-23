@@ -2181,6 +2181,7 @@
       "methods": [
         "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
         "pub (super) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
+        "pub (super) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
         "pub (super) fn check_durability_profile (& mut self) -> Result < () >",
         "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
@@ -2226,6 +2227,10 @@
         },
         {
           "owner": "CurrentVolumePhase < '_ , 'role >",
+          "signature": "pub (super) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , 'role >",
           "signature": "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         }
       ],
@@ -2240,6 +2245,7 @@
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_budget_liveness (& self) -> Result < () >",
         "pub (crate) fn check_initial_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
@@ -2302,6 +2308,10 @@
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPreparedFilePhase < 'file , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >"
         },
         {
           "owner": "CurrentPreparedFilePhase < 'file , 'role >",
@@ -2760,6 +2770,7 @@
         "pub (in crate :: security_epoch) fn announce_known (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_budget_liveness (& self) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_activated (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >",
@@ -2789,6 +2800,10 @@
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >"
+        },
+        {
+          "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >"
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
@@ -2975,8 +2990,9 @@
         "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < Budget >",
         "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >",
         "fn decoding_sample (& mut self) -> Result < Sample >",
-        "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
+        "fn post (& mut self , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "fn remaining_budget (& mut self , budget : & mut Budget) -> Result < Duration >",
         "fn sample (& mut self) -> Result < Sample >"
       ],
       "factories": [
@@ -2992,7 +3008,11 @@
         },
         {
           "owner": "ControllerPort < '_ , '_ >",
-          "signature": "fn post (& mut self , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
+          "signature": "fn post (& mut self , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >"
+        },
+        {
+          "owner": "ControllerPort < '_ , '_ >",
+          "signature": "fn remaining_budget (& mut self , budget : & mut Budget) -> Result < Duration >"
         },
         {
           "owner": "ControllerPort < '_ , '_ >",
@@ -3210,7 +3230,7 @@
         "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",
         "pub (in crate :: security_epoch) fn into_controller (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < (ControllerEpochReads , ProviderEpochReads) >",
         "pub (in crate :: security_epoch) fn into_provider_observation (mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore , timings : Timings) -> Result < ProviderEpochReads >",
-        "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >",
+        "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "pub (in crate :: security_epoch) fn read_slot (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , core : & crate :: security_epoch :: control_slot :: LogicalCore) -> Result < crate :: security_epoch :: control_slot_io :: SlotObservation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
@@ -3241,7 +3261,7 @@
         },
         {
           "owner": "RetainedEpochReads",
-          "signature": "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , timeout : Duration , max_bytes : usize) -> Result < EpochReply >"
+          "signature": "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >"
         },
         {
           "owner": "RetainedEpochReads",
@@ -4145,6 +4165,7 @@
         }
       ],
       "methods": [
+        "pub (in crate :: security_epoch) fn check_stage (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < () >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)"
       ],
       "factories": [
@@ -4154,6 +4175,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "ControllerEpochReads",
+          "signature": "pub (in crate :: security_epoch) fn check_stage (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & InitialBootstrapPolicy , store : & EpochStore) -> Result < () >"
+        },
         {
           "owner": "ControllerEpochReads",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
