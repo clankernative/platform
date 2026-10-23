@@ -2756,8 +2756,8 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_authenticated_reads (& mut self , reads : & ControllerEpochReads) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
-        "pub (in crate :: security_epoch) fn finish_activated (mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_activated (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >",
+        "pub (in crate :: security_epoch) fn finish_checked (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn request_digest (& self) -> Result < Digest >"
       ],
@@ -2790,11 +2790,11 @@
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn finish_activated (mut self) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn finish_activated (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >"
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn finish_checked (mut self , timings : & crate :: security_epoch :: controller :: preparation_timing :: Timings) -> Result < () >"
         },
         {
           "owner": "CurrentStorageBootstrapPhase < '_ , 'role >",
@@ -2960,7 +2960,7 @@
       "type_name": "ControllerPort",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads , timings : Timings) -> Result < Self >",
         "pub (in crate :: security_epoch) fn borrow (& mut self) -> ControllerBorrow < '_ , 'storage , 'role >",
         "pub (in crate :: security_epoch) fn budget (& mut self) -> Result < Budget >",
         "pub (in crate :: security_epoch) fn context_interval (& mut self , owner : & Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore) -> Result < (Sample , Duration) >",
@@ -2971,7 +2971,7 @@
       "factories": [
         {
           "owner": "ControllerPort < 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads) -> Result < Self >"
+          "signature": "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads , timings : Timings) -> Result < Self >"
         }
       ],
       "material_uses": [
@@ -4145,7 +4145,7 @@
         },
         {
           "owner": "ControllerPort < 'storage , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads) -> Result < Self >"
+          "signature": "pub (in crate :: security_epoch) fn acquire (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , policy : & InitialBootstrapPolicy , store : & EpochStore , reads : ControllerEpochReads , timings : Timings) -> Result < Self >"
         },
         {
           "owner": "ProviderEpochReads",

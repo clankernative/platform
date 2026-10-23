@@ -150,9 +150,7 @@ impl BootstrapTiming {
     /// Called only after the actual stage/file/port operation has returned and
     /// its permission borrows have unwound. A snapshot cannot reconstruct them.
     pub(in crate::security_epoch) fn snapshot(&self) -> Option<Snapshot> {
-        if self.state.is_none() {
-            return None;
-        }
+        self.state.as_ref()?;
         self.snapshot_at(crate::security_epoch::native_clock::boottime().ok())
     }
 
