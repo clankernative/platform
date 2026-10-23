@@ -261,6 +261,63 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "public I/O witness invoked explicitly by the build-host profile test"]
+    fn build_host_public_witness() -> Result<()> {
+        use std::{
+            io::{Read, Write},
+            net::{SocketAddr, TcpStream},
+            time::Duration,
+        };
+
+        let operation = std::env::var("DAY2_TEST_BUILD_HOST_OPERATION")?;
+        let target = std::env::var("DAY2_TEST_BUILD_HOST_TARGET")?;
+        let expected = std::env::var("DAY2_TEST_BUILD_HOST_EXPECTED")?;
+        let result = match operation.as_str() {
+            "read" => fs::read(&target).and_then(|bytes| {
+                if bytes == b"public read witness" {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("public read witness changed"))
+                }
+            }),
+            "write" => fs::write(&target, b"public write witness"),
+            "connect" => {
+                let address: SocketAddr = target.parse()?;
+                ensure!(
+                    address.ip().is_loopback() && address.port() != 0,
+                    "loopback witness required"
+                );
+                (|| -> std::io::Result<()> {
+                    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))?;
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                    stream.write_all(
+                        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )?;
+                    let mut response = Vec::new();
+                    stream.take(4097).read_to_end(&mut response)?;
+                    if response.len() <= 4096 && response.ends_with(b"\r\n\r\nOK") {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("public HTTP witness changed"))
+                    }
+                })()
+            }
+            _ => anyhow::bail!("unknown public witness operation"),
+        };
+        match (expected.as_str(), result) {
+            ("allowed", Ok(())) => {}
+            ("denied", Err(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            ("denied", Ok(())) => anyhow::bail!("sandbox allowed the public witness operation"),
+            (_, Err(error)) => return Err(error).context("public witness operation"),
+            _ => anyhow::bail!("unknown public witness expectation"),
+        }
+        println!("DAY2_PUBLIC_WITNESS:{operation}:{expected}");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn selected_developer_profile_keeps_outside_file_and_network_refusals() -> Result<()> {
         use std::{
             io::{Read, Write},
@@ -278,30 +335,62 @@ mod tests {
         fs::write(&outside, b"public read witness")?;
         let inside = job.join("inside");
         fs::write(&inside, b"public read witness")?;
-        let cat = job.join("cat");
-        fs::copy("/bin/cat", &cat)?;
-        assert!(Command::new(&cat).arg(&outside).status()?.success());
-        assert!(build_host(&job, &cat)?.arg(&inside).status()?.success());
-        assert!(!build_host(&job, &cat)?.arg(&outside).status()?.success());
-        let touch = job.join("touch");
-        fs::copy("/usr/bin/touch", &touch)?;
-        assert!(
-            build_host(&job, &touch)?
-                .arg(job.join("allowed-write"))
-                .status()?
-                .success()
-        );
+        // Apple system executables carry launch constraints that can reject a
+        // copied binary before confinement. Use this repository-built Rust
+        // harness, with one explicit ignored fixture and only public witnesses.
+        let executable = job.join("public-witness");
+        fs::copy(std::env::current_exe()?, &executable)?;
+        let witness = |operation: &str,
+                       target: &std::ffi::OsStr,
+                       confined: bool,
+                       expected: &str|
+         -> Result<()> {
+            let mut command = if confined {
+                build_host(&job, &executable)?
+            } else {
+                Command::new(&executable)
+            };
+            let output = command
+                .args([
+                    "--exact",
+                    "sandbox::tests::build_host_public_witness",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("DAY2_TEST_BUILD_HOST_OPERATION", operation)
+                .env("DAY2_TEST_BUILD_HOST_TARGET", target)
+                .env("DAY2_TEST_BUILD_HOST_EXPECTED", expected)
+                .output()?;
+            let stdout = std::str::from_utf8(&output.stdout)?;
+            ensure!(
+                output.status.success()
+                    && output.stdout.len() <= 4096
+                    && output.stderr.len() <= 4096
+                    && stdout.lines().any(|line| line
+                        .ends_with(&format!("DAY2_PUBLIC_WITNESS:{operation}:{expected}")))
+                    && stdout.contains("1 passed; 0 failed; 0 ignored;"),
+                "public witness {operation}/{expected} did not execute successfully: {}",
+                output.status
+            );
+            Ok(())
+        };
+        witness("read", outside.as_os_str(), false, "allowed")?;
+        witness("read", inside.as_os_str(), true, "allowed")?;
+        witness("read", outside.as_os_str(), true, "denied")?;
+        let allowed = job.join("allowed-write");
+        witness("write", allowed.as_os_str(), true, "allowed")?;
+        assert_eq!(fs::read(&allowed)?, b"public write witness");
         let denied = temporary.path().join("denied-write");
-        assert!(Command::new(&touch).arg(&denied).status()?.success());
+        witness("write", denied.as_os_str(), false, "allowed")?;
+        assert_eq!(fs::read(&denied)?, b"public write witness");
         fs::remove_file(&denied)?;
-        assert!(!build_host(&job, &touch)?.arg(&denied).status()?.success());
+        witness("write", denied.as_os_str(), true, "denied")?;
         assert!(!denied.exists());
 
-        let curl = job.join("curl");
-        fs::copy("/usr/bin/curl", &curl)?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
-        let address = format!("http://{}/", listener.local_addr()?);
+        let address = listener.local_addr()?.to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let accepted = Arc::new(AtomicUsize::new(0));
         let serving = Arc::clone(&stop);
@@ -341,31 +430,11 @@ mod tests {
             }
             Ok(())
         });
-        let arguments = [
-            "--noproxy",
-            "*",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--max-time",
-            "3",
-            "--output",
-            "/dev/null",
-            &address,
-        ];
         let result = (|| -> Result<()> {
-            ensure!(
-                Command::new(&curl).args(arguments).status()?.success(),
-                "network witness before confinement"
-            );
-            ensure!(
-                !build_host(&job, &curl)?.args(arguments).status()?.success(),
-                "private builder network was permitted"
-            );
-            ensure!(
-                Command::new(&curl).args(arguments).status()?.success(),
-                "network witness after confinement"
-            );
+            let target = std::ffi::OsStr::new(&address);
+            witness("connect", target, false, "allowed")?;
+            witness("connect", target, true, "denied")?;
+            witness("connect", target, false, "allowed")?;
             Ok(())
         })();
         stop.store(true, Ordering::SeqCst);
