@@ -666,11 +666,15 @@
       "consuming_methods": [],
       "methods": [
         "pub (super) fn budget (& mut self , port : & mut impl Port) -> Result < Budget >",
-        "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >",
+        "fn budget_at (& mut self , sample : & Sample) -> Result < Budget >",
+        "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < (Sample , Budget) >",
+        "pub (super) fn clock_sample (& mut self , port : & mut impl Port) -> Result < Sample >",
         "pub (super) fn fixture (selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , sample : Sample) -> Result < Self >",
         "pub (super) fn lose_original_creator_fixture (& mut self)",
         "pub (super) fn native (owner : Rc < RefCell < CurrentStorageBootstrapPhase < 'storage , 'role > > > , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut super :: authenticated_reads :: ControllerBorrow < '_ , 'storage , 'role >) -> Result < Self >",
         "pub (super) fn observe_fixture_lifetime (& mut self) -> std :: rc :: Weak < () >",
+        "fn observe_sample (& mut self , sample : Sample) -> Result < Sample >",
+        "pub (super) fn refuse (& mut self)",
         "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
       ],
       "factories": [
@@ -682,15 +686,27 @@
       "material_uses": [
         {
           "owner": "CurrentBootstrapExecution < 'storage , 'role >",
+          "signature": "fn budget_at (& mut self , sample : & Sample) -> Result < Budget >"
+        },
+        {
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
+          "signature": "fn observe_sample (& mut self , sample : Sample) -> Result < Sample >"
+        },
+        {
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
           "signature": "fn sample (& mut self , port : & mut impl Port) -> Result < Sample >"
         },
         {
           "owner": "CurrentBootstrapExecution < 'storage , 'role >",
-          "signature": "pub (super) fn budget (& mut self , port : & mut impl Port) -> Result < Budget >"
+          "signature": "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < (Sample , Budget) >"
         },
         {
           "owner": "CurrentBootstrapExecution < 'storage , 'role >",
-          "signature": "pub (super) fn check (& mut self , selection : & EpochStore , request : & Request , snapshot : & Snapshot , purpose : Purpose , port : & mut impl Port) -> Result < () >"
+          "signature": "pub (super) fn clock_sample (& mut self , port : & mut impl Port) -> Result < Sample >"
+        },
+        {
+          "owner": "CurrentBootstrapExecution < 'storage , 'role >",
+          "signature": "pub (super) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],
@@ -701,6 +717,8 @@
       "type_name": "EpochObservation",
       "owning_children": [],
       "methods": [
+        "pub (super) fn check_binding (& mut self , selection : & EpochStore) -> Result < () >",
+        "pub (super) fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >",
         "pub (super) fn into_data (self) -> Snapshot",
         "pub (super) fn remaining (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < Duration >",
         "pub (super) fn snapshot (& self) -> & Snapshot"
@@ -716,6 +734,14 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "EpochObservation",
+          "signature": "pub (super) fn check_binding (& mut self , selection : & EpochStore) -> Result < () >"
+        },
+        {
+          "owner": "EpochObservation",
+          "signature": "pub (super) fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >"
+        },
         {
           "owner": "EpochObservation",
           "signature": "pub (super) fn into_data (self) -> Snapshot"
@@ -1077,9 +1103,10 @@
       "type_name": "SlotObservation",
       "owning_children": [],
       "methods": [
+        "fn check_binding (& mut self , selection : & EpochStore , core : & LogicalCore) -> Result < () >",
+        "fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >",
         "pub (super) fn data (& self) -> Option < & VersionedSlot >",
-        "pub (super) fn into_data (self) -> Option < VersionedSlot >",
-        "pub (super) fn remaining (& mut self , selection : & EpochStore , core : & LogicalCore , port : & mut impl Port) -> Result < Duration >"
+        "pub (super) fn into_data (self) -> Option < VersionedSlot >"
       ],
       "factories": [
         {
@@ -1106,15 +1133,19 @@
         },
         {
           "owner": "SlotObservation",
+          "signature": "fn check_binding (& mut self , selection : & EpochStore , core : & LogicalCore) -> Result < () >"
+        },
+        {
+          "owner": "SlotObservation",
+          "signature": "fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >"
+        },
+        {
+          "owner": "SlotObservation",
           "signature": "pub (super) fn data (& self) -> Option < & VersionedSlot >"
         },
         {
           "owner": "SlotObservation",
           "signature": "pub (super) fn into_data (self) -> Option < VersionedSlot >"
-        },
-        {
-          "owner": "SlotObservation",
-          "signature": "pub (super) fn remaining (& mut self , selection : & EpochStore , core : & LogicalCore , port : & mut impl Port) -> Result < Duration >"
         }
       ],
       "proof_uses": [],
@@ -1128,7 +1159,7 @@
       "type_name": "Mutation",
       "owning_children": [],
       "methods": [
-        "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Sample , Budget) >",
         "fn send (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , UpdateTime) >"
       ],
       "factories": [
@@ -1164,7 +1195,7 @@
         },
         {
           "owner": "Mutation < 'storage , 'role >",
-          "signature": "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
+          "signature": "fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Sample , Budget) >"
         },
         {
           "owner": "Mutation < 'storage , 'role >",
@@ -1230,8 +1261,9 @@
       "type_name": "KnownClaim",
       "owning_children": [],
       "methods": [
-        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < () >",
+        "pub (super) fn check (& mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Sample , Budget) >",
         "pub (super) fn prepare (mut self , selection : & EpochStore , port : & mut impl Port) -> Result < (Self , Request , Budget) >",
+        "pub (super) fn refuse (& mut self)",
         "pub (super) fn send (self , selection : & EpochStore , port : & mut impl Port) -> Result < () >"
       ],
       "factories": [
