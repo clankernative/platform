@@ -193,14 +193,11 @@ impl ControllerPort<'_, '_> {
                 acquisition,
                 ..
             } = &mut *material;
+            // Keep this fallible evaluation outside the diagnostic closure:
+            // failure must exit before both request and post-request sampling.
+            let authorization = credential.authorization()?;
             let requested = self.timings.measure(operation, || {
-                http.request_with_ceiling(
-                    route,
-                    &credential.authorization()?,
-                    Some(body),
-                    acquisition,
-                    timeout,
-                )
+                http.request_with_ceiling(route, &authorization, Some(body), acquisition, timeout)
             });
             let checked = material.sample(stage);
             let bytes = requested?;
