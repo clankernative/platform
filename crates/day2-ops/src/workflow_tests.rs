@@ -694,6 +694,80 @@ fn provider_conformance_rejects_unknown_recipe_and_supplied_configuration_argume
     Ok(())
 }
 
+const CARTA_QUALIFICATION_STEPS: [&str; 5] = [
+    "carta-qualification-open",
+    "carta-qualification-scratch",
+    "carta-qualification-collect",
+    "carta-qualification-discard",
+    "carta-qualification-receipt",
+];
+
+#[test]
+fn carta_qualification_runs_fixed_steps_and_returns_the_guarded_receipt_result() -> Result<()> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/CartaQualification.roc")
+    );
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["carta-qualification"],
+        |request| {
+            assert_eq!(request.decode::<Value>()?, json!({}));
+            effects.push(request.action.clone());
+            if request.action == "carta-qualification-receipt" {
+                Ok(json!({"outcome":"captured"}))
+            } else {
+                Ok(json!({}))
+            }
+        },
+    )?;
+    assert_eq!(effects, CARTA_QUALIFICATION_STEPS);
+    assert_eq!(result, json!({"outcome":"captured"}));
+    Ok(())
+}
+
+#[test]
+fn carta_qualification_stops_at_every_failed_step_without_retry() -> Result<()> {
+    let runner = automation::runner()?;
+    for (index, failed) in CARTA_QUALIFICATION_STEPS.iter().enumerate() {
+        let mut effects = Vec::new();
+        let result = automation::run(&runner, &["carta-qualification"], |request| {
+            effects.push(request.action.clone());
+            if request.action == *failed {
+                bail!("injected carta qualification failure: {failed}");
+            }
+            Ok(json!({}))
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected carta qualification failure")
+        );
+        assert_eq!(effects, CARTA_QUALIFICATION_STEPS[..=index]);
+    }
+    for arguments in [
+        vec!["carta-qualification", "profile.json"],
+        vec!["carta-qualification", "--production"],
+    ] {
+        let mut effects = 0;
+        let result = automation::run(&runner, &arguments, |_| {
+            effects += 1;
+            bail!("unadmitted recipe reached native host");
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown private workflow")
+        );
+        assert_eq!(effects, 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn local_lifecycle_and_invalid_settings_never_build_or_reset_data() -> Result<()> {
     let mut effects = Vec::new();

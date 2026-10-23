@@ -568,7 +568,8 @@ impl CredentialResolver for SimulatedCredentials {
         connection
             .validate()
             .map_err(|_| AdapterError::InvalidProfile)?;
-        if !self.available {
+        // Carta's client secret is never a bearer, offline or live.
+        if !self.available || matches!(connection, LiveConnection::Carta { .. }) {
             return Err(AdapterError::CredentialUnavailable);
         }
         Credentials::bearer(
@@ -962,8 +963,8 @@ pub(crate) fn carta_read(
     scope: &str,
     read: CartaRead<'_>,
     max: usize,
-) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::Failure> {
-    use crate::carta_live::{Collection, Failure, Reply};
+) -> std::result::Result<crate::carta_live::Reply, crate::carta_live::TransportFailure> {
+    use crate::carta_live::{Collection, Failure, Reply, TransportFailure};
     let status = |status: u16| Reply {
         status,
         json: true,
@@ -992,8 +993,14 @@ pub(crate) fn carta_read(
         });
         if let Some(fault) = take_fault_named(state, endpoint) {
             return Ok(match fault_response(fault, max as u64) {
-                None => Err(Failure::Unavailable),
-                Some(Err(_)) => Err(Failure::Unavailable),
+                None => Err(Failure::Unavailable.into()),
+                // Whatever the shared fault consumed is carried, as on the wire.
+                Some(Err(error)) => Err(TransportFailure {
+                    failure: Failure::Unavailable,
+                    response_bytes: error.response_bytes,
+                    http_status: error.http_status,
+                    retry_after_seconds: None,
+                }),
                 Some(Ok(response)) => Ok(Reply {
                     status: response.status,
                     json: response.json_content_type,
@@ -1078,7 +1085,7 @@ pub(crate) fn carta_read(
             reply.body.truncate(max.saturating_add(1));
             Ok(reply)
         }
-        Err(_) => Err(crate::carta_live::Failure::Unavailable),
+        Err(_) => Err(Failure::Unavailable.into()),
     }
 }
 

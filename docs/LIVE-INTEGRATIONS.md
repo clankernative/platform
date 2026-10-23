@@ -74,6 +74,66 @@ Applications own membership-cache validity, ancestry decisions and reconciliatio
 
 Authorization freezes a validated cache or provider-fetch plan before reserving provider traffic. A cached hierarchy needs no provider call/byte budget and cannot fall through to the network; membership still requires a user lookup. Both live and simulated adapters share this cache policy. The simulator records requests and consumes scheduled endpoint faults in its SQLite world, while fresh reads use the injected capture time. Provider world data carries no adapter-cache timestamp. The Directory regression campaign checks expiry, failed refresh, recovery, membership, cache reuse during provider outage, and identical replay; real HTTP fixtures separately check the native authentication and request paths.
 
+## Carta issuer captures
+
+A resource on a live `carta` connection makes `carta.snapshot.v1` collect one
+issuer's stakeholders and option grants completely and publish an immutable
+capture; `carta.record.v1` then reads it locally. [Carta](CARTA.md) describes
+the profile, bounds, mapping, retention and failure codes. The native adapter
+(`crates/day2/src/carta_http.rs`) builds its own blocking client because the
+token exchange needs HTTP Basic and a form body, which the shared bearer
+transport cannot express. The client is https-only, follows no redirect, retries
+nothing, uses no proxy, cookie or content encoding, keeps no idle connection,
+and has 5-second connect and 30-second request timeouts. A 180-second capture
+deadline is checked before every request.
+
+Origins are fixed by the closed environment: production uses
+`https://login.app.carta.com` and `https://api.carta.com`; playground uses
+`https://login.playground.carta.team` and `https://api.playground.carta.team`.
+The playground API origin is pinned for qualification; the inspected Equity
+client paired that login with a mock API origin, which is not admitted. The
+token request is `POST /o/access_token/` with
+`grant_type=CLIENT_CREDENTIALS&scope=read_issuer_stakeholders read_issuer_securities`
+and Basic `client_id:secret`; page requests are bearer `GET`s of
+`/v1alpha1/issuers/{issuer}/stakeholders` and `/optionGrants` with a
+URL-encoded `pageToken`. No page size is requested until qualification shows
+the provider honours one.
+
+Only the client secret is mounted, through the ordinary credential mount and
+registration path. It resolves as `CartaClientSecret`, a type sent only as
+Basic authentication, under the same profile and fingerprint checks as every
+mount; bearer resolution refuses a Carta connection. The access token lives in
+memory for one capture and is never cached.
+
+A truncated or failed response is still metered: a body read that stops on a
+close or timeout keeps the bytes it already consumed, and a response refused
+from its headers keeps its status and `Retry-After`. Known settlement and the
+failure's correlation therefore record all provider traffic.
+
+`cargo run --locked -p xtask -- carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY`
+is the explicit operator qualification. It is not part of any verification
+recipe. The private [`ops/CartaQualification.roc`](../ops/CartaQualification.roc)
+recipe owns its step order and runs through `ops/Runner.roc`: open the inputs,
+create a private scratch store, collect, discard the scratch store, then publish
+the receipt. The native session supplies only those steps, refuses them out of
+order, with arguments or replayed, and deletes the scratch store if any step
+fails. The profile is JSON with `format: 1`, `environment: "playground"`
+(production is refused before the secret is read), `client_id`, numeric
+`issuer_id`, optional `children`, `max_pages_per_collection` and `expires_at`
+(Unix seconds). The secret file must be an owner-private regular file, and the
+evidence directory must be new. Collection drives the native adapter through
+the production pipeline into the scratch store. The `receipt.json` it publishes
+has an outcome code, counts, usage, the last exchange, each page's status, bytes,
+item count, `nextPageToken` form and any transport failure code, and
+per-field present/null/absent/empty counts. The token exchange is recorded only
+as JSON shapes, whether `token_type` is `Bearer`, a lifetime of at most a year,
+the granted scopes from a reviewed list and a count of other scopes. Unmapped
+field names are kept only when identifier-shaped, at most 64 per kind; the rest
+are counted. No provider value or JSON subtree is retained, including from a
+malformed response. Before publishing, the session refuses a receipt that claims
+`provider_qualified` or contains the client secret. Every receipt reports
+`provider_qualified: false` until a reviewer accepts it.
+
 ## Credentials and transport
 
 This illustrative `Instance.resources` catalog allows the `reports` app to post
@@ -286,6 +346,10 @@ A live qualification requires explicitly approved nonproduction targets:
   restrictions; caller-chosen filter values do not enforce those restrictions.
 - OpenAI project, reviewed fixed model/context/rates, approved test prompt and
   spend allowance, private API-key mount, and required provider data controls.
+- Carta playground OAuth client with read access to one test issuer, a private
+  client-secret file and an expiring `carta-qualify` profile. Its receipt must
+  settle the granted scopes, the playground API origin, end-of-pagination form,
+  page sizes and which fields Carta omits or nulls before production cut-over.
 
 Live credentials and account evidence must be provided before those checks can
 be completed. Installing an adapter or mounting a credential does not assert
