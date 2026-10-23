@@ -1302,8 +1302,8 @@ fn mutation_intersection_charges_later_transport_work_without_resend() {
                 if shorter_counter { 105_000 } else { 102_000 },
                 100_000,
             );
-            let mutation = guarded::accept(&selection, core, counter, slot, context, &mut port)
-                .unwrap();
+            let mutation =
+                guarded::accept(&selection, core, counter, slot, context, &mut port).unwrap();
             if post {
                 port.after_send = Some(Duration::from_secs(102));
             } else {
@@ -1372,7 +1372,12 @@ fn mutation_narrow_claim_acknowledgement_and_counter_send_keep_may_without_resen
             counter,
             slot,
             context,
-            attempt(&core, before.version, AttemptOrdinal::first(), b"narrow-clock"),
+            attempt(
+                &core,
+                before.version,
+                AttemptOrdinal::first(),
+                b"narrow-clock",
+            ),
             &mut port,
         )
         .unwrap();
@@ -1393,13 +1398,22 @@ fn mutation_narrow_claim_acknowledgement_and_counter_send_keep_may_without_resen
             assert!(claim.send(&selection, &mut port).is_err());
         }
         assert_eq!(port.inner.slot_posts, 2, "{boundary}");
-        assert_eq!(port.inner.counter_posts, usize::from(boundary == "counter-post"));
+        assert_eq!(
+            port.inner.counter_posts,
+            usize::from(boundary == "counter-post")
+        );
         let stored = codec::decode(&selection, &core, &port.inner.slots.read(&name)).unwrap();
         assert_eq!(stored.slot.logical, core);
-        assert!(matches!(stored.slot.state, SlotState::MayHaveBeenSent { .. }));
+        assert!(matches!(
+            stored.slot.state,
+            SlotState::MayHaveBeenSent { .. }
+        ));
         port.at(Duration::from_secs(100));
         assert!(port.sample().is_err());
-        assert_eq!(port.inner.counter_posts, usize::from(boundary == "counter-post"));
+        assert_eq!(
+            port.inner.counter_posts,
+            usize::from(boundary == "counter-post")
+        );
         replay_provider(&port.inner.slots.replay());
     }
 }
