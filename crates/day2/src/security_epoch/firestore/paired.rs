@@ -172,11 +172,17 @@ fn read_once(
         }
         Ok((decode_snapshot(names, counter_entries)?, slot))
     })();
-    // All semantic errors after obtaining a valid token still close that exact
-    // provider transaction. Failed/expired cleanup never yields an observation.
-    transaction.rollback(port, budget, names)?;
-    budget.remaining_decoding(port)?;
-    result
+    // All semantic errors after obtaining a valid token still attempt to close
+    // that exact transaction. Preserve the first semantic cause if bounded cleanup
+    // also fails; successful decoding still requires complete unexpired cleanup.
+    let cleanup: Result<()> = (|| {
+        transaction.rollback(port, budget, names)?;
+        budget.remaining_decoding(port)?;
+        Ok(())
+    })();
+    let pair = result?;
+    cleanup?;
+    Ok(pair)
 }
 
 fn document_name(entry: &PairEntry) -> Result<&str> {
