@@ -353,6 +353,14 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
         };
         let started = Instant::now();
         let key = match request.action.as_str() {
+            "verify-bazel-controls" => {
+                ensure!(
+                    parameters.is_empty(),
+                    "compiler controls accept no overrides"
+                );
+                crate::bazel::wrapper_controls(root)?;
+                "bazel-controls".into()
+            }
             "verify-browser" => {
                 ensure!(parameters.is_empty(), "browser checks accept no overrides");
                 run_with_budget(
@@ -1684,6 +1692,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "test-installation-build",
         ],
         "all" => &[
+            "bazel-controls",
             "control-simulation",
             "format-all",
             "lint",

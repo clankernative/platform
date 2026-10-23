@@ -16,6 +16,11 @@ read their trusted base caches and save only under GitHub's isolated PR ref;
 those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
+Action snapshots use source/run/attempt keys with same-source, role and host
+restoration prefixes; an earlier partial immutable snapshot does not prevent a
+later run from saving additional actions. Owned manual measurement runs save
+within their branch cache scope.
+
 Compilation reuse never skips a verification campaign. Test result reuse is
 disabled with `--cache_test_results=no`. Runtime, documentation, private build
 and installation outcomes remain fresh. Isolated Mac builders receive pinned
@@ -109,8 +114,12 @@ and no runtime result is inferred from a compiler cache hit.
 
 ## Measurement
 
-Use complete hosted runs on fresh runners: an empty action-cache run, a restored
-warm run of the same source and representative Rust and Roc edits. Keep target,
+Use complete hosted runs on fresh runners. Dispatch the same source/ref first
+with `compilation_cache=empty`, then with `compilation_cache=reuse`. The empty
+selection performs cache metadata lookup without downloading prior-run action,
+fixture or harness snapshots. Repository/tool downloads and transport from the
+current preparation jobs remain enabled and must be disclosed. Measure
+representative Rust and Roc edits separately. Keep target,
 feature, profile, linker, concurrency, fixtures and test coverage matched. Record
 security/queue wait, setup, cache restore/save time and bytes, compilation, fresh
 campaign work, final join, critical-path time and runner minutes by OS. Account

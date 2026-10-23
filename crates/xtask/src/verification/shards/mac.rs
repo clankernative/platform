@@ -334,6 +334,13 @@ const CASES: &[(&str, &str, &str, &str, bool)] = &[
         "formatting::tests::formatter_native_spacing_width_check_idempotence_and_parse_failure",
         true,
     ),
+    (
+        "day2",
+        "day2",
+        "lib",
+        "sandbox::tests::selected_developer_profile_keeps_outside_file_and_network_refusals",
+        false,
+    ),
 ];
 const BUILD_CASES: &[(&str, &str)] = &[
     (
@@ -370,7 +377,7 @@ pub(super) struct Proof {
 }
 
 fn preparation_effects() -> BTreeSet<String> {
-    ["cli", "test-binaries"]
+    ["bazel-controls", "cli", "test-binaries"]
         .into_iter()
         .map(String::from)
         .chain(FIXTURES.iter().map(|fixture| format!("build-{fixture}")))
@@ -804,6 +811,9 @@ pub(super) mod tests {
             &["verify-mac"],
             |request| {
                 match request.action.as_str() {
+                    "verify-bazel-controls" => {
+                        prepared.insert("bazel-controls".into());
+                    }
                     "verify-cli" => {
                         prepared.insert("cli".into());
                     }

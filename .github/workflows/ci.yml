@@ -12,6 +12,11 @@ on:
         type: choice
         options: [sharded, diagnostics]
         default: sharded
+      compilation_cache:
+        description: Reuse admitted compiled outputs, or measure complete verification with empty compiled-output caches
+        type: choice
+        options: [reuse, empty]
+        default: reuse
 
 permissions:
   contents: read
@@ -102,9 +107,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
@@ -189,9 +196,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
@@ -232,6 +241,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'inputs' }}
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
             day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
@@ -243,6 +253,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ matrix.part == 'tests' }}
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
@@ -336,7 +347,7 @@ jobs:
             build-out/tests/*
 
       - name: Persist newly compiled actions under the captured source key
-        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
+        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
@@ -378,9 +389,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-mac-compatibility-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
@@ -399,6 +412,7 @@ jobs:
         id: fixture_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
             day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
@@ -409,6 +423,7 @@ jobs:
         id: test_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           key: day2-test-outputs-v2-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**', 'cli/**', 'fixtures/**', 'examples/**') }}
           path: |
             artifacts/ci-test-build-cache.json
@@ -470,7 +485,7 @@ jobs:
             build-out/tests/*
 
       - name: Persist newly compiled actions under the captured source key
-        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
+        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
@@ -517,9 +532,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -618,9 +635,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -707,9 +726,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -831,9 +852,11 @@ jobs:
         id: bazel_actions
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
+          lookup-only: ${{ inputs.compilation_cache == 'empty' }}
           path: ~/.cache/bazel-disk
-          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
