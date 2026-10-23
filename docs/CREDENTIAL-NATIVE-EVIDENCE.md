@@ -173,6 +173,21 @@ counter read. The user approved thirty seconds per bootstrap action to qualify
 the unmeasured tail. Require repeated complete actions within 24 seconds before
 claiming margin; neither this ceiling nor successful DATA tests establish it.
 
+The subsequent thirty-second attempt refused during its counter read: the
+inclusive counter phase took 18.732 seconds, including 17.968 seconds of native
+checks and 14.317 seconds of nested authentication checks. These durations
+overlap. The timed Firestore read and rollback themselves totalled 0.126 seconds;
+that is not the complete transport/authority cost. Three pure response-decoding
+checkpoints now sample only the SAME retained original native clock, behind the
+same refusal gate and local file/process/thread liveness checks. They return
+budget DATA only. Full current file, peer, role and authentication checks still
+run at budget/context issuance, every HTTP pre/post boundary, observation
+consumption and final lifecycle transfer. No successful native check is cached,
+no initial-image read guard is removed, and no deadline is widened. A separate
+allocation-free canonical decimal check preserves the fresh `/proc` parser's
+previous integer range and spelling rules. Actual savings and complete-path
+margin still require new native measurements.
+
 ## Preparation timing diagnosis
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,

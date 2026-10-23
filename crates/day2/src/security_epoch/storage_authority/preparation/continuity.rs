@@ -401,6 +401,17 @@ impl<'file> PendingPreparedFilePhase<'file> {
 }
 
 impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
+    /// Local refusal/owner liveness only, for pure decoding's clock budget.
+    /// This does not inspect the file or grant physical/current authority.
+    pub(in crate::security_epoch::storage_authority) fn check_budget_liveness(&self) -> Result<()> {
+        self.disposition.check()?;
+        ensure!(
+            self.process == std::process::id() && self.thread == std::thread::current().id(),
+            "retained_preparation_owner_changed"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch::storage_authority) fn check_authenticated_reads(
         &mut self,
         reads: &ControllerEpochReads,
@@ -411,11 +422,7 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
-            self.disposition.check()?;
-            ensure!(
-                self.process == std::process::id() && self.thread == std::thread::current().id(),
-                "retained_preparation_owner_changed"
-            );
+            self.check_budget_liveness()?;
             ensure!(
                 self.layout.proposal.selection == *self.selection.digest()
                     && self.layout.proposal.core == *self.selection.seed()

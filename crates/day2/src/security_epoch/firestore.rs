@@ -33,6 +33,14 @@ pub(super) struct EpochReply {
 
 pub(super) trait Port {
     fn sample(&mut self) -> Result<Sample>;
+
+    /// DATA-only time spent decoding an already received response. The default
+    /// retains full checks; only the closed Controller transport may borrow its
+    /// SAME retained native clock here. This is never an authority observation.
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        self.sample()
+    }
+
     // Exactly one bounded HTTPS request; no proxy, redirect or automatic retry.
     // A future live implementation must enforce the response limit while reading.
     fn post(
@@ -147,6 +155,12 @@ impl Budget {
     pub(super) fn remaining(&mut self, port: &mut impl Port) -> Result<Duration> {
         let sample = port.sample()?;
         self.observe(sample)
+    }
+
+    /// Private pure-code checkpoint only. HTTP pre/postchecks, context/budget
+    /// issuance and observation consumers continue to use full `remaining`.
+    fn remaining_decoding(&mut self, port: &mut impl Port) -> Result<Duration> {
+        self.observe(port.decoding_sample()?)
     }
 
     pub(super) fn remaining_native(
@@ -353,7 +367,7 @@ impl ReadTransaction {
         #[serde(deny_unknown_fields)]
         struct Empty {}
         let _: Empty = crate::json::decode(&bytes)?;
-        budget.remaining(port)?;
+        budget.remaining_decoding(port)?;
         Ok(())
     }
 }
@@ -514,7 +528,7 @@ pub(super) fn read_with_budget(
         },
         &snapshot,
     )?;
-    budget.remaining(port)?;
+    budget.remaining_decoding(port)?;
     Ok(EpochObservation {
         selection: Digest::of(&names.selection)?,
         snapshot,
@@ -555,7 +569,7 @@ fn read_once(port: &mut impl Port, budget: &mut Budget, names: &Names) -> Result
     // Semantic decode failures also close the observed read transaction. If the
     // bounded cleanup fails, no snapshot escapes as a successful observation.
     transaction.rollback(port, budget, names)?;
-    budget.remaining(port)?;
+    budget.remaining_decoding(port)?;
     result
 }
 
@@ -637,6 +651,109 @@ pub(super) fn commit(
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+
+    // Independent DATA transport model: successful time arithmetic must never
+    // replace the full pre/post authority observations around a real operation.
+    struct BoundaryPort {
+        domain: Digest,
+        now: Duration,
+        full_checks: usize,
+        clock_checks: usize,
+        posts: usize,
+        refused: bool,
+        refuse_after_post: bool,
+    }
+
+    impl Port for BoundaryPort {
+        fn sample(&mut self) -> Result<Sample> {
+            self.full_checks += 1;
+            ensure!(!self.refused, "model_authority_refused");
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn decoding_sample(&mut self) -> Result<Sample> {
+            self.clock_checks += 1;
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn post(&mut self, _: &str, _: &[u8], _: Duration, _: usize) -> Result<EpochReply> {
+            self.posts += 1;
+            self.refused |= self.refuse_after_post;
+            Ok(EpochReply {
+                status: 200,
+                body: Vec::new(),
+            })
+        }
+    }
+
+    fn boundary() -> (Budget, BoundaryPort) {
+        let domain = Digest::new(b"decoding-time-is-not-authority");
+        let budget = Budget::from_original_parts(
+            Sample {
+                domain: domain.clone(),
+                elapsed: Duration::from_secs(100),
+            },
+            Duration::from_secs(100),
+            Duration::from_secs(130),
+            super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+        .unwrap();
+        (
+            budget,
+            BoundaryPort {
+                domain,
+                now: Duration::from_secs(101),
+                full_checks: 0,
+                clock_checks: 0,
+                posts: 0,
+                refused: false,
+                refuse_after_post: false,
+            },
+        )
+    }
+
+    #[test]
+    fn decoding_time_cannot_substitute_for_http_or_consumer_authority() {
+        for (refused, refuse_after_post, expected_posts) in [(true, false, 0), (false, true, 1)] {
+            let (mut budget, mut port) = boundary();
+            port.refused = refused;
+            port.refuse_after_post = refuse_after_post;
+            assert!(budget.remaining_decoding(&mut port).is_ok());
+            assert_eq!((port.full_checks, port.clock_checks), (0, 1));
+            assert!(budget.call(&mut port, "fixed-test-contract", &[]).is_err());
+            assert_eq!(port.posts, expected_posts);
+            assert_eq!(port.full_checks, expected_posts + 1);
+            // Observation consumers still call the original full remaining.
+            assert!(budget.remaining(&mut port).is_err());
+        }
+        let (mut budget, mut port) = boundary();
+        budget.remaining_decoding(&mut port).unwrap();
+        budget.call(&mut port, "fixed-test-contract", &[]).unwrap();
+        assert_eq!((port.full_checks, port.clock_checks, port.posts), (2, 1, 1));
+    }
+
+    #[test]
+    fn decoding_time_keeps_original_domain_monotonicity_and_exclusive_deadline() {
+        for change in [0, 1, 2] {
+            let (mut budget, mut port) = boundary();
+            budget.remaining_decoding(&mut port).unwrap();
+            match change {
+                0 => port.domain = Digest::new(b"foreign-clock"),
+                1 => port.now = Duration::from_millis(100_999),
+                _ => port.now = Duration::from_secs(130),
+            }
+            assert!(budget.remaining_decoding(&mut port).is_err());
+            assert_eq!(port.posts, 0);
+            assert_eq!(budget.start, Duration::from_secs(100));
+            assert_eq!(budget.limit, Duration::from_secs(30));
+        }
+    }
 
     // Arithmetic/transport-contract DATA only. This port owns no enrolled role,
     // file, native clock, credential, writable journal or provider connection.

@@ -2,7 +2,7 @@
 //! authenticated peer phase throughout each request; read credentials or parsed
 //! policy DATA alone cannot install this port.
 
-use super::{ControllerEpochReads, RetainedEpochReads};
+use super::{ControllerEpochReads, ReadScope, RetainedEpochReads};
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
     controller::preparation_timing::{Operation, Timings},
@@ -12,7 +12,10 @@ use crate::security_epoch::{
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     Digest,
-    security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy},
+    security_epoch::{
+        EpochStore,
+        bootstrap::{InitialBootstrapPolicy, NativeRole},
+    },
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -137,6 +140,37 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
 }
 
 impl ControllerPort<'_, '_> {
+    /// Pure decoding consumes THIS retained acquisition, not a reconstructed
+    /// clock or successful native-check cache. The same local owners and shared
+    /// refusal gate stay borrowed; full sample/post/transfer guards are separate.
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        let result = (|| {
+            let guard = self.reads.state.gate.guard()?;
+            ensure!(self.valid, "epoch_writer_refused");
+            let phase = self.owner.try_borrow()?;
+            phase.check_budget_liveness()?;
+            let borrow = self.reads.state.gate.enter()?;
+            let mut material = self.reads.state.material.try_borrow_mut()?;
+            ensure!(
+                material.valid
+                    && material.scope == ReadScope::StorageBootstrap
+                    && material.purpose == NativeRole::EpochController,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            material.acquisition.require_storage_bootstrap()?;
+            let sample = material.acquisition.sample()?;
+            drop(material);
+            borrow.complete()?;
+            drop(phase);
+            guard.complete()?;
+            Ok(sample)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     fn sample(&mut self) -> Result<Sample> {
         let result = (|| {
             let guard = self.reads.state.gate.guard()?;
@@ -236,6 +270,10 @@ impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
 impl Port for ControllerBorrow<'_, '_, '_> {
     fn sample(&mut self) -> Result<Sample> {
         self.owner.sample()
+    }
+
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        self.owner.decoding_sample()
     }
 
     fn post(

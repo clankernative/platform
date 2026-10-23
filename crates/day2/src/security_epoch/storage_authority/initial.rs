@@ -411,6 +411,16 @@ fn request_binding(
 }
 
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
+    /// A pure decoder may inspect local refusal before borrowing the original
+    /// clock. This never substitutes for `check` at I/O or ownership transfer.
+    pub(in crate::security_epoch) fn check_budget_liveness(&self) -> Result<()> {
+        ensure!(
+            !*self.continuation,
+            "initial_storage_phase_already_released"
+        );
+        self.file.check_budget_liveness()
+    }
+
     pub(in crate::security_epoch) fn check_authenticated_reads(
         &mut self,
         reads: &ControllerEpochReads,
