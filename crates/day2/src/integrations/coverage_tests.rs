@@ -1071,6 +1071,17 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
     use crate::freetool_executor::{
         ExecutionIdentity, ExecutionPlan, ServiceRequest, response_json, sha256, simulated_call,
     };
+    let connection_id = VersionRef {
+        id: "executor_coverage".into(),
+        revision: 1,
+    };
+    let connection = LiveConnection::FreetoolExecutor {
+        credential_ref: VersionRef {
+            id: "executor_key_coverage".into(),
+            revision: 1,
+        },
+        endpoint: "http://127.0.0.1:43210".into(),
+    };
     let run = |variant: Variant| -> Result<(String, bool)> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("freetool_executor.simulated.sqlite");
@@ -1108,6 +1119,8 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
                 writes = true;
                 response_json(simulated_call(
                     &database,
+                    &connection_id,
+                    &connection,
                     ServiceRequest::Register { identity, plan },
                 )?)?
             }
@@ -1115,6 +1128,8 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
                 writes = true;
                 simulated_call(
                     &database,
+                    &connection_id,
+                    &connection,
                     ServiceRequest::Register {
                         identity: identity.clone(),
                         plan,
@@ -1122,12 +1137,16 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
                 )?;
                 response_json(simulated_call(
                     &database,
+                    &connection_id,
+                    &connection,
                     ServiceRequest::Execute { identity },
                 )?)?
             }
             Action::FreetoolStatus | Action::FreetoolResultPage => {
                 simulated_call(
                     &database,
+                    &connection_id,
+                    &connection,
                     ServiceRequest::Register {
                         identity: identity.clone(),
                         plan,
@@ -1135,6 +1154,8 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
                 )?;
                 simulated_call(
                     &database,
+                    &connection_id,
+                    &connection,
                     ServiceRequest::Execute {
                         identity: identity.clone(),
                     },
@@ -1149,7 +1170,12 @@ fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
                         limit: 1024,
                     }
                 };
-                let output = response_json(simulated_call(&database, request)?)?;
+                let output = response_json(simulated_call(
+                    &database,
+                    &connection_id,
+                    &connection,
+                    request,
+                )?)?;
                 ensure!(
                     std::fs::read(&database)? == before,
                     "Freetool read changed its world"

@@ -4,6 +4,7 @@
 //! wire DTOs. Trusted dispatch facts are supplied by Runtime; Roc may supply only
 //! the already-authorized business execution identity and complete plan.
 use anyhow::{Context, Result, ensure};
+use day2_capabilities::{integrations::LiveConnection, resources::VersionRef};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -496,9 +497,12 @@ pub(crate) fn call(
         .live
         .as_ref()
         .context("freetool_executor_connection_missing")?;
-    let response = runtime
-        .integrations()
-        .freetool_request(runtime.db(), connection, request)?;
+    let response = runtime.integrations().freetool_request(
+        runtime.db(),
+        &resource.grant.connection,
+        connection,
+        request,
+    )?;
     match response {
         ServiceResponse::Error { code } if is_result_page => anyhow::bail!(safe_code(&code)),
         ServiceResponse::Error { code } => response_json(ServiceResponse::Error { code }),
@@ -508,13 +512,35 @@ pub(crate) fn call(
 
 /// SQLite-backed deterministic adapter used by simulations; it preserves sealed
 /// registrations and service receipts without opening a socket.
-pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result<ServiceResponse> {
+fn simulated_record_key(
+    connection_id: &VersionRef,
+    connection: &LiveConnection,
+    identity: &ExecutionIdentity,
+) -> Result<String> {
+    ensure!(
+        matches!(connection, LiveConnection::FreetoolExecutor { .. }),
+        "freetool_executor_connection_mismatch"
+    );
+    Ok(sha256(&serde_json::to_vec(&(
+        connection_id,
+        connection,
+        identity,
+    ))?))
+}
+
+pub(crate) fn simulated_call(
+    database: &Path,
+    connection_id: &VersionRef,
+    connection: &LiveConnection,
+    request: ServiceRequest,
+) -> Result<ServiceResponse> {
     use rusqlite::{Connection, OptionalExtension, params};
+    connection.validate()?;
     let mut db = Connection::open(database)?;
     db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS freetool_executor_records(identity TEXT PRIMARY KEY, plan TEXT NOT NULL, outcome TEXT, result_id TEXT, result_digest TEXT, result_body BLOB);")?;
     match request {
         ServiceRequest::Register { identity, plan } => {
-            let key = serde_json::to_string(&identity)?;
+            let key = simulated_record_key(connection_id, connection, &identity)?;
             let plan_json = serde_json::to_string(&plan)?;
             let existing: Option<String> = db
                 .query_row(
@@ -542,7 +568,7 @@ pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result
             })
         }
         ServiceRequest::Execute { identity } => {
-            let key = serde_json::to_string(&identity)?;
+            let key = simulated_record_key(connection_id, connection, &identity)?;
             let transaction = db.transaction()?;
             let record: Option<(String, Option<String>)> = transaction
                 .query_row(
@@ -578,7 +604,7 @@ pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result
             Ok(ServiceResponse::Executed { outcome })
         }
         ServiceRequest::Status { identity } => {
-            let key = serde_json::to_string(&identity)?;
+            let key = simulated_record_key(connection_id, connection, &identity)?;
             let outcome: Option<String> = db
                 .query_row(
                     "SELECT outcome FROM freetool_executor_records WHERE identity=?1",
@@ -609,7 +635,7 @@ pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result
                     code: "invalid_page".into(),
                 });
             }
-            let key = serde_json::to_string(&identity)?;
+            let key = simulated_record_key(connection_id, connection, &identity)?;
             let result: Option<(String, String, Vec<u8>)> = db.query_row(
                 "SELECT result_id,result_digest,result_body FROM freetool_executor_records WHERE identity=?1 AND outcome IS NOT NULL AND result_id IS NOT NULL",
                 [&key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -638,6 +664,22 @@ pub(crate) fn simulated_call(database: &Path, request: ServiceRequest) -> Result
 mod tests {
     use super::*;
 
+    fn simulated_connection() -> (VersionRef, LiveConnection) {
+        (
+            VersionRef {
+                id: "executor_test".into(),
+                revision: 1,
+            },
+            LiveConnection::FreetoolExecutor {
+                credential_ref: VersionRef {
+                    id: "executor_key_test".into(),
+                    revision: 1,
+                },
+                endpoint: "http://127.0.0.1:43210".into(),
+            },
+        )
+    }
+
     fn identity() -> ExecutionIdentity {
         ExecutionIdentity {
             installation: "test/dev".into(),
@@ -658,6 +700,7 @@ mod tests {
     fn simulated_world_seals_manifest_and_reuses_receipt_and_scoped_pages() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let database = directory.path().join("executor.sqlite");
+        let (connection_id, connection) = simulated_connection();
         let identity = identity();
         let plan = ExecutionPlan::Http {
             method: "GET".into(),
@@ -667,6 +710,8 @@ mod tests {
         };
         let registered = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Register {
                 identity: identity.clone(),
                 plan: plan.clone(),
@@ -675,6 +720,8 @@ mod tests {
         assert!(matches!(registered, ServiceResponse::Registered { .. }));
         let duplicate = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Register {
                 identity: identity.clone(),
                 plan: plan.clone(),
@@ -683,6 +730,8 @@ mod tests {
         assert_eq!(duplicate, registered);
         let conflict = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Register {
                 identity: identity.clone(),
                 plan: ExecutionPlan::Http {
@@ -697,12 +746,16 @@ mod tests {
 
         let first = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Execute {
                 identity: identity.clone(),
             },
         )?;
         let second = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Execute {
                 identity: identity.clone(),
             },
@@ -724,6 +777,8 @@ mod tests {
         };
         let status = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::Status {
                 identity: identity.clone(),
             },
@@ -736,6 +791,8 @@ mod tests {
         ));
         let page = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::ResultPage {
                 identity: identity.clone(),
                 offset: 0,
@@ -748,6 +805,8 @@ mod tests {
         );
         let denied = simulated_call(
             &database,
+            &connection_id,
+            &connection,
             ServiceRequest::ResultPage {
                 identity: ExecutionIdentity {
                     actor: "bob".into(),

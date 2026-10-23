@@ -4,7 +4,7 @@ use crate::integrations::{
     self, AdapterError, CredentialResolver, Credentials, HttpTransport, Transport,
 };
 use anyhow::{Context, Result, ensure};
-use day2_capabilities::integrations::LiveConnection;
+use day2_capabilities::{integrations::LiveConnection, resources::VersionRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -122,6 +122,7 @@ impl Host {
     pub(crate) fn freetool_request(
         &self,
         database: &Path,
+        connection_id: &VersionRef,
         connection: &LiveConnection,
         request: crate::freetool_executor::ServiceRequest,
     ) -> Result<crate::freetool_executor::ServiceResponse> {
@@ -133,7 +134,12 @@ impl Host {
                 .parent()
                 .context("application_database_parent_missing")?
                 .join("freetool_executor.simulated.sqlite");
-            return crate::freetool_executor::simulated_call(&world, request);
+            return crate::freetool_executor::simulated_call(
+                &world,
+                connection_id,
+                connection,
+                request,
+            );
         }
         let credential = self
             .resolver
@@ -478,4 +484,101 @@ pub fn mount(instance: &Path, operator: &str, request: &Mount) -> Result<serde_j
     Ok(
         serde_json::json!({"credential":reference,"registered":true,"mode":"local_private_mount","provider_qualified":false}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::freetool_executor::{
+        ExecutionIdentity, ExecutionPlan, ServiceRequest, ServiceResponse,
+    };
+    use day2_capabilities::resources::VersionRef;
+
+    #[test]
+    fn simulated_executor_records_are_connection_bound() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("app.sqlite");
+        let host = Host::simulated(&database, "test");
+        let connection_id_a = VersionRef {
+            id: "executor_a".into(),
+            revision: 3,
+        };
+        let connection_a = LiveConnection::FreetoolExecutor {
+            credential_ref: VersionRef {
+                id: "executor_key_a".into(),
+                revision: 1,
+            },
+            endpoint: "http://127.0.0.1:43210".into(),
+        };
+        let connection_id_b = VersionRef {
+            id: "executor_b".into(),
+            revision: 7,
+        };
+        let connection_b = LiveConnection::FreetoolExecutor {
+            credential_ref: VersionRef {
+                id: "executor_key_b".into(),
+                revision: 2,
+            },
+            endpoint: "http://127.0.0.1:43211".into(),
+        };
+        let identity = ExecutionIdentity {
+            installation: "company/staging".into(),
+            application: "freetool".into(),
+            actor: "alice".into(),
+            artifact: "artifact-1".into(),
+            operation: "freetool.run".into(),
+            resource_id: "resource-1".into(),
+            configuration_id: "config-1".into(),
+            immutable_version: 1,
+            configuration_digest: "a".repeat(64),
+            run_id: "run-1".into(),
+            arguments_digest: "b".repeat(64),
+        };
+        let plan = ExecutionPlan::Http {
+            method: "GET".into(),
+            url: "https://api.example.test/items".into(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        host.freetool_request(
+            &database,
+            &connection_id_a,
+            &connection_a,
+            ServiceRequest::Register {
+                identity: identity.clone(),
+                plan,
+            },
+        )?;
+        host.freetool_request(
+            &database,
+            &connection_id_a,
+            &connection_a,
+            ServiceRequest::Execute {
+                identity: identity.clone(),
+            },
+        )?;
+        let status = host.freetool_request(
+            &database,
+            &connection_id_b,
+            &connection_b,
+            ServiceRequest::Status {
+                identity: identity.clone(),
+            },
+        )?;
+        assert!(matches!(status, ServiceResponse::Status { receipt: None }));
+
+        let result = host.freetool_request(
+            &database,
+            &connection_id_b,
+            &connection_b,
+            ServiceRequest::ResultPage {
+                identity,
+                offset: 0,
+                limit: 100,
+            },
+        )?;
+        assert!(matches!(result, ServiceResponse::Error { code } if code == "result_unavailable"));
+        Ok(())
+    }
 }
