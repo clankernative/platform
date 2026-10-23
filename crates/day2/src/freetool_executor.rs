@@ -641,27 +641,69 @@ fn safe_code(value: &str) -> &'static str {
         .unwrap_or("executor_error")
 }
 
+pub(crate) struct CallOutcome {
+    pub result: Result<String>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub known: bool,
+    pub dispatched: bool,
+}
+
+pub(crate) fn request_wire_bytes(request: &ServiceRequest) -> Result<u64> {
+    let bytes = serde_json::to_vec(request)?;
+    ensure!(
+        bytes.len() as u64 <= crate::integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES,
+        "freetool_service_request_budget"
+    );
+    Ok(bytes.len() as u64)
+}
+
 pub(crate) fn call(
     runtime: &crate::store::Runtime,
     resource: &crate::resources::ResourceUse,
     request: ServiceRequest,
-) -> Result<String> {
+) -> CallOutcome {
     let is_result_page = matches!(&request, ServiceRequest::ResultPage { .. });
-    let connection = resource
-        .grant
-        .live
-        .as_ref()
-        .context("freetool_executor_connection_missing")?;
-    let response = runtime.integrations().freetool_request(
+    let Some(connection) = resource.grant.live.as_ref() else {
+        return CallOutcome {
+            result: Err(anyhow::anyhow!("freetool_executor_connection_missing")),
+            request_bytes: 0,
+            response_bytes: 0,
+            known: true,
+            dispatched: false,
+        };
+    };
+    let exchange = runtime.integrations().freetool_request(
         runtime.db(),
         &resource.grant.connection,
         connection,
         request,
-    )?;
-    match response {
-        ServiceResponse::Error { code } if is_result_page => anyhow::bail!(safe_code(&code)),
-        ServiceResponse::Error { code } => response_json(ServiceResponse::Error { code }),
-        response => response_json(response),
+        resource.grant.limits.max_response_bytes,
+    );
+    let crate::integrations::FreetoolExecutorExchange {
+        response,
+        request_bytes,
+        response_bytes,
+        known,
+        dispatched,
+    } = exchange;
+    let result = response.and_then(|bytes| {
+        let response: ServiceResponse =
+            serde_json::from_slice(&bytes).context("freetool_service_response_invalid")?;
+        match response {
+            ServiceResponse::Error { code } if is_result_page => {
+                anyhow::bail!(safe_code(&code))
+            }
+            ServiceResponse::Error { code } => response_json(ServiceResponse::Error { code }),
+            response => response_json(response),
+        }
+    });
+    CallOutcome {
+        result,
+        request_bytes,
+        response_bytes,
+        known,
+        dispatched,
     }
 }
 
@@ -849,6 +891,16 @@ mod tests {
             run_id: "run-1".into(),
             arguments_digest: "b".repeat(64),
         }
+    }
+
+    #[test]
+    fn executor_request_meter_uses_the_exact_serialized_wire_body() -> Result<()> {
+        let request = ServiceRequest::Status {
+            identity: identity(),
+        };
+        let encoded = serde_json::to_vec(&request)?;
+        assert_eq!(request_wire_bytes(&request)?, encoded.len() as u64);
+        Ok(())
     }
 
     #[test]
