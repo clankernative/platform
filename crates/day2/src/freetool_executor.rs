@@ -473,17 +473,172 @@ fn outcome_json(outcome: Outcome) -> Value {
     }
 }
 
-fn safe_code(value: &str) -> String {
-    if !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
-        value.to_owned()
-    } else {
-        "executor_error".into()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutorErrorCode {
+    InvalidRequest,
+    Unauthorized,
+    InvalidIdentity,
+    CallerNotAuthorized,
+    InvalidTarget,
+    ResourceNotAuthorized,
+    TargetNotAuthorized,
+    ManifestConflict,
+    RegistryFailure,
+    ReceiptUnavailable,
+    InvalidPage,
+    ResultUnavailable,
+    NotRegistered,
+    ExecutionInProgress,
+    IdentityConflict,
+    ReceiptFailure,
+    ResultPersistenceUncertain,
+    ReceiptPersistenceUncertain,
+    DnsFailure,
+    DnsRejected,
+    EgressDenied,
+    HttpSetupFailure,
+    InvalidMethod,
+    CredentialTargetMismatch,
+    CredentialUnavailable,
+    CredentialHeaderConflict,
+    CredentialTypeUnsupported,
+    ProviderTimeout,
+    ProviderConnectFailure,
+    ProviderTransportFailure,
+    RedirectDenied,
+    ResponseTooLarge,
+    ProviderResponseFailure,
+    ProviderHttpError,
+    QueryRejected,
+    ProviderQueryFailure,
+    InvalidParameters,
+    ResultTooLarge,
+    ResultEncodingFailure,
+    DeliveryUncertain,
+    InvalidPlan,
+    PlanTooLarge,
+    InvalidUrl,
+    RequestTooLarge,
+    InvalidHeader,
+    RestrictedHeader,
+    InvalidQuery,
+}
+
+impl ExecutorErrorCode {
+    const REVIEWED: &'static [Self] = &[
+        Self::InvalidRequest,
+        Self::Unauthorized,
+        Self::InvalidIdentity,
+        Self::CallerNotAuthorized,
+        Self::InvalidTarget,
+        Self::ResourceNotAuthorized,
+        Self::TargetNotAuthorized,
+        Self::ManifestConflict,
+        Self::RegistryFailure,
+        Self::ReceiptUnavailable,
+        Self::InvalidPage,
+        Self::ResultUnavailable,
+        Self::NotRegistered,
+        Self::ExecutionInProgress,
+        Self::IdentityConflict,
+        Self::ReceiptFailure,
+        Self::ResultPersistenceUncertain,
+        Self::ReceiptPersistenceUncertain,
+        Self::DnsFailure,
+        Self::DnsRejected,
+        Self::EgressDenied,
+        Self::HttpSetupFailure,
+        Self::InvalidMethod,
+        Self::CredentialTargetMismatch,
+        Self::CredentialUnavailable,
+        Self::CredentialHeaderConflict,
+        Self::CredentialTypeUnsupported,
+        Self::ProviderTimeout,
+        Self::ProviderConnectFailure,
+        Self::ProviderTransportFailure,
+        Self::RedirectDenied,
+        Self::ResponseTooLarge,
+        Self::ProviderResponseFailure,
+        Self::ProviderHttpError,
+        Self::QueryRejected,
+        Self::ProviderQueryFailure,
+        Self::InvalidParameters,
+        Self::ResultTooLarge,
+        Self::ResultEncodingFailure,
+        Self::DeliveryUncertain,
+        Self::InvalidPlan,
+        Self::PlanTooLarge,
+        Self::InvalidUrl,
+        Self::RequestTooLarge,
+        Self::InvalidHeader,
+        Self::RestrictedHeader,
+        Self::InvalidQuery,
+    ];
+
+    fn decode(value: &str) -> Option<Self> {
+        Self::REVIEWED
+            .iter()
+            .copied()
+            .find(|code| code.as_str() == value)
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::Unauthorized => "unauthorized",
+            Self::InvalidIdentity => "invalid_identity",
+            Self::CallerNotAuthorized => "caller_not_authorized",
+            Self::InvalidTarget => "invalid_target",
+            Self::ResourceNotAuthorized => "resource_not_authorized",
+            Self::TargetNotAuthorized => "target_not_authorized",
+            Self::ManifestConflict => "manifest_conflict",
+            Self::RegistryFailure => "registry_failure",
+            Self::ReceiptUnavailable => "receipt_unavailable",
+            Self::InvalidPage => "invalid_page",
+            Self::ResultUnavailable => "result_unavailable",
+            Self::NotRegistered => "not_registered",
+            Self::ExecutionInProgress => "execution_in_progress",
+            Self::IdentityConflict => "identity_conflict",
+            Self::ReceiptFailure => "receipt_failure",
+            Self::ResultPersistenceUncertain => "result_persistence_uncertain",
+            Self::ReceiptPersistenceUncertain => "receipt_persistence_uncertain",
+            Self::DnsFailure => "dns_failure",
+            Self::DnsRejected => "dns_rejected",
+            Self::EgressDenied => "egress_denied",
+            Self::HttpSetupFailure => "http_setup_failure",
+            Self::InvalidMethod => "invalid_method",
+            Self::CredentialTargetMismatch => "credential_target_mismatch",
+            Self::CredentialUnavailable => "credential_unavailable",
+            Self::CredentialHeaderConflict => "credential_header_conflict",
+            Self::CredentialTypeUnsupported => "credential_type_unsupported",
+            Self::ProviderTimeout => "provider_timeout",
+            Self::ProviderConnectFailure => "provider_connect_failure",
+            Self::ProviderTransportFailure => "provider_transport_failure",
+            Self::RedirectDenied => "redirect_denied",
+            Self::ResponseTooLarge => "response_too_large",
+            Self::ProviderResponseFailure => "provider_response_failure",
+            Self::ProviderHttpError => "provider_http_error",
+            Self::QueryRejected => "query_rejected",
+            Self::ProviderQueryFailure => "provider_query_failure",
+            Self::InvalidParameters => "invalid_parameters",
+            Self::ResultTooLarge => "result_too_large",
+            Self::ResultEncodingFailure => "result_encoding_failure",
+            Self::DeliveryUncertain => "delivery_uncertain",
+            Self::InvalidPlan => "invalid_plan",
+            Self::PlanTooLarge => "plan_too_large",
+            Self::InvalidUrl => "invalid_url",
+            Self::RequestTooLarge => "request_too_large",
+            Self::InvalidHeader => "invalid_header",
+            Self::RestrictedHeader => "restricted_header",
+            Self::InvalidQuery => "invalid_query",
+        }
+    }
+}
+
+fn safe_code(value: &str) -> &'static str {
+    ExecutorErrorCode::decode(value)
+        .map(ExecutorErrorCode::as_str)
+        .unwrap_or("executor_error")
 }
 
 pub(crate) fn call(
@@ -900,12 +1055,38 @@ mod tests {
     }
 
     #[test]
-    fn provider_error_codes_are_bounded_and_redacted() {
+    fn provider_error_codes_are_allowlisted_and_redacted() -> Result<()> {
+        for code in ExecutorErrorCode::REVIEWED {
+            assert_eq!(safe_code(code.as_str()), code.as_str());
+        }
+
+        let private_token = "synthetic_private_token_ABC123";
+        assert_eq!(safe_code(private_token), "executor_error");
+        let error = response_json(ServiceResponse::Error {
+            code: private_token.into(),
+        })?;
+        let error: serde_json::Value = serde_json::from_str(&error)?;
+        assert_eq!(error["code"], "executor_error");
+
+        for outcome in [
+            Outcome::Rejected {
+                code: private_token.into(),
+            },
+            Outcome::Failed {
+                code: private_token.into(),
+            },
+            Outcome::Unknown {
+                code: private_token.into(),
+            },
+        ] {
+            assert_eq!(outcome_json(outcome)["code"], "executor_error");
+        }
         assert_eq!(
-            safe_code("resource_not_authorized"),
-            "resource_not_authorized"
+            outcome_json(Outcome::Failed {
+                code: "provider_timeout".into(),
+            })["code"],
+            "provider_timeout"
         );
-        assert_eq!(safe_code("contains secret value"), "executor_error");
-        assert_eq!(safe_code(&"x".repeat(129)), "executor_error");
+        Ok(())
     }
 }
