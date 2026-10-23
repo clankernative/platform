@@ -454,9 +454,10 @@ impl Session {
                     120,
                 )?;
                 self.tooling_started = true;
-                // The bounded tmpfs hides the image's source ABI input. Seed
-                // that same reviewed file before the ordinary Roc build checks
-                // fresh generator equality; no nested mount or guard bypass.
+                // The bounded tmpfs hides the image's source ABI input.
+                // Install the image's source-bound seed inside the live mount;
+                // Docker archive copy does not support tmpfs destinations.
+                // Fresh generator equality and all native guards remain mandatory.
                 let remaining = Duration::from_secs(120)
                     .checked_sub(setup_started.elapsed())
                     .context("tooling initialization deadline exhausted")?
@@ -465,17 +466,15 @@ impl Session {
                 logged(
                     &self.output,
                     "seed-tooling-abi",
-                    Command::new("docker")
-                        .arg("cp")
-                        .arg(
-                            self.output.join(
-                                "inputs/platform/crates/worker/generated/roc_platform_abi.rs",
-                            ),
-                        )
-                        .arg(format!(
-                            "{}:/workspace/platform/crates/worker/generated/roc_platform_abi.rs",
-                            self.container
-                        )),
+                    Command::new("docker").args([
+                        "exec",
+                        &self.container,
+                        "install",
+                        "-m",
+                        "0644",
+                        "/usr/local/lib/day2/roc_platform_abi.rs",
+                        "/workspace/platform/crates/worker/generated/roc_platform_abi.rs",
+                    ]),
                     remaining,
                 )?;
                 json!({"container":self.container,"memory_bytes":6_u64*1024*1024*1024,"cpu_millis":4000,"pids":512,"artifact_tmpfs_bytes":1024_u64*1024*1024,"abi_tmpfs_bytes":64_u64*1024*1024,"reviewed_abi_seed_staged":true})

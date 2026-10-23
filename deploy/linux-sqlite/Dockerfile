@@ -13,6 +13,9 @@ WORKDIR /workspace/platform
 # The disposable tooling image keeps executable behavior and assertions while
 # avoiding multi-gigabyte debug symbols and incremental caches in image layers.
 COPY . .
+# Keep the reviewed ABI outside the bounded generated-output mount so live
+# tooling can initialize that mount without Docker archive-copy semantics.
+RUN ["install", "-D", "-m", "0644", "crates/worker/generated/roc_platform_abi.rs", "/usr/local/lib/day2/roc_platform_abi.rs"]
 RUN ["bazel", "--batch", "--output_base=/workspace/platform/.cache/bazel-executor", "run", "//crates/xtask:xtask", "--", "install-verifier"]
 RUN ["build-out/bin/xtask", "build-tooling-image"]
 RUN ["build-out/bin/xtask", "bootstrap"]
