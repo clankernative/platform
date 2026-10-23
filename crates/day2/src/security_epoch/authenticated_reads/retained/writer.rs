@@ -71,7 +71,7 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 valid: true,
                 timings: timings.clone(),
             };
-            timings.measure(Operation::BootstrapWriterSample, || port.sample())?;
+            port.sample()?;
             guard.complete()?;
             Ok(port)
         })();
@@ -172,7 +172,10 @@ impl ControllerPort<'_, '_> {
     }
 
     fn sample(&mut self) -> Result<Sample> {
-        let result = (|| {
+        // Count every full composite observation, not just acquisition's
+        // first one. These inclusive timings do not grant or cache authority.
+        let timings = self.timings.clone();
+        let result = timings.measure(Operation::BootstrapWriterSample, || {
             let guard = self.reads.state.gate.guard()?;
             ensure!(self.valid, "epoch_writer_refused");
             self.owner.try_borrow_mut()?.check()?;
@@ -187,7 +190,7 @@ impl ControllerPort<'_, '_> {
             self.owner.try_borrow_mut()?.check()?;
             guard.complete()?;
             Ok(sample)
-        })();
+        });
         if result.is_err() {
             self.refuse();
         }

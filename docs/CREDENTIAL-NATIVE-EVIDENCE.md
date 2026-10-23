@@ -297,8 +297,10 @@ its separate named count/total/max format. Bootstrap codes are:
 
 Rows remain inclusive: provider and authentication timings nest inside outer
 file/durability/writer phases, and Firestore calls nest inside counter/slot or
-mutation phases. Do not add nested durations to their parents. `elapsed_us`
-covers the whole caller action from immediately before role acquisition until
+mutation phases. Do not add nested durations to their parents.
+The `bootstrap_writer_sample` row counts every full Controller port observation,
+including the acquisition sample; it excludes decoding-only clock observations.
+`elapsed_us` covers the whole caller action from immediately before role acquisition until
 after final acknowledgement/release or refusal unwind. Its diagnostic clocks
 cannot grant authority, replace a native failure or renew an original interval.
 An unavailable elapsed time is inconclusive for margin.
