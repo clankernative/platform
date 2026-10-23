@@ -326,11 +326,9 @@ fn paired_observations_retain_spent_budget_and_expire_before_a_new_claim() {
         .counter
         .set_slot_fixture_time(Duration::from_secs(104));
     let (counter, slot) = guarded::read_with_counter(&selection, &core, &mut port, budget).unwrap();
-    assert!(
-        port.inner
-            .selected_timeouts
-            .iter()
-            .all(|timeout| *timeout == Duration::from_secs(1))
+    assert_eq!(
+        port.inner.selected_timeouts,
+        [Duration::from_secs(1), Duration::from_secs(1)]
     );
     let context = CurrentBootstrapExecution::fixture(
         &selection,
