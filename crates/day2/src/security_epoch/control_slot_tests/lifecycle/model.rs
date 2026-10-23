@@ -46,7 +46,11 @@ fn digest<T: Serialize>(tag: &str, value: &T) -> Digest {
 }
 
 impl Model {
-    pub(super) fn new(cores: &[LogicalCore; 2], physical: bool) -> Result<Self> {
+    pub(super) fn new(
+        cores: &[LogicalCore; 2],
+        physical: bool,
+        image_binding: &Option<Digest>,
+    ) -> Result<Self> {
         let values = [
             serde_json::to_value(&cores[0])?,
             serde_json::to_value(&cores[1])?,
@@ -113,7 +117,7 @@ impl Model {
         }
         Ok(Self {
             state: State {
-                binding: Digest::of(cores)?,
+                binding: Digest::of(&("day2-storage-lifecycle-fixture-v1", cores, image_binding))?,
                 continuation: true,
                 first_holder: false,
                 current: 0,

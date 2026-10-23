@@ -84,6 +84,7 @@ impl FileFixture {
         day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
         EpochStore,
         OriginalSeedCore,
+        Digest,
     )> {
         self.check(false)?;
         let selected = &self.creator.authority.selection;
@@ -92,13 +93,20 @@ impl FileFixture {
                 && self.layout.proposal.core == *selected.seed()
                 && self.layout.proposal.marker == selected.seed().marker()?
                 && self.layout.proposal.selection == *selected.digest()
-                && self.layout.proposal.store == *selected.store(),
+                && self.layout.proposal.store == *selected.store()
+                && self.layout.proposal.image == Digest::new(self.layout.image.bytes())
+                && self.layout.proposal.length == self.layout.image.bytes().len(),
             "lifecycle original fixture blueprint changed"
         );
         let data = (
             selected.policy().clone(),
             selected.store().clone(),
             selected.seed().clone(),
+            Digest::of(&(
+                "day2-storage-lifecycle-image-v1",
+                &self.layout.proposal.image,
+                self.layout.proposal.length,
+            ))?,
         );
         self.check(false)?;
         Ok(data)

@@ -119,6 +119,7 @@ struct World {
     port: SharedPort,
     selection: EpochStore,
     cores: [LogicalCore; 2],
+    image_binding: Option<Digest>,
     continuation: bool,
     first_holder: bool,
     current: usize,
@@ -139,18 +140,21 @@ impl World {
             None
         };
         #[cfg(target_os = "linux")]
-        let (selection, create) = if let Some(file) = &mut file {
-            let (policy, store, original) = file.blueprint()?;
+        let (selection, create, image_binding) = if let Some(file) = &mut file {
+            let (policy, store, original, image) = file.blueprint()?;
             let request = Request::CreateInitialAuthority {
                 bootstrap: original.bootstrap()?,
             };
             let core = LogicalCore::new(&store, policy, original, &request)?;
-            (store, core)
+            (store, core, Some(image))
         } else {
-            fixture()
+            let (store, core) = fixture();
+            (store, core, None)
         };
         #[cfg(not(target_os = "linux"))]
         let (selection, create) = fixture();
+        #[cfg(not(target_os = "linux"))]
+        let image_binding = None;
         ensure!(
             selection == tests::selection(),
             "conditional fixture provider selection changed"
@@ -189,6 +193,7 @@ impl World {
             port,
             selection,
             cores: [create, complete],
+            image_binding,
             continuation: true,
             first_holder: false,
             current: 0,
@@ -479,7 +484,7 @@ impl World {
         Ok(Record {
             accepted,
             state: State {
-                binding: Digest::of(&self.cores)?,
+                binding: self.binding()?,
                 continuation: self.continuation,
                 first_holder: self.first_holder,
                 current: self.current,
@@ -495,6 +500,14 @@ impl World {
             provider: json!({"counter":counter,"slots":provider}),
             handshake: self.handshake.snapshot(),
         })
+    }
+
+    fn binding(&self) -> Result<Digest> {
+        Digest::of(&(
+            "day2-storage-lifecycle-fixture-v1",
+            &self.cores,
+            &self.image_binding,
+        ))
     }
 }
 
@@ -548,7 +561,7 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
         "lifecycle fault/operation bound"
     );
     let mut world = World::new(program.seed, program.physical)?;
-    let mut model = model::Model::new(&world.cores, program.physical)?;
+    let mut model = model::Model::new(&world.cores, program.physical, &world.image_binding)?;
     let mut records = Vec::new();
     for (index, &event) in program.events.iter().enumerate() {
         let actual = match world.step(event) {
@@ -949,7 +962,7 @@ fn replay_saved_storage_lifecycle_history() -> Result<()> {
     );
     let fixture = World::new(bundle.program.seed, bundle.program.physical)?;
     ensure!(
-        Digest::of(&fixture.cores)? == bundle.binding,
+        fixture.binding()? == bundle.binding,
         "lifecycle replay immutable fixture inputs changed"
     );
     drop(fixture);
