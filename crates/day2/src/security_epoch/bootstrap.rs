@@ -483,7 +483,7 @@ impl AppStorageBootstrap {
             let holder = self.storage.first_holder_data()?;
             // Complete provider authentication within this stage's ORIGINAL
             // five seconds, before file/peer work can spend the separate
-            // ten-second bootstrap interval. Retaining the successful child
+            // storage-bootstrap interval. Retaining the successful child
             // does not observe the epoch or acknowledge anything; both provider
             // observations still follow the checked peer's actual Known.
             let mut reads = super::AuthenticatedReads::acquire_storage_bootstrap(
