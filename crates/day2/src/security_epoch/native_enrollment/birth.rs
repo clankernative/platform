@@ -5,7 +5,7 @@ use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::{HashCosts, issuer_stderr};
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
-    policy::EnrollmentPolicy,
+    policy::{EnrollmentPolicy, MAX_POLICY_BYTES, PolicyInterpretation},
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
     root_kms::RootKms,
@@ -23,11 +23,26 @@ const POLICY: &str = "/etc/day2/native-enrollment.json";
 const ISSUER: &str = "/usr/local/bin/day2-native-enrollment";
 
 pub(super) fn load_policy(acquisition: &mut NativeAcquisition) -> Result<EnrollmentPolicy> {
-    let bytes = selected_file(POLICY, 65_536, acquisition)?;
+    let bytes = selected_file(POLICY, MAX_POLICY_BYTES, acquisition)?;
     let policy: EnrollmentPolicy = crate::json::decode(&bytes)?;
     policy.validate()?;
     acquisition.remaining()?;
     Ok(policy)
+}
+
+pub(super) fn check_policy_interpretation(
+    acquisition: &mut NativeAcquisition,
+    interpretation: &mut PolicyInterpretation,
+    expected: &EnrollmentPolicy,
+) -> Result<()> {
+    // The same fresh NOFOLLOW/open, metadata, bounded read and clock checks
+    // run even on an exact-byte hit. A failed read cannot use cached DATA.
+    interpretation.observe(
+        selected_file(POLICY, MAX_POLICY_BYTES, acquisition),
+        expected,
+    )?;
+    acquisition.remaining()?;
+    Ok(())
 }
 
 fn selected_file(

@@ -72,6 +72,8 @@ pub(crate) struct EnrolledRoleStage<'a> {
     channel: Channel,
     #[cfg(target_os = "linux")]
     current_grant: SignedStage,
+    #[cfg(target_os = "linux")]
+    policy_interpretation: super::policy::PolicyInterpretation,
 }
 
 /// Exclusive, short borrow of an actual enrolled stage for storage work.
@@ -225,10 +227,12 @@ impl EnrolledProcessRoleOwner {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    ensure!(
-                        super::birth::load_policy(&mut authentication)? == self.policy,
-                        "native_enrollment_operator_selection_changed"
-                    );
+                    let mut policy_interpretation = super::policy::PolicyInterpretation::new();
+                    super::birth::check_policy_interpretation(
+                        &mut authentication,
+                        &mut policy_interpretation,
+                        &self.policy,
+                    )?;
                     self.issuer.check_live(&mut authentication)?;
                     self.certificate.verify(&self.policy)?;
                     let mut current = SelfSnapshot::acquire(
@@ -261,6 +265,7 @@ impl EnrolledProcessRoleOwner {
                         grant_peer,
                         nonce_peer,
                         channel,
+                        policy_interpretation,
                     ))
                 }
             })();
@@ -269,8 +274,16 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (acquisition, authentication, current, grant, grant_peer, nonce_peer, channel) =
-                    result?;
+                let (
+                    acquisition,
+                    authentication,
+                    current,
+                    grant,
+                    grant_peer,
+                    nonce_peer,
+                    channel,
+                    policy_interpretation,
+                ) = result?;
                 let deadline = Duration::from_nanos(grant.data.deadline_ns);
                 let mut stage = EnrolledRoleStage {
                     owner: self,
@@ -282,6 +295,7 @@ impl EnrolledProcessRoleOwner {
                     grant_peer,
                     channel,
                     current_grant: grant,
+                    policy_interpretation,
                 };
                 stage.check()?;
                 // A ten-second peer interval never gives role authentication
@@ -587,10 +601,11 @@ impl EnrolledRoleStage<'_> {
             );
             #[cfg(target_os = "linux")]
             {
-                ensure!(
-                    super::birth::load_policy(&mut self.acquisition)? == self.owner.policy,
-                    "native_enrollment_operator_selection_changed"
-                );
+                super::birth::check_policy_interpretation(
+                    &mut self.acquisition,
+                    &mut self.policy_interpretation,
+                    &self.owner.policy,
+                )?;
                 self.current.check(&mut self.acquisition)?;
                 self.owner.issuer.check_live(&mut self.acquisition)?;
                 self.nonce_peer.check_live(&mut self.acquisition)?;
