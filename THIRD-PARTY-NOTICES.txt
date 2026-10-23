@@ -61242,10 +61242,10 @@ freely, subject to the following restrictions:
 
 
 
-===== tokio 1.53.1 =====
+===== tokio 1.53.3 =====
 License: MIT
 Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/tokio/1.53.1/download
+Unmodified source: https://crates.io/api/v1/crates/tokio/1.53.3/download
 
 --- LICENSE ---
 MIT License
