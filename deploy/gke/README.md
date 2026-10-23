@@ -939,17 +939,18 @@ resource_catalog = {
       target = {
         kind                = "freetool_executor"
         service_id          = "freetool_executor"
-        allowed_resources   = ["freetool_db"]
-        credential_managers = ["operator@example.com"]
+        scope               = { kind = "any_app_resource" }
+        credential_managers = ["operator@wonderly.com"]
       }
     }
   }
   policies = {
     freetool_access = {
       revision             = 1
-      owner                = "operator@example.com"
+      owner                = "operator@wonderly.com"
       delegates            = []
-      actors               = ["operator@example.com", "automation@freetool.invalid"]
+      # Requires Platform PR #245, merged to main as c4047a21.
+      actors               = ["domain:wonderly.com"]
       allowed_apps         = ["freetool"]
       max_duration_seconds = null
       slots = {
@@ -978,7 +979,7 @@ resource_policies = [{
   bindings  = { freetool_executor = { id = "freetool_resource", revision = 1 } }
 }]
 
-credential_operator = "operator@example.com"
+credential_operator = "operator@wonderly.com"
 provider_credentials = [{
   credential_ref = { id = "freetool_transport_key", revision = 1 }
   secret_version = "projects/123456789/secrets/freetool-transport-key/versions/1"
@@ -1003,6 +1004,22 @@ loopback_services = {
 # app-edge values (Secret Manager IAM is granted to the pod runtime identity)
 runtime_secret_ids = ["freetool-transport-key", "freetool-executor-config"]
 ```
+
+This production Freetool policy uses `domain:wonderly.com` so employees can
+invoke the app's run and result-page operations. The app's `readers`, `writers`,
+and those operations' `actors` must name the same domain, and the verified
+identity contract must set `hosted_domain = "wonderly.com"`. Platform PR #245 is
+required because it admits verified domains in non-delegation resource-grant
+actors; `freetool_executor_resource` is such a grant. Platform revisions before
+#245 must list individual employees in the resource policy.
+
+The Freetool resource target's tagged `scope` is either
+`{ kind = "any_app_resource" }` for resources registered by this bound app at
+run time or `{ kind = "explicit", allowed_resources = ["resource_id"] }` for
+a non-empty allowlist. The executor still enforces its configured exact HTTP and
+PostgreSQL targets, approved DNS IPs and read-only database policy; the Platform
+binding constrains which app may invoke the executor and which exact actors may
+manage credentials.
 
 The config secret is a closed-schema executor JSON document. Set `bind` to
 `127.0.0.1:43210` and `database` to
