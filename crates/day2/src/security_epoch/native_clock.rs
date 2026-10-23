@@ -814,7 +814,7 @@ mod tests {
                 .unwrap();
             // The completed authentication child is gone. Subsequent I/O is
             // derived from THIS actual parent, never by widening that child.
-            let mut io = parent.narrow(30, parent.deadline).unwrap();
+            let mut io = parent.narrow(60, parent.deadline).unwrap();
             io.fixture_time = Some(Duration::from_millis(106_300));
             parent.fixture_time = io.fixture_time;
             match scope {
@@ -866,11 +866,11 @@ mod tests {
         parent.complete_authentication(provider).unwrap();
         // Authenticate first, consume that actual successful child, then spend
         // peer/file I/O time on the same original bootstrap parent.
-        let mut io = parent.narrow(30, parent.deadline).unwrap();
+        let mut io = parent.narrow(60, parent.deadline).unwrap();
         io.fixture_time = Some(parent.origin + Duration::from_millis(6_300));
         parent.fixture_time = io.fixture_time;
         parent.join_storage_bootstrap_view(io).unwrap();
-        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(23_700));
+        assert_eq!(parent.remaining().unwrap(), Duration::from_millis(53_700));
         parent.fixture_time = Some(parent.origin + STORAGE_BOOTSTRAP_LIMIT);
         assert!(parent.remaining().is_err());
     }
