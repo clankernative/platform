@@ -47,6 +47,9 @@ fn check_policy_file(
     interpretation: &mut PolicyInterpretation,
     expected: &EnrollmentPolicy,
 ) -> Result<()> {
+    let _profile = crate::security_epoch::self_check_profile::enter(
+        crate::security_epoch::self_check_profile::Category::Policy,
+    );
     // The same fresh NOFOLLOW/open, metadata, bounded read and clock checks
     // run even on an exact-byte hit. A failed read cannot use cached DATA.
     interpretation.observe(selected_file(path, MAX_POLICY_BYTES, acquisition), expected)?;

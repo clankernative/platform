@@ -197,14 +197,17 @@ impl ControllerPort<'_, '_> {
         let timings = self.timings.clone();
         let result = timings.measure(Operation::BootstrapWriterSample, || {
             let guard = self.reads.state.gate.guard()?;
-            ensure!(self.valid, "epoch_writer_refused");
-            let mut phase = self.owner.try_borrow_mut()?;
-            // The closed leaf borrows the SAME provider state and actual
-            // owning stage. It returns no stage/material/permission and ends
-            // its exclusive material borrow before the full file/peer check.
-            phase.check_authentication(&mut self.reads)?;
-            phase.check()?;
-            drop(phase);
+            timings.profile_self_check(|| {
+                ensure!(self.valid, "epoch_writer_refused");
+                let mut phase = self.owner.try_borrow_mut()?;
+                // The closed leaf borrows the SAME provider state and actual
+                // owning stage. It returns no stage/material/permission and ends
+                // its exclusive material borrow before the full file/peer check.
+                phase.check_authentication(&mut self.reads)?;
+                phase.check()?;
+                drop(phase);
+                Ok::<(), anyhow::Error>(())
+            })?;
             // Charge ALL full-check work; the leaf's earlier clock cannot be
             // returned as if it had been sampled after those checks.
             let sample = self.decoding_sample()?;

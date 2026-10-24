@@ -394,6 +394,7 @@
     "crates/day2/src/security_epoch/runtime_identity_tests.rs",
     "crates/day2/src/security_epoch/runtime_profile.rs",
     "crates/day2/src/security_epoch/seed_core.rs",
+    "crates/day2/src/security_epoch/self_check_profile.rs",
     "crates/day2/src/security_epoch/serving.rs",
     "crates/day2/src/security_epoch/serving/shell.rs",
     "crates/day2/src/security_epoch/storage_authority.rs",
