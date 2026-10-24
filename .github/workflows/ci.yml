@@ -132,8 +132,23 @@ jobs:
         run: build-out/bin/xtask verify-queue-find
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download workflow artifacts
+        id: artifact_download_1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ steps.find.outputs.artifact != '' }}
+        with:
+          artifact-ids: ${{ steps.find.outputs.artifact }}
+          run-id: ${{ steps.find.outputs.run }}
+          github-token: ${{ github.token }}
+          repository: clankernative/platform
+          path: /tmp/day2-merge-receipt
+          merge-multiple: true
+      - name: Retry download of workflow artifacts
+        if: ${{ !cancelled() && steps.artifact_download_1.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           artifact-ids: ${{ steps.find.outputs.artifact }}
           run-id: ${{ steps.find.outputs.run }}
@@ -272,11 +287,24 @@ jobs:
       - run: build-out/bin/xtask source-check
       - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
+      - name: Restore pinned native compiler and formatter inputs
+        id: native_tools
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ matrix.part == 'inputs' }}
+        with:
+          path: /__w/${{ github.event.repository.name }}/.toolchains
+          key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
       - run: build-out/bin/xtask bootstrap
       - run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
         env:
           GH_TOKEN: ${{ github.token }}
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
+      - name: Save pinned native compiler and formatter inputs
+        if: ${{ matrix.part == 'inputs' && steps.native_tools.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /__w/${{ github.event.repository.name }}/.toolchains
+          key: ${{ steps.native_tools.outputs.cache-primary-key }}
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
         id: native_preparation
@@ -325,12 +353,14 @@ jobs:
           retention-days: 3
       # Each lane transports only its reviewed outputs. The test lane cannot
       # overwrite fixture caches, CLI distribution or generated worker sources.
+      - name: Plan only this lane's admitted compiler outputs
+        run: build-out/bin/xtask verify-transport-plan ${{ matrix.part }}
       - name: Archive fixture and check preparation
         if: ${{ matrix.part == 'inputs' }}
-        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out platform/artifacts platform/cli platform/crates/worker/generated .toolchains
+        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/inputs.list0
       - name: Archive test compilation and documentation preparation
         if: ${{ matrix.part == 'tests' }}
-        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out/bin platform/build-out/tests platform/artifacts/ci-test-binaries.json platform/artifacts/ci-test-build-cache.json platform/artifacts/ci-preparation-tests.json
+        run: tar -czf /tmp/day2-preparation.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/tests.list0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-preparation-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -625,7 +655,18 @@ jobs:
         run: test "$PARALLEL" = success
         env:
           PARALLEL: ${{ needs.verify-prepare-parts.result }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      - name: Retry download of day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_1.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-linux-verifier
@@ -645,29 +686,108 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_2
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-preparation-inputs
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Retry download of day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-preparation-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-preparation-inputs
+      - name: Download day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_3
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-preparation-tests
+      - name: Retry download of day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-preparation-tests-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-preparation-tests
       - name: Restore fixture and check outputs
-        run: tar -xzf /tmp/day2-preparation-inputs/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.."
+        run: tar -xzf /tmp/day2-preparation-inputs/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
       - name: Restore test compilation outputs
-        run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE/.."
+        run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore pinned native compiler and formatter inputs
+        id: native_tools
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /__w/${{ github.event.repository.name }}/.toolchains
+          key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned compiler inputs on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap
+      - name: Download pinned formatter input on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Admit pinned formatter input on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Admit both preparation parts
         run: build-out/bin/xtask verify-prepare-join
-      - name: Archive complete admitted preparation
-        run: tar -czf /tmp/day2-verification.tgz -C "$GITHUB_WORKSPACE/.." platform/build-out platform/artifacts platform/cli platform/crates/worker/generated .toolchains
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Plan shard-specific admitted compiler outputs
+        run: build-out/bin/xtask verify-transport-plan runtime
+      - name: Archive admitted common outputs
+        run: tar -czf /tmp/day2-common.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/common.list0
+      - name: Retain admitted common outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-verification.tgz
+          name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-common.tgz
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
+      - name: Archive admitted workspace-day2 outputs
+        run: tar -czf /tmp/day2-workspace-day2.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-day2.list0
+      - name: Retain admitted workspace-day2 outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-verify-workspace-day2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-workspace-day2.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - name: Archive admitted workspace-control outputs
+        run: tar -czf /tmp/day2-workspace-control.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-control.list0
+      - name: Retain admitted workspace-control outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-verify-workspace-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-workspace-control.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - name: Archive admitted workspace-other outputs
+        run: tar -czf /tmp/day2-workspace-other.tgz -C "$GITHUB_WORKSPACE" --no-recursion --null -T /tmp/day2-verification-transport/workspace-other.list0
+      - name: Retain admitted workspace-other outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-verify-workspace-other-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-workspace-other.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - name: Retain the exact transport file inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-transport-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification-transport/plan.json
+          if-no-files-found: error
+          retention-days: 14
 
   verify-shards:
     needs: verify-prepare
@@ -740,7 +860,18 @@ jobs:
       - run: sha256sum --check "$GITHUB_WORKSPACE/.github/temporal-linux.sha256"
         working-directory: /tmp/day2-tools
       - run: tar -xzf /tmp/day2-tools/temporal_cli_1.6.1_linux_amd64.tar.gz -C /tmp/day2-tools
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      - name: Retry download of day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_1.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-linux-verifier
@@ -757,11 +888,86 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download common admitted fixtures and metadata
+        id: artifact_download_2
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification
-      - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
+      - name: Retry download of common admitted fixtures and metadata
+        if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
+      - name: Restore common admitted fixtures and metadata
+        run: tar -xzf /tmp/day2-verification/day2-common.tgz -C "$GITHUB_WORKSPACE"
+      - name: Download this workspace shard's test executables
+        id: artifact_download_3
+        timeout-minutes: 2
+        continue-on-error: true
+        if: ${{ startsWith(matrix.shard, 'workspace-') }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-verify-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
+      - name: Retry download of this workspace shard's test executables
+        if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-verify-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
+      - name: Restore this workspace shard's test executables
+        if: ${{ startsWith(matrix.shard, 'workspace-') }}
+        run: tar -xzf /tmp/day2-verification/day2-${{ matrix.shard }}.tgz -C "$GITHUB_WORKSPACE"
+      - name: Download all required binary groups in parallel
+        id: artifact_download_4
+        timeout-minutes: 2
+        continue-on-error: true
+        if: ${{ matrix.shard == 'parallel-runtime' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: day2-verify-workspace-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: /tmp/day2-verification
+      - name: Retry download of all required binary groups in parallel
+        if: ${{ !cancelled() && steps.artifact_download_4.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: day2-verify-workspace-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: /tmp/day2-verification
+      - name: Restore required workspace-day2 test executables
+        if: ${{ matrix.shard == 'parallel-runtime' }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-day2.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore required workspace-control test executables
+        if: ${{ matrix.shard == 'parallel-runtime' }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-control.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore required workspace-other test executables
+        if: ${{ matrix.shard == 'parallel-runtime' }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-other.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore pinned native compiler and formatter inputs
+        id: native_tools
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /__w/${{ github.event.repository.name }}/.toolchains
+          key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned compiler inputs on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap
+      - name: Download pinned formatter input on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Admit pinned formatter input on cache miss
+        if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-shard ${{ matrix.shard }}
       - name: Retain failed storage lifecycle replay bundles
@@ -844,8 +1050,19 @@ jobs:
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
           MAC: ${{ needs.verify-mac-compatibility.result }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        with:
+          name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-linux-verifier
+      - name: Retry download of day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_1.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-linux-verifier
@@ -864,24 +1081,104 @@ jobs:
           path: /tmp/day2-ci-linux-context.json
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download common admitted fixtures and metadata
+        id: artifact_download_2
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
-          name: day2-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/day2-verification
-      - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
+      - name: Retry download of common admitted fixtures and metadata
+        if: ${{ !cancelled() && steps.artifact_download_2.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-verify-common-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-verification
+      - name: Restore common admitted fixtures and metadata
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        run: tar -xzf /tmp/day2-verification/day2-common.tgz -C "$GITHUB_WORKSPACE"
+      - name: Download all required binary groups in parallel
+        id: artifact_download_3
+        timeout-minutes: 2
+        continue-on-error: true
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: day2-verify-workspace-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: /tmp/day2-verification
+      - name: Retry download of all required binary groups in parallel
+        if: ${{ !cancelled() && steps.artifact_download_3.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: day2-verify-workspace-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: /tmp/day2-verification
+      - name: Restore required workspace-day2 test executables
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-day2.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore required workspace-control test executables
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-control.tgz -C "$GITHUB_WORKSPACE"
+      - name: Restore required workspace-other test executables
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        run: tar -xzf /tmp/day2-verification/day2-workspace-other.tgz -C "$GITHUB_WORKSPACE"
+      - name: Download day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_4
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           pattern: day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ci-results
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Retry download of day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_4.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: day2-result-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-results
+          merge-multiple: true
+      - name: Download day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_5
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
         with:
           name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts
+      - name: Retry download of day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_5.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: day2-mac-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Restore pinned native compiler and formatter inputs
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
+        id: native_tools
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: /__w/${{ github.event.repository.name }}/.toolchains
+          key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
+      - name: Download pinned compiler inputs on cache miss
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap
+      - name: Download pinned formatter input on cache miss
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
+        run: gh release download roc-formatter-linux-2026-09-12 --repo clankernative/platform --pattern roc-fmt-day2-x86_64-unknown-linux-gnu --dir /tmp/day2-tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Admit pinned formatter input on cache miss
+        if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && steps.native_tools.outputs.cache-hit != 'true' }}
+        run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask verify-compose
         if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -896,8 +1193,19 @@ jobs:
             artifacts/ci-preparation-*.json
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+        id: artifact_download_6
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
+        with:
+          name: day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Retry download of day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ !cancelled() && steps.artifact_download_6.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: day2-merge-reuse-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts
