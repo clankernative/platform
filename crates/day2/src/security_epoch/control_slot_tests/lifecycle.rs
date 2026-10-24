@@ -3,8 +3,10 @@
 //! adds actual original-file observations to these same schedules.
 use super::*;
 use crate::security_epoch::{
-    bootstrap::check_active_snapshot, journal::snapshot_digest,
-    native_enrollment::LifecycleHandshake, storage_authority::lifecycle_fixture,
+    bootstrap::check_active_snapshot,
+    journal::snapshot_digest,
+    native_enrollment::{LifecycleHandshake, LifecycleModelError},
+    storage_authority::lifecycle_fixture,
     tests::lifecycle_provider as counter_fixture,
 };
 use serde::{Deserialize, Serialize};
@@ -513,7 +515,11 @@ impl World {
                     Ok(())
                 });
                 self.continuation = continuation;
-                result.is_ok()
+                match result {
+                    Ok(()) => true,
+                    Err(error) if error.is::<LifecycleModelError>() => return Err(error),
+                    Err(_) => false,
+                }
             }
         };
         let counter = counter_fixture::snapshot(&self.port.counter);
@@ -749,6 +755,63 @@ impl ConsumerLifecycle {
             json!({"actual":actual,"expected":{"accepted":accepted,"state":state},"serving":self.shell.snapshot()}),
         )
     }
+}
+
+#[test]
+fn expected_peer_death_cannot_hide_a_handshake_oracle_error() -> Result<()> {
+    fn active() -> Result<ConsumerLifecycle> {
+        let mut consumer = ConsumerLifecycle::new(71, &tests::selection().scope)?;
+        consumer.step(ConsumerEvent::FirstHolder { death_cut: None })?;
+        for activation in [false, true] {
+            consumer.step(ConsumerEvent::Reserve { activation })?;
+            consumer.step(ConsumerEvent::Dispatch { activation })?;
+            consumer.step(ConsumerEvent::Settle { activation })?;
+        }
+        consumer.step(ConsumerEvent::Current {
+            death_cut: None,
+            rewrite_provider: false,
+        })?;
+        Ok(consumer)
+    }
+
+    for event in [
+        ConsumerEvent::Current {
+            death_cut: Some(0),
+            rewrite_provider: false,
+        },
+        ConsumerEvent::ControllerDeath { cut: 0 },
+    ] {
+        let mut ordinary = active()?;
+        let refused = ordinary.step(event)?;
+        assert_eq!(refused["actual"]["accepted"], false);
+        assert_eq!(refused["expected"]["accepted"], false);
+        assert_eq!(refused["actual"]["state"]["continuation"], false);
+
+        let mut divergent = active()?;
+        divergent.world.handshake.corrupt_reference_for_control();
+        let error = divergent
+            .step(event)
+            .expect_err("oracle disagreement became an ordinary expected refusal");
+        assert!(error.is::<ConsumerModelError>());
+        assert!(!divergent.world.continuation);
+        // Reproduce the masking condition: ordinary storage denial and the
+        // complete outer State still agree. The transcript disagreement must
+        // remain independently fatal rather than relying on that comparison.
+        let expected = divergent.model.step(Event::Current {
+            death_cut: Some(0),
+            rewrite_provider: false,
+        })?;
+        let observed = divergent.world.record(
+            false,
+            counter_fixture::snapshot(&divergent.world.port.counter),
+        )?;
+        assert_eq!(
+            (observed.accepted, &observed.state),
+            (expected.0, &expected.1)
+        );
+        assert_ne!(observed.handshake["actual"], observed.handshake["oracle"]);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

@@ -26,6 +26,11 @@ attempt rows, provider sends and read outcomes. It never consumes the actual
 result or calls production transition helpers to choose an expectation. The
 storage and handshake campaigns retain their own independent models and compare
 their complete state before the composed consumer receives an observation.
+Handshake simulator/oracle errors retain a typed failure channel across the
+storage phase's pessimistic refusal handling. A negative control deliberately
+disagrees only in the reference transcript: even when peer death produces the
+expected denial and the complete outer storage state still matches, the model
+error must fail the composition.
 
 Four successful seeds and fifty-six owner/prefix schedules replay twice.
 Coverage requires the scheduled owner actually to become unavailable. Directed
