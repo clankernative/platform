@@ -41,8 +41,14 @@ For a focused Apple Silicon private-builder diagnosis after bootstrap, use
 prepares the normal CLI and executes the existing real isolated-build case in
 its current integration harness. It uses the ordinary pinned offline builder,
 sandbox and admission, and publishes no full verification receipt. Compiler
-failure messages expose only fixed observations and bounded numeric child
-statuses; free-form app/SDK diagnostics remain protected local evidence.
+failure messages expose only fixed observations, bounded numeric child
+statuses and failed action owners found in the current platform target catalog.
+Unknown/external owners stay absent; action kinds use a closed vocabulary. The
+uploaded outcome includes bounded numeric cgroup snapshots before the build and
+at failure, with nondecreasing OOM-counter deltas when the limits match. These
+are cgroup observations, not attribution of a signal or OOM to a particular PID
+or action. Free-form app/SDK diagnostics, command lines and environment values
+remain protected local evidence.
 
 The second command only compiles and prints the admitted executable path. It
 runs no cases. The first accepts declared test labels and bounded libtest

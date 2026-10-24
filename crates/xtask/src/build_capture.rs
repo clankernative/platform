@@ -65,13 +65,15 @@ pub(crate) struct Failure {
     observations: BTreeSet<&'static str>,
     children: BTreeSet<ChildStatus>,
     child_statuses_truncated: bool,
+    actions: ActionDiagnostics,
+    oom_kill_delta: Option<u64>,
 }
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}; observations={:?}; children={:?}; child_statuses_truncated={}",
+            "Bazel build failed: primary={}, code={:?}, signal={:?}, os_error={:?}; evidence={:?}; retained={}; observations={:?}; children={:?}; child_statuses_truncated={}; actions={:?}; cgroup_oom_kill_delta={:?}",
             if self.process.category == "success" {
                 "capture"
             } else {
@@ -84,7 +86,9 @@ impl std::fmt::Display for Failure {
             self.retained,
             self.observations,
             self.children,
-            self.child_statuses_truncated
+            self.child_statuses_truncated,
+            self.actions,
+            self.oom_kill_delta
         )
     }
 }
@@ -205,6 +209,94 @@ fn diagnostic_observations(bytes: &[u8]) -> BTreeSet<&'static str> {
     .collect()
 }
 
+#[derive(Debug, Serialize)]
+struct FailedAction {
+    owner: Option<String>,
+    kind: &'static str,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ActionDiagnostics {
+    records: Vec<FailedAction>,
+    reported_failures: usize,
+    catalog_available: bool,
+    parse_complete: bool,
+    truncated: bool,
+    child_signal_attribution: bool,
+}
+
+// Export only owners present in the current public platform target catalog.
+// BEP messages, paths, command lines and unknown/external labels stay private.
+fn action_diagnostics(bytes: &[u8], allowed: &BTreeSet<String>) -> ActionDiagnostics {
+    let mut result = ActionDiagnostics {
+        records: Vec::new(),
+        reported_failures: 0,
+        catalog_available: !allowed.is_empty(),
+        parse_complete: bytes.len() <= MAX_CAPTURE,
+        truncated: false,
+        child_signal_attribution: false,
+    };
+    if !result.parse_complete {
+        return result;
+    }
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(value) = day2::json::decode::<Value>(line) else {
+            result.parse_complete = false;
+            break;
+        };
+        let Some(action) = value.get("action").and_then(Value::as_object) else {
+            continue;
+        };
+        match action.get("success") {
+            Some(Value::Bool(true)) => continue,
+            None | Some(Value::Bool(false)) => {}
+            _ => {
+                result.parse_complete = false;
+                continue;
+            }
+        }
+        let Some(id) = value
+            .pointer("/id/actionCompleted")
+            .and_then(Value::as_object)
+        else {
+            result.parse_complete = false;
+            continue;
+        };
+        result.reported_failures += 1;
+        if result.records.len() == 8 {
+            result.truncated = true;
+            continue;
+        }
+        let owner = id.get("label").and_then(Value::as_str).and_then(|label| {
+            allowed
+                .get(label.strip_prefix("@@").unwrap_or(label))
+                .cloned()
+        });
+        let kind = match action.get("type").and_then(Value::as_str) {
+            Some("Rustc") => "rustc",
+            Some("RustcClippy") => "clippy",
+            Some("CppCompile") => "c_compile",
+            Some("CppLink") => "native_link",
+            Some("CargoBuildScriptRun") => "build_script",
+            _ => "other",
+        };
+        let exit_code = action
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok());
+        result.records.push(FailedAction {
+            owner,
+            kind,
+            exit_code,
+        });
+    }
+    result
+}
+
 fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut options = fs::OpenOptions::new();
@@ -238,7 +330,15 @@ fn memory(directory: &Path) -> serde_json::Value {
             (key == name).then(|| value.parse::<u64>().ok()).flatten()
         })
     };
-    json!({"limit_bytes":number("memory.max"),"peak_bytes":number("memory.peak"),"oom_events":event("oom"),"oom_kills":event("oom_kill"),"cause_attribution":false})
+    json!({"limit_bytes":number("memory.max"),"current_bytes":number("memory.current"),"peak_bytes":number("memory.peak"),"oom_events":event("oom"),"oom_kills":event("oom_kill"),"cause_attribution":false})
+}
+
+fn memory_delta(before: &Value, after: &Value, key: &str) -> Option<u64> {
+    let limit = before["limit_bytes"].as_u64().filter(|limit| *limit > 0)?;
+    if after["limit_bytes"].as_u64() != Some(limit) {
+        return None;
+    }
+    after[key].as_u64()?.checked_sub(before[key].as_u64()?)
 }
 
 fn report(
@@ -246,6 +346,7 @@ fn report(
     process: Outcome,
     events: std::io::Result<Vec<u8>>,
     log: &[u8],
+    memory_before: Value,
 ) -> Result<()> {
     let capture = match &events {
         Err(_) => Some("read"),
@@ -256,6 +357,13 @@ fn report(
     if process.category == "success" && capture.is_none() {
         return Ok(());
     }
+    let memory_after = memory(Path::new("/sys/fs/cgroup"));
+    let oom_kill_delta = memory_delta(&memory_before, &memory_after, "oom_kills");
+    let catalog = crate::bazel::targets(root)
+        .map(|targets| targets.into_iter().map(|target| target.label).collect())
+        .unwrap_or_default();
+    let mut actions = action_diagnostics(events.as_deref().unwrap_or_default(), &catalog);
+    actions.parse_complete &= events.is_ok();
     let retain = (|| -> Result<()> {
         let base = root.join("artifacts/bazel/failures");
         fs::create_dir_all(&base)?;
@@ -273,7 +381,7 @@ fn report(
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
         let bytes = events.as_ref().map(Vec::as_slice).unwrap_or_default();
-        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"diagnostic_observations":diagnostic_observations(log),"cause_attribution":false,"cgroup_memory_at_failure":memory(Path::new("/sys/fs/cgroup")),"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
+        let manifest = json!({"format":1,"build_process":process,"capture_problem":capture,"captured_bytes":bytes.len(),"retained_bytes":bytes.len().min(MAX_CAPTURE),"complete":bytes.len() <= MAX_CAPTURE && events.is_ok(),"child_statuses":child_statuses(log),"failed_actions":actions,"diagnostic_observations":diagnostic_observations(log),"cause_attribution":false,"cgroup_memory_before":memory_before,"cgroup_memory_at_failure":memory_after,"cgroup_memory_event_deltas":{"oom_events":memory_delta(&memory_before,&memory_after,"oom_events"),"oom_kills":oom_kill_delta,"cause_attribution":false},"diagnostic_only_not_a_preparation_or_runtime_receipt":true,"raw_retention":"private job-workspace only; never an Actions artifact input"});
         private_write(
             &directory.join("events.jsonl"),
             &bytes[..bytes.len().min(MAX_CAPTURE)],
@@ -297,6 +405,8 @@ fn report(
         observations: diagnostic_observations(log),
         children: children.into_iter().take(8).collect(),
         child_statuses_truncated,
+        actions,
+        oom_kill_delta,
     }
     .into())
 }
@@ -307,6 +417,7 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
     command
         .stdout(stdout.as_file().try_clone()?)
         .stderr(stderr.as_file().try_clone()?);
+    let memory_before = memory(Path::new("/sys/fs/cgroup"));
     let process = Outcome::observe(command_status_with_budget(root, command, budget));
     let output = read_bounded(stdout.path());
     let errors = read_bounded(stderr.path());
@@ -315,6 +426,7 @@ fn capture(root: &Path, command: &mut Command, budget: Duration, events: &Path) 
         process,
         read_bounded(events),
         errors.as_deref().unwrap_or_default(),
+        memory_before,
     );
     // Free-form compiler/Bazel diagnostics remain private local evidence. The
     // public error exports only the actual numeric outcome and fixed classes.
@@ -344,7 +456,14 @@ mod tests {
         for code in 1..=12 {
             log.extend_from_slice(format!("RR_CHILD_V1 code_present=1 code={code} signal_present=0 signal=0 metadata_kill_requested=0\n").as_bytes());
         }
-        let error = report(root.path(), failed(), Ok(success_events()), &log).unwrap_err();
+        let error = report(
+            root.path(),
+            failed(),
+            Ok(success_events()),
+            &log,
+            Value::Null,
+        )
+        .unwrap_err();
         let display = error.to_string();
         assert!(display.contains("os_access_refused"));
         assert!(display.contains("child_statuses_truncated=true"));
@@ -368,6 +487,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failed_action_diagnostics_expose_only_current_catalog_owners_and_closed_fields() -> Result<()>
+    {
+        let allowed = BTreeSet::from(["//crates/day2:unit_lib".into()]);
+        let mut bytes = Vec::new();
+        for (label, kind, success) in [
+            ("@@//crates/day2:unit_lib", "Rustc", false),
+            ("//PRIVATE:SECRET", "PRIVATE", false),
+            ("//crates/day2:unit_lib", "Rustc", true),
+        ] {
+            bytes.extend(serde_json::to_vec(&json!({
+                "id":{"actionCompleted":{"label":label,"primaryOutput":"/PRIVATE/PATH"}},
+                "action":{"success":success,"type":kind,"exitCode":1,
+                    "commandLine":["PRIVATE-ARGV"],"stderr":{"uri":"file:///PRIVATE"},
+                    "failureDetail":{"message":"PRIVATE-ENV"}}
+            }))?);
+            bytes.push(b'\n');
+        }
+        let summary = action_diagnostics(&bytes, &allowed);
+        assert_eq!(summary.reported_failures, 2);
+        assert_eq!(summary.records.len(), 2);
+        assert_eq!(
+            summary.records[0].owner.as_deref(),
+            Some("//crates/day2:unit_lib")
+        );
+        assert_eq!(summary.records[0].kind, "rustc");
+        assert_eq!(summary.records[0].exit_code, Some(1));
+        assert_eq!(summary.records[1].owner, None);
+        assert_eq!(summary.records[1].kind, "other");
+        assert!(!summary.child_signal_attribution);
+        assert!(summary.parse_complete);
+        assert!(!serde_json::to_string(&summary)?.contains("PRIVATE"));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_action_diagnostics_preserve_limits_multiplicity_and_inconclusive_inputs() -> Result<()>
+    {
+        let event = serde_json::to_vec(&json!({
+            "id":{"actionCompleted":{"label":"//crates/day2:unit_lib"}},
+            "action":{"type":"Rustc","exitCode":1}
+        }))?;
+        let allowed = BTreeSet::from(["//crates/day2:unit_lib".into()]);
+        let mut bytes = Vec::new();
+        for _ in 0..10 {
+            bytes.extend(&event);
+            bytes.push(b'\n');
+        }
+        let summary = action_diagnostics(&bytes, &allowed);
+        assert_eq!(summary.reported_failures, 10);
+        assert_eq!(summary.records.len(), 8);
+        assert!(summary.truncated);
+        assert!(summary.parse_complete);
+        bytes.extend(b"malformed PRIVATE");
+        assert!(!action_diagnostics(&bytes, &allowed).parse_complete);
+        let missing = action_diagnostics(&event, &BTreeSet::new());
+        assert!(!missing.catalog_available);
+        assert_eq!(missing.records[0].owner, None);
+        assert!(!action_diagnostics(&vec![b'x'; MAX_CAPTURE + 1], &allowed).parse_complete);
+        Ok(())
+    }
+
+    #[test]
+    fn memory_event_deltas_never_invent_zero_or_identify_a_killed_child() {
+        let before = json!({"limit_bytes":6442450944_u64,"oom_kills":3});
+        let after = json!({"limit_bytes":6442450944_u64,"oom_kills":4});
+        assert_eq!(memory_delta(&before, &after, "oom_kills"), Some(1));
+        assert_eq!(memory_delta(&after, &before, "oom_kills"), None);
+        assert_eq!(memory_delta(&Value::Null, &after, "oom_kills"), None);
+        assert_eq!(
+            memory_delta(
+                &before,
+                &json!({"limit_bytes":1,"oom_kills":4}),
+                "oom_kills"
+            ),
+            None
+        );
+        assert_eq!(
+            memory_delta(&before, &json!({"limit_bytes":6442450944_u64}), "oom_kills"),
+            None
+        );
+    }
+
     fn failed() -> Outcome {
         Outcome {
             category: "exit",
@@ -386,7 +588,7 @@ mod tests {
     fn nonzero_is_primary_even_with_valid_or_malformed_events() -> Result<()> {
         for events in [success_events(), b"malformed".to_vec()] {
             let root = tempfile::tempdir()?;
-            let error = report(root.path(), failed(), Ok(events), b"").unwrap_err();
+            let error = report(root.path(), failed(), Ok(events), b"", Value::Null).unwrap_err();
             assert_eq!(
                 error.downcast_ref::<Failure>().unwrap().process.code,
                 Some(7)
@@ -409,7 +611,14 @@ mod tests {
         let log = b"RR_CHILD_V1 code_present=0 code=0 signal_present=1 signal=9 metadata_kill_requested=0\nPRIVATE RR_CHILD_V1 code_present=1 code=0 signal_present=0 signal=0 metadata_kill_requested=0\n";
         assert_eq!(child_statuses(log).len(), 1);
         let root = tempfile::tempdir()?;
-        let error = report(root.path(), failed(), Ok(success_events()), log).unwrap_err();
+        let error = report(
+            root.path(),
+            failed(),
+            Ok(success_events()),
+            log,
+            Value::Null,
+        )
+        .unwrap_err();
         assert_eq!(
             error.downcast_ref::<Failure>().unwrap().process.code,
             Some(7)
@@ -426,6 +635,7 @@ mod tests {
             failed(),
             Err(std::io::Error::from_raw_os_error(5)),
             b"",
+            Value::Null,
         )
         .unwrap_err();
         let failure = error.downcast_ref::<Failure>().unwrap();
@@ -591,6 +801,7 @@ mod tests {
             failed(),
             Ok(vec![b'x'; MAX_CAPTURE + 1]),
             b"PRIVATE",
+            Value::Null,
         )
         .unwrap_err();
         let directory = fs::read_dir(root.path().join("artifacts/bazel/failures"))?
@@ -627,6 +838,7 @@ mod tests {
     fn memory_diagnostics_are_optional_numeric_kernel_facts() -> Result<()> {
         let root = tempfile::tempdir()?;
         fs::write(root.path().join("memory.max"), b"6442450944")?;
+        fs::write(root.path().join("memory.current"), b"1234")?;
         fs::write(root.path().join("memory.peak"), b"PRIVATE")?;
         fs::write(
             root.path().join("memory.events"),
@@ -634,6 +846,7 @@ mod tests {
         )?;
         let value = memory(root.path());
         assert_eq!(value["limit_bytes"], 6442450944_u64);
+        assert_eq!(value["current_bytes"], 1234);
         assert!(value["peak_bytes"].is_null());
         assert_eq!(value["oom_events"], 2);
         assert_eq!(value["oom_kills"], 1);
@@ -651,7 +864,7 @@ mod tests {
             signal: None,
             os_error: None,
         };
-        report(root.path(), process, Ok(success_events()), b"")?;
+        report(root.path(), process, Ok(success_events()), b"", Value::Null)?;
         assert!(!root.path().join("artifacts").exists());
         Ok(())
     }
