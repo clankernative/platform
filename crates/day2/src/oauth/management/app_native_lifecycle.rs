@@ -1328,13 +1328,24 @@ fn seeded_native_oauth_failures_cannot_restore_originals_or_current_authority() 
 fn original_deadline_is_not_reset_by_native_reobservation_or_sqlite_reopen() -> Result<()> {
     for at in [1, 3, 4, 10] {
         let mut steps = happy();
-        steps.insert(at, Step::Advance { seconds: 300 });
+        // The ordinary path spends two seconds between capture and approval.
+        // Spend the remainder so the selected consumer meets deadline equality.
+        steps.insert(at, Step::Advance { seconds: 298 });
         steps.extend([Step::Reopen, Step::Restore, Step::Authorize, Step::Callback]);
-        verify(&Program {
+        let records = verify(&Program {
             version: 1,
             seed: at as u64,
             steps,
         })?;
+        let boundary = &records[at + 1 + usize::from(at == 1)];
+        ensure!(
+            boundary["oracle"]["now"].as_i64()
+                == boundary["oracle"]["created"]
+                    .as_i64()
+                    .map(|created| created + 300)
+                && boundary["accepted"] == false,
+            "original expiry schedule missed deadline equality"
+        );
     }
     Ok(())
 }
