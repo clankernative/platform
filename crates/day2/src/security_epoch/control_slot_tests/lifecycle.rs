@@ -218,7 +218,7 @@ impl World {
         // later sample and no constructor for a native owner is called.
         let budget = Budget::for_context(self.port.sample()?, Duration::from_secs(105))?;
         let (counter, slot) =
-            guarded::read_with_counter(&self.selection, core, &mut self.port, budget)?;
+            guarded::read_for_action(&self.selection, core, &mut self.port, budget)?;
         let context = CurrentBootstrapExecution::fixture(
             &self.selection,
             &core.counter,
@@ -424,18 +424,18 @@ impl World {
                     anyhow::bail!("physical lifecycle requires Linux");
                 }
             }
-            Event::Observe { stage } => self
-                .port
-                .counter
-                .observe(&self.cores[stage].counter)
-                .and_then(|observed| {
-                    crate::security_epoch::kernel::reconcile(
-                        &self.selection,
-                        &self.cores[stage].counter,
-                        observed.snapshot(),
-                    )
-                })
-                .is_ok(),
+            Event::Observe { stage } => counter_fixture::observe_read_only(
+                &self.directory.path().join("counter.sqlite"),
+                &self.cores[stage].counter,
+            )
+            .and_then(|observed| {
+                crate::security_epoch::kernel::reconcile(
+                    &self.selection,
+                    &self.cores[stage].counter,
+                    &observed,
+                )
+            })
+            .is_ok(),
             event => {
                 // This drives the SAME production continuation decision, not a
                 // second grant. The operation still uses only DATA contexts.
@@ -769,6 +769,46 @@ fn successful(seed: u64) -> Program {
         physical: None,
         events,
     }
+}
+
+#[test]
+fn independent_observation_after_semantic_refusal_never_revives_the_writer() -> Result<()> {
+    let mut world = World::new(71, None)?;
+    assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
+    for operation in [Operation::Reserve, Operation::Dispatch] {
+        assert!(
+            world
+                .step(Event::Bootstrap {
+                    stage: 0,
+                    operation,
+                    fault: Fault::None
+                })?
+                .accepted
+        );
+    }
+    assert!(
+        !world
+            .step(Event::Bootstrap {
+                stage: 0,
+                operation: Operation::Reserve,
+                fault: Fault::None
+            })?
+            .accepted
+    );
+    assert!(world.port.sample().is_err());
+    let observed = world.step(Event::Observe { stage: 0 })?;
+    assert!(observed.accepted);
+    assert!(!observed.state.continuation);
+    assert!(world.port.sample().is_err());
+    let denied = world.step(Event::Bootstrap {
+        stage: 0,
+        operation: Operation::Settle,
+        fault: Fault::None,
+    })?;
+    assert!(!denied.accepted);
+    assert_eq!(denied.state.slot_posts, observed.state.slot_posts);
+    assert_eq!(denied.state.counter_posts, observed.state.counter_posts);
+    Ok(())
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! One bounded read-only transaction for the exact counter and control slot.
+//! Fixed strong reads and Controller action transactions for the exact pair.
 //! Parsed observations retain the same original time DATA; neither is native
 //! role, physical-file, writer or counter-send authority.
 
@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use day2_capabilities::{Digest, security_epoch::EpochStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, marker::PhantomData};
+use std::{collections::BTreeSet, marker::PhantomData, rc::Rc};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,12 +24,95 @@ struct PairEntry {
     missing: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ReadMode {
+    Strong,
+    Action,
+}
+
+/// A one-use provider transaction, not current role/file/write authority.
+/// Only the consuming native mutation can use it to send a slot write.
+pub(in crate::security_epoch) struct ActionTransaction {
+    names: Names,
+    logical: Digest,
+    token: String,
+    local: PhantomData<Rc<()>>,
+}
+
+impl ActionTransaction {
+    pub(in crate::security_epoch) fn commit_body(
+        &self,
+        selection: &EpochStore,
+        core: &LogicalCore,
+        write: &Value,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            self.names.matches_selection(selection) && self.logical == core.digest()?,
+            "security_epoch_action_transaction_binding"
+        );
+        let body = serde_json::to_vec(&json!({"writes":[write],"transaction":self.token}))?;
+        ensure!(
+            body.len() <= super::MAX_BYTES,
+            "security_epoch_request_budget"
+        );
+        Ok(body)
+    }
+
+    pub(in crate::security_epoch) fn rollback(
+        self,
+        port: &mut impl Port,
+        budget: &mut Budget,
+    ) -> Result<()> {
+        ReadTransaction { token: self.token }.rollback(port, budget, &self.names)
+    }
+}
+
 pub(in crate::security_epoch) fn read_with_slot(
     selection: &EpochStore,
     core: &LogicalCore,
     port: &mut impl Port,
-    mut budget: Budget,
+    budget: Budget,
 ) -> Result<(EpochObservation, Option<VersionedSlot>, Budget)> {
+    let (counter, slot, budget, transaction) =
+        read_pair(selection, core, port, budget, ReadMode::Strong)?;
+    ensure!(transaction.is_none(), "security_epoch_strong_transaction");
+    Ok((counter, slot, budget))
+}
+
+pub(in crate::security_epoch) fn begin_action(
+    selection: &EpochStore,
+    core: &LogicalCore,
+    port: &mut impl Port,
+    budget: Budget,
+) -> Result<(
+    EpochObservation,
+    Option<VersionedSlot>,
+    Budget,
+    ActionTransaction,
+)> {
+    let (counter, slot, budget, transaction) =
+        read_pair(selection, core, port, budget, ReadMode::Action)?;
+    Ok((
+        counter,
+        slot,
+        budget,
+        transaction.context("security_epoch_action_transaction_missing")?,
+    ))
+}
+
+fn read_pair(
+    selection: &EpochStore,
+    core: &LogicalCore,
+    port: &mut impl Port,
+    mut budget: Budget,
+    mode: ReadMode,
+) -> Result<(
+    EpochObservation,
+    Option<VersionedSlot>,
+    Budget,
+    Option<ActionTransaction>,
+)> {
+    let mut transaction = None;
     let result = (|| {
         // Both selectors come only from the same fully validated logical core.
         // There is no caller-supplied document list or observation constructor.
@@ -39,7 +122,9 @@ pub(in crate::security_epoch) fn read_with_slot(
             Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
         };
         let names = Names::new(selection, core.counter.bootstrap(), activate)?;
-        let (mut snapshot, mut slot) = read_once(port, &mut budget, &names, core, &slot_name)?;
+        let (mut snapshot, mut slot, pending) =
+            read_once(port, &mut budget, &names, core, &slot_name, mode)?;
+        transaction = pending;
         if names.activate.is_none()
             && let Some(Versioned {
                 value:
@@ -55,7 +140,11 @@ pub(in crate::security_epoch) fn read_with_slot(
             // transaction under this same original deadline.
             let operation = completion.operation.clone();
             let complete = Names::new(selection, core.counter.bootstrap(), Some(&operation))?;
-            (snapshot, slot) = read_once(port, &mut budget, &complete, core, &slot_name)?;
+            if let Some(pending) = transaction.take() {
+                pending.rollback(port, &mut budget)?;
+            }
+            let reread = read_once(port, &mut budget, &complete, core, &slot_name, mode)?;
+            (snapshot, slot, transaction) = reread;
             ensure!(
                 matches!(&snapshot.root, Some(root) if matches!(&root.value.phase, Phase::ActiveFirstHolder { completion } if completion.operation == operation)),
                 "security_epoch_discovery_state_changed"
@@ -73,28 +162,36 @@ pub(in crate::security_epoch) fn read_with_slot(
         // before copying only this actual retained budget's time DATA. Every
         // actual HTTP request still owns its full native pre/post envelope.
         budget.remaining_decoding(port)?;
-        let slot_budget = Budget {
-            domain: budget.domain.clone(),
-            start: budget.start,
-            latest: budget.latest,
-            limit: budget.limit,
-        };
-        Ok((
-            EpochObservation {
-                selection,
-                snapshot,
-                budget,
-                valid: true,
-                local: PhantomData,
-            },
-            slot,
-            slot_budget,
-        ))
+        Ok((snapshot, slot, selection))
     })();
-    if result.is_err() {
-        port.refuse();
-    }
-    result
+    let (snapshot, slot, selection) = match result {
+        Ok(value) => value,
+        Err(primary) => {
+            if let Some(pending) = transaction.take() {
+                let _ = pending.rollback(port, &mut budget);
+            }
+            port.refuse();
+            return Err(primary);
+        }
+    };
+    let slot_budget = Budget {
+        domain: budget.domain.clone(),
+        start: budget.start,
+        latest: budget.latest,
+        limit: budget.limit,
+    };
+    Ok((
+        EpochObservation {
+            selection,
+            snapshot,
+            budget,
+            valid: true,
+            local: PhantomData,
+        },
+        slot,
+        slot_budget,
+        transaction,
+    ))
 }
 
 fn read_once(
@@ -103,36 +200,65 @@ fn read_once(
     names: &Names,
     core: &LogicalCore,
     slot_name: &str,
-) -> Result<(Snapshot, Option<VersionedSlot>)> {
+    mode: ReadMode,
+) -> Result<(Snapshot, Option<VersionedSlot>, Option<ActionTransaction>)> {
     let mut expected = names.documents();
     ensure!(
         !expected.contains(&slot_name),
         "security_epoch_paired_document_selection"
     );
     expected.push(slot_name);
-    let body = serde_json::to_vec(&json!({"documents":expected,"newTransaction":{"readOnly":{}}}))?;
+    let mut request = json!({"documents":expected});
+    if matches!(mode, ReadMode::Action) {
+        request["newTransaction"] = json!({"readWrite":{}});
+    }
+    let logical = core.digest()?;
+    let body = serde_json::to_vec(&request)?;
     let bytes = budget.call(port, &names.endpoint("batchGet"), &body)?;
     // The strict JSON decoder rejects duplicate/escaped object keys before
     // either generic document payload is converted to its closed record codec.
-    let mut entries: Vec<PairEntry> = crate::json::decode(&bytes)?;
-    ensure!(!entries.is_empty(), "security_epoch_batch_size");
-    let token = entries[0]
-        .transaction
-        .take()
-        .context("security_epoch_transaction_missing")?;
-    let decoded = STANDARD.decode(&token)?;
-    ensure!(
-        !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
-        "security_epoch_invalid_transaction"
-    );
-    let transaction = ReadTransaction { token };
+    let mut wire: Vec<Value> = crate::json::decode(&bytes)?;
+    ensure!(!wire.is_empty(), "security_epoch_batch_size");
+    let mut transaction = if matches!(mode, ReadMode::Action) {
+        let header = wire[0]
+            .as_object_mut()
+            .context("security_epoch_batch_object")?;
+        let token: String = serde_json::from_value(
+            header
+                .remove("transaction")
+                .context("security_epoch_transaction_missing")?,
+        )?;
+        let decoded = STANDARD.decode(&token)?;
+        ensure!(
+            !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
+            "security_epoch_invalid_transaction"
+        );
+        Some(ActionTransaction {
+            names: names.clone(),
+            logical,
+            token,
+            local: PhantomData,
+        })
+    } else {
+        None
+    };
     let result = (|| {
         ensure!(
-            entries.len() <= expected.len() + 1,
+            wire.len() <= expected.len() + usize::from(transaction.is_some()),
             "security_epoch_batch_size"
         );
+        // Serde structs also accept positional sequences. Require actual wire
+        // objects before typed decoding. A known canonical first-object token
+        // is already owned, so a later shape/field error still attempts cleanup.
+        let mut entries: Vec<PairEntry> = wire
+            .into_iter()
+            .map(|entry| -> Result<PairEntry> {
+                ensure!(entry.is_object(), "security_epoch_batch_object");
+                Ok(serde_json::from_value(entry)?)
+            })
+            .collect::<Result<_>>()?;
         // The first entry may hold just the token or also the first document.
-        if entries[0].found.is_none() && entries[0].missing.is_none() {
+        if transaction.is_some() && entries[0].found.is_none() && entries[0].missing.is_none() {
             ensure!(
                 entries[0].read_time.is_none(),
                 "security_epoch_transaction_header_fields"
@@ -166,17 +292,15 @@ fn read_once(
         }
         Ok((decode_snapshot(names, counter_entries)?, slot))
     })();
-    // All semantic errors after obtaining a valid token still attempt to close
-    // that exact transaction. Preserve the first semantic cause if bounded cleanup
-    // also fails; successful decoding still requires complete unexpired cleanup.
-    let cleanup: Result<()> = (|| {
-        transaction.rollback(port, budget, names)?;
-        budget.remaining_decoding(port)?;
-        Ok(())
-    })();
-    let pair = result?;
-    cleanup?;
-    Ok(pair)
+    match result {
+        Ok((snapshot, slot)) => Ok((snapshot, slot, transaction)),
+        Err(primary) => {
+            if let Some(pending) = transaction.take() {
+                let _ = pending.rollback(port, budget);
+            }
+            Err(primary)
+        }
+    }
 }
 
 fn document_name(entry: &PairEntry) -> Result<&str> {

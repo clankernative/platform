@@ -7,7 +7,7 @@
 use super::{
     control_slot::{AttemptCore, LogicalCore, RearmCore, SettlementCore, Slot, SlotState},
     control_slot_firestore::{self as codec, VersionedSlot},
-    firestore::{Budget, EpochObservation, Port, Sample},
+    firestore::{ActionTransaction, Budget, EpochObservation, Port, Sample},
     journal::{AuthorizedDispatch, CurrentBootstrapExecution, Purpose, snapshot_digest},
     kernel::{self, Outcome, Request, UpdateTime},
 };
@@ -17,7 +17,7 @@ use day2_capabilities::{
     security_epoch::{EpochProvider, EpochStore},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{marker::PhantomData, rc::Rc};
 
 fn endpoint(selection: &EpochStore, operation: &str) -> String {
@@ -38,9 +38,24 @@ pub(crate) struct SlotObservation {
     budget: Budget,
     valid: bool,
     local: PhantomData<Rc<()>>,
+    transaction: Option<ActionTransaction>,
 }
 
 impl SlotObservation {
+    /// Best-effort cleanup under the same remaining authority and budget. No
+    /// expired/refused owner may bypass its transport guards to roll back.
+    pub(super) fn abort(&mut self, port: &mut impl Port) -> Result<()> {
+        let result = match self.transaction.take() {
+            Some(pending) => pending.rollback(port, &mut self.budget),
+            None => Ok(()),
+        };
+        if result.is_err() {
+            self.valid = false;
+            port.refuse();
+        }
+        result
+    }
+
     fn check_binding(&mut self, selection: &EpochStore, core: &LogicalCore) -> Result<()> {
         let result = (|| {
             ensure!(self.valid, "control_slot_observation_refused");
@@ -77,7 +92,7 @@ impl SlotObservation {
     }
 }
 
-/// One coherent provider transaction supplies both observations. Each retains
+/// One coherent strong provider read supplies both observations. Each retains
 /// the same spent original budget; neither observation is native authority.
 pub(super) fn read_with_counter(
     selection: &EpochStore,
@@ -100,6 +115,39 @@ pub(super) fn read_with_counter(
                 budget,
                 valid: true,
                 local: PhantomData,
+                transaction: None,
+            },
+        ))
+    })();
+    if result.is_err() {
+        port.refuse();
+    }
+    result
+}
+
+/// The Controller holds this exact read-write transaction until the consuming
+/// slot commit. App and post-commit strong reads never receive one.
+pub(super) fn read_for_action(
+    selection: &EpochStore,
+    core: &LogicalCore,
+    port: &mut impl Port,
+    budget: Budget,
+) -> Result<(EpochObservation, SlotObservation)> {
+    let result = (|| {
+        let selection_binding = Digest::of(selection)?;
+        let logical = core.digest()?;
+        let (counter, value, budget, transaction) =
+            super::firestore::begin_action(selection, core, port, budget)?;
+        Ok((
+            counter,
+            SlotObservation {
+                selection: selection_binding,
+                logical,
+                value,
+                budget,
+                valid: true,
+                local: PhantomData,
+                transaction: Some(transaction),
             },
         ))
     })();
@@ -117,6 +165,18 @@ pub(crate) struct Mutation<'storage, 'role> {
     slot: SlotObservation,
     context: CurrentBootstrapExecution<'storage, 'role>,
     purpose: Purpose,
+}
+
+fn refuse_after_cleanup(
+    slot: &mut SlotObservation,
+    context: &mut CurrentBootstrapExecution<'_, '_>,
+    port: &mut impl Port,
+    primary: anyhow::Error,
+) -> anyhow::Error {
+    let _ = slot.abort(port);
+    context.refuse();
+    port.refuse();
+    primary
 }
 
 impl<'storage, 'role> Mutation<'storage, 'role> {
@@ -151,12 +211,47 @@ impl<'storage, 'role> Mutation<'storage, 'role> {
     }
 
     fn send(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Self, UpdateTime)> {
-        let (_, mut budget) = self.check(selection, port)?;
-        let body = serde_json::to_vec(&json!({"writes":[self.write]}))?;
-        let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
-        let version = commit_version(&bytes)?;
-        self.check(selection, port)?;
-        Ok((self, version))
+        let prepared = (|| {
+            let (_, budget) = self.check(selection, port)?;
+            let body = self
+                .slot
+                .transaction
+                .as_ref()
+                .context("control_slot_action_transaction_required")?
+                .commit_body(selection, &self.core, &self.write)?;
+            Ok((budget, body))
+        })();
+        let (mut budget, body) = match prepared {
+            Ok(value) => value,
+            Err(primary) => {
+                return Err(refuse_after_cleanup(
+                    &mut self.slot,
+                    &mut self.context,
+                    port,
+                    primary,
+                ));
+            }
+        };
+        // Spend before the first possible send. A lost or malformed commit
+        // response never retains a token that could authorize a resend.
+        self.slot
+            .transaction
+            .take()
+            .context("control_slot_action_transaction_required")?;
+        let result = (|| {
+            let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
+            let version = commit_version(&bytes)?;
+            self.check(selection, port)?;
+            Ok(version)
+        })();
+        match result {
+            Ok(version) => Ok((self, version)),
+            Err(primary) => {
+                self.context.refuse();
+                port.refuse();
+                Err(primary)
+            }
+        }
     }
 }
 
@@ -211,15 +306,30 @@ fn checked<'storage, 'role>(
     port: &mut impl Port,
     expected: Outcome,
 ) -> Result<Mutation<'storage, 'role>> {
-    mutation.check(selection, port)?;
-    ensure!(
-        kernel::reconcile(
-            selection,
-            &mutation.core.counter,
-            mutation.counter.snapshot()
-        )? == expected,
-        "control_slot_counter_outcome"
-    );
+    let result = (|| {
+        ensure!(
+            mutation.slot.transaction.is_some(),
+            "control_slot_action_transaction_required"
+        );
+        mutation.check(selection, port)?;
+        ensure!(
+            kernel::reconcile(
+                selection,
+                &mutation.core.counter,
+                mutation.counter.snapshot()
+            )? == expected,
+            "control_slot_counter_outcome"
+        );
+        Ok(())
+    })();
+    if let Err(primary) = result {
+        return Err(refuse_after_cleanup(
+            &mut mutation.slot,
+            &mut mutation.context,
+            port,
+            primary,
+        ));
+    }
     Ok(mutation)
 }
 
@@ -231,9 +341,16 @@ pub(super) fn accept<'storage, 'role>(
     context: CurrentBootstrapExecution<'storage, 'role>,
     port: &mut impl Port,
 ) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
-    ensure!(slot.value.is_none(), "control_slot_already_reserved");
-    let after = Slot::prepared(core.clone());
-    let write = codec::create_data(selection, &after)?;
+    let mut slot = slot;
+    let mut context = context;
+    let proposal = (|| {
+        ensure!(slot.value.is_none(), "control_slot_already_reserved");
+        let after = Slot::prepared(core.clone());
+        let write = codec::create_data(selection, &after)?;
+        Ok((after, write))
+    })();
+    let (after, write) =
+        proposal.map_err(|error| refuse_after_cleanup(&mut slot, &mut context, port, error))?;
     Ok(SlotMaintenanceMutation {
         mutation: checked(
             Mutation {
@@ -261,18 +378,25 @@ pub(super) fn claim<'storage, 'role>(
     attempt: AttemptCore,
     port: &mut impl Port,
 ) -> Result<SlotClaimMutation<'storage, 'role>> {
-    let before = slot
-        .value
-        .as_ref()
-        .context("control_slot_reservation_missing")?;
-    ensure!(
-        before.slot.logical == core,
-        "control_slot_reservation_replaced"
-    );
-    let after = before
-        .slot
-        .claim_data(selection, &before.version, attempt)?;
-    let write = codec::cas_data(selection, before, &after)?;
+    let mut slot = slot;
+    let mut context = context;
+    let proposal = (|| {
+        let before = slot
+            .value
+            .as_ref()
+            .context("control_slot_reservation_missing")?;
+        ensure!(
+            before.slot.logical == core,
+            "control_slot_reservation_replaced"
+        );
+        let after = before
+            .slot
+            .claim_data(selection, &before.version, attempt)?;
+        let write = codec::cas_data(selection, before, &after)?;
+        Ok((after, write))
+    })();
+    let (after, write) =
+        proposal.map_err(|error| refuse_after_cleanup(&mut slot, &mut context, port, error))?;
     Ok(SlotClaimMutation {
         mutation: checked(
             Mutation {
@@ -300,20 +424,27 @@ pub(super) fn rearm<'storage, 'role>(
     rearm: RearmCore,
     port: &mut impl Port,
 ) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
-    ensure!(
-        rearm.not_applied_observation == snapshot_digest(counter.snapshot())?,
-        "control_slot_rearm_observation_mismatch"
-    );
-    let before = slot
-        .value
-        .as_ref()
-        .context("control_slot_reservation_missing")?;
-    ensure!(
-        before.slot.logical == core,
-        "control_slot_reservation_replaced"
-    );
-    let after = before.slot.rearm_data(selection, &before.version, rearm)?;
-    let write = codec::cas_data(selection, before, &after)?;
+    let mut slot = slot;
+    let mut context = context;
+    let proposal = (|| {
+        ensure!(
+            rearm.not_applied_observation == snapshot_digest(counter.snapshot())?,
+            "control_slot_rearm_observation_mismatch"
+        );
+        let before = slot
+            .value
+            .as_ref()
+            .context("control_slot_reservation_missing")?;
+        ensure!(
+            before.slot.logical == core,
+            "control_slot_reservation_replaced"
+        );
+        let after = before.slot.rearm_data(selection, &before.version, rearm)?;
+        let write = codec::cas_data(selection, before, &after)?;
+        Ok((after, write))
+    })();
+    let (after, write) =
+        proposal.map_err(|error| refuse_after_cleanup(&mut slot, &mut context, port, error))?;
     Ok(SlotMaintenanceMutation {
         mutation: checked(
             Mutation {
@@ -341,20 +472,27 @@ pub(super) fn settle<'storage, 'role>(
     settlement: SettlementCore,
     port: &mut impl Port,
 ) -> Result<SlotMaintenanceMutation<'storage, 'role>> {
-    let before = slot
-        .value
-        .as_ref()
-        .context("control_slot_reservation_missing")?;
-    ensure!(
-        before.slot.logical == core,
-        "control_slot_reservation_replaced"
-    );
-    let expected = core.counter.receipt()?;
-    let after =
-        before
-            .slot
-            .settle_data(selection, &before.version, settlement, expected.clone())?;
-    let write = codec::cas_data(selection, before, &after)?;
+    let mut slot = slot;
+    let mut context = context;
+    let proposal = (|| {
+        let before = slot
+            .value
+            .as_ref()
+            .context("control_slot_reservation_missing")?;
+        ensure!(
+            before.slot.logical == core,
+            "control_slot_reservation_replaced"
+        );
+        let expected = core.counter.receipt()?;
+        let after =
+            before
+                .slot
+                .settle_data(selection, &before.version, settlement, expected.clone())?;
+        let write = codec::cas_data(selection, before, &after)?;
+        Ok((after, write, expected))
+    })();
+    let (after, write, expected) =
+        proposal.map_err(|error| refuse_after_cleanup(&mut slot, &mut context, port, error))?;
     Ok(SlotMaintenanceMutation {
         mutation: checked(
             Mutation {

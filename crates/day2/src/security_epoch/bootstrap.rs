@@ -99,13 +99,13 @@ pub(super) fn run_phase(
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
         let mut port = transport.borrow();
-        let (counter, slot) = trace.measure(Operation::BootstrapSnapshot, || {
+        let (counter, mut slot) = trace.measure(Operation::BootstrapSnapshot, || {
             let budget = port.budget().map_err(|error| {
                 PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error)
             })?;
-            control_slot_io::read_with_counter(selection, &core, &mut port, budget).map_err(
-                |error| PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error),
-            )
+            control_slot_io::read_for_action(selection, &core, &mut port, budget).map_err(|error| {
+                PreparationFailure::at(PreparationStep::BootstrapSnapshotBefore, error)
+            })
         })?;
         let purpose = match action {
             Action::Settle => Purpose::Reconcile,
@@ -122,7 +122,15 @@ pub(super) fn run_phase(
                     &mut port,
                 )
             })
-            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error))?;
+            .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapExecution, error));
+        let context = match context {
+            Ok(value) => value,
+            Err(primary) => {
+                let _ = slot.abort(&mut port);
+                port.refuse();
+                return Err(primary);
+            }
+        };
         trace.measure(Operation::BootstrapMutation, || {
             match action {
                 Action::Reserve => {
@@ -144,31 +152,41 @@ pub(super) fn run_phase(
                 }
                 Action::Dispatch => {
                     (|| {
-                        // Only the initial Prepared state is accepted. A historical
-                        // May/Retryable/Observed slot is not this actual known claim.
-                        let before = slot
-                            .data()
-                            .context("native_bootstrap_reservation_missing")?;
-                        let SlotState::Prepared { next } = before.slot.state else {
-                            anyhow::bail!("native_bootstrap_dispatch_not_prepared");
-                        };
-                        let incarnation = owner
-                            .try_borrow_mut()?
-                            .controller_stage()?
-                            .incarnation_data()?;
-                        let mut nonce = [0_u8; 32];
-                        crate::host_inputs::Entropy::fill(
-                            &crate::host_inputs::SecureEntropy,
-                            &mut nonce,
-                        )?;
-                        port.sample()?;
-                        let attempt = AttemptCore {
-                            logical: core.digest()?,
-                            request: request.digest()?,
-                            ordinal: next,
-                            expected: before.version.clone(),
-                            controller_incarnation: incarnation,
-                            nonce: Digest::new(&nonce),
+                        let proposal = (|| {
+                            // Only the initial Prepared state is accepted. A historical
+                            // May/Retryable/Observed slot is not this actual known claim.
+                            let before = slot
+                                .data()
+                                .context("native_bootstrap_reservation_missing")?;
+                            let SlotState::Prepared { next } = before.slot.state else {
+                                anyhow::bail!("native_bootstrap_dispatch_not_prepared");
+                            };
+                            let incarnation = owner
+                                .try_borrow_mut()?
+                                .controller_stage()?
+                                .incarnation_data()?;
+                            let mut nonce = [0_u8; 32];
+                            crate::host_inputs::Entropy::fill(
+                                &crate::host_inputs::SecureEntropy,
+                                &mut nonce,
+                            )?;
+                            port.sample()?;
+                            Ok::<_, anyhow::Error>(AttemptCore {
+                                logical: core.digest()?,
+                                request: request.digest()?,
+                                ordinal: next,
+                                expected: before.version.clone(),
+                                controller_incarnation: incarnation,
+                                nonce: Digest::new(&nonce),
+                            })
+                        })();
+                        let attempt = match proposal {
+                            Ok(value) => value,
+                            Err(primary) => {
+                                let _ = slot.abort(&mut port);
+                                port.refuse();
+                                return Err(primary);
+                            }
                         };
                         control_slot_io::claim(
                             selection,
@@ -204,17 +222,27 @@ pub(super) fn run_phase(
                 }
                 Action::Settle => {
                     (|| {
-                        let before = slot
-                            .data()
-                            .context("native_bootstrap_reservation_missing")?;
-                        let SlotState::MayHaveBeenSent { attempt } = &before.slot.state else {
-                            anyhow::bail!("native_bootstrap_settlement_not_pending");
-                        };
-                        let settlement = SettlementCore {
-                            logical: core.digest()?,
-                            expected: before.version.clone(),
-                            control_attempt: attempt.id.clone(),
-                            receipt: request.receipt()?.digest()?,
+                        let proposal = (|| {
+                            let before = slot
+                                .data()
+                                .context("native_bootstrap_reservation_missing")?;
+                            let SlotState::MayHaveBeenSent { attempt } = &before.slot.state else {
+                                anyhow::bail!("native_bootstrap_settlement_not_pending");
+                            };
+                            Ok::<_, anyhow::Error>(SettlementCore {
+                                logical: core.digest()?,
+                                expected: before.version.clone(),
+                                control_attempt: attempt.id.clone(),
+                                receipt: request.receipt()?.digest()?,
+                            })
+                        })();
+                        let settlement = match proposal {
+                            Ok(value) => value,
+                            Err(primary) => {
+                                let _ = slot.abort(&mut port);
+                                port.refuse();
+                                return Err(primary);
+                            }
                         };
                         control_slot_io::settle(
                             selection,
