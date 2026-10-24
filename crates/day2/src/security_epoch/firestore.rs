@@ -897,7 +897,7 @@ mod budget_tests {
     #[test]
     fn storage_budget_keeps_origin_and_caps_each_request_at_five_seconds() {
         let domain = Digest::new(b"budget-arithmetic-only");
-        for (limit, expected) in [(5, 3), (10, 5), (30, 5)] {
+        for (limit, expected) in [(5, 3), (10, 5), (30, 5), (60, 5)] {
             let mut port = ObservedTimeout {
                 domain: domain.clone(),
                 now: Duration::from_secs(102),
