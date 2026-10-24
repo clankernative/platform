@@ -397,7 +397,10 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     );
     for (name, expected) in [
         ("admission", &["desired_epochs.rs"][..]),
-        ("management", &["app.rs", "shell.rs"][..]),
+        (
+            "management",
+            &["app.rs", "app_native_lifecycle.rs", "shell.rs"][..],
+        ),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {
