@@ -1077,8 +1077,8 @@ fn successful(seed: u64) -> Program {
 fn independent_observation_after_semantic_refusal_never_revives_the_writer() -> Result<()> {
     let original = tests::selection().scope;
     let mut selected = original.clone();
-    selected.installation = "scoped_company".into();
-    selected.environment = "production".into();
+    selected.installation = "scoped_company".to_owned().try_into()?;
+    selected.environment = "production".to_owned().try_into()?;
     for scope in [original, selected] {
         let mut world = World::selected(71, None, Some(&scope))?;
         assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
