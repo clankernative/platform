@@ -213,6 +213,35 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 
 ## Preparation timing diagnosis
 
+Ordinary Current App-serving has a distinct diagnostic root around its actual
+operation, including role acquisition. After the role/file/peer borrows unwind,
+the Controller can emit `day2-native-controller-self-check` with format
+`controller_current_app_serving_exclusive_ns_v1`, scope
+`whole_current_app_serving_operation`, and the following main record's sequence,
+selection and Controller incarnation. It is historical DATA, not readiness,
+permission, current validity or a sampled remaining budget. It has no bootstrap
+action field and cannot be interpreted as a bootstrap full-check sample.
+
+Its `profile.rows` use the existing nine fixed exclusive-nanosecond categories;
+`profile.samples` counts whole Current operations here, not full checks. Remote
+issuer execution is not profiled: its synchronous wait remains caller time.
+Optional `physical` DATA identifies the last attempted composite-check subcall,
+whether it returned, and the first failed subcall. Rows are fixed in order
+durability, current/retained peer, final file; each is `[count, inclusive_us]`.
+These rows overlap the exclusive profile and must not be added to it. A subcall
+can contain several guards; the marker does not establish a failed statement or
+cause. If role acquisition fails first, no physical row is fabricated.
+
+The Current record is capped separately at 1536 bytes and emitted at most once
+for the first actual App-serving result/refusal. The existing 1024-byte
+bootstrap profile and 2048-byte authority-record bounds stay unchanged. Missing,
+rewound, nested-root or overflowed metric samples are inconclusive, never zero
+cost. The collector does not replace native clocks, reset an original, cache a
+check, suppress an error, skip I/O or change any five-second guard. Leaf spans
+still finish before terminal native checks. Diagnostic clocks and output can
+perturb elapsed time; no measured saving or complete serving margin follows
+from enabling them. Bootstrap counts/costs do not transfer to Current.
+
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App
 paired reads request a token-free strong snapshot. Both decoded observations
