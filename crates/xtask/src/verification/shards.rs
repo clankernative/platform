@@ -34,6 +34,7 @@ const SHARDS: &[&str] = &[
 
 pub(super) mod mac;
 pub(super) mod reuse;
+pub(super) mod transport;
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -344,7 +345,10 @@ fn copy_programs(root: &Path, programs: &[Binary], restoring: bool) -> Result<()
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        fs::copy(source, &target)?;
+        // Bazel and restored caches intentionally retain read-only executable
+        // modes. Replace changed bytes atomically instead of opening them for
+        // an in-place write; identical running verifier inodes stay intact.
+        crate::install_cli_file(source, &target)?;
         admit_executable(&target, &program.digest, program.permissions)?;
     }
     Ok(())
@@ -964,20 +968,37 @@ pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
     fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
     // Admit all transported executable bytes and every native fixture before
     // the workflow can publish the complete workspace to runtime campaigns.
-    let prepared = load(root, snapshot)?;
+    let prepared = load(root, snapshot, None)?;
     fixtures(root, &prepared)?;
     println!("Joined both preparation parts with all fixtures and test executables");
     Ok(())
 }
 
-pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
+pub(super) fn load(root: &Path, snapshot: &str, shard: Option<&str>) -> Result<Prepared> {
     let prepared: Prepared = day2::json::decode(&fs::read(root.join(PREPARED))?)?;
     ensure!(
         prepared.identity == identity(root, snapshot)?,
         "prepared verification belongs to another checkout, run, attempt or host"
     );
     validate_preparation(&prepared, "all")?;
-    for binary in prepared.binaries.iter().chain(&prepared.programs) {
+    admit_outputs(root, &prepared, shard)?;
+    if shard.is_none_or(|shard| matches!(shard, "workspace-other" | "parallel-runtime")) {
+        transport::admit_cli(root)?;
+    }
+    Ok(prepared)
+}
+
+fn admit_outputs(root: &Path, prepared: &Prepared, shard: Option<&str>) -> Result<()> {
+    ensure!(
+        shard.is_none_or(valid),
+        "unknown executable admission shard"
+    );
+    for binary in prepared
+        .binaries
+        .iter()
+        .chain(&prepared.programs)
+        .filter(|binary| shard.is_none_or(|shard| selected(&binary.package, shard)))
+    {
         admit_executable(
             &root.join(&binary.executable),
             &binary.digest,
@@ -1000,7 +1021,7 @@ pub(super) fn load(root: &Path, snapshot: &str) -> Result<Prepared> {
             &root.join(&auxiliary.executable),
         )?;
     }
-    Ok(prepared)
+    Ok(())
 }
 
 pub(super) fn fixtures(root: &Path, prepared: &Prepared) -> Result<BTreeMap<String, PathBuf>> {
@@ -1316,6 +1337,44 @@ mod tests {
             workflow: "workflow".into(),
             snapshot: "snapshot".into(),
         }
+    }
+
+    #[test]
+    fn program_cache_atomically_replaces_readonly_outputs_in_both_directions() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let scratch = tempfile::tempdir()?;
+        let root = scratch.path().canonicalize()?;
+        let cached = root.join(PROGRAM_CACHE).join("example");
+        let ordinary = root.join(program_output("example"));
+        fs::create_dir_all(cached.parent().unwrap())?;
+        fs::create_dir_all(ordinary.parent().unwrap())?;
+        fs::write(&cached, b"current")?;
+        fs::write(&ordinary, b"previous")?;
+        for path in [&cached, &ordinary] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o555))?;
+        }
+        let program = Binary {
+            package: "example".into(),
+            target: "example".into(),
+            kind: vec!["bin".into()],
+            directory: "crates/example".into(),
+            executable: program_output("example"),
+            digest: digest(b"current"),
+            permissions: 0o555,
+        };
+        let previous = fs::metadata(&ordinary)?.ino();
+        copy_programs(&root, std::slice::from_ref(&program), true)?;
+        assert_ne!(fs::metadata(&ordinary)?.ino(), previous);
+        let current = fs::metadata(&ordinary)?.ino();
+        copy_programs(&root, std::slice::from_ref(&program), true)?;
+        assert_eq!(fs::metadata(&ordinary)?.ino(), current);
+        fs::remove_file(&cached)?;
+        fs::write(&cached, b"previous")?;
+        fs::set_permissions(&cached, fs::Permissions::from_mode(0o555))?;
+        copy_programs(&root, &[program], false)?;
+        assert_eq!(fs::read(&cached)?, b"current");
+        assert_eq!(executable_permissions(&cached)?, 0o555);
+        Ok(())
     }
 
     pub(super) fn sample_part(part: &str) -> Result<Prepared> {
