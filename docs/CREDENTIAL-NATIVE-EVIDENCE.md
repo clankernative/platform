@@ -227,6 +227,54 @@ ambiguous write retry or positive authority cache is introduced. The separate
 provider lock deadline still applies; fewer exchanges do not establish a
 complete native action or timing margin.
 
+The Controller's first App-serving release or refusal can include a `serving`
+diagnostic for the actual `current_app_serving` call. It covers role acquisition
+and the unchanged physical, peer and provider calls. Current serving and
+authentication remain capped at five seconds. No record is written while the
+operation's role/physical/provider borrows remain live.
+
+`caller_elapsed_us` measures the complete caller with an independent diagnostic
+continuous clock, starting before role acquisition. `original_last_checked_us`
+copies the SAME original acquisition's last successful shared sample, including
+samples made by narrowed views. It survives unwind as read-only DATA. It is not
+the failed guard's timestamp, current validity or remaining budget; it is absent
+when role acquisition never returned its actual stage. Missing, rewound or
+overflowed metric clocks are inconclusive and cannot change the native result.
+The closed `failure.step` identifies the innermost annotated call and
+`failure.category` uses the existing allowlist, without private error text or
+provider payloads. A labelled call may contain several unchanged inner checks;
+its label alone does not identify an internal statement or establish a cause.
+
+Rows use `[operation_code, count, inclusive_total_us]`. Nested rows must not be
+added together. The fixed serving codes are:
+
+| Code | Call |
+| --- | --- |
+| 0 | Current role acquisition |
+| 1 | Physical/peer phase construction |
+| 2 | Pending physical phase |
+| 3 | App peer preparation |
+| 4 | Actual physical acquisition |
+| 5 | Durability check |
+| 6 | Accept current App peer |
+| 7 | Constructed physical phase check |
+| 8 | App request binding |
+| 9 | Provider authentication and retention |
+| 10 | Exact counter selectors |
+| 11 | Counter read before announcement |
+| 12 | Validate initial counter snapshot |
+| 13 | Physical check before announcement |
+| 14 | Provider observation check before announcement |
+| 15 | Announce known |
+| 16 | Await App acknowledgement |
+| 17 | Counter read after acknowledgement |
+| 18 | Validate final counter snapshot |
+| 19 | Final provider observation check |
+| 20 | Final physical check |
+| 21 | Historical snapshot digest |
+| 22 | Release and complete actual physical/peer phase |
+| 23 | Whole serving operation, excluding role acquisition |
+
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
 one-process diagnostic for the actual enrolled Controller. It performs the
 ordinary artifact/instance admission, role-stage exchange, complete Controller

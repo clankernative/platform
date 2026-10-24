@@ -2,6 +2,7 @@
 //! accepts these records as a native owner, permission, readiness or replay.
 use super::bootstrap_timing::Snapshot as BootstrapSnapshot;
 use super::preparation_timing::Summary;
+use super::serving_timing::Snapshot as ServingSnapshot;
 use crate::security_epoch::{
     bootstrap::{Action, ServingObservation},
     kernel::{Holder, Request, Snapshot},
@@ -53,6 +54,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     export_failed: bool,
     preparation_timing: Option<Summary>,
     bootstrap_timing: Option<BootstrapSnapshot>,
+    serving_timing: Option<ServingSnapshot>,
     read_only_observed: bool,
 }
 
@@ -188,7 +190,7 @@ pub(in crate::security_epoch) struct PreparationProgress {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum PreparationErrorCategory {
+pub(super) enum PreparationErrorCategory {
     ClockExpiredOrRewound,
     AcquisitionRefused,
     TransportUnavailable,
@@ -302,7 +304,7 @@ impl PreparationFailure {
     }
 }
 
-fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory {
+pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory {
     use PreparationErrorCategory as Category;
     // Inspect only stored message DATA against a closed list. Never format the
     // error, walk Display causes, or emit an unrecognized string.
@@ -497,6 +499,8 @@ enum Observation {
         role: ServingRole,
         binding: Digest,
         snapshot: Digest,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        serving: Option<ServingSnapshot>,
     },
     Refused {
         at: FailurePhase,
@@ -506,6 +510,8 @@ enum Observation {
         timing: Option<Summary>,
         #[serde(skip_serializing_if = "Option::is_none")]
         bootstrap: Option<BootstrapSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        serving: Option<ServingSnapshot>,
     },
 }
 
@@ -534,12 +540,18 @@ impl<W: RecordOutput> Recorder<W> {
             export_failed: false,
             preparation_timing: None,
             bootstrap_timing: None,
+            serving_timing: None,
             read_only_observed: false,
         }
     }
 
     pub(in crate::security_epoch) fn enter(&mut self, at: FailurePhase) {
         self.at = at;
+        self.serving_timing = None;
+    }
+
+    pub(super) fn serving_timing(&mut self, timing: ServingSnapshot) {
+        self.serving_timing = Some(timing);
     }
 
     pub(super) fn select(
@@ -689,6 +701,10 @@ impl<W: RecordOutput> Recorder<W> {
                 role,
                 binding: observed.binding,
                 snapshot: observed.snapshot,
+                serving: match role {
+                    ServingRole::App => self.serving_timing.clone(),
+                    ServingRole::Shell => None,
+                },
             })?;
             self.serving[index] = true;
         }
@@ -737,13 +753,21 @@ impl<W: RecordOutput> Recorder<W> {
                 preparation,
                 // This completed preparation DATA remains attributable if a
                 // later listener/holder phase refuses before first-holder log.
-                timing: if current || provider_control {
+                timing: if current
+                    || provider_control
+                    || matches!(self.at, FailurePhase::AppServing)
+                {
                     None
                 } else {
                     self.preparation_timing.clone()
                 },
                 bootstrap: if current || provider_control {
                     self.bootstrap_timing.clone()
+                } else {
+                    None
+                },
+                serving: if matches!(self.at, FailurePhase::AppServing) {
+                    self.serving_timing.clone()
                 } else {
                     None
                 },
@@ -1912,6 +1936,50 @@ mod tests {
                     .contains("bootstrap_role")
             );
         }
+    }
+
+    #[test]
+    fn current_app_serving_diagnostic_fits_fixed_bound_and_never_leaks_to_other_phases() {
+        for phase in [
+            FailurePhase::AppServing,
+            FailurePhase::Preparation,
+            FailurePhase::ShellServing,
+        ] {
+            let (mut recorder, ..) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.enter(phase);
+            recorder.serving_timing(super::super::serving_timing::ServingTiming::maximal_fixture());
+            if matches!(phase, FailurePhase::AppServing) {
+                recorder.preparation_timings(
+                    super::super::preparation_timing::Timings::maximal_summary_fixture(),
+                );
+            }
+            recorder.refuse(None).unwrap();
+            let rows = records(&recorder.output);
+            let observation = &rows[1]["observation"];
+            if matches!(phase, FailurePhase::AppServing) {
+                assert_eq!(observation["serving"]["scope"], "current_app_serving");
+                assert_eq!(observation["serving"]["failure"]["step"], "acknowledgement");
+                assert_eq!(
+                    observation["serving"]["timing"].as_array().unwrap().len(),
+                    24
+                );
+                assert!(observation.get("timing").is_none());
+            } else {
+                assert!(observation.get("serving").is_none());
+            }
+            let records = recorder.records;
+            recorder.refuse(None).unwrap();
+            assert_eq!(recorder.records, records);
+            assert!(recorder.refused && !recorder.activated);
+        }
+        let (mut recorder, ..) = fixture();
+        recorder.serving_timing(super::super::serving_timing::ServingTiming::maximal_fixture());
+        recorder.enter(FailurePhase::AppServing);
+        assert!(
+            recorder.serving_timing.is_none(),
+            "another attempt cannot inherit timing"
+        );
     }
 
     #[test]

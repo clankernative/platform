@@ -16,6 +16,7 @@ pub(in crate::security_epoch) mod bootstrap_timing;
 pub(in crate::security_epoch) mod evidence;
 mod health;
 pub(in crate::security_epoch) mod preparation_timing;
+pub(in crate::security_epoch) mod serving_timing;
 use evidence::{Evidence, FailurePhase, PreparationFailure, PreparationStep, ServingRole};
 use preparation_timing::{Operation, Timings};
 
@@ -196,7 +197,21 @@ fn run_inner(
             evidence.enter(FailurePhase::AppPending);
             if active.app_pending()? {
                 evidence.enter(FailurePhase::AppServing);
-                let observed = active.serve_app_current(role.begin_current_stage()?)?;
+                let trace = serving_timing::ServingTiming::new();
+                let result = trace
+                    .measure(serving_timing::ServingStep::RoleStage, || {
+                        role.begin_current_stage()
+                    })
+                    .and_then(|stage| {
+                        trace.bind_progress(stage.diagnostic_progress());
+                        trace.measure(serving_timing::ServingStep::Operation, || {
+                            active.serve_app_current(stage, &trace)
+                        })
+                    });
+                // The role/physical/provider borrows have returned or unwound.
+                // Only historical DATA is exported; no logging in the phase.
+                evidence.serving_timing(trace.snapshot(result.as_ref().err()));
+                let observed = result?;
                 evidence.serving(ServingRole::App, observed)?;
             }
             if let Some(peer) = &mut shell {

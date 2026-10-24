@@ -337,6 +337,7 @@
     "crates/day2/src/security_epoch/controller/evidence.rs",
     "crates/day2/src/security_epoch/controller/health.rs",
     "crates/day2/src/security_epoch/controller/preparation_timing.rs",
+    "crates/day2/src/security_epoch/controller/serving_timing.rs",
     "crates/day2/src/security_epoch/credential_material.rs",
     "crates/day2/src/security_epoch/firestore.rs",
     "crates/day2/src/security_epoch/firestore/paired.rs",

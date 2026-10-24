@@ -76,6 +76,24 @@ struct OriginalObservation {
     refused: bool,
 }
 
+/// Read-only historical DATA from the same original's existing samples. This
+/// cannot sample a clock, check validity, change a deadline or restore an owner.
+/// It may outlive the refused owner solely so diagnostics can run after unwind.
+pub(super) struct AcquisitionProgress {
+    origin: Duration,
+    observation: Rc<Cell<OriginalObservation>>,
+}
+
+impl AcquisitionProgress {
+    pub(super) fn last_checked_elapsed_micros(&self) -> Option<u32> {
+        self.observation
+            .get()
+            .latest
+            .checked_sub(self.origin)
+            .and_then(|elapsed| elapsed.as_micros().try_into().ok())
+    }
+}
+
 impl NativeAcquisition {
     /// The first clock read precedes entropy and every subsequent observation.
     /// Linux qualification of the selected deployment profile is a separate gate.
@@ -219,6 +237,13 @@ impl NativeAcquisition {
             .latest
             .checked_sub(self.origin)
             .and_then(|elapsed| elapsed.as_micros().try_into().ok())
+    }
+
+    pub(super) fn diagnostic_progress(&self) -> AcquisitionProgress {
+        AcquisitionProgress {
+            origin: self.origin,
+            observation: Rc::clone(&self.observation),
+        }
     }
 
     /// Historical DATA only, for the packet decision reducer after actual
@@ -1154,16 +1179,19 @@ mod tests {
             Duration::from_secs(100),
             Duration::from_secs(5),
         );
+        let retained_data = acquisition.diagnostic_progress();
         acquisition
             .observe(Duration::from_micros(102_123_456))
             .unwrap();
         assert_eq!(acquisition.last_checked_elapsed_micros(), Some(2_123_456));
+        assert_eq!(retained_data.last_checked_elapsed_micros(), Some(2_123_456));
         let original = (
             acquisition.origin,
             acquisition.observation.get().latest,
             acquisition.deadline,
         );
         assert!(acquisition.observe(Duration::from_secs(105)).is_err());
+        assert_eq!(retained_data.last_checked_elapsed_micros(), Some(2_123_456));
         assert_eq!(acquisition.last_checked_elapsed_micros(), Some(2_123_456));
         assert_eq!(
             (
@@ -1175,6 +1203,26 @@ mod tests {
         );
         assert!(acquisition.remaining().is_err());
         assert!(acquisition.observe(Duration::from_secs(103)).is_err());
+    }
+
+    #[test]
+    fn retained_diagnostic_data_follows_original_samples_but_survives_only_as_data() {
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"retained-progress"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        let progress = original.diagnostic_progress();
+        let mut child = original.narrow(5, original.deadline).unwrap();
+        child.observe(Duration::from_secs(103)).unwrap();
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(3_000_000));
+        assert!(child.observe(Duration::from_secs(105)).is_err());
+        assert!(original.sample().is_err());
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(3_000_000));
+        drop(child);
+        drop(original);
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(3_000_000));
     }
 
     #[test]

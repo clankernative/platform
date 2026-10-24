@@ -312,22 +312,29 @@ impl InitialStorageContinuity {
     pub(in crate::security_epoch) fn begin_current_app<'storage, 'role>(
         &'storage mut self,
         mut stage: EnrolledRoleStage<'role>,
+        trace: &crate::security_epoch::controller::serving_timing::ServingTiming,
     ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
         ensure!(self.ready, "controller_storage_continuation_refused");
         self.ready = false;
-        let pending = self.file.begin_pending_physical_phase()?;
-        let rendezvous = self
-            .peer
-            .prepare_current(&mut stage, StoragePeerPurpose::CurrentServing)?;
-        let mut file = pending.acquire(stage)?;
-        file.check_current_durability()?;
-        let peer = rendezvous.accept_current(file.controller_stage_after_check()?, None)?;
+        use crate::security_epoch::controller::serving_timing::ServingStep;
+        let pending = trace.measure(ServingStep::PhysicalPending, || {
+            self.file.begin_pending_physical_phase()
+        })?;
+        let rendezvous = trace.measure(ServingStep::PeerPrepare, || {
+            self.peer
+                .prepare_current(&mut stage, StoragePeerPurpose::CurrentServing)
+        })?;
+        let mut file = trace.measure(ServingStep::PhysicalAcquire, || pending.acquire(stage))?;
+        trace.measure(ServingStep::Durability, || file.check_current_durability())?;
+        let peer = trace.measure(ServingStep::PeerAccept, || {
+            rendezvous.accept_current(file.controller_stage_after_check()?, None)
+        })?;
         let mut phase = CurrentControllerStoragePhase {
             file,
             peer: PeerFence::Current(Box::new(peer)),
             continuation: &mut self.ready,
         };
-        phase.check()?;
+        trace.measure(ServingStep::PhysicalCheck, || phase.check())?;
         Ok(phase)
     }
 
