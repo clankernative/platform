@@ -60,14 +60,17 @@ impl Peer {
                 self.valid && !self.processes.is_empty() && self.processes.len() <= 5,
                 "storage_peer_retained_process_refused"
             );
-            stage.storage()?.check_storage_acquisition(acquisition)?;
-            let local = stage.storage()?.storage_statement()?;
-            ensure!(
-                self.statement.certificate == local.certificate
-                    && self.statement.stage.data.policy == local.stage.data.policy
-                    && self.statement.stage.data.role == stage.storage()?.storage_peer_role()?,
-                "storage_peer_original_issuer_or_role_changed"
-            );
+            {
+                let mut storage = stage.storage()?;
+                storage.check_storage_acquisition(acquisition)?;
+                let local = storage.storage_statement()?;
+                ensure!(
+                    self.statement.certificate == local.certificate
+                        && self.statement.stage.data.policy == local.stage.data.policy
+                        && self.statement.stage.data.role == storage.storage_peer_role()?,
+                    "storage_peer_original_issuer_or_role_changed"
+                );
+            }
             let mut same_actor = Vec::new();
             for sender in &mut self.processes {
                 match sender {

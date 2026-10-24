@@ -43,37 +43,44 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<StageStatement> {
         let result = (|| {
             self.require_storage_peer_purpose()?;
-            ensure!(
-                matches!(
-                    self.stage.owner.role,
-                    NativeRole::EpochController | NativeRole::AppHost
-                ),
-                "storage_peer_shell_role_refused"
-            );
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("storage_peer_platform_unsupported");
-            #[cfg(target_os = "linux")]
-            {
-                let (origin, deadline) = self.stage.acquisition.interval_data()?;
-                let sample = self.stage.acquisition.sample()?;
-                let statement = StageStatement {
-                    certificate: self.stage.owner.certificate.clone(),
-                    stage: self.stage.current_grant.clone(),
-                    original: OriginalInterval {
-                        domain: sample.domain,
-                        origin_ns: origin.as_nanos().try_into()?,
-                        deadline_ns: deadline.min(self.stage.deadline).as_nanos().try_into()?,
-                    },
-                };
-                self.stage.check()?;
-                Ok(statement)
-            }
+            let statement = self.storage_statement_data()?;
+            self.stage.check()?;
+            Ok(statement)
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
             self.stage.acquisition.refuse();
         }
         result
+    }
+
+    // Private DATA assembly within a checked operation. This never leaves the
+    // facade or returns a permission; standalone statements and signing retain
+    // full pre/post native checks around their actual consuming boundary.
+    fn storage_statement_data(&mut self) -> Result<StageStatement> {
+        ensure!(
+            matches!(
+                self.stage.owner.role,
+                NativeRole::EpochController | NativeRole::AppHost
+            ),
+            "storage_peer_shell_role_refused"
+        );
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("storage_peer_platform_unsupported");
+        #[cfg(target_os = "linux")]
+        {
+            let (origin, deadline) = self.stage.acquisition.interval_data()?;
+            let sample = self.stage.acquisition.sample()?;
+            Ok(StageStatement {
+                certificate: self.stage.owner.certificate.clone(),
+                stage: self.stage.current_grant.clone(),
+                original: OriginalInterval {
+                    domain: sample.domain,
+                    origin_ns: origin.as_nanos().try_into()?,
+                    deadline_ns: deadline.min(self.stage.deadline).as_nanos().try_into()?,
+                },
+            })
+        }
     }
 
     pub(in crate::security_epoch::native_enrollment) fn sign_storage_message(
@@ -87,7 +94,10 @@ impl EnrolledStorageStage<'_, '_> {
                 body.sender_role() == self.stage.owner.role,
                 "storage_peer_local_sender_role"
             );
-            let sender = self.storage_statement()?.digest()?;
+            let sender = self.storage_statement_data()?.digest()?;
+            // The same full native check remains immediately before the key
+            // operation, followed by the original full post-signing check.
+            self.stage.check()?;
             let signature = self
                 .stage
                 .owner

@@ -560,12 +560,34 @@ impl EnrolledRoleStage<'_> {
         store: &day2_capabilities::security_epoch::EpochStore,
         role: NativeRole,
     ) -> Result<()> {
+        self.require_selection_data(policy, store, role)?;
+        self.check()
+    }
+
+    /// One full Current guard for the exact selection and purpose. These DATA
+    /// predicates need no second adjacent native observation before I/O.
+    pub(in crate::security_epoch) fn check_current_selection(
+        &mut self,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+        role: NativeRole,
+    ) -> Result<()> {
+        self.require_selection_data(policy, store, role)?;
+        self.require_purpose(StagePurpose::CurrentRole)
+    }
+
+    fn require_selection_data(
+        &mut self,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+        role: NativeRole,
+    ) -> Result<()> {
         if self.owner.policy.bootstrap != *policy || self.owner.policy.store != *store {
             self.owner.refused = true;
             self.acquisition.refuse();
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
-        self.check_for(&policy.scope, role)
+        self.require_role_data(&policy.scope, role)
     }
 
     /// DATA from this actual checked executor, never a current grant factory.
@@ -575,13 +597,18 @@ impl EnrolledRoleStage<'_> {
     }
 
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
+        self.require_role_data(scope, role)?;
+        self.check()
+    }
+
+    fn require_role_data(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
         let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
             self.owner.refused = true;
             self.acquisition.refuse();
             anyhow::bail!("native_enrollment_stage_selection_changed");
         }
-        self.check()
+        Ok(())
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {
@@ -624,6 +651,34 @@ impl EnrolledRoleStage<'_> {
 }
 
 impl SameEnrolledOwner {
+    /// One lexical Current read view: validate the actual owner fully, then
+    /// perform only selection/purpose DATA checks and original-clock narrowing.
+    /// The sole caller observes its process under this child and fully checks
+    /// the same owner again before accepting the observation. No native check
+    /// is cached or omitted across that I/O boundary.
+    pub(in crate::security_epoch) fn current_read_view(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+        store: &day2_capabilities::security_epoch::EpochStore,
+        role: NativeRole,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.check(stage)?;
+            stage.require_selection_data(policy, store, role)?;
+            stage.purpose.require_exact(StagePurpose::CurrentRole)?;
+            stage
+                .acquisition
+                .narrow(store.max_lease_seconds, stage.deadline)
+        })();
+        if result.is_err() {
+            self.refused = true;
+            stage.owner.refused = true;
+            stage.acquisition.refuse();
+        }
+        result
+    }
+
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
             ensure!(!self.refused, "native_enrollment_owner_continuity_refused");

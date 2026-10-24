@@ -55,6 +55,22 @@ enum ReadScope {
 }
 
 impl ReadScope {
+    fn check_selection(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        purpose: NativeRole,
+    ) -> Result<()> {
+        match self {
+            Self::Current => stage.check_current_selection(policy, selection, purpose),
+            Self::StorageBootstrap | Self::StorageMetadataObservation => {
+                stage.check_selection(policy, selection, purpose)?;
+                self.require(stage)
+            }
+        }
+    }
+
     fn require(self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         stage.require_purpose(match self {
             Self::Current => StagePurpose::CurrentRole,
@@ -131,9 +147,8 @@ struct RoleGuard<'stage, 'role, 'selection> {
 
 impl RoleGuard<'_, '_, '_> {
     fn check(&mut self) -> Result<()> {
-        self.stage
-            .check_selection(self.policy, self.selection, self.purpose)?;
-        self.scope.require(self.stage)
+        self.scope
+            .check_selection(self.stage, self.policy, self.selection, self.purpose)
     }
 
     fn request(
@@ -401,22 +416,21 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             valid: true,
         };
         reads.process.check(&mut reads.acquisition)?;
-        reads.stage.check_selection(policy, selection, purpose)?;
-        reads.scope.require(reads.stage)?;
+        reads
+            .scope
+            .check_selection(reads.stage, policy, selection, purpose)?;
         Ok(reads)
     }
 
     fn sample(&mut self) -> Result<Sample> {
         let result = (|| {
             ensure!(self.valid, "epoch_native_read_refused");
-            self.stage
-                .check_selection(&self.policy, &self.store, self.purpose)?;
-            self.scope.require(self.stage)?;
+            self.scope
+                .check_selection(self.stage, &self.policy, &self.store, self.purpose)?;
             self.process.check(&mut self.acquisition)?;
             let sample = self.acquisition.sample()?;
-            self.stage
-                .check_selection(&self.policy, &self.store, self.purpose)?;
-            self.scope.require(self.stage)?;
+            self.scope
+                .check_selection(self.stage, &self.policy, &self.store, self.purpose)?;
             Ok(sample)
         })();
         if result.is_err() {
