@@ -16,6 +16,23 @@ read their trusted base caches and save only under GitHub's isolated PR ref;
 those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
+Main publishes the Linux bootstrap actions it already compiled. Its queue-proof
+fast path skips native preparation, so a separate Mac publisher downloads only
+the compiler-action archive from the exact origin run and attempt admitted by
+the existing full-proof guard. The origin identifiers are emitted only after
+source, latest-attempt, checks and receipt admission succeed. On ordinary full
+runs the publisher uses that same run after verification succeeds. It does not
+compile again or publish runtime, fixture, documentation or installation
+outcomes. All existing verification and native admission remain mandatory.
+
+Mac actions retain their OS/architecture partition and source/run/attempt keys.
+The publisher runs in the caller's GitHub cache scope: PRs still cannot write
+main's cache. The trusted main push is what makes its snapshot available to
+later PRs. Artifact download has a two-minute deadline and one automatic retry;
+cache-only transport/extraction/save failures fall back to normal compilation.
+No new server, cloud resource, permission to write repository contents, or paid
+storage setting is introduced.
+
 Action snapshots use source/run/attempt keys with same-source, role and host
 restoration prefixes; an earlier partial immutable snapshot does not prevent a
 later run from saving additional actions. Owned manual measurement runs save
