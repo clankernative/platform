@@ -702,6 +702,69 @@ mod retained_initial_read_tests {
         Ok(file)
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "synthetic Linux byte-loop cost only; excludes native volume/provider/role checks"]
+    fn profile_synthetic_retained_initial_byte_loop() -> Result<()> {
+        use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
+        use std::os::unix::fs::MetadataExt;
+
+        let chunk = super::super::INITIAL_IO_CHUNK_BYTES;
+        for length in [chunk - 17, chunk + 17, super::super::MAX_IMAGE_BYTES] {
+            let bytes: Vec<u8> = (0..length).map(|n| (n % 251) as u8).collect();
+            let file = image_file(&bytes)?;
+            let identity = file.metadata()?;
+            let stamp = |metadata: &std::fs::Metadata| {
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.len(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            };
+            let expected = stamp(&identity);
+            let mut acquisition = NativeAcquisition::begin(5)?;
+            let mut total_ns = Some(0_u64);
+            let mut checks = 0;
+            for _ in 0..8 {
+                let before = boottime().ok();
+                let result = check_retained_initial_bytes(&file, &bytes, || {
+                    acquisition.remaining()?;
+                    anyhow::ensure!(stamp(&file.metadata()?) == expected, "profile_file_changed");
+                    checks += 1;
+                    Ok(())
+                });
+                let after = boottime().ok();
+                result?;
+                let elapsed = before
+                    .zip(after)
+                    .and_then(|(a, b)| b.checked_sub(a))
+                    .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+                total_ns = total_ns.zip(elapsed).and_then(|(a, b)| a.checked_add(b));
+                acquisition.remaining()?;
+            }
+            let chunks = length.div_ceil(chunk);
+            assert_eq!(checks, 8 * (2 * chunks + 1));
+            acquisition.remaining()?;
+            eprintln!(
+                "day2-native-original-byte-profile-fixture {}",
+                serde_json::json!({
+                    "scope": "synthetic_retained_byte_loop_only",
+                    "image_bytes": length,
+                    "chunk_bytes": chunk,
+                    "calls": 8,
+                    "fd_identity_checks": checks,
+                    "total_ns": total_ns,
+                    "excluded": ["volume", "directory", "path", "process", "namespace", "role", "provider"],
+                })
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn multi_batch_complete_reread_keeps_every_syscall_guard_and_last_check() -> Result<()> {
         let bytes: Vec<u8> = (0..super::super::INITIAL_IO_CHUNK_BYTES + 17)

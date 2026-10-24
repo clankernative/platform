@@ -29,6 +29,11 @@ pub(super) struct PolicyInterpretation {
 
 #[cfg(any(target_os = "linux", test))]
 impl PolicyInterpretation {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn decodes_for_fixture(&self) -> usize {
+        self.decodes
+    }
+
     pub(super) fn new() -> Self {
         Self {
             current: None,
