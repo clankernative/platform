@@ -133,13 +133,19 @@ same-source, same-role and OS/architecture fallbacks. Each run can save newly
 compiled actions, including when a previous immutable snapshot was partial. A Rust-only edit can save new actions
 without discarding reusable prior actions. Valid compiled actions may be saved
 after a later fresh-runtime failure, while cancelled runs do not save them.
-Only the native preparation builders
-and Mac job write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
+The native preparation builders, main's Linux verifier bootstrap and the
+post-verification Mac cache publisher write these snapshots; consumer jobs restore them. Each runner restores its OS/architecture partition into
 the local content-addressed disk cache. Trusted main/merge-group runs may save
 shared outputs. PRs can read trusted base caches and save only their own
 GitHub-isolated pull-request cache scope; they cannot seed the main branch. There is no new cache server, bucket
 or paid storage setting. Eviction within the existing repository allowance can
 reduce hits.
+
+When main reuses exact queue proof, the Mac publisher transfers only compiler
+actions from that fully admitted origin run and attempt. Other events publish
+their own completed Mac actions after the full gate. Missing or failed cache
+transport is a cache miss, never an alternative verification result. See
+[cache publication](CI-CACHING.md) for the branch boundary.
 
 The ordinary Roc verification recipes execute the complete patched compiler-wrapper
 control module on Linux and Mac. The Mac campaign also executes the actual trusted

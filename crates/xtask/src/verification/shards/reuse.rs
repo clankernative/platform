@@ -94,7 +94,7 @@ fn read_json(path: &Path) -> Result<Value> {
 
 fn output(name: &str, value: &str) -> Result<()> {
     ensure!(
-        ["run", "artifact", "reused"].contains(&name)
+        ["run", "artifact", "attempt", "reused"].contains(&name)
             && (value == "true"
                 || value == "false"
                 || value.bytes().all(|byte| byte.is_ascii_digit())),
@@ -482,6 +482,13 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
             "origin":candidate, "original_receipts":files,
             "fresh_runtime_executed":false, "scope":"exact commit only; other nine required jobs execute fresh"
         }))?,
+    )?;
+    // Cache promotion may select only this fully admitted origin, never a
+    // caller-supplied run or an unqualified PR receipt.
+    output("run", &number(&candidate.run, "id")?.to_string())?;
+    output(
+        "attempt",
+        &number(&candidate.run, "run_attempt")?.to_string(),
     )?;
     output("reused", "true")?;
     println!(

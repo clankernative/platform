@@ -2025,18 +2025,63 @@ mod tests {
         assert!(
             actions.contains("-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}")
         );
-        let publish = ci_step(
+        let native_at = job
+            .find("      - run: build-out/bin/xtask verify-mac\n")
+            .unwrap();
+        let archive_at = job
+            .find("      - name: Archive only completed Mac compiler actions\n")
+            .unwrap();
+        assert!(native_at < archive_at);
+        let archive = ci_step(&job, "Archive only completed Mac compiler actions");
+        assert!(archive.contains("-C \"$HOME/.cache/bazel-disk\" ."));
+        assert!(!archive.contains("always()") && !archive.contains("artifacts/"));
+        let upload = ci_step(
             &job,
-            "Persist newly compiled actions under the captured source key",
+            "Retain Mac compiler actions for trusted main publication",
         );
-        assert!(publish.contains("!cancelled()"));
-        assert!(publish.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
-        assert!(publish.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
-        assert!(publish.contains("github.event_name == 'merge_group'"));
-        assert!(publish.contains("github.event_name == 'workflow_dispatch'"));
-        assert!(publish.contains(
-            "github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/')"
+        assert!(upload.contains(
+            "name: day2-bazel-mac-actions-${{ github.run_id }}-${{ github.run_attempt }}"
         ));
+        assert!(upload.contains("steps.mac_actions_archive.outcome == 'success'"));
+
+        let publisher = ci_job("publish-mac-actions");
+        assert!(
+            publisher.contains("needs: [verify, verify-queue-receipt, verify-mac-compatibility]")
+        );
+        assert!(publisher.contains("!cancelled() && needs.verify.result == 'success'"));
+        assert!(publisher.contains("needs.verify-mac-compatibility.result == 'success'"));
+        let admitted = "needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true'";
+        for origin in ["DAY2_CACHE_ORIGIN_RUN:", "DAY2_CACHE_ORIGIN_ATTEMPT:"] {
+            let selected = publisher
+                .lines()
+                .find(|line| line.contains(origin))
+                .unwrap();
+            assert!(selected.contains(admitted));
+            assert!(selected.contains("|| github.run_"));
+        }
+        for name in [
+            "Download compiler actions from the admitted origin",
+            "Retry compiler action download once",
+        ] {
+            let download = ci_step(&publisher, name);
+            assert!(download.contains("repository: clankernative/platform"));
+            assert!(download.contains("run-id: ${{ env.DAY2_CACHE_ORIGIN_RUN }}"));
+            assert!(download.contains("name: day2-bazel-mac-actions-${{ env.DAY2_CACHE_ORIGIN_RUN }}-${{ env.DAY2_CACHE_ORIGIN_ATTEMPT }}"));
+            assert!(download.contains("timeout-minutes: 2"));
+        }
+        let publish = ci_step(&publisher, "Publish compiler actions in this branch scope");
+        assert!(publish.contains("steps.actions_extract.outcome == 'success'"));
+        assert!(publish.contains("path: ~/.cache/bazel-disk"));
+        assert!(publish.contains("key: day2-bazel-mac-actions-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
+        assert!(publisher.contains("contents: read") && publisher.contains("actions: read"));
+        assert!(!publisher.contains("contents: write") && !publisher.contains("actions: write"));
+        let main = ci_job("verify-queue-receipt");
+        assert!(main.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
+        assert!(main.contains("cache_run: ${{ steps.admit.outputs.run }}"));
+        assert!(main.contains("cache_attempt: ${{ steps.admit.outputs.attempt }}"));
+        let bootstrap = ci_step(&main, "Publish completed Linux bootstrap actions");
+        assert!(bootstrap.contains("path: ~/.cache/bazel-disk"));
+        assert!(bootstrap.contains("key: ${{ steps.bazel_actions.outputs.cache-primary-key }}"));
         for consumer in [
             "verify-prepare",
             "verify-shards",
