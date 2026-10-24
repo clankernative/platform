@@ -26,6 +26,10 @@ use native_volume::NativeVolumeObservation;
 mod persistent_disk;
 pub(in crate::security_epoch) use persistent_disk::PersistentDiskSelection;
 mod preparation;
+#[cfg(test)]
+pub(in crate::security_epoch) use preparation::lifecycle_fixture;
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::security_epoch) use preparation::tests::lifecycle_file::FileFixture;
 pub(crate) use preparation::{
     AppFileContinuity, AppPreparedFile, BeforeAttemptRefusal, CurrentPhysicalFilePhase,
     CurrentPreparedFilePhase, NativeOriginalPreparationOutcome, OriginalCreatorFd,

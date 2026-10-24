@@ -688,6 +688,14 @@ jobs:
       - run: tar -xzf /tmp/day2-verification/day2-verification.tgz -C "$GITHUB_WORKSPACE/.."
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-shard ${{ matrix.shard }}
+      - name: Retain failed storage lifecycle replay bundles
+        if: ${{ failure() && matrix.shard == 'workspace-day2' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-storage-lifecycle-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/storage-lifecycle-simulation/failure-*/failure.json
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-result-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -387,4 +387,4 @@ impl Transcript {
 }
 
 #[cfg(test)]
-mod simulation;
+pub(in crate::security_epoch) mod simulation;

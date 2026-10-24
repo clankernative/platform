@@ -27,6 +27,8 @@ mod app;
 mod continuity;
 pub(crate) use app::{AppFileContinuity, AppPreparedFile};
 pub(super) use continuity::PendingPhysicalFilePhase;
+#[cfg(test)]
+pub(in crate::security_epoch) use continuity::lifecycle_fixture;
 pub(crate) use continuity::{
     CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
     PreparedRetentionOutcome,
@@ -693,4 +695,4 @@ impl ReviewedFileLayout {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::security_epoch) mod tests;
