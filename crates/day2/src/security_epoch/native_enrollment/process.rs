@@ -54,8 +54,18 @@ impl SelfSnapshot {
     }
 
     pub(super) fn check(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
-        self.process.check(acquisition)?;
-        self.namespace.check(acquisition)?;
+        {
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::SelfProcess,
+            );
+            self.process.check(acquisition)?;
+        }
+        {
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::Namespace,
+            );
+            self.namespace.check(acquisition)?;
+        }
         Ok(())
     }
 
@@ -220,6 +230,9 @@ impl MessageProcess {
         acquisition: &mut NativeAcquisition,
         costs: &HashCosts,
     ) -> Result<()> {
+        let _profile = crate::security_epoch::self_check_profile::enter(
+            crate::security_epoch::self_check_profile::Category::Peer,
+        );
         let mut timing = costs.start_identity();
         let result = (|| {
             ensure!(
@@ -500,6 +513,47 @@ mod tests {
                 .strip_prefix("day2-native-issuer-cost ")
                 .unwrap(),
         )?)
+    }
+
+    #[test]
+    #[ignore = "scoped Linux cost fixture; not a full enrolled Controller or node qualification"]
+    fn profile_actual_retained_peer_and_self_guards() -> Result<()> {
+        use crate::security_epoch::self_check_profile::{self, Profile};
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let length = std::fs::metadata("/proc/self/exe")?.len();
+        let mut original = NativeAcquisition::begin(5)?;
+        let mut current = SelfSnapshot::acquire(&code, &mut original, &HashCosts::disabled())?;
+        let mut owners = self_receipts(5)?;
+        let mut total = Profile::EMPTY;
+        for _ in 0..8 {
+            let mut peer = NativeAcquisition::begin(5)?;
+            let (checked, profile) = self_check_profile::sample(|| {
+                current.check(&mut original)?;
+                MessageProcess::check_same_actor(
+                    &mut owners.iter_mut().collect::<Vec<_>>(),
+                    &mut peer,
+                    &HashCosts::disabled(),
+                )
+            });
+            total.add(profile.unwrap());
+            checked?;
+            // Actual clocks are still sampled after all diagnostic work.
+            original.remaining()?;
+            peer.remaining()?;
+        }
+        assert_eq!(total.samples, Some(8));
+        for index in [1, 2, 3, 5] {
+            assert_eq!(total.rows[index].0, Some(8));
+        }
+        eprintln!(
+            "day2-native-peer-profile-fixture {}",
+            serde_json::json!({
+                "scope": "actual_retained_peer_and_self_guards_only",
+                "executable_length": length,
+                "profile": total,
+            })
+        );
+        Ok(())
     }
 
     #[test]

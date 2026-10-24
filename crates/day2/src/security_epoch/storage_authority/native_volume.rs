@@ -127,6 +127,9 @@ fn cluster_ca(acquisition: &mut NativeAcquisition) -> Result<Vec<u8>> {
 }
 
 fn profile(acquisition: &mut NativeAcquisition) -> Result<PersistentDiskSelection> {
+    let _profile = crate::security_epoch::self_check_profile::enter(
+        crate::security_epoch::self_check_profile::Category::StorageProfile,
+    );
     let bytes = read_fixed(PROFILE, MAX_PROFILE, acquisition)?;
     crate::json::decode(&bytes)
 }
@@ -702,6 +705,9 @@ impl NativeVolumeResources {
     fn check_current(&mut self, reader: &mut ProviderReader<'_>) -> Result<()> {
         let timings = reader.timings.clone();
         let result = timings.measure(Operation::NativeCheck, || {
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::Volume,
+            );
             ensure!(self.valid, "storage_native_volume_refused");
             reader.check()?;
             ensure!(

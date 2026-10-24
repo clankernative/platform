@@ -25,6 +25,7 @@ mod native_namespace;
 mod preparation_image;
 mod runtime_profile;
 mod seed_core;
+mod self_check_profile;
 pub(crate) mod serving;
 pub(crate) use serving::ServingParticipant;
 mod storage_authority;

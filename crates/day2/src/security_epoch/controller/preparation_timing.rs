@@ -246,6 +246,7 @@ impl Summary {
 pub(in crate::security_epoch) struct Timings(
     Option<Rc<RefCell<[Measurement; OPERATIONS.len()]>>>,
     Scope,
+    Option<Rc<RefCell<super::super::self_check_profile::Profile>>>,
 );
 
 impl Timings {
@@ -255,6 +256,7 @@ impl Timings {
                 [Measurement::EMPTY; OPERATIONS.len()],
             ))),
             Scope::Preparation,
+            None,
         )
     }
 
@@ -264,11 +266,32 @@ impl Timings {
                 [Measurement::EMPTY; OPERATIONS.len()],
             ))),
             Scope::Bootstrap,
+            Some(Rc::new(RefCell::new(
+                super::super::self_check_profile::Profile::EMPTY,
+            ))),
         )
     }
 
     pub(in crate::security_epoch) fn disabled() -> Self {
-        Self(None, Scope::Preparation)
+        Self(None, Scope::Preparation, None)
+    }
+
+    pub(in crate::security_epoch) fn profile_self_check<T>(&self, call: impl FnOnce() -> T) -> T {
+        let Some(total) = &self.2 else {
+            return call();
+        };
+        let (result, profile) = super::super::self_check_profile::sample(call);
+        if let Some(profile) = profile {
+            total.borrow_mut().add(profile);
+        }
+        result
+    }
+
+    pub(super) fn self_check_profile(&self) -> Option<super::super::self_check_profile::Profile> {
+        self.2.as_ref().and_then(|value| {
+            let profile = *value.borrow();
+            (profile.samples != Some(0)).then_some(profile)
+        })
     }
 
     pub(in crate::security_epoch) fn measure<T>(
@@ -347,6 +370,32 @@ impl Timings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_check_data_never_renews_an_original_clock_or_clears_refusal() {
+        use crate::security_epoch::{native_clock::NativeAcquisition, self_check_profile};
+        use day2_capabilities::Digest;
+        let timings = Timings::bootstrap();
+        let mut acquisition = NativeAcquisition::fixture(
+            Digest::new(b"original-check-only"),
+            std::process::id(),
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        acquisition.refuse();
+        let error = timings
+            .profile_self_check(|| {
+                let _profile = self_check_profile::enter(self_check_profile::Category::Policy);
+                acquisition.remaining()
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "epoch_native_acquisition_refused");
+        assert!(acquisition.remaining().is_err());
+        assert_eq!(timings.self_check_profile().unwrap().samples, Some(1));
+        let disabled = Timings::disabled();
+        assert_eq!(disabled.profile_self_check(|| 17), 17);
+        assert!(disabled.self_check_profile().is_none());
+    }
 
     #[test]
     fn compact_round_and_tail_codes_preserve_counts_totals_and_inconclusive_values() {

@@ -45,6 +45,10 @@ pub(in crate::security_epoch) struct Snapshot {
     elapsed_us: Option<u32>,
     timing_format: &'static str,
     timing: CompactSummary,
+    // Exported as a separately bounded record; existing authority diagnostics
+    // retain their original record size and operation-code meanings.
+    #[serde(skip)]
+    pub(super) self_check: Option<super::super::self_check_profile::Profile>,
 }
 
 fn purpose_limit_us(scope: DiagnosticScope) -> Option<u32> {
@@ -170,6 +174,7 @@ impl BootstrapTiming {
                     .and_then(|elapsed| elapsed.as_micros().try_into().ok()),
                 timing_format: "operation_count_total_us_v1",
                 timing: self.timings.summary().compact(),
+                self_check: self.timings.self_check_profile(),
             }
         })
     }
@@ -185,6 +190,7 @@ impl BootstrapTiming {
             elapsed_us: Some(u32::MAX),
             timing_format: "operation_count_total_us_v1",
             timing: Timings::maximal_bootstrap_fixture().compact(),
+            self_check: Some(super::super::self_check_profile::Profile::maximal_fixture()),
         }
     }
 
@@ -208,6 +214,7 @@ impl BootstrapTiming {
             elapsed_us: Some(u32::MAX),
             timing_format: "operation_count_total_us_v1",
             timing: Timings::maximal_bootstrap_fixture().compact(),
+            self_check: Some(super::super::self_check_profile::Profile::maximal_fixture()),
         }
     }
 }

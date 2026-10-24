@@ -633,6 +633,9 @@ fn check_retained_initial_bytes(
     expected: &[u8],
     mut check_identity: impl FnMut() -> Result<()>,
 ) -> Result<()> {
+    let _profile = crate::security_epoch::self_check_profile::enter(
+        crate::security_epoch::self_check_profile::Category::OriginalFile,
+    );
     ensure!(
         !expected.is_empty() && expected.len() <= super::MAX_IMAGE_BYTES,
         "retained_initial_image_bound"

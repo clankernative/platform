@@ -41,6 +41,9 @@ pub(super) fn hash(
     acquisition: &mut NativeAcquisition,
     costs: &HashCosts,
 ) -> Result<Digest> {
+    let _profile = crate::security_epoch::self_check_profile::enter(
+        crate::security_epoch::self_check_profile::Category::ExecutableBytes,
+    );
     costs.hash(|read_bytes| {
         acquisition.remaining()?;
         let before = identity(file)?;

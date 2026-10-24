@@ -19,6 +19,8 @@ use std::io::{Stderr, Write};
 pub(super) const PREFIX: &str = "day2-native-controller-evidence ";
 const MAX_RECORD_BYTES: usize = 2048;
 const MAX_RECORDS: u8 = 12;
+const SELF_CHECK_PREFIX: &str = "day2-native-controller-self-check ";
+const MAX_SELF_CHECK_BYTES: usize = 1024;
 
 pub(in crate::security_epoch) type Evidence = Recorder<StderrOutput>;
 
@@ -45,6 +47,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     activated: bool,
     serving: [bool; 2],
     records: u8,
+    self_check_exported: u8,
     at: FailurePhase,
     refused: bool,
     export_failed: bool,
@@ -525,6 +528,7 @@ impl<W: RecordOutput> Recorder<W> {
             activated: false,
             serving: [false; 2],
             records: 0,
+            self_check_exported: 0,
             at: FailurePhase::Selection,
             refused: false,
             export_failed: false,
@@ -754,6 +758,9 @@ impl<W: RecordOutput> Recorder<W> {
             !self.refused && !self.export_failed && self.records < MAX_RECORDS,
             "native_evidence_closed"
         );
+        // At most one numeric profile for each of the six fixed actions.
+        // All permission borrows have unwound before diagnostic output.
+        self.emit_self_check(&observation)?;
         let record = Record {
             format: "day2_native_controller_evidence_v1",
             sequence: self.records + 1,
@@ -774,6 +781,80 @@ impl<W: RecordOutput> Recorder<W> {
             anyhow::bail!("native_evidence_export_failed");
         }
         self.records += 1;
+        Ok(())
+    }
+
+    fn emit_self_check(&mut self, observation: &Observation) -> Result<()> {
+        let (step, profile) = match observation {
+            Observation::BootstrapCompleted {
+                step,
+                bootstrap: Some(bootstrap),
+                ..
+            } => (*step, bootstrap.self_check),
+            Observation::Refused {
+                at,
+                bootstrap: Some(bootstrap),
+                ..
+            } => {
+                let step = match at {
+                    FailurePhase::CreateReserve => Step::CreateReserve,
+                    FailurePhase::CreateDispatch => Step::CreateDispatch,
+                    FailurePhase::CreateSettle => Step::CreateSettle,
+                    FailurePhase::ActivateReserve => Step::ActivateReserve,
+                    FailurePhase::ActivateDispatch => Step::ActivateDispatch,
+                    FailurePhase::ActivateSettle => Step::ActivateSettle,
+                    _ => return Ok(()),
+                };
+                (step, bootstrap.self_check)
+            }
+            _ => return Ok(()),
+        };
+        let Some(profile) = profile else {
+            return Ok(());
+        };
+        let bit = match step {
+            Step::CreateReserve => 1,
+            Step::CreateDispatch => 2,
+            Step::CreateSettle => 4,
+            Step::ActivateReserve => 8,
+            Step::ActivateDispatch => 16,
+            Step::ActivateSettle => 32,
+        };
+        if self.self_check_exported & bit != 0 {
+            return Ok(());
+        }
+        #[derive(Serialize)]
+        struct ProfileRecord<'a> {
+            format: &'static str,
+            // Joins the following main evidence record, not a grant/result.
+            sequence: u8,
+            selection: &'a Option<Digest>,
+            controller_incarnation: &'a Option<Digest>,
+            step: Step,
+            profile: super::super::self_check_profile::Profile,
+        }
+        let record = ProfileRecord {
+            format: "controller_full_check_exclusive_ns_v1",
+            sequence: self.records + 1,
+            selection: &self.selection,
+            controller_incarnation: &self.incarnation,
+            step,
+            profile,
+        };
+        let json = serde_json::to_string(&record)?;
+        ensure!(
+            SELF_CHECK_PREFIX.len() + json.len() < MAX_SELF_CHECK_BYTES,
+            "native_self_check_record_bound"
+        );
+        if self
+            .output
+            .append(format!("{SELF_CHECK_PREFIX}{json}\n").as_bytes())
+            .is_err()
+        {
+            self.export_failed = true;
+            anyhow::bail!("native_evidence_export_failed");
+        }
+        self.self_check_exported |= bit;
         Ok(())
     }
 }
@@ -871,11 +952,48 @@ mod tests {
         std::str::from_utf8(output)
             .unwrap()
             .lines()
+            .filter(|line| !line.starts_with(SELF_CHECK_PREFIX))
             .map(|line| {
                 assert!(line.len() < MAX_RECORD_BYTES);
                 serde_json::from_str(line.strip_prefix(PREFIX).unwrap()).unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn exclusive_profiles_are_separately_bounded_joined_and_once_per_action() {
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.incarnation = Some(Digest::new(b"actual-owner-historical-data-fixture"));
+        for step in STEPS {
+            let observation = Observation::BootstrapCompleted {
+                step,
+                operation: Digest::new(b"operation"),
+                request: Digest::new(b"request"),
+                snapshot: Digest::new(b"snapshot"),
+                bootstrap: Some(
+                    super::super::bootstrap_timing::BootstrapTiming::maximal_completed_fixture(),
+                ),
+            };
+            recorder.emit_self_check(&observation).unwrap();
+            let length = recorder.output.len();
+            recorder.emit_self_check(&observation).unwrap();
+            assert_eq!(recorder.output.len(), length);
+        }
+        assert_eq!(recorder.records, 0);
+        assert_eq!(recorder.self_check_exported, 63);
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        assert_eq!(text.lines().count(), 6);
+        for line in text.lines() {
+            assert!(line.len() < MAX_SELF_CHECK_BYTES);
+            let record: Value =
+                serde_json::from_str(line.strip_prefix(SELF_CHECK_PREFIX).unwrap()).unwrap();
+            assert_eq!(record["sequence"], 1);
+            assert_eq!(
+                record["selection"],
+                serde_json::to_value(&recorder.selection).unwrap()
+            );
+            assert_eq!(record["profile"]["rows"].as_array().unwrap().len(), 9);
+        }
     }
 
     #[test]
