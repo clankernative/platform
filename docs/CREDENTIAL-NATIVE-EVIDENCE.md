@@ -225,6 +225,11 @@ action field and cannot be interpreted as a bootstrap full-check sample.
 Its `profile.rows` use the existing nine fixed exclusive-nanosecond categories;
 `profile.samples` counts whole Current operations here, not full checks. Remote
 issuer execution is not profiled: its synchronous wait remains caller time.
+The executable bucket covers only instrumented hash spans, notably App-peer
+scans. The self-acquisition SHA loop is not marked and remains in `Other`, along
+with unclassified work and the remote-issuer wait. Neither that bucket's count
+nor its duration represents all hashes in a Current operation. A total verity
+estimate requires qualified coverage of each actual hash path.
 Optional `physical` DATA identifies the last attempted composite-check subcall,
 whether it returned, and the first failed subcall. Rows are fixed in order
 durability, current/retained peer, final file; each is `[count, inclusive_us]`.
