@@ -1075,41 +1075,47 @@ fn successful(seed: u64) -> Program {
 
 #[test]
 fn independent_observation_after_semantic_refusal_never_revives_the_writer() -> Result<()> {
-    let mut world = World::new(71, None)?;
-    assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
-    for operation in [Operation::Reserve, Operation::Dispatch] {
+    let original = tests::selection().scope;
+    let mut selected = original.clone();
+    selected.installation = "scoped_company".into();
+    selected.environment = "production".into();
+    for scope in [original, selected] {
+        let mut world = World::selected(71, None, Some(&scope))?;
+        assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
+        for operation in [Operation::Reserve, Operation::Dispatch] {
+            assert!(
+                world
+                    .step(Event::Bootstrap {
+                        stage: 0,
+                        operation,
+                        fault: Fault::None
+                    })?
+                    .accepted
+            );
+        }
         assert!(
-            world
+            !world
                 .step(Event::Bootstrap {
                     stage: 0,
-                    operation,
+                    operation: Operation::Reserve,
                     fault: Fault::None
                 })?
                 .accepted
         );
+        assert!(world.port.sample().is_err());
+        let observed = world.step(Event::Observe { stage: 0 })?;
+        assert!(observed.accepted);
+        assert!(!observed.state.continuation);
+        assert!(world.port.sample().is_err());
+        let denied = world.step(Event::Bootstrap {
+            stage: 0,
+            operation: Operation::Settle,
+            fault: Fault::None,
+        })?;
+        assert!(!denied.accepted);
+        assert_eq!(denied.state.slot_posts, observed.state.slot_posts);
+        assert_eq!(denied.state.counter_posts, observed.state.counter_posts);
     }
-    assert!(
-        !world
-            .step(Event::Bootstrap {
-                stage: 0,
-                operation: Operation::Reserve,
-                fault: Fault::None
-            })?
-            .accepted
-    );
-    assert!(world.port.sample().is_err());
-    let observed = world.step(Event::Observe { stage: 0 })?;
-    assert!(observed.accepted);
-    assert!(!observed.state.continuation);
-    assert!(world.port.sample().is_err());
-    let denied = world.step(Event::Bootstrap {
-        stage: 0,
-        operation: Operation::Settle,
-        fault: Fault::None,
-    })?;
-    assert!(!denied.accepted);
-    assert_eq!(denied.state.slot_posts, observed.state.slot_posts);
-    assert_eq!(denied.state.counter_posts, observed.state.counter_posts);
     Ok(())
 }
 
