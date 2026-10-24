@@ -40,6 +40,7 @@ impl LifecycleHandshake {
                 events.push(Event::BeginCurrent {
                     endpoint,
                     sequence: self.sequence,
+                    purpose: StagePurpose::CurrentRole,
                 });
             }
             Protocol::CurrentStorage

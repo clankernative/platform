@@ -214,9 +214,11 @@ impl World {
         guarded::SlotObservation,
         CurrentBootstrapExecution<'static, 'static>,
     )> {
-        let counter = self.port.counter.observe(&core.counter)?;
         // Fixed original interval. Reopening SQLite never resets this to a
         // later sample and no constructor for a native owner is called.
+        let budget = Budget::for_context(self.port.sample()?, Duration::from_secs(105))?;
+        let (counter, slot) =
+            guarded::read_with_counter(&self.selection, core, &mut self.port, budget)?;
         let context = CurrentBootstrapExecution::fixture(
             &self.selection,
             &core.counter,
@@ -227,8 +229,6 @@ impl World {
                 elapsed: Duration::from_secs(100),
             },
         )?;
-        let budget = Budget::for_context(self.port.sample()?, Duration::from_secs(105))?;
-        let slot = guarded::read_with_budget(&self.selection, core, &mut self.port, budget)?;
         Ok((counter, slot, context))
     }
 
