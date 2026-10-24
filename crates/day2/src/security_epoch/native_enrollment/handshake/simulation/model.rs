@@ -96,7 +96,7 @@ impl Model {
         } else if self.protocol == Protocol::CurrentStorage
             && self.purpose == StagePurpose::StorageBootstrap
         {
-            30_000_000_000
+            60_000_000_000
         } else {
             5_000_000_000
         };

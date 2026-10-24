@@ -322,7 +322,7 @@ impl<M: Machine> World<M> {
                         origin: self.now,
                         deadline: self.now
                             + Duration::from_secs(if purpose == StagePurpose::StorageBootstrap {
-                                30
+                                60
                             } else {
                                 5
                             }),
@@ -1015,7 +1015,7 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
             StagePurpose::StorageMetadataObservation,
             StagePurpose::InitialFirstHolder,
         ] {
-            for seconds in [1, 5, 10, 11, 30, 31, 60] {
+            for seconds in [1, 5, 6, 10, 11, 30, 31, 59, 60, 61, 120] {
                 for (elapsed, at_deadline) in [
                     (Duration::ZERO, false),
                     (
@@ -1069,7 +1069,7 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
                     // production purpose limit. Equal one-second ceilings
                     // keep distinct labels and never imply ordinary Current.
                     let limit = if purpose == StagePurpose::StorageBootstrap {
-                        30
+                        60
                     } else {
                         5
                     };

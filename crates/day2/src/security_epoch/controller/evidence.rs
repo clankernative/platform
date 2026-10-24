@@ -942,7 +942,7 @@ mod tests {
         assert_eq!(rows[10]["observation"]["role"], "shell");
         for row in &rows[2..8] {
             let timing = &row["observation"]["bootstrap"];
-            assert_eq!(timing["purpose_limit_us"], 30_000_000);
+            assert_eq!(timing["purpose_limit_us"], 60_000_000);
             assert_eq!(timing["elapsed_us"], u32::MAX);
             assert_eq!(timing["last_step"], "bootstrap_release");
             assert_eq!(timing["returned"], true);

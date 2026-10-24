@@ -11,7 +11,8 @@ interruption spend the same original interval; they do not advance a packet.
 Enrollment remains capped at five seconds, including authentication for an
 initial first-holder stage. The initial storage exchange remains capped at ten
 seconds. The subsequent storage wire conversation records its explicit checked
-stage purpose: `StorageBootstrap` is capped at thirty seconds per action, and ordinary
+stage purpose: `StorageBootstrap` has a temporary sixty-second ceiling per action,
+pending the kernel-integrity/Firestore redesign, and ordinary
 `CurrentRole` remains capped at five. Serving remains capped at five seconds.
 Deadline equality refuses. No deadline, signature, sender observation, content
 hash, namespace, socket, file, physical/provider or final consumer check is removed.
@@ -53,7 +54,7 @@ storage purpose
 exercise successful exchanges with interrupted calls, unavailable transport and
 delayed readiness. Storage and serving histories continue through two current
 exchanges and their acknowledgement/release messages. Bootstrap histories spend
-eleven seconds before the first current packet under their original thirty-second
+eleven seconds before the first current packet under their original sixty-second
 ceiling. A further thirty-two seeds per family/purpose generate adversarial
 schedules from reachable prefixes.
 
@@ -68,8 +69,9 @@ All forty family/purpose/fault combinations must reach executed refusal. Expiry
 cuts must refuse at the immediate postcheck, and waits exceed even the bootstrap
 ceiling. Direct controls independently check short purpose ceilings, the last
 instant before each deadline, deadline equality, metadata rejection and rejection
-of bootstrap for serving. Bootstrap accepts eleven- and thirty-second ceilings
-only strictly before expiry and rejects thirty-one- and sixty-second ceilings;
+of bootstrap for serving. Bootstrap accepts eleven-, thirty-, thirty-one- and
+sixty-second ceilings only strictly before expiry and rejects sixty-one- and
+120-second ceilings;
 ordinary Current and serving keep their five-second limit. These are controlled
 DATA observations, not evidence of native completion or the required live margin.
 
