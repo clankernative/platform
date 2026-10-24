@@ -5,6 +5,25 @@ pub(in crate::security_epoch) fn open(path: &Path) -> Provider {
     Provider::open(path)
 }
 
+/// Independent historical DATA, not a replacement writer/continuation owner.
+/// The refused writer port is untouched; this connection cannot create or
+/// mutate even the fixture schema, and a missing file refuses.
+pub(in crate::security_epoch) fn observe_read_only(
+    path: &Path,
+    request: &Request,
+) -> Result<Snapshot> {
+    let mut reader = Provider {
+        db: Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?,
+        fault: Fault::None,
+        tick: Duration::from_secs(100),
+        samples: VecDeque::new(),
+        read_override: None,
+        calls: Vec::new(),
+        refused: false,
+    };
+    reader.read(request)
+}
+
 pub(in crate::security_epoch) fn snapshot(provider: &Provider) -> Value {
     let mut statement = provider
         .db

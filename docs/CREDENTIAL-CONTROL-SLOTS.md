@@ -31,7 +31,8 @@ retains its receipt and control lineage. Fenced retains the reservation. There
 is no deletion, expiry, reset, replacement, reseed, takeover or release operation.
 
 Every slot mutation needs separate opaque current execution authority and fresh
-counter and slot observations. The authority's production factory is absent.
+counter and slot observations. Only the actual original native owner can supply
+the current execution context; observations and provider tokens cannot do so.
 Claim requires a coherent NotApplied counter result and the exact accepted slot.
 Only a known successful claim commit with still-valid original authority yields
 a consuming counter-send handle. A lost/malformed/expired claim reply yields no
@@ -40,6 +41,41 @@ Rearming requires a fresh coherent NotApplied observation, preserves the frozen
 request and grants no send handle. A later separately authorized claim is needed.
 Settlement requires a coherent Applied receipt; its control lineage does not
 identify the winning physical HTTP attempt and is not app readiness.
+
+## One Controller-owned transaction per action
+
+The Controller starts an explicit Firestore read-write transaction with one
+`batchGet` of the exact counter documents and control slot. The opaque, one-use
+token is bound to the selected database and logical core. The slot commit
+consumes it, retaining create-only or exact-version preconditions. A known
+successful MayHaveBeenSent commit still precedes the separate counter send;
+neither a stored May nor an ambiguous commit reply can create a send handle.
+There is no retry on contention, abort, expiry or lost acknowledgement.
+
+After the commit, the Controller performs a token-free strong `batchGet` and
+the unchanged complete after-state validation before announcement/transfer. The
+App's paired read is also strong and read-only. Every returned document appears
+exactly once, the entire stream has nondecreasing readTime, and the existing
+closed counter and slot codecs run only after those global checks. No read-time
+selector or old transaction is reused to observe a commit's result.
+
+Normal reserve and settle use three counter/slot Firestore RPCs: transaction
+read, slot commit, strong post-read. Dispatch uses four: transaction read,
+known-May commit, counter commit, strong post-read. Other metadata and identity
+exchanges are unchanged. Discovery is additional: discard both first values, close any
+known transaction, then reread the entire expanded pair under the original
+budget. Pre-send failure attempts token cleanup only while the same actual port
+and budget remain valid. A refused owner cannot bypass its guards for rollback;
+unresolved provider resources expire without granting permission. A token is
+spent before a possible commit send, so an ambiguous reply cannot resend it.
+
+All role, physical file, writer, identity, original-clock and per-RPC pre/post
+checks remain. The independent Firestore 20-second lock deadline can abort a
+transaction even within the native storage-bootstrap ceiling. This change does
+not raise either deadline or qualify latency, live contention or timing margin.
+Provider contracts: [batchGet strong reads and stream coherence](https://docs.cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/batchGet),
+[transaction commit](https://docs.cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/commit),
+and [transaction failure limits](https://firebase.google.com/docs/firestore/manage-data/transactions#transaction_failure).
 
 ## Native preparation prerequisite
 
@@ -65,13 +101,16 @@ This check returns unit. It produces no stored permission, role or P3 witness.
 It checks the unchanged initial image before later application writes: a valid
 SQLite write deliberately makes this check refuse. It is not a general check of
 serving database integrity. Sampled checks do not eliminate concurrent changes,
-qualify provider durability or establish a hard OS I/O deadline. The production
-storage issuer and current bootstrap execution factory remain unavailable.
+qualify provider durability or establish a hard OS I/O deadline. This continuity
+check itself supplies neither a storage issuer nor a current execution context.
 
 ## Conformance evidence
 
 The independent SQLite provider oracle implements only create-only and exact
-version CAS semantics. Its shared journal records stable handle/attempt/event
+version CAS semantics. The paired-reader model additionally snapshots both
+SQLite stores and rejects an action commit if any requested document changed;
+it is a controlled schedule, not a live Firestore transaction implementation.
+Its shared journal records stable handle/attempt/event
 identities, dispatch order, provider-observed versions, commit/refusal outcomes,
 reply loss and final rows/versions. Dispatch records commit separately from the
 mutation; a failed CAS or process exit cannot erase them. Each capture creates a

@@ -734,7 +734,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub (in crate :: security_epoch) fn read_with_slot (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget) -> Result < (EpochObservation , Option < VersionedSlot > , Budget) >"
+          "signature": "pub (in crate :: security_epoch) fn read_with_slot (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , Option < VersionedSlot > , Budget) >"
         },
         {
           "owner": null,
@@ -743,6 +743,14 @@
         {
           "owner": null,
           "signature": "pub (super) fn read_with_budget (port : & mut impl Port , names : & Names , mut budget : Budget) -> Result < EpochObservation >"
+        },
+        {
+          "owner": null,
+          "signature": "fn read_pair (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget , mode : ReadMode) -> Result < (EpochObservation , Option < VersionedSlot > , Budget , Option < ActionTransaction > ,) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch) fn begin_action (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , Option < VersionedSlot > , Budget , ActionTransaction ,) >"
         }
       ],
       "material_uses": [
@@ -1123,12 +1131,17 @@
         "fn check_binding (& mut self , selection : & EpochStore , core : & LogicalCore) -> Result < () >",
         "fn constrain_budget (& mut self , budget : & mut Budget , sample : & Sample) -> Result < () >",
         "pub (super) fn data (& self) -> Option < & VersionedSlot >",
-        "pub (super) fn into_data (self) -> Option < VersionedSlot >"
+        "pub (super) fn into_data (self) -> Option < VersionedSlot >",
+        "pub (super) fn abort (& mut self , port : & mut impl Port) -> Result < () >"
       ],
       "factories": [
         {
           "owner": null,
           "signature": "pub (super) fn read_with_counter (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , SlotObservation) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn read_for_action (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , SlotObservation) >"
         }
       ],
       "material_uses": [
@@ -1163,6 +1176,14 @@
         {
           "owner": "SlotObservation",
           "signature": "pub (super) fn into_data (self) -> Option < VersionedSlot >"
+        },
+        {
+          "owner": null,
+          "signature": "fn refuse_after_cleanup (slot : & mut SlotObservation , context : & mut CurrentBootstrapExecution < '_ , '_ > , port : & mut impl Port , primary : anyhow :: Error) -> anyhow :: Error"
+        },
+        {
+          "owner": "SlotObservation",
+          "signature": "pub (super) fn abort (& mut self , port : & mut impl Port) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -4457,6 +4478,44 @@
             "module": "storage"
           }
         }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/firestore/paired.rs",
+      "type_name": "ActionTransaction",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn commit_body (& self , selection : & EpochStore , core : & LogicalCore , write : & Value) -> Result < Vec < u8 > >",
+        "pub (in crate :: security_epoch) fn rollback (self , port : & mut impl Port , budget : & mut Budget) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn read_once (port : & mut impl Port , budget : & mut Budget , names : & Names , core : & LogicalCore , slot_name : & str , mode : ReadMode) -> Result < (Snapshot , Option < VersionedSlot > , Option < ActionTransaction >) >"
+        },
+        {
+          "owner": null,
+          "signature": "fn read_pair (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , mut budget : Budget , mode : ReadMode) -> Result < (EpochObservation , Option < VersionedSlot > , Budget , Option < ActionTransaction > ,) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (in crate :: security_epoch) fn begin_action (selection : & EpochStore , core : & LogicalCore , port : & mut impl Port , budget : Budget) -> Result < (EpochObservation , Option < VersionedSlot > , Budget , ActionTransaction ,) >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ActionTransaction",
+          "signature": "pub (in crate :: security_epoch) fn commit_body (& self , selection : & EpochStore , core : & LogicalCore , write : & Value) -> Result < Vec < u8 > >"
+        },
+        {
+          "owner": "ActionTransaction",
+          "signature": "pub (in crate :: security_epoch) fn rollback (self , port : & mut impl Port , budget : & mut Budget) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "rollback"
       ]
     }
   ],

@@ -920,6 +920,7 @@ use super::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClaimReply {
     Known,
+    ProviderDeadline,
     LostAfterCommit,
     MalformedAfterCommit,
     ExpiredAfterCommit,
@@ -935,6 +936,9 @@ struct SharedPort {
     expire_after_counter_commit: bool,
     lose_counter_reply: bool,
     selected_timeouts: Vec<Duration>,
+    transactions: std::collections::BTreeMap<String, (Value, Vec<Value>)>,
+    next_transaction: u64,
+    requests: Vec<(String, Value)>,
 }
 
 impl SharedPort {
@@ -958,6 +962,9 @@ impl SharedPort {
             expire_after_counter_commit: false,
             lose_counter_reply: false,
             selected_timeouts: Vec::new(),
+            transactions: std::collections::BTreeMap::new(),
+            next_transaction: 0,
+            requests: Vec::new(),
         }
     }
 
@@ -982,7 +989,7 @@ impl SharedPort {
         .unwrap();
         let sample = self.sample().unwrap();
         let budget = Budget::for_context(sample, Duration::from_secs(105)).unwrap();
-        let slot = guarded::read_with_counter(selection, core, self, budget)
+        let slot = guarded::read_for_action(selection, core, self, budget)
             .unwrap()
             .1;
         (counter, slot, context)
@@ -996,6 +1003,62 @@ impl SharedPort {
 }
 
 impl SharedPort {
+    // Independent wire/provider DATA: take both SQLite stores at one controlled
+    // schedule point. No production state transition predicts the result.
+    fn paired_snapshot(
+        &mut self,
+        documents: &Value,
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> Result<Vec<Value>> {
+        let documents = documents.as_array().context("oracle documents")?;
+        ensure!((4..=5).contains(&documents.len()), "oracle bounded pair");
+        let slot_names: Vec<_> = documents
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| name.contains("/day2_credential_control_v1/"))
+            .collect();
+        ensure!(slot_names.len() == 1, "oracle one slot");
+        let name = slot_names[0];
+        let counter_documents: Vec<_> = documents
+            .iter()
+            .filter(|item| item.as_str() != Some(name))
+            .cloned()
+            .collect();
+        let body = serde_json::to_vec(
+            &json!({"documents":counter_documents,"newTransaction":{"readOnly":{}}}),
+        )?;
+        let reply = self.counter.post_wire("https://firestore.googleapis.com/v1/projects/project-seven/databases/security/documents:batchGet", &body, timeout, max_bytes)?;
+        let mut entries: Vec<Value> = crate::json::decode(&reply.body)?;
+        entries.remove(0);
+        let found: bool = self.slots.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM slots WHERE name=?1)",
+            [name],
+            |r| r.get(0),
+        )?;
+        let mut entry = if found {
+            json!({"found":serde_json::from_slice::<Value>(&self.slots.read(name))?})
+        } else {
+            json!({"missing":name})
+        };
+        entry["readTime"] = json!("2026-10-14T00:00:00.000100Z");
+        entries.push(entry);
+        Ok(entries)
+    }
+
+    fn snapshot_documents(entries: &[Value]) -> Vec<Value> {
+        entries
+            .iter()
+            .map(|entry| {
+                if let Some(found) = entry.get("found") {
+                    json!({"found":found})
+                } else {
+                    json!({"missing":entry["missing"]})
+                }
+            })
+            .collect()
+    }
+
     fn post_wire(
         &mut self,
         url: &str,
@@ -1012,6 +1075,15 @@ impl SharedPort {
             "oracle bounded request"
         );
         let value: Value = crate::json::decode(body)?;
+        if url.ends_with(":rollback")
+            && let Some(token) = value["transaction"].as_str()
+            && self.transactions.remove(token).is_some()
+        {
+            return Ok(EpochReply {
+                status: 200,
+                body: b"{}".to_vec(),
+            });
+        }
         if url.ends_with(":batchGet")
             && value["documents"].as_array().is_some_and(|documents| {
                 documents.iter().any(|name| {
@@ -1020,50 +1092,31 @@ impl SharedPort {
                 })
             })
         {
-            let documents = value["documents"].as_array().context("oracle documents")?;
-            ensure!(
-                (4..=5).contains(&documents.len())
-                    && value["newTransaction"] == json!({"readOnly":{}}),
-                "oracle exact joint read"
-            );
-            let slot_names: Vec<_> = documents
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|name| name.contains("/day2_credential_control_v1/"))
-                .collect();
-            ensure!(slot_names.len() == 1, "oracle one slot");
-            let name = slot_names[0];
-            let mut counter_request = value.clone();
-            counter_request["documents"] = Value::Array(
-                documents
-                    .iter()
-                    .filter(|item| item.as_str() != Some(name))
-                    .cloned()
-                    .collect(),
-            );
-            let mut reply = self.counter.post_wire(
-                url,
-                &serde_json::to_vec(&counter_request)?,
-                timeout,
-                max_bytes,
-            )?;
-            let mut entries: Vec<Value> = crate::json::decode(&reply.body)?;
-            let found: bool = self.slots.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM slots WHERE name=?1)",
-                [name],
-                |r| r.get(0),
-            )?;
-            let mut entry = if found {
-                json!({"found":serde_json::from_slice::<Value>(&self.slots.read(name))?})
+            let mut entries = self.paired_snapshot(&value["documents"], timeout, max_bytes)?;
+            if value.get("newTransaction").is_some() {
+                ensure!(
+                    value["newTransaction"] == json!({"readWrite":{}})
+                        && value.as_object().unwrap().len() == 2,
+                    "oracle action mode"
+                );
+                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                self.next_transaction += 1;
+                let token = STANDARD.encode(format!("action-{}", self.next_transaction));
+                self.transactions.insert(
+                    token.clone(),
+                    (
+                        value["documents"].clone(),
+                        Self::snapshot_documents(&entries),
+                    ),
+                );
+                entries.insert(0, json!({"transaction":token}));
             } else {
-                json!({"missing":name})
-            };
-            // One model request observes both independent SQLite stores at
-            // this controlled schedule point; it is not a native transaction.
-            entry["readTime"] = json!("2026-10-14T00:00:00.000100Z");
-            entries.push(entry);
-            reply.body = serde_json::to_vec(&entries)?;
-            return Ok(reply);
+                ensure!(value.as_object().unwrap().len() == 1, "oracle strong mode");
+            }
+            return Ok(EpochReply {
+                status: 200,
+                body: serde_json::to_vec(&entries)?,
+            });
         }
         if url.ends_with(":commit")
             && value["writes"]
@@ -1071,9 +1124,29 @@ impl SharedPort {
                 .is_some_and(|writes| writes.len() == 1)
         {
             self.slot_posts += 1;
+            let token = value["transaction"]
+                .as_str()
+                .context("oracle action commit token")?;
+            let (documents, before) = self
+                .transactions
+                .remove(token)
+                .context("oracle unknown action transaction")?;
+            let current = self.paired_snapshot(&documents, timeout, max_bytes)?;
+            if Self::snapshot_documents(&current) != before {
+                return Ok(EpochReply {
+                    status: 409,
+                    body: b"{}".to_vec(),
+                });
+            }
             let write = &value["writes"][0];
             let reply = self.claim_reply;
             self.claim_reply = ClaimReply::Known;
+            if reply == ClaimReply::ProviderDeadline {
+                return Ok(EpochReply {
+                    status: 409,
+                    body: b"{}".to_vec(),
+                });
+            }
             self.slots
                 .apply(write, reply == ClaimReply::LostAfterCommit)?;
             let name = write["update"]["name"]
@@ -1093,6 +1166,10 @@ impl SharedPort {
             return Ok(EpochReply { status: 200, body });
         }
         if url.ends_with(":commit") {
+            ensure!(
+                value.get("transaction").is_none(),
+                "oracle counter commit is separate from known-May transaction"
+            );
             self.counter_posts += 1;
             if let Some(owner) = &self.retained_counter_owner {
                 ensure!(
@@ -1126,6 +1203,8 @@ impl Port for SharedPort {
     ) -> Result<EpochReply> {
         let timeout = budget.remaining(self)?.min(Duration::from_secs(5));
         self.selected_timeouts.push(timeout);
+        self.requests
+            .push((url.to_owned(), crate::json::decode(body)?));
         self.post_wire(url, body, timeout, max_bytes)
     }
 
@@ -1226,7 +1305,7 @@ fn mutation_clock_evidence(
         Duration::from_millis(slot_deadline),
     )
     .unwrap();
-    let slot = guarded::read_with_counter(selection, core, inner, slot_budget)
+    let slot = guarded::read_for_action(selection, core, inner, slot_budget)
         .unwrap()
         .1;
     let context = CurrentBootstrapExecution::fixture(
@@ -1520,6 +1599,7 @@ fn only_known_current_claim_commit_yields_one_consuming_counter_send() {
     for core in [&create, &complete] {
         for reply in [
             ClaimReply::Known,
+            ClaimReply::ProviderDeadline,
             ClaimReply::LostAfterCommit,
             ClaimReply::MalformedAfterCommit,
             ClaimReply::ExpiredAfterCommit,
@@ -1614,6 +1694,11 @@ fn matching_stored_may_and_rearm_ack_never_reconstruct_counter_send_authority() 
     let SlotState::MayHaveBeenSent { attempt: previous } = &may.slot.state else {
         unreachable!()
     };
+    assert!(port.sample().is_err());
+    // The rejected claim consumed this model execution/transport. A separate
+    // DATA fixture can explicitly reconcile/rearm the preserved May; this
+    // neither revives the old port nor reconstructs native file authority.
+    port = port.reopen_model_transport();
     let (counter, slot, context) = port.evidence(&selection, &core, Purpose::Reconcile);
     let rearm = RearmCore {
         logical: core.digest().unwrap(),

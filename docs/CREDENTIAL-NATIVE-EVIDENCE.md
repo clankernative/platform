@@ -208,16 +208,18 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 
 ## Preparation timing diagnosis
 
-Bootstrap reads its counter and control slot together in one bounded read-only
-Firestore transaction before each mutation and in another afterward. The App
-also reads the pair together after the Controller's Known message. Both decoded
-observations retain the same spent original budget. Complete requested-document,
-transaction-token and cross-stream read-time checks precede partitioning into
-the existing strict codecs; discovery discards both values and rereads the whole
-pair. Every batch and rollback retains its full native transport guards, and a
-failed or expired rollback releases no observation. No deadline or response-byte
-ceiling increases. This replaces the separate counter and slot reads; it adds no
-write retry or positive authority cache. Fewer exchanges do not establish a
+Bootstrap reads its counter and control slot in one bounded Controller-owned
+read-write transaction, consumed by the slot commit. The post-commit and App
+paired reads request a token-free strong snapshot. Both decoded observations
+retain the same spent original budget. Complete requested-document, token and
+global nondecreasing read-time checks precede the existing strict codecs;
+discovery discards both values and rereads the whole pair. Every actual batch,
+commit and attempted cleanup retains its native transport guards. Durable known
+May still precedes the separate counter send. Normal reserve/settle require
+three RPCs and dispatch four, excluding discovery/reconciliation. These are
+protocol counts, not native timings. No deadline or byte ceiling increases,
+ambiguous write retry or positive authority cache is introduced. The separate
+provider lock deadline still applies; fewer exchanges do not establish a
 complete native action or timing margin.
 
 `day2-epoch-controller --observe-preparation-read-only INSTANCE APP` is a closed,
