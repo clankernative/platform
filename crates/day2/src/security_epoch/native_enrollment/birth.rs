@@ -378,6 +378,81 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "isolated root Linux cost fixture; no enrolled role or full Controller sample"]
+    fn profile_guarded_policy_cold_and_exact_byte_reads() -> Result<()> {
+        use crate::security_epoch::native_clock::boottime;
+
+        let expected = super::super::tests::policy(&KeyOwner::generate()?);
+        expected.validate()?;
+        let encoded = serde_json::to_vec(&expected)?;
+        for length in [encoded.len(), MAX_POLICY_BYTES as usize] {
+            let directory = tempfile::tempdir()?;
+            ensure!(
+                std::fs::metadata(directory.path())?.uid() == 0,
+                "native_policy_file_test_requires_root_owned_linux_fixture"
+            );
+            let selected = directory.path().join("copied-policy.json");
+            let path: &'static str = Box::leak(
+                selected
+                    .to_str()
+                    .context("native_policy_profile_path")?
+                    .to_owned()
+                    .into_boxed_str(),
+            );
+            // The larger case adds JSON whitespace, not more policy rules.
+            let mut bytes = encoded.clone();
+            bytes.resize(length, b' ');
+            std::fs::write(&selected, &bytes)?;
+            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
+            let mut acquisition = NativeAcquisition::begin(5)?;
+            let mut warm = PolicyInterpretation::new();
+            check_policy_file(path, &mut acquisition, &mut warm, &expected)?;
+            assert_eq!(warm.decodes_for_fixture(), 1);
+            let mut rows = Vec::new();
+            for cold in [true, false] {
+                let mut total_ns = Some(0_u64);
+                let mut decodes = 0;
+                for _ in 0..8 {
+                    let mut empty = PolicyInterpretation::new();
+                    let interpretation = if cold { &mut empty } else { &mut warm };
+                    let prior = interpretation.decodes_for_fixture();
+                    let before = boottime().ok();
+                    let result =
+                        check_policy_file(path, &mut acquisition, interpretation, &expected);
+                    let after = boottime().ok();
+                    result?;
+                    let elapsed = before
+                        .zip(after)
+                        .and_then(|(a, b)| b.checked_sub(a))
+                        .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+                    total_ns = total_ns.zip(elapsed).and_then(|(a, b)| a.checked_add(b));
+                    decodes += interpretation.decodes_for_fixture() - prior;
+                    // All measurements spend this SAME actual original clock.
+                    acquisition.remaining()?;
+                }
+                assert_eq!(decodes, if cold { 8 } else { 0 });
+                rows.push(serde_json::json!({
+                    "interpretation": if cold { "cold" } else { "exact_byte_hit" },
+                    "calls": 8,
+                    "decodes_during_measurement": decodes,
+                    "total_ns": total_ns,
+                }));
+            }
+            acquisition.remaining()?;
+            eprintln!(
+                "day2-native-policy-profile-fixture {}",
+                serde_json::json!({
+                    "scope": "generated_policy_guarded_file_read_only",
+                    "policy_bytes": length,
+                    "padding_bytes": length - encoded.len(),
+                    "rows": rows,
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires isolated root-owned Linux fixture; run this exact test explicitly"]
     fn policy_interpretation_rechecks_real_files_after_hits_and_refuses_restoration() -> Result<()>
     {
