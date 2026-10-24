@@ -27,6 +27,13 @@ const FIXTURES: &[&str] = &[
 ];
 const CASES: &[(&str, &str, &str, &str, bool)] = &[
     (
+        "xtask",
+        "xtask",
+        "bin",
+        "verification::shards::tests::compiled_program_cache_replaces_readonly_bytes_and_preserves_identical_inodes",
+        false,
+    ),
+    (
         "day2",
         "day2",
         "lib",
