@@ -31,6 +31,9 @@ enum Fault {
     ExpireAfterRollback,
     LostReadReply,
     ExpireAfterRead,
+    SequenceHeader,
+    SequenceDocument,
+    UnknownEntryField,
 }
 
 struct PairPort {
@@ -172,6 +175,15 @@ impl Port for PairPort {
             Fault::InvalidSlot => entries[slot]["found"]["fields"]["control_json"]["stringValue"] = json!("[]"),
             Fault::ExtraSlotField => entries[slot]["found"]["extra"] = json!(true),
             Fault::InvalidToken => entries[0]["transaction"] = json!("not-canonical"),
+            Fault::SequenceHeader => {
+                let entry = &entries[0];
+                entries[0] = json!([entry["transaction"], entry["readTime"], entry["found"], entry["missing"]]);
+            }
+            Fault::SequenceDocument => {
+                let entry = &entries[slot];
+                entries[slot] = json!([entry["transaction"], entry["readTime"], entry["found"], entry["missing"]]);
+            }
+            Fault::UnknownEntryField => entries[start]["extra"] = json!(true),
             _ => {}
         }
         reply.body = serde_json::to_vec(&entries)?;
@@ -230,6 +242,35 @@ fn action_keeps_one_exact_read_write_transaction_until_commit_or_abort() {
             assert_eq!(port.requests[1].1, json!({"transaction":"YWN0aW9uLTE="}));
             slot.abort(&mut port).unwrap();
             assert_eq!(port.requests.len(), 2, "one consuming cleanup");
+            assert_eq!((port.inner.slot_posts, port.inner.counter_posts), (0, 0));
+        }
+    }
+}
+
+#[test]
+fn stream_entries_require_objects_and_later_shape_errors_close_the_known_transaction() {
+    for action in [false, true] {
+        for fault in [
+            Fault::SequenceHeader,
+            Fault::SequenceDocument,
+            Fault::UnknownEntryField,
+        ] {
+            let (selection, core, mut port) = PairPort::new(true);
+            port.fault = fault;
+            let budget = port.budget();
+            let result = if action {
+                guarded::read_for_action(&selection, &core, &mut port, budget)
+            } else {
+                guarded::read_with_counter(&selection, &core, &mut port, budget)
+            };
+            assert!(result.is_err(), "{action}/{fault:?}");
+            let known = action && fault != Fault::SequenceHeader;
+            assert_eq!(port.requests.len(), 1 + usize::from(known));
+            if known {
+                assert_eq!(port.requests[1].1, json!({"transaction":"YWN0aW9uLTE="}));
+            }
+            assert_eq!(port.inner.transactions.len(), usize::from(action && !known));
+            assert!(port.sample().is_err());
             assert_eq!((port.inner.slot_posts, port.inner.counter_posts), (0, 0));
         }
     }

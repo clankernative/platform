@@ -217,13 +217,17 @@ fn read_once(
     let bytes = budget.call(port, &names.endpoint("batchGet"), &body)?;
     // The strict JSON decoder rejects duplicate/escaped object keys before
     // either generic document payload is converted to its closed record codec.
-    let mut entries: Vec<PairEntry> = crate::json::decode(&bytes)?;
-    ensure!(!entries.is_empty(), "security_epoch_batch_size");
+    let mut wire: Vec<Value> = crate::json::decode(&bytes)?;
+    ensure!(!wire.is_empty(), "security_epoch_batch_size");
     let mut transaction = if matches!(mode, ReadMode::Action) {
-        let token = entries[0]
-            .transaction
-            .take()
-            .context("security_epoch_transaction_missing")?;
+        let header = wire[0]
+            .as_object_mut()
+            .context("security_epoch_batch_object")?;
+        let token: String = serde_json::from_value(
+            header
+                .remove("transaction")
+                .context("security_epoch_transaction_missing")?,
+        )?;
         let decoded = STANDARD.decode(&token)?;
         ensure!(
             !decoded.is_empty() && decoded.len() <= 1024 && STANDARD.encode(decoded) == token,
@@ -240,9 +244,19 @@ fn read_once(
     };
     let result = (|| {
         ensure!(
-            entries.len() <= expected.len() + usize::from(transaction.is_some()),
+            wire.len() <= expected.len() + usize::from(transaction.is_some()),
             "security_epoch_batch_size"
         );
+        // Serde structs also accept positional sequences. Require actual wire
+        // objects before typed decoding. A known canonical first-object token
+        // is already owned, so a later shape/field error still attempts cleanup.
+        let mut entries: Vec<PairEntry> = wire
+            .into_iter()
+            .map(|entry| -> Result<PairEntry> {
+                ensure!(entry.is_object(), "security_epoch_batch_object");
+                Ok(serde_json::from_value(entry)?)
+            })
+            .collect::<Result<_>>()?;
         // The first entry may hold just the token or also the first document.
         if transaction.is_some() && entries[0].found.is_none() && entries[0].missing.is_none() {
             ensure!(
