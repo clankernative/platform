@@ -805,6 +805,10 @@ pub(crate) fn reserve_in(
             client_id,
             ..
         }) => format!("carta/{}/{client_id}", environment.name()),
+        Some(day2_capabilities::integrations::LiveConnection::FreetoolExecutor {
+            endpoint,
+            ..
+        }) => format!("freetool_executor/{endpoint}"),
         None => format!("{:?}", resource.grant.provider),
     };
     crate::budget::reserve_in(

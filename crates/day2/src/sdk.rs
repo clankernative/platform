@@ -115,6 +115,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "FreetoolExecutor.roc",
+        source: "contracts/FreetoolExecutor.roc",
+        app_export: true,
+    },
+    Module {
         file: "Handler.roc",
         source: "contracts/Handler.roc",
         app_export: true,

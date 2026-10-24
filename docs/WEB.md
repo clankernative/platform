@@ -1116,3 +1116,38 @@ company-approved library catalogs, strict-CSP Datastar
 migration and full audit retention/export remain follow-up work. Deterministic
 simulation covers the Roc core and recorded host observations, not arbitrary
 native browser execution.
+
+## Freetool private resource credentials
+
+Freetool resource editors link to `GET /__freetool/credentials/{resource_id}` using
+`{{ platform.freetool_credentials(resource_id=ui_key(selected.id)) }}`. The helper
+requires a canonical `res` identity and emits a complete, provenance-checked
+navigation value; concatenated paths and arbitrary internal URL strings remain
+forbidden. A link grants no credential-management authority.
+This is a native secret-entry surface, not an app command form. It loads no
+scripts and uses ordinary same-origin POSTs with session-bound CSRF and signed
+30-minute tickets. The ticket fixes the installation, artifact, caller/session,
+resource kind/revision, custody version, approved destination and operator grant.
+A status delay is followed by another live session and Roc authority check before
+mutation. A stale resource, changed target/policy, expired grant or revoked
+session refuses the mutation. Custody supplies CAS and durable attempt replay.
+
+Enable this route only with an activated resource binding on
+`freetool.credential_enrollment_access`: `FreetoolStatus` observation permission,
+a `FreetoolExecutor` target naming the exact approved business resource IDs,
+and an explicit `credential_managers` set containing the authenticated actors.
+The target service ID must match its live connection ID. Execution/result-read
+grants do not grant credential management. The native host invokes the admitted
+Roc query using only `{resource_id}`; its safe response contains
+`resource_id`, `space_id`, `revision`, `resource_kind`, and `can_enroll`.
+The query must independently enforce current effective edit-resource permission.
+
+The private executor must allow the same installation/environment, artifact,
+actor and operation. The native host signs only the four allowlisted custody
+paths and retrieves the service transport key from operator custody. Form values
+are not sent to Roc, saved as ordinary invocation inputs, or included in errors.
+HTTP bearer/basic/private-header and PostgreSQL password forms are separate from
+ordinary resource configuration. The executor's transport key and vault key must
+be distinct. Its configured target—not a browser-supplied URL—selects the secret's
+destination. Simulated-provider sessions never open custody sockets or claim that
+a real credential has been enrolled.

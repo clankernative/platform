@@ -250,7 +250,7 @@ impl InitialStorageContinuity {
         let pending = self.file.begin_pending_initial_phase()?;
         let rendezvous = trace
             .measure(Operation::BootstrapReady, || {
-                self.peer.prepare_current(&mut stage)
+                self.peer.prepare_current(&mut stage, binding.purpose)
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapReady, error))?;
         // Read-only authentication overlaps the App's fresh role acquisition
@@ -258,13 +258,13 @@ impl InitialStorageContinuity {
         // stage; neither these reads nor their material can dispatch a write.
         // The fixed writer is installed only after the file and peer join below.
         let (reads, provider) = trace.measure(Operation::BootstrapAuthentication, || {
-            let retained = AuthenticatedReads::acquire(
+            let retained = AuthenticatedReads::acquire_storage_bootstrap(
                 policy,
                 selection,
                 NativeRole::EpochController,
                 &mut stage,
             )
-            .and_then(AuthenticatedReads::retain_current)
+            .and_then(AuthenticatedReads::retain_storage_bootstrap)
             .map_err(|error| PreparationFailure::at(PreparationStep::BootstrapTransport, error))?;
             retained
                 .into_controller(&mut stage, policy, selection, trace.timings())
@@ -316,7 +316,9 @@ impl InitialStorageContinuity {
         ensure!(self.ready, "controller_storage_continuation_refused");
         self.ready = false;
         let pending = self.file.begin_pending_physical_phase()?;
-        let rendezvous = self.peer.prepare_current(&mut stage)?;
+        let rendezvous = self
+            .peer
+            .prepare_current(&mut stage, StoragePeerPurpose::CurrentServing)?;
         let mut file = pending.acquire(stage)?;
         file.check_current_durability()?;
         let peer = rendezvous.accept_current(file.controller_stage()?, None)?;
@@ -409,6 +411,33 @@ fn request_binding(
 }
 
 impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
+    /// Closed authentication DATA leaf. The transport must release this leaf's
+    /// material borrow, then run the unchanged FULL composite check before any
+    /// returned clock DATA, effect or authority transfer.
+    pub(in crate::security_epoch) fn check_authentication(
+        &mut self,
+        reads: &mut ControllerEpochReads,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_budget_liveness()?;
+            self.file.check_authentication(reads)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// A pure decoder may inspect local refusal before borrowing the original
+    /// clock. This never substitutes for `check` at I/O or ownership transfer.
+    pub(in crate::security_epoch) fn check_budget_liveness(&self) -> Result<()> {
+        ensure!(
+            !*self.continuation,
+            "initial_storage_phase_already_released"
+        );
+        self.file.check_budget_liveness()
+    }
+
     pub(in crate::security_epoch) fn check_authenticated_reads(
         &mut self,
         reads: &ControllerEpochReads,
@@ -458,28 +487,48 @@ impl<'role> CurrentStorageBootstrapPhase<'_, 'role> {
         self.check()
     }
 
-    pub(in crate::security_epoch) fn finish_checked(mut self) -> Result<()> {
+    pub(in crate::security_epoch) fn finish_checked(
+        mut self,
+        timings: &crate::security_epoch::controller::preparation_timing::Timings,
+    ) -> Result<()> {
         self.check()?;
-        self.peer
-            .await_acknowledgement(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapAcknowledgement, || {
+            self.peer
+                .await_acknowledgement(self.file.controller_stage()?)
+        })?;
         self.check()?;
-        self.peer.release_known(self.file.controller_stage()?)?;
-        self.peer.finish_checked(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapPeerRelease, || {
+            self.peer.release_known(self.file.controller_stage()?)
+        })?;
+        timings.measure(Operation::BootstrapPeerFinish, || {
+            self.peer.finish_checked(self.file.controller_stage()?)
+        })?;
+        // Preserve the final native file guard as the last I/O before transfer.
         self.file.finish_checked()?;
         *self.continuation = true;
         Ok(())
     }
 
-    pub(in crate::security_epoch) fn finish_activated(mut self) -> Result<()> {
+    pub(in crate::security_epoch) fn finish_activated(
+        mut self,
+        timings: &crate::security_epoch::controller::preparation_timing::Timings,
+    ) -> Result<()> {
         self.check()?;
-        self.peer
-            .await_acknowledgement(self.file.controller_stage()?)?;
+        timings.measure(Operation::BootstrapAcknowledgement, || {
+            self.peer
+                .await_acknowledgement(self.file.controller_stage()?)
+        })?;
         self.check()?;
         // The App remains blocked on release until this last initial-byte
         // check. Once released, only physical identity is required here.
-        let mut physical = self.file.into_physical_checked()?;
-        self.peer.release_known(physical.controller_stage()?)?;
-        self.peer.finish_checked(physical.controller_stage()?)?;
+        let mut physical = self.file.into_bootstrap_physical_checked()?;
+        timings.measure(Operation::BootstrapPeerRelease, || {
+            self.peer.release_known(physical.controller_stage()?)
+        })?;
+        timings.measure(Operation::BootstrapPeerFinish, || {
+            self.peer.finish_checked(physical.controller_stage()?)
+        })?;
+        // No diagnostic ending clock read between the final guard and transfer.
         physical.finish_checked()?;
         *self.continuation = true;
         Ok(())
@@ -570,7 +619,7 @@ impl AppInitialStorageContinuity {
             selection,
             request,
         )?;
-        self.file.check_initial(stage)?;
+        self.file.check_bootstrap(stage)?;
         let peer = self.peer.begin_current(queued, stage, binding)?;
         let mut phase = CurrentAppStorageBootstrapPhase {
             file: &mut self.file,
@@ -601,9 +650,9 @@ impl CurrentAppStorageBootstrapPhase<'_> {
     pub(crate) fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
             self.continuation.check()?;
-            self.file.check_initial(stage)?;
+            self.file.check_bootstrap(stage)?;
             self.peer.check(stage)?;
-            self.file.check_initial(stage)
+            self.file.check_bootstrap(stage)
         })();
         if result.is_err() {
             self.refuse();
@@ -620,7 +669,7 @@ impl CurrentAppStorageBootstrapPhase<'_> {
         self.check(stage)?;
         self.peer.await_release(stage)?;
         self.peer.finish_checked(stage)?;
-        self.file.check_initial(stage)?;
+        self.file.check_bootstrap(stage)?;
         self.continuation.complete()?;
         Ok(())
     }
@@ -635,7 +684,7 @@ impl CurrentAppStorageBootstrapPhase<'_> {
         // The Controller may now finalize activation. Future writes need
         // their own active serving fence; initial bytes are never re-adopted.
         self.peer.finish_checked(stage)?;
-        self.file.check_current(stage)?;
+        self.file.check_bootstrap_physical(stage)?;
         self.continuation.complete()?;
         Ok(())
     }

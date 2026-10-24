@@ -74,9 +74,11 @@ impl ProviderEpochReads {
             // Import the actual last provider view before sampling another
             // view; reversing that order could hide a rewind. Hand the actual
             // latest authenticated view back, with no scalar timestamp/max.
-            material.acquisition.exchange_current_views(acquisition)?;
+            let scope = material.scope;
+            scope.exchange(&mut material.acquisition, acquisition)?;
             material.check_bootstrap(stage, policy, store)?;
-            material.acquisition.exchange_current_views(acquisition)?;
+            let scope = material.scope;
+            scope.exchange(&mut material.acquisition, acquisition)?;
             drop(material);
             use_guard.complete()
         })();
@@ -118,7 +120,8 @@ impl ProviderEpochReads {
             let checked = material.check_bootstrap(stage, policy, store);
             let bytes = requested?;
             checked?;
-            material.acquisition.exchange_current_views(acquisition)?;
+            let scope = material.scope;
+            scope.exchange(&mut material.acquisition, acquisition)?;
             drop(material);
             use_guard.complete()?;
             Ok(bytes)

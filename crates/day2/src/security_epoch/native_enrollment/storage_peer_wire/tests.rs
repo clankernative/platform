@@ -73,15 +73,17 @@ fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_si
             controller_nonce: ready_nonce.clone(),
         },
     );
-    wrong_purpose.verify(&app).unwrap();
+    assert!(wrong_purpose.verify(&app).is_err());
     assert!(
         wrong_purpose
             .current_hello(&initial, 1, &ready_nonce, None)
             .is_err()
     );
-    wrong_purpose
-        .current_hello(&initial, 1, &ready_nonce, Some(&bootstrap))
-        .unwrap();
+    assert!(
+        wrong_purpose
+            .current_hello(&initial, 1, &ready_nonce, Some(&bootstrap))
+            .is_err()
+    );
     let mut missing = serde_json::to_value(&hello).unwrap();
     missing["body"]
         .as_object_mut()
@@ -762,7 +764,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             initial: Digest::new(b"original-known-exchange"),
             sequence: 1,
             request: StoragePeerRequest {
-                purpose: StoragePeerPurpose::BootstrapCreate,
+                purpose: StoragePeerPurpose::CurrentServing,
                 binding: Digest::new(b"exact-request"),
             },
             nonce: Digest::new(b"fresh-app-nonce"),
@@ -832,7 +834,7 @@ fn current_exchange_binds_sequence_purpose_request_and_both_fresh_grants() {
 
 #[test]
 fn current_wire_stays_closed_and_rejects_nested_arrays_and_unknown_fields() {
-    let (_policy, stage, key) = fixture(NativeRole::AppHost);
+    let (_policy, stage, key) = bootstrap_fixture(NativeRole::AppHost);
     let hello = signed(
         &stage,
         &key,
@@ -988,6 +990,132 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
         )
         .verify(&controller)
         .is_err()
+    );
+}
+
+fn bootstrap_fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
+    let (policy, mut statement, key, issuer) = fixture_with_issuer(role);
+    statement.stage.data.purpose = StagePurpose::StorageBootstrap;
+    statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+    (policy, statement, key)
+}
+
+#[test]
+fn bootstrap_request_rejects_valid_ordinary_grant_even_when_both_are_short() {
+    for purpose in [
+        StoragePeerPurpose::BootstrapCreate,
+        StoragePeerPurpose::BootstrapComplete,
+    ] {
+        let (policy, current, key, issuer) = fixture_with_issuer(NativeRole::AppHost);
+        let mut bootstrap = current.clone();
+        bootstrap.stage.data.purpose = StagePurpose::StorageBootstrap;
+        bootstrap.stage.signature = issuer.sign("role-stage", &bootstrap.stage.data).unwrap();
+        bootstrap
+            .validate(
+                &policy,
+                &bootstrap.certificate,
+                NativeRole::AppHost,
+                &bootstrap.stage.data.process,
+                Duration::from_secs(102),
+                StagePurpose::StorageBootstrap,
+            )
+            .unwrap();
+        let request = StoragePeerRequest {
+            purpose,
+            binding: Digest::new(b"fixed-bootstrap-request"),
+        };
+        let nonce = Digest::new(b"ready");
+        let initial = Digest::new(b"initial-peer");
+        let body = |statement: &StageStatement| Body::CurrentHello {
+            app: Box::new(statement.clone()),
+            initial: initial.clone(),
+            sequence: 1,
+            request: request.clone(),
+            nonce: Digest::new(b"app"),
+            controller_nonce: nonce.clone(),
+        };
+        let correct = signed(&bootstrap, &key, body(&bootstrap));
+        correct.verify(&bootstrap).unwrap();
+        correct
+            .current_hello(&initial, 1, &nonce, Some(&request))
+            .unwrap();
+        assert!(correct.verify(&current).is_err());
+        let wrong = signed(&current, &key, body(&current));
+        assert!(wrong.verify(&current).is_err());
+        assert!(
+            wrong
+                .current_hello(&initial, 1, &nonce, Some(&request))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn every_current_completion_binds_actual_stage_purpose_and_excludes_metadata() {
+    for (role, completion) in [
+        (NativeRole::EpochController, CompletionKind::Result),
+        (NativeRole::AppHost, CompletionKind::Consumed),
+        (NativeRole::EpochController, CompletionKind::Released),
+    ] {
+        let (_, ordinary, key, issuer) = fixture_with_issuer(role);
+        for purpose in [
+            StagePurpose::CurrentRole,
+            StagePurpose::StorageBootstrap,
+            StagePurpose::InitialFirstHolder,
+            StagePurpose::StorageMetadataObservation,
+        ] {
+            let mut statement = ordinary.clone();
+            statement.stage.data.purpose = purpose;
+            statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+            let exchange = Digest::new(b"exact-purpose-exchange");
+            let body = match completion {
+                CompletionKind::Result => Body::CurrentResult {
+                    exchange: exchange.clone(),
+                },
+                CompletionKind::Consumed => Body::CurrentConsumed {
+                    exchange: exchange.clone(),
+                },
+                CompletionKind::Released => Body::CurrentReleased {
+                    exchange: exchange.clone(),
+                },
+            };
+            let message = signed(&statement, &key, body);
+            let permitted = matches!(
+                purpose,
+                StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+            );
+            assert_eq!(message.verify(&statement).is_ok(), permitted);
+            if permitted {
+                let mut replacement = statement.clone();
+                replacement.stage.data.purpose = if purpose == StagePurpose::CurrentRole {
+                    StagePurpose::StorageBootstrap
+                } else {
+                    StagePurpose::CurrentRole
+                };
+                replacement.stage.signature =
+                    issuer.sign("role-stage", &replacement.stage.data).unwrap();
+                assert!(message.verify(&replacement).is_err());
+                assert!(message.body.matches_completion(&exchange, completion));
+            }
+        }
+    }
+}
+
+#[test]
+fn metadata_statement_is_not_storage_peer_evidence_even_with_a_valid_short_grant() {
+    let (policy, mut statement, _key, issuer) = fixture_with_issuer(NativeRole::EpochController);
+    statement.stage.data.purpose = StagePurpose::StorageMetadataObservation;
+    statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+    assert!(
+        statement
+            .validate_attested_controller(
+                &policy,
+                &statement.certificate,
+                statement.stage.data.process.process,
+                Duration::from_secs(102),
+                StagePurpose::StorageMetadataObservation,
+            )
+            .is_err()
     );
 }
 

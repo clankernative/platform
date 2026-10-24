@@ -2,16 +2,20 @@
 //! authenticated peer phase throughout each request; read credentials or parsed
 //! policy DATA alone cannot install this port.
 
-use super::{ControllerEpochReads, RetainedEpochReads};
+use super::{ControllerEpochReads, ReadScope, RetainedEpochReads};
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
+    controller::preparation_timing::{Operation, Timings},
     firestore::{Budget, EpochReply, Port, Sample},
     transport::Route,
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     Digest,
-    security_epoch::{EpochStore, bootstrap::InitialBootstrapPolicy},
+    security_epoch::{
+        EpochStore,
+        bootstrap::{InitialBootstrapPolicy, NativeRole},
+    },
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -20,6 +24,7 @@ pub(crate) struct ControllerPort<'storage, 'role> {
     reads: ControllerEpochReads,
     selection: Digest,
     valid: bool,
+    timings: Timings,
 }
 
 /// A short-lived borrow only; it cannot outlive or reconstruct the actual
@@ -38,6 +43,7 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         policy: &InitialBootstrapPolicy,
         store: &EpochStore,
         reads: ControllerEpochReads,
+        timings: Timings,
     ) -> Result<Self> {
         let state = Rc::clone(&reads.state);
         let guard = state.gate.guard()?;
@@ -45,11 +51,15 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
             let mut phase = owner.try_borrow_mut()?;
             // Resolve the actual phase BEFORE borrowing shared material:
             // phase checks themselves reborrow that same provider context.
-            phase.check_authenticated_reads(&reads)?;
+            timings.measure(Operation::BootstrapWriterPhase, || {
+                phase.check_authenticated_reads(&reads)
+            })?;
             let stage = phase.controller_stage()?;
             let borrow = state.gate.enter()?;
             let mut material = state.material.try_borrow_mut()?;
-            material.check_bootstrap(stage, policy, store)?;
+            timings.measure(Operation::BootstrapWriterMaterial, || {
+                material.check_bootstrap(stage, policy, store)
+            })?;
             let selection = material.selection.clone();
             drop(material);
             borrow.complete()?;
@@ -59,6 +69,7 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 reads,
                 selection,
                 valid: true,
+                timings: timings.clone(),
             };
             port.sample()?;
             guard.complete()?;
@@ -73,11 +84,12 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
         result
     }
 
-    pub(in crate::security_epoch) fn context_interval(
+    fn context_budget(
         &mut self,
         owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         selection: &EpochStore,
-    ) -> Result<(Sample, Duration)> {
+        request: &Digest,
+    ) -> Result<(Sample, Budget, Duration)> {
         let result = (|| {
             ensure!(
                 Rc::ptr_eq(owner, &self.owner),
@@ -87,17 +99,36 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
                 self.selection == Digest::of(selection)?,
                 "epoch_writer_selection_changed"
             );
-            let sample = self.sample()?;
-            let guard = self.reads.state.gate.enter()?;
-            let (_, deadline) = self
-                .reads
-                .state
-                .material
-                .try_borrow_mut()?
-                .acquisition
-                .interval_data()?;
+            ensure!(
+                self.owner.try_borrow()?.request_digest()? == *request,
+                "security_epoch_native_request_changed"
+            );
+            // One construction boundary, not an effect or transfer. Release
+            // every phase/material borrow before this unchanged FULL sample:
+            // the full check itself reborrows the same provider/file/peer.
+            self.sample()?;
+            let guard = self.reads.state.gate.guard()?;
+            let phase = self.owner.try_borrow()?;
+            phase.check_budget_liveness()?;
+            let borrow = self.reads.state.gate.enter()?;
+            let mut material = self.reads.state.material.try_borrow_mut()?;
+            ensure!(
+                self.valid
+                    && material.valid
+                    && material.scope == ReadScope::StorageBootstrap
+                    && material.purpose == NativeRole::EpochController,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            // Only this actual original purpose-bound acquisition can issue
+            // the budget. No scalar deadline or fresh origin selects 30s.
+            // All binding hashes/full work and budget derivation precede this
+            // ACTUAL clock checkpoint. Retain each original floor/ceiling.
+            let result = material.acquisition.bootstrap_context_budget()?;
+            drop(material);
+            borrow.complete()?;
+            drop(phase);
             guard.complete()?;
-            Ok((sample, deadline))
+            Ok(result)
         })();
         if result.is_err() {
             self.refuse();
@@ -129,20 +160,28 @@ impl<'storage, 'role> ControllerPort<'storage, 'role> {
 }
 
 impl ControllerPort<'_, '_> {
-    fn sample(&mut self) -> Result<Sample> {
+    /// Pure decoding consumes THIS retained acquisition, not a reconstructed
+    /// clock or successful native-check cache. The same local owners and shared
+    /// refusal gate stay borrowed; full sample/post/transfer guards are separate.
+    fn decoding_sample(&mut self) -> Result<Sample> {
         let result = (|| {
             let guard = self.reads.state.gate.guard()?;
             ensure!(self.valid, "epoch_writer_refused");
-            self.owner.try_borrow_mut()?.check()?;
-            let mut phase = self.owner.try_borrow_mut()?;
-            let stage = phase.controller_stage()?;
+            let phase = self.owner.try_borrow()?;
+            phase.check_budget_liveness()?;
             let borrow = self.reads.state.gate.enter()?;
             let mut material = self.reads.state.material.try_borrow_mut()?;
-            let sample = material.sample(stage)?;
+            ensure!(
+                material.valid
+                    && material.scope == ReadScope::StorageBootstrap
+                    && material.purpose == NativeRole::EpochController,
+                "epoch_bootstrap_read_purpose_changed"
+            );
+            material.acquisition.require_storage_bootstrap()?;
+            let sample = material.acquisition.sample()?;
             drop(material);
             borrow.complete()?;
             drop(phase);
-            self.owner.try_borrow_mut()?.check()?;
             guard.complete()?;
             Ok(sample)
         })();
@@ -152,29 +191,73 @@ impl ControllerPort<'_, '_> {
         result
     }
 
+    fn sample(&mut self) -> Result<Sample> {
+        // Count every full composite observation, not just acquisition's
+        // first one. These inclusive timings do not grant or cache authority.
+        let timings = self.timings.clone();
+        let result = timings.measure(Operation::BootstrapWriterSample, || {
+            let guard = self.reads.state.gate.guard()?;
+            ensure!(self.valid, "epoch_writer_refused");
+            let mut phase = self.owner.try_borrow_mut()?;
+            // The closed leaf borrows the SAME provider state and actual
+            // owning stage. It returns no stage/material/permission and ends
+            // its exclusive material borrow before the full file/peer check.
+            phase.check_authentication(&mut self.reads)?;
+            phase.check()?;
+            drop(phase);
+            // Charge ALL full-check work; the leaf's earlier clock cannot be
+            // returned as if it had been sampled after those checks.
+            let sample = self.decoding_sample()?;
+            guard.complete()?;
+            Ok(sample)
+        });
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Spend the caller's actual budget against this SAME retained original
+    /// acquisition after the full transport postguards. No native proof escapes.
+    fn remaining_budget(&mut self, budget: &mut Budget) -> Result<Duration> {
+        let guard = self.reads.state.gate.enter()?;
+        let mut material = self.reads.state.material.try_borrow_mut()?;
+        ensure!(
+            self.valid
+                && material.valid
+                && material.scope == ReadScope::StorageBootstrap
+                && material.purpose == NativeRole::EpochController,
+            "epoch_writer_refused"
+        );
+        material.acquisition.require_storage_bootstrap()?;
+        let remaining = budget.remaining_native(&mut material.acquisition)?;
+        drop(material);
+        guard.complete()?;
+        Ok(remaining)
+    }
+
     fn post(
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        let result = (|| {
+        let timings = self.timings.clone();
+        let result = timings.measure(Operation::BootstrapWriterExchange, || {
             let guard = self.reads.state.gate.guard()?;
-            self.sample()?;
             ensure!(
-                max_bytes == 65_536
-                    && body.len() <= 65_536
-                    && !timeout.is_zero()
-                    && timeout <= Duration::from_secs(5),
+                self.valid && max_bytes == 65_536 && body.len() <= 65_536,
                 "epoch_writer_budget"
             );
             let mut phase = self.owner.try_borrow_mut()?;
+            // Keep FULL physical/file/peer admission before the actual effect;
+            // the authentication-only leaf is never used in its place.
             let stage = phase.controller_stage()?;
             let borrow = self.reads.state.gate.enter()?;
             let mut material = self.reads.state.material.try_borrow_mut()?;
             material.sample(stage)?;
-            let route = writer_route(url)?;
+            let (route, operation) = writer_route(url)?;
             ensure!(
                 material.http.matches(&route, url)?,
                 "epoch_writer_recipient_changed"
@@ -185,26 +268,35 @@ impl ControllerPort<'_, '_> {
                 acquisition,
                 ..
             } = &mut *material;
-            let requested = http.request_with_ceiling(
-                route,
-                &credential.authorization()?,
-                Some(body),
-                acquisition,
-                timeout,
-            );
+            // Keep this fallible evaluation outside the diagnostic closure:
+            // failure must exit before both request and post-request sampling.
+            let authorization = credential.authorization()?;
+            // The caller may have a shorter context deadline than this live
+            // parent. Charge every preguard before selecting the one HTTP
+            // timeout, and fail BEFORE the request closure/post-request path.
+            let timeout = budget
+                .remaining_native(acquisition)?
+                .min(Duration::from_secs(5));
+            let requested = self.timings.measure(operation, || {
+                http.request_with_ceiling(route, &authorization, Some(body), acquisition, timeout)
+            });
             let checked = material.sample(stage);
+            // An attempted transport still receives its authentication
+            // postcheck, but its first error exits before completing this
+            // exclusive use or doing successful-path physical postwork.
             let bytes = requested?;
             checked?;
             drop(material);
             borrow.complete()?;
             drop(phase);
-            self.sample()?;
+            self.owner.try_borrow_mut()?.check()?;
+            self.remaining_budget(budget)?;
             guard.complete()?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
             })
-        })();
+        });
         if result.is_err() {
             self.refuse();
         }
@@ -213,12 +305,32 @@ impl ControllerPort<'_, '_> {
 }
 
 impl<'storage, 'role> ControllerBorrow<'_, 'storage, 'role> {
-    pub(in crate::security_epoch) fn context_interval(
+    fn check_context_owner(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<()> {
+        // Both retained Rcs stay live. Compare the actual allocations, even
+        // when their borrow lifetimes differ; no pointer or stage escapes.
+        let result = (|| {
+            ensure!(
+                std::ptr::addr_eq(Rc::as_ptr(&self.owner.owner), Rc::as_ptr(owner)),
+                "epoch_writer_original_owner_changed"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.owner.refuse();
+        }
+        result
+    }
+
+    pub(in crate::security_epoch) fn context_budget(
         &mut self,
         owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'storage, 'role>>>,
         selection: &EpochStore,
-    ) -> Result<(Sample, Duration)> {
-        self.owner.context_interval(owner, selection)
+        request: &Digest,
+    ) -> Result<(Sample, Budget, Duration)> {
+        self.owner.context_budget(owner, selection, request)
     }
 
     pub(in crate::security_epoch) fn budget(&mut self) -> Result<Budget> {
@@ -231,26 +343,50 @@ impl Port for ControllerBorrow<'_, '_, '_> {
         self.owner.sample()
     }
 
+    fn sample_for_context(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<Sample> {
+        self.check_context_owner(owner)?;
+        self.owner.sample()
+    }
+
+    fn clock_for_context(
+        &mut self,
+        owner: &Rc<RefCell<CurrentStorageBootstrapPhase<'_, '_>>>,
+    ) -> Result<Sample> {
+        self.check_context_owner(owner)?;
+        self.owner.decoding_sample()
+    }
+
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        self.owner.decoding_sample()
+    }
+
     fn post(
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply> {
-        self.owner.post(url, body, timeout, max_bytes)
+        self.owner.post(url, body, budget, max_bytes)
+    }
+
+    fn refuse(&mut self) {
+        self.owner.refuse();
     }
 }
 
 // Route selection is DATA; NativeHttp additionally requires the exact selected
 // project/database URL. This function cannot issue a request or mint a writer.
-fn writer_route(url: &str) -> Result<Route<'static>> {
+fn writer_route(url: &str) -> Result<(Route<'static>, Operation)> {
     if url.ends_with("/documents:batchGet") {
-        Ok(Route::EpochRead)
+        Ok((Route::EpochRead, Operation::BootstrapFirestoreRead))
     } else if url.ends_with("/documents:rollback") {
-        Ok(Route::EpochRollback)
+        Ok((Route::EpochRollback, Operation::BootstrapFirestoreRollback))
     } else if url.ends_with("/documents:commit") {
-        Ok(Route::EpochCommit)
+        Ok((Route::EpochCommit, Operation::BootstrapFirestoreCommit))
     } else {
         anyhow::bail!("epoch_writer_route_refused")
     }

@@ -693,7 +693,11 @@ fn capture_query(
     Ok(output)
 }
 
-pub(crate) fn worker_archive(root: &Path, isolated_job: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn worker_archive(
+    root: &Path,
+    isolated_job: Option<&Path>,
+    budget: Duration,
+) -> Result<PathBuf> {
     let selected = targets(root)?
         .into_iter()
         .filter(|target| {
@@ -704,13 +708,7 @@ pub(crate) fn worker_archive(root: &Path, isolated_job: Option<&Path>) -> Result
         selected.len() == 1,
         "one current native worker archive target required"
     );
-    let outputs = build_profile(
-        root,
-        &selected,
-        Duration::from_secs(600),
-        Profile::Release,
-        isolated_job,
-    )?;
+    let outputs = build_profile(root, &selected, budget, Profile::Release, isolated_job)?;
     Ok(root.join(
         outputs
             .get(&selected[0].label)

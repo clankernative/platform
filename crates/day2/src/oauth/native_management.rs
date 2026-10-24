@@ -283,15 +283,17 @@ pub(crate) fn prepare_initial_app_storage(
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
             }
             // S3 owns the fixed Reserve/Dispatch/Settle pair. Each of its six
-            // steps receives a fresh stage from this SAME enrollment. A failed
-            // or incomplete step cannot restart this once-only startup attempt.
+            // steps receives its storage-bootstrap stage from this SAME
+            // enrollment and trusted local Bootstrapping state. Ordinary
+            // serving never selects this purpose. A failed or incomplete step
+            // cannot restart this once-only startup attempt.
             for _ in 0..6 {
                 let AppStorage::Bootstrapping(storage) = &mut owners.storage else {
                     anyhow::bail!("native App bootstrap owner unavailable")
                 };
                 storage.prepare_current()?;
                 let mut role = owners.role.try_borrow_mut()?;
-                let mut stage = role.begin_current_stage()?;
+                let mut stage = role.begin_storage_bootstrap_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
                 storage.advance(&mut stage)?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
@@ -852,7 +854,7 @@ enum BorrowedRoleStage<'stage, 'role> {
 impl BorrowedRoleStage<'_, '_> {
     fn check(&mut self) -> Result<()> {
         match self {
-            Self::Native(stage) => stage.check(),
+            Self::Native(stage) => stage.require_current_role(),
             #[cfg(test)]
             Self::Simulated(stage) => stage.check(),
         }
@@ -870,7 +872,7 @@ impl<'role> RoleStage<'role> {
 
     pub(crate) fn check(&mut self) -> Result<()> {
         match &mut self.source {
-            RoleSource::Native(stage) => stage.check(),
+            RoleSource::Native(stage) => stage.require_current_role(),
             #[cfg(test)]
             RoleSource::Simulated(stage) => stage.check(),
         }
@@ -878,21 +880,26 @@ impl<'role> RoleStage<'role> {
 
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
         match &mut self.source {
-            RoleSource::Native(stage) => stage.check_for(scope, role),
+            RoleSource::Native(stage) => {
+                stage.require_current_role()?;
+                stage.check_for(scope, role)
+            }
             #[cfg(test)]
             RoleSource::Simulated(stage) => stage.check_for(scope, role),
         }
     }
 
     /// S3 may borrow the real stage for native authenticated reads. A scripted
-    /// role never constructs or substitutes a native enrolled stage.
+    /// role never constructs or substitutes a native enrolled stage. A storage
+    /// bootstrap or metadata-observation stage cannot become ordinary serving
+    /// authority, even if its remaining interval is shorter than five seconds.
     pub(crate) fn with_native<T>(
         &mut self,
         use_native: impl FnOnce(&mut EnrolledRoleStage<'_>) -> Result<T>,
     ) -> Result<T> {
         match &mut self.source {
             RoleSource::Native(stage) => {
-                stage.check()?;
+                stage.require_current_role()?;
                 use_native(stage)
             }
             #[cfg(test)]

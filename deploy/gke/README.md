@@ -890,6 +890,162 @@ this root refuses to add, remove or rotate a provider credential, or change
 change with the candidate image and artifact, then enable it again. See
 [the release workflow](../../docs/RELEASE-WORKFLOW.md#provider-credentials).
 
+## Companion loopback services
+
+`day2-app.loopback_services` is the one generic path for an optional private
+service in the day2 pod. It takes a map of named services with a digest-pinned
+image, unique non-8080 port, exact Secret Manager config version, safe
+`.state/companions/` subpath, health-check declaration, and bounded integer CPU
+and memory limits. The companion uses the same UID 10001, read-only root,
+RuntimeDefault seccomp, dropped capabilities and no-privilege-escalation posture
+as `day2`; requests equal limits. The stack adds no public Service or Ingress
+port. Each service must bind only `127.0.0.1:<port>`; a loopback endpoint is a
+service contract, not a containerPort firewall rule.
+
+`app-edge.runtime_secret_ids` must include every `config_secret_version` secret
+ID and every service-credential secret ID. The CSI add-on reads the exact
+numbered config version. A root init container copies it into a memory-backed
+regular file owned by 10001 with mode `0600`; the service mounts that file
+read-only and receives it as the `serve` argument. Its health-check command runs
+inside the container so it can request the loopback health path (a Kubernetes
+HTTP probe otherwise targets the pod IP). Set `health_check.command` to an
+in-image command that accepts the final health URL argument; the stack appends
+`http://127.0.0.1:<port><path>`.
+
+The complete Freetool example below shows the day2 connection, resource,
+operation policy, transport-key provider credential, companion, and edge IAM
+selection together. Replace all example names, principals, secret versions,
+resource scope, fingerprint and image digest with reviewed values.
+
+```hcl
+# day2-app workload values
+resource_catalog = {
+  version = 1
+  connections = {
+    freetool_executor = {
+      revision = 1
+      provider = "freetool_executor"
+      live = {
+        provider       = "freetool_executor"
+        endpoint       = "http://127.0.0.1:43210"
+        credential_ref = { id = "freetool_transport_key", revision = 1 }
+      }
+    }
+  }
+  resources = {
+    freetool_resource = {
+      revision   = 1
+      connection = { id = "freetool_executor", revision = 1 }
+      target = {
+        kind                = "freetool_executor"
+        service_id          = "freetool_executor"
+        scope               = { kind = "any_app_resource" }
+        credential_managers = ["operator@wonderly.com"]
+      }
+    }
+  }
+  policies = {
+    freetool_access = {
+      revision             = 1
+      owner                = "operator@wonderly.com"
+      delegates            = []
+      # Requires Platform PR #245, merged to main as c4047a21.
+      actors               = ["domain:wonderly.com"]
+      allowed_apps         = ["freetool"]
+      max_duration_seconds = null
+      slots = {
+        freetool_executor = {
+          kind = "freetool_executor_resource"
+          allowed_resources = [{ id = "freetool_resource", revision = 1 }]
+          actions = [
+            "freetool_fingerprint", "freetool_status", "freetool_result_page",
+            "freetool_register", "freetool_execute",
+          ]
+          limits = {
+            max_request_bytes        = 65536
+            max_response_bytes       = 1048576
+            max_calls_per_invocation = 32
+          }
+          budgets = []
+        }
+      }
+  }
+  budgets = {}
+}
+
+resource_policies = [{
+  policy    = { id = "freetool_access", revision = 1 }
+  operation = "freetool.run"
+  bindings  = { freetool_executor = { id = "freetool_resource", revision = 1 } }
+}]
+
+credential_operator = "operator@wonderly.com"
+provider_credentials = [{
+  credential_ref = { id = "freetool_transport_key", revision = 1 }
+  secret_version = "projects/123456789/secrets/freetool-transport-key/versions/1"
+  fingerprint    = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+}]
+
+loopback_services = {
+  freetool = {
+    image                 = "us-central1-docker.pkg.dev/PROJECT/freetool/executor@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    port                  = 43210
+    config_secret_version = "projects/123456789/secrets/freetool-executor-config/versions/1"
+    state_subpath         = "companions/freetool-executor"
+    state_database_file   = "executor.sqlite"
+    health_check = {
+      path    = "/healthz"
+      command = ["/usr/local/bin/freetool-executor", "healthcheck"]
+    }
+    resources = { cpu_millis = 250, memory_mib = 256 }
+  }
+}
+
+# app-edge values (Secret Manager IAM is granted to the pod runtime identity)
+runtime_secret_ids = ["freetool-transport-key", "freetool-executor-config"]
+```
+
+This production Freetool policy uses `domain:wonderly.com` so employees can
+invoke the app's run and result-page operations. The app's `readers`, `writers`,
+and those operations' `actors` must name the same domain, and the verified
+identity contract must set `hosted_domain = "wonderly.com"`. Platform PR #245 is
+required because it admits verified domains in non-delegation resource-grant
+actors; `freetool_executor_resource` is such a grant. Platform revisions before
+#245 must list individual employees in the resource policy.
+
+The Freetool resource target's tagged `scope` is either
+`{ kind = "any_app_resource" }` for resources registered by this bound app at
+run time or `{ kind = "explicit", allowed_resources = ["resource_id"] }` for
+a non-empty allowlist. The executor still enforces its configured exact HTTP and
+PostgreSQL targets, approved DNS IPs and read-only database policy; the Platform
+binding constrains which app may invoke the executor and which exact actors may
+manage credentials.
+
+The config secret is a closed-schema executor JSON document. Set `bind` to
+`127.0.0.1:43210` and `database` to
+`/var/lib/day2/loopback-state/executor.sqlite`. `transport_key_hex` must match
+the bytes of the `freetool_transport_key` Secret Manager version; the distinct
+32-byte `credential_vault_key_hex` encrypts user-entered provider credentials.
+The executor config also pins allowed installations, actors, artifacts,
+operations, approved HTTP targets/IPs/path prefixes and/or bounded PostgreSQL
+targets. The Freetool adapter independently refuses a non-loopback endpoint.
+
+The day2 backup job reads the same PVC and now includes each declared companion
+subpath. Companion snapshots are bounded to 20 GiB, 16,384 regular files, 65,536
+filesystem entries, and ten nested directories. A declared SQLite file is copied
+with SQLite's online backup API; other regular files are included and hashed.
+Bundle format 3 verifies the full subtree and `day2 platform restore` restores it
+beneath `.state/companions/`. Set the PVC size, `backup_scratch_size_limit`, and
+backup deadline for the app database, provider stores, companion data and
+artifact together. Generic non-SQLite files
+are copied without a service-specific transaction; a mutable non-SQLite service
+must supply its own consistency procedure before relying on that snapshot.
+
+The Freetool credential page is a native Platform route and is separate from
+normal execution grants. Its operation, manager binding, ticket checks, HMAC
+transport and key-rotation procedure are described in
+[the executor integration guide](../../docs/FREETOOL-EXECUTOR.md).
+
 Size the state volume for the app's invocation rate. A completed invocation keeps
 its full trace, which includes the authority it ran under, for 72 hours unless
 `journal_trace_hours` is set; an app with frequent schedules should set a few
@@ -897,9 +1053,9 @@ hours. The hourly backup copies the database online in time proportional to
 its size (bounded at 15 s plus 8 MiB/s, see the
 [Linux guide](../linux-sqlite/README.md#online-backup-in-the-runtime-image)),
 and its scratch volume holds a full copy: as the database grows, keep
-`backup_scratch_size_limit` above the database, provider stores and artifact
-together, and `backup_active_deadline_seconds` above the copy, integrity checks
-and upload.
+`backup_scratch_size_limit` above the database, provider stores, companion state
+and artifact together, and `backup_active_deadline_seconds` above the copy,
+integrity checks and upload.
 
 `app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
 paths through a separate backend without IAP. This is for provider deliveries:

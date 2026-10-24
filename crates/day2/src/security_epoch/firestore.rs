@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc, time::Duration};
 
+mod paired;
+pub(super) use paired::read_with_slot;
+
 const MAX_BYTES: usize = 65_536;
 const ACQUISITION_BUDGET: Duration = Duration::from_secs(5);
 
@@ -33,15 +36,51 @@ pub(super) struct EpochReply {
 
 pub(super) trait Port {
     fn sample(&mut self) -> Result<Sample>;
-    // Exactly one bounded HTTPS request; no proxy, redirect or automatic retry.
-    // A future live implementation must enforce the response limit while reading.
+
+    /// A native execution context may observe only its SAME retained phase.
+    /// Unrelated/ordinary ports cannot substitute equal clock/selection DATA.
+    fn sample_for_context(
+        &mut self,
+        _owner: &Rc<
+            std::cell::RefCell<super::storage_authority::CurrentStorageBootstrapPhase<'_, '_>>,
+        >,
+    ) -> Result<Sample> {
+        self.refuse();
+        anyhow::bail!("security_epoch_native_context_port_required")
+    }
+
+    /// Clock DATA after a fixed context's full observation and pure checks.
+    /// This never supplies a physical/role observation or a reusable witness.
+    fn clock_for_context(
+        &mut self,
+        _owner: &Rc<
+            std::cell::RefCell<super::storage_authority::CurrentStorageBootstrapPhase<'_, '_>>,
+        >,
+    ) -> Result<Sample> {
+        self.refuse();
+        anyhow::bail!("security_epoch_native_context_port_required")
+    }
+
+    /// DATA-only time spent decoding an already received response. The default
+    /// retains full checks; only the closed Controller transport may borrow its
+    /// SAME retained native clock here. This is never an authority observation.
+    fn decoding_sample(&mut self) -> Result<Sample> {
+        self.sample()
+    }
+
+    /// One guarded exchange under THIS actual caller budget. Implementations
+    /// must charge all pre-send work before selecting the timeout and all full
+    /// postchecks before returning. No proxy, redirect or automatic retry.
     fn post(
         &mut self,
         url: &str,
         body: &[u8],
-        timeout: Duration,
+        budget: &mut Budget,
         max_bytes: usize,
     ) -> Result<EpochReply>;
+
+    /// Refusal only, including failures of the central response/budget contract.
+    fn refuse(&mut self);
 }
 
 pub(super) struct Budget {
@@ -57,11 +96,36 @@ impl Budget {
         origin: Duration,
         deadline: Duration,
     ) -> Result<Self> {
+        Self::from_original_parts(sample, origin, deadline, ACQUISITION_BUDGET)
+    }
+
+    /// Only an ACTUAL purpose-bound clock can select the bootstrap ceiling.
+    /// This budget still grants no port, writer or role permission.
+    pub(super) fn from_storage_bootstrap(
+        acquisition: &mut super::native_clock::NativeAcquisition,
+    ) -> Result<Self> {
+        acquisition.require_storage_bootstrap()?;
+        let (origin, deadline) = acquisition.interval_data()?;
+        let sample = acquisition.sample()?;
+        Self::from_original_parts(
+            sample,
+            origin,
+            deadline,
+            super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+    }
+
+    fn from_original_parts(
+        sample: Sample,
+        origin: Duration,
+        deadline: Duration,
+        maximum: Duration,
+    ) -> Result<Self> {
         ensure!(
             sample.elapsed >= origin
                 && sample.elapsed < deadline
                 && deadline > origin
-                && deadline - origin <= ACQUISITION_BUDGET,
+                && deadline - origin <= maximum,
             "security_epoch_original_native_budget"
         );
         Ok(Self {
@@ -98,9 +162,64 @@ impl Budget {
         })
     }
 
+    /// Derive only from this actual budget. A context cannot use a scalar
+    /// deadline to select the storage-bootstrap ceiling or restart its origin.
+    pub(super) fn narrow_for_context(
+        &mut self,
+        sample: Sample,
+        deadline: Duration,
+    ) -> Result<Self> {
+        self.limit = self.limit.min(
+            deadline
+                .checked_sub(self.start)
+                .context("security_epoch_context_expired")?,
+        );
+        self.observe(sample)?;
+        Ok(Self {
+            domain: self.domain.clone(),
+            start: self.start,
+            latest: self.latest,
+            limit: self.limit,
+        })
+    }
+
     pub(super) fn remaining(&mut self, port: &mut impl Port) -> Result<Duration> {
         let sample = port.sample()?;
         self.observe(sample)
+    }
+
+    /// Pure clock checkpoint. A guarded post owns its full authority envelope;
+    /// this also charges its completed work centrally. Context/budget issuance
+    /// and observation consumers continue to use full `remaining`.
+    pub(super) fn remaining_decoding(&mut self, port: &mut impl Port) -> Result<Duration> {
+        self.observe(port.decoding_sample()?)
+    }
+
+    /// Intersect two ACTUAL retained time budgets at the supplied fresh clock
+    /// DATA. Neither origin/latest is reset, and no role or permission is made.
+    /// The caller must obtain this sample inside its same-owner full envelope.
+    pub(super) fn constrain_to(&mut self, other: &mut Self, sample: &Sample) -> Result<Duration> {
+        self.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })?;
+        other.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })?;
+        let ceiling = other
+            .start
+            .checked_add(other.limit)
+            .context("security_epoch_clock_overflow")?;
+        self.limit = self.limit.min(
+            ceiling
+                .checked_sub(self.start)
+                .context("security_epoch_acquisition_expired")?,
+        );
+        self.observe(Sample {
+            domain: sample.domain.clone(),
+            elapsed: sample.elapsed,
+        })
     }
 
     pub(super) fn remaining_native(
@@ -129,19 +248,30 @@ impl Budget {
     }
 
     pub(super) fn call(&mut self, port: &mut impl Port, url: &str, body: &[u8]) -> Result<Vec<u8>> {
-        ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
-        let timeout = self.remaining(port)?;
-        let response = port.post(url, body, timeout, MAX_BYTES)?;
-        self.remaining(port)?;
-        ensure!(
-            response.status == 200,
-            "security_epoch_provider_unavailable"
-        );
-        ensure!(
-            response.body.len() <= MAX_BYTES,
-            "security_epoch_response_budget"
-        );
-        Ok(response.body)
+        let result = (|| {
+            ensure!(body.len() <= MAX_BYTES, "security_epoch_request_budget");
+            // The closed transport spends this SAME budget inside its mandatory
+            // authority envelope; a second full envelope here would duplicate
+            // file/peer observations without adding another HTTP operation.
+            let response = port.post(url, body, self, MAX_BYTES)?;
+            // Charge all returned postwork centrally too. Ordinary ports keep
+            // their previous full sample; only the closed Controller uses its
+            // actual clock here after its mandatory full physical postguard.
+            self.remaining_decoding(port)?;
+            ensure!(
+                response.status == 200,
+                "security_epoch_provider_unavailable"
+            );
+            ensure!(
+                response.body.len() <= MAX_BYTES,
+                "security_epoch_response_budget"
+            );
+            Ok(response.body)
+        })();
+        if result.is_err() {
+            port.refuse();
+        }
+        result
     }
 }
 
@@ -306,7 +436,7 @@ impl ReadTransaction {
         #[serde(deny_unknown_fields)]
         struct Empty {}
         let _: Empty = crate::json::decode(&bytes)?;
-        budget.remaining(port)?;
+        budget.remaining_decoding(port)?;
         Ok(())
     }
 }
@@ -408,13 +538,38 @@ impl EpochObservation {
         selection: &EpochStore,
         port: &mut impl Port,
     ) -> Result<Duration> {
-        ensure!(self.valid, "security_epoch_observation_refused");
         let result = (|| {
+            self.check_binding(selection)?;
+            self.budget.remaining(port)
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    pub(super) fn check_binding(&mut self, selection: &EpochStore) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "security_epoch_observation_refused");
             ensure!(
                 self.selection == Digest::of(selection)?,
                 "security_epoch_observation_selection_changed"
             );
-            self.budget.remaining(port)
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    /// Time DATA only, within the fixed mutation's full context observation.
+    /// The immutable selection is checked separately before that observation.
+    pub(super) fn constrain_budget(&mut self, budget: &mut Budget, sample: &Sample) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "security_epoch_observation_refused");
+            budget.constrain_to(&mut self.budget, sample)?;
+            Ok(())
         })();
         if result.is_err() {
             self.valid = false;
@@ -467,7 +622,7 @@ pub(super) fn read_with_budget(
         },
         &snapshot,
     )?;
-    budget.remaining(port)?;
+    budget.remaining_decoding(port)?;
     Ok(EpochObservation {
         selection: Digest::of(&names.selection)?,
         snapshot,
@@ -508,7 +663,7 @@ fn read_once(port: &mut impl Port, budget: &mut Budget, names: &Names) -> Result
     // Semantic decode failures also close the observed read transaction. If the
     // bounded cleanup fails, no snapshot escapes as a successful observation.
     transaction.rollback(port, budget, names)?;
-    budget.remaining(port)?;
+    budget.remaining_decoding(port)?;
     result
 }
 
@@ -585,4 +740,239 @@ pub(super) fn commit(
         ensure!(update <= commit, "security_epoch_commit_time_order");
     }
     reply.finish(selection, port)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    // Independent DATA transport model: successful time arithmetic must never
+    // replace the full pre/post authority observations around a real operation.
+    struct BoundaryPort {
+        domain: Digest,
+        now: Duration,
+        full_checks: usize,
+        clock_checks: usize,
+        posts: usize,
+        refused: bool,
+        refuse_after_post: bool,
+    }
+
+    impl Port for BoundaryPort {
+        fn sample(&mut self) -> Result<Sample> {
+            self.full_checks += 1;
+            ensure!(!self.refused, "model_authority_refused");
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn decoding_sample(&mut self) -> Result<Sample> {
+            self.clock_checks += 1;
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn post(&mut self, _: &str, _: &[u8], budget: &mut Budget, _: usize) -> Result<EpochReply> {
+            budget.remaining(self)?;
+            self.posts += 1;
+            self.refused |= self.refuse_after_post;
+            budget.remaining(self)?;
+            Ok(EpochReply {
+                status: 200,
+                body: Vec::new(),
+            })
+        }
+
+        fn refuse(&mut self) {
+            self.refused = true;
+        }
+    }
+
+    fn boundary() -> (Budget, BoundaryPort) {
+        let domain = Digest::new(b"decoding-time-is-not-authority");
+        let budget = Budget::from_original_parts(
+            Sample {
+                domain: domain.clone(),
+                elapsed: Duration::from_secs(100),
+            },
+            Duration::from_secs(100),
+            Duration::from_secs(130),
+            super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+        .unwrap();
+        (
+            budget,
+            BoundaryPort {
+                domain,
+                now: Duration::from_secs(101),
+                full_checks: 0,
+                clock_checks: 0,
+                posts: 0,
+                refused: false,
+                refuse_after_post: false,
+            },
+        )
+    }
+
+    #[test]
+    fn decoding_time_cannot_substitute_for_http_or_consumer_authority() {
+        for (refused, refuse_after_post, expected_posts) in [(true, false, 0), (false, true, 1)] {
+            let (mut budget, mut port) = boundary();
+            port.refused = refused;
+            port.refuse_after_post = refuse_after_post;
+            assert!(budget.remaining_decoding(&mut port).is_ok());
+            assert_eq!((port.full_checks, port.clock_checks), (0, 1));
+            assert!(budget.call(&mut port, "fixed-test-contract", &[]).is_err());
+            assert_eq!(port.posts, expected_posts);
+            assert_eq!(port.full_checks, expected_posts + 1);
+            // Observation consumers still call the original full remaining.
+            assert!(budget.remaining(&mut port).is_err());
+        }
+        let (mut budget, mut port) = boundary();
+        budget.remaining_decoding(&mut port).unwrap();
+        budget.call(&mut port, "fixed-test-contract", &[]).unwrap();
+        assert_eq!((port.full_checks, port.clock_checks, port.posts), (2, 2, 1));
+    }
+
+    #[test]
+    fn decoding_time_keeps_original_domain_monotonicity_and_exclusive_deadline() {
+        for change in [0, 1, 2] {
+            let (mut budget, mut port) = boundary();
+            budget.remaining_decoding(&mut port).unwrap();
+            match change {
+                0 => port.domain = Digest::new(b"foreign-clock"),
+                1 => port.now = Duration::from_millis(100_999),
+                _ => port.now = Duration::from_secs(130),
+            }
+            assert!(budget.remaining_decoding(&mut port).is_err());
+            assert_eq!(port.posts, 0);
+            assert_eq!(budget.start, Duration::from_secs(100));
+            assert_eq!(budget.limit, Duration::from_secs(30));
+        }
+    }
+
+    // Arithmetic/transport-contract DATA only. This port owns no enrolled role,
+    // file, native clock, credential, writable journal or provider connection.
+    struct ObservedTimeout {
+        domain: Digest,
+        now: Duration,
+        selected: Option<Duration>,
+        refused: bool,
+    }
+
+    impl Port for ObservedTimeout {
+        fn sample(&mut self) -> Result<Sample> {
+            ensure!(!self.refused, "model_transport_refused");
+            Ok(Sample {
+                domain: self.domain.clone(),
+                elapsed: self.now,
+            })
+        }
+
+        fn post(
+            &mut self,
+            _url: &str,
+            _body: &[u8],
+            budget: &mut Budget,
+            max_bytes: usize,
+        ) -> Result<EpochReply> {
+            assert_eq!(max_bytes, MAX_BYTES);
+            let timeout = budget.remaining(self)?.min(ACQUISITION_BUDGET);
+            self.selected = Some(timeout);
+            Ok(EpochReply {
+                status: 200,
+                body: Vec::new(),
+            })
+        }
+
+        fn refuse(&mut self) {
+            self.refused = true;
+        }
+    }
+
+    #[test]
+    fn storage_budget_keeps_origin_and_caps_each_request_at_five_seconds() {
+        let domain = Digest::new(b"budget-arithmetic-only");
+        for (limit, expected) in [(5, 3), (10, 5), (30, 5)] {
+            let mut port = ObservedTimeout {
+                domain: domain.clone(),
+                now: Duration::from_secs(102),
+                selected: None,
+                refused: false,
+            };
+            let mut budget = Budget::from_original_parts(
+                port.sample().unwrap(),
+                Duration::from_secs(100),
+                Duration::from_secs(100 + limit),
+                super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+            )
+            .unwrap();
+            budget.call(&mut port, "fixed-test-contract", &[]).unwrap();
+            assert_eq!(port.selected, Some(Duration::from_secs(expected)));
+            assert_eq!(budget.start, Duration::from_secs(100));
+            assert_eq!(
+                budget.remaining(&mut port).unwrap(),
+                Duration::from_secs(limit - 2)
+            );
+            port.now = Duration::from_secs(100 + limit);
+            assert!(budget.call(&mut port, "fixed-test-contract", &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn context_budget_consumes_actual_spent_time_and_only_tightens_its_deadline() {
+        let domain = Digest::new(b"context-budget-data-only");
+        let sample = |milliseconds| Sample {
+            domain: domain.clone(),
+            elapsed: Duration::from_millis(milliseconds),
+        };
+        let mut original = Budget::from_original_parts(
+            sample(100_000),
+            Duration::from_secs(100),
+            Duration::from_secs(110),
+            super::super::native_clock::STORAGE_BOOTSTRAP_LIMIT,
+        )
+        .unwrap();
+        let mut context = original
+            .narrow_for_context(sample(106_300), Duration::from_secs(109))
+            .unwrap();
+        assert_eq!(context.start, Duration::from_secs(100));
+        assert_eq!(
+            context.observe(sample(106_300)).unwrap(),
+            Duration::from_millis(2700)
+        );
+        let mut next = context
+            .narrow_for_context(sample(107_000), Duration::from_secs(112))
+            .unwrap();
+        assert_eq!(
+            next.observe(sample(107_000)).unwrap(),
+            Duration::from_secs(2)
+        );
+        assert!(
+            next.narrow_for_context(sample(109_000), Duration::from_secs(112))
+                .is_err()
+        );
+        assert!(
+            context
+                .narrow_for_context(sample(106_000), Duration::from_secs(109))
+                .is_err()
+        );
+        assert!(
+            original
+                .narrow_for_context(
+                    Sample {
+                        domain: Digest::new(b"different-domain"),
+                        elapsed: Duration::from_secs(107),
+                    },
+                    Duration::from_secs(109)
+                )
+                .is_err()
+        );
+        // The ordinary scalar context factory still cannot select ten seconds.
+        assert!(Budget::for_context(sample(100_000), Duration::from_secs(110)).is_err());
+    }
 }

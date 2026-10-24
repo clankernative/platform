@@ -401,6 +401,33 @@ impl<'file> PendingPreparedFilePhase<'file> {
 }
 
 impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
+    /// Only authentication DATA, using the actual volume's hidden owning
+    /// stage. Full file validation is a separate mandatory caller obligation.
+    pub(in crate::security_epoch::storage_authority) fn check_authentication(
+        &mut self,
+        reads: &mut ControllerEpochReads,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_budget_liveness()?;
+            self.phase.check_authentication(reads)
+        })();
+        if result.is_err() {
+            self.disposition.refuse();
+        }
+        result
+    }
+
+    /// Local refusal/owner liveness only, for pure decoding's clock budget.
+    /// This does not inspect the file or grant physical/current authority.
+    pub(in crate::security_epoch::storage_authority) fn check_budget_liveness(&self) -> Result<()> {
+        self.disposition.check()?;
+        ensure!(
+            self.process == std::process::id() && self.thread == std::thread::current().id(),
+            "retained_preparation_owner_changed"
+        );
+        Ok(())
+    }
+
     pub(in crate::security_epoch::storage_authority) fn check_authenticated_reads(
         &mut self,
         reads: &ControllerEpochReads,
@@ -411,11 +438,7 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
-            self.disposition.check()?;
-            ensure!(
-                self.process == std::process::id() && self.thread == std::thread::current().id(),
-                "retained_preparation_owner_changed"
-            );
+            self.check_budget_liveness()?;
             ensure!(
                 self.layout.proposal.selection == *self.selection.digest()
                     && self.layout.proposal.core == *self.selection.seed()
@@ -475,14 +498,14 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
     /// The fixed, successfully observed activation performs its LAST initial
     /// byte check before notifying the App that legitimate writes may begin.
     /// The SAME descriptors/provider phase remain live for physical postchecks.
-    pub(in crate::security_epoch) fn into_physical_checked(
+    pub(in crate::security_epoch) fn into_bootstrap_physical_checked(
         mut self,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
         // An initial-handshake interval cannot mint a current physical phase,
         // even if a future internal caller reaches this conversion directly.
         self.phase
             .controller_stage()?
-            .require_purpose(StagePurpose::CurrentRole)?;
+            .require_purpose(StagePurpose::StorageBootstrap)?;
         self.check()?;
         let mut physical = CurrentPhysicalFilePhase { inner: self };
         physical.check()?;

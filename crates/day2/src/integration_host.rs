@@ -4,7 +4,7 @@ use crate::integrations::{
     self, AdapterError, CredentialResolver, Credentials, HttpTransport, Transport,
 };
 use anyhow::{Context, Result, ensure};
-use day2_capabilities::integrations::LiveConnection;
+use day2_capabilities::{integrations::LiveConnection, resources::VersionRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -87,6 +87,109 @@ impl Host {
             self.transport.as_ref(),
             attempt,
         )
+    }
+
+    pub(crate) fn freetool_credential_request(
+        &self,
+        connection: &LiveConnection,
+        action: integrations::FreetoolCredentialAction,
+        body: &[u8],
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            !self.simulated_providers,
+            "freetool_credential_custody_offline"
+        );
+        let LiveConnection::FreetoolExecutor { endpoint, .. } = connection else {
+            anyhow::bail!("freetool_executor_connection_mismatch");
+        };
+        let credential = self
+            .resolver
+            .resolve(connection)
+            .map_err(|_| anyhow::anyhow!("freetool_service_key_unavailable"))?;
+        integrations::freetool_credential_request(endpoint, &credential, action, body).map_err(
+            |error| {
+                use crate::error::Failure;
+                anyhow::anyhow!(match crate::error::classify(&error) {
+                    Failure::InvalidForm => Failure::InvalidForm,
+                    Failure::ResourceForbidden => Failure::ResourceForbidden,
+                    Failure::VersionConflict => Failure::VersionConflict,
+                    _ => Failure::CredentialUnavailable,
+                })
+            },
+        )
+    }
+
+    pub(crate) fn freetool_request(
+        &self,
+        database: &Path,
+        connection_id: &VersionRef,
+        connection: &LiveConnection,
+        request: crate::freetool_executor::ServiceRequest,
+        max_response_bytes: u64,
+    ) -> integrations::FreetoolExecutorExchange {
+        let LiveConnection::FreetoolExecutor { endpoint, .. } = connection else {
+            return integrations::FreetoolExecutorExchange::not_dispatched(anyhow::anyhow!(
+                "freetool_executor_connection_mismatch"
+            ));
+        };
+        let body = match serde_json::to_vec(&request) {
+            Ok(body) => body,
+            Err(error) => {
+                return integrations::FreetoolExecutorExchange::not_dispatched(error.into());
+            }
+        };
+        if body.len() as u64 > integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES {
+            return integrations::FreetoolExecutorExchange::not_dispatched(anyhow::anyhow!(
+                "freetool_service_request_budget"
+            ));
+        }
+        let max_response_bytes =
+            max_response_bytes.min(integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES);
+        if max_response_bytes == 0 {
+            return integrations::FreetoolExecutorExchange::not_dispatched(anyhow::anyhow!(
+                "freetool_service_response_budget"
+            ));
+        }
+        if self.simulated_providers {
+            let response = database
+                .parent()
+                .context("application_database_parent_missing")
+                .and_then(|parent| {
+                    let world = parent.join("freetool_executor.simulated.sqlite");
+                    crate::freetool_executor::simulated_call(
+                        &world,
+                        connection_id,
+                        connection,
+                        request,
+                    )
+                })
+                .and_then(|response| serde_json::to_vec(&response).map_err(Into::into));
+            let response_bytes = response.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            let known = response.is_ok();
+            let response = response.and_then(|bytes| {
+                ensure!(
+                    bytes.len() as u64 <= max_response_bytes,
+                    "freetool_service_response_budget"
+                );
+                Ok(bytes)
+            });
+            return integrations::FreetoolExecutorExchange {
+                response,
+                request_bytes: body.len() as u64,
+                response_bytes,
+                known,
+                dispatched: true,
+            };
+        }
+        let credential = match self.resolver.resolve(connection) {
+            Ok(credential) => credential,
+            Err(_) => {
+                return integrations::FreetoolExecutorExchange::not_dispatched(anyhow::anyhow!(
+                    "freetool_service_key_unavailable"
+                ));
+            }
+        };
+        integrations::freetool_executor_request(endpoint, &credential, &body, max_response_bytes)
     }
 
     #[cfg(test)]
@@ -451,4 +554,234 @@ pub fn mount(instance: &Path, operator: &str, request: &Mount) -> Result<serde_j
     Ok(
         serde_json::json!({"credential":reference,"registered":true,"mode":"local_private_mount","provider_qualified":false}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::freetool_executor::{
+        ExecutionIdentity, ExecutionPlan, ServiceRequest, ServiceResponse,
+    };
+    use day2_capabilities::resources::VersionRef;
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+
+    struct FreetoolResolver;
+
+    impl CredentialResolver for FreetoolResolver {
+        fn resolve(&self, _: &LiveConnection) -> std::result::Result<Credentials, AdapterError> {
+            Credentials::bearer(crate::hex(&[0x31; 32]))
+                .map_err(|_| AdapterError::CredentialUnavailable)
+        }
+    }
+
+    struct UnusedTransport;
+
+    impl Transport for UnusedTransport {
+        fn send(
+            &self,
+            _: &integrations::WireRequest,
+            _: integrations::Authorization<'_>,
+            _: u64,
+        ) -> std::result::Result<integrations::WireResponse, integrations::TransportError> {
+            unreachable!("Freetool executor transport has its own adapter")
+        }
+    }
+
+    fn read_loopback_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let mut received = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let (header_end, content_length) = loop {
+            let count = stream.read(&mut chunk)?;
+            ensure!(count > 0, "loopback request ended before headers");
+            received.extend_from_slice(&chunk[..count]);
+            if let Some(index) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+                let header_end = index + 4;
+                let headers = String::from_utf8(received[..header_end].to_vec())?;
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .context("missing content length")?;
+                break (header_end, length);
+            }
+        };
+        while received.len() - header_end < content_length {
+            let count = stream.read(&mut chunk)?;
+            ensure!(count > 0, "loopback request body truncated");
+            received.extend_from_slice(&chunk[..count]);
+        }
+        Ok(received[header_end..header_end + content_length].to_vec())
+    }
+
+    #[test]
+    fn freetool_host_threads_grant_response_limit_and_meters_wire_request() -> Result<()> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server_body = vec![b'x'; 1024];
+        let server = thread::spawn(move || -> Result<Vec<u8>> {
+            let (mut stream, _) = listener.accept()?;
+            let body = read_loopback_request(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                server_body.len()
+            )?;
+            stream.write_all(&server_body)?;
+            Ok(body)
+        });
+        let database_dir = tempfile::tempdir()?;
+        let database = database_dir.path().join("app.sqlite");
+        let host = Host::injected(Arc::new(FreetoolResolver), Arc::new(UnusedTransport));
+        let connection_id = VersionRef {
+            id: "executor_wire_test".into(),
+            revision: 1,
+        };
+        let connection = LiveConnection::FreetoolExecutor {
+            credential_ref: VersionRef {
+                id: "executor_wire_key".into(),
+                revision: 1,
+            },
+            endpoint,
+        };
+        let request = ServiceRequest::Status {
+            identity: ExecutionIdentity {
+                installation: "company/staging".into(),
+                application: "freetool".into(),
+                actor: "alice".into(),
+                artifact: "artifact-1".into(),
+                operation: "freetool.run".into(),
+                resource_id: "resource-1".into(),
+                configuration_id: "config-1".into(),
+                immutable_version: 1,
+                configuration_digest: "a".repeat(64),
+                run_id: "run-1".into(),
+                arguments_digest: "b".repeat(64),
+            },
+        };
+        let expected_request = serde_json::to_vec(&request)?;
+        let response_limit = 128;
+        let exchange = host.freetool_request(
+            &database,
+            &connection_id,
+            &connection,
+            request,
+            response_limit,
+        );
+        assert!(exchange.response.is_err());
+        assert_eq!(exchange.request_bytes, expected_request.len() as u64);
+        assert_eq!(exchange.response_bytes, response_limit + 1);
+        assert!(exchange.known && exchange.dispatched);
+        assert_eq!(
+            server
+                .join()
+                .map_err(|_| anyhow::anyhow!("loopback server panicked"))??,
+            expected_request
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn simulated_executor_records_are_connection_bound() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("app.sqlite");
+        let host = Host::simulated(&database, "test");
+        let connection_id_a = VersionRef {
+            id: "executor_a".into(),
+            revision: 3,
+        };
+        let connection_a = LiveConnection::FreetoolExecutor {
+            credential_ref: VersionRef {
+                id: "executor_key_a".into(),
+                revision: 1,
+            },
+            endpoint: "http://127.0.0.1:43210".into(),
+        };
+        let connection_id_b = VersionRef {
+            id: "executor_b".into(),
+            revision: 7,
+        };
+        let connection_b = LiveConnection::FreetoolExecutor {
+            credential_ref: VersionRef {
+                id: "executor_key_b".into(),
+                revision: 2,
+            },
+            endpoint: "http://127.0.0.1:43211".into(),
+        };
+        let identity = ExecutionIdentity {
+            installation: "company/staging".into(),
+            application: "freetool".into(),
+            actor: "alice".into(),
+            artifact: "artifact-1".into(),
+            operation: "freetool.run".into(),
+            resource_id: "resource-1".into(),
+            configuration_id: "config-1".into(),
+            immutable_version: 1,
+            configuration_digest: "a".repeat(64),
+            run_id: "run-1".into(),
+            arguments_digest: "b".repeat(64),
+        };
+        let plan = ExecutionPlan::Http {
+            method: "GET".into(),
+            url: "https://api.example.test/items".into(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        host.freetool_request(
+            &database,
+            &connection_id_a,
+            &connection_a,
+            ServiceRequest::Register {
+                identity: identity.clone(),
+                plan,
+            },
+            integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES,
+        )
+        .response?;
+        host.freetool_request(
+            &database,
+            &connection_id_a,
+            &connection_a,
+            ServiceRequest::Execute {
+                identity: identity.clone(),
+            },
+            integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES,
+        )
+        .response?;
+        let status = host.freetool_request(
+            &database,
+            &connection_id_b,
+            &connection_b,
+            ServiceRequest::Status {
+                identity: identity.clone(),
+            },
+            integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES,
+        );
+        let status: ServiceResponse = serde_json::from_slice(&status.response?)?;
+        assert!(matches!(status, ServiceResponse::Status { receipt: None }));
+
+        let result = host.freetool_request(
+            &database,
+            &connection_id_b,
+            &connection_b,
+            ServiceRequest::ResultPage {
+                identity,
+                offset: 0,
+                limit: 100,
+            },
+            integrations::MAX_FREETOOL_EXECUTOR_WIRE_BYTES,
+        );
+        let result: ServiceResponse = serde_json::from_slice(&result.response?)?;
+        assert!(matches!(result, ServiceResponse::Error { code } if code == "result_unavailable"));
+        Ok(())
+    }
 }

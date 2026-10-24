@@ -37,7 +37,11 @@ impl World {
             "collections.collect":{"actors":["alice","bob","admin","viewer"],"mode":{"kind":"read"},
                 "models":{"entries":{"read":true,"rows":owned}}},
             "collections.update_collect":{"actors":["alice","bob","admin"],"mode":{"kind":"current_state"},
-                "models":{"entries":{"read":true,"update_fields":["note"],"rows":owned}}}
+                "models":{"entries":{"read":true,"update_fields":["note"],"rows":owned}}},
+            "collections.batch_update":{"actors":["alice","bob","admin"],"mode":{"kind":"current_state"},
+                "models":{"entries":{"read":true,"update_fields":["note"],"rows":owned}}},
+            "collections.batch_lifecycle":{"actors":["alice","bob","admin"],"mode":{"kind":"current_state"},
+                "models":{"entries":{"read":true,"create":true,"update_fields":["note"],"rows":owned}}}
         }});
         let instance = json!({"installation":"collectiontest","environment":"test","apps":{"collections":{
             "artifact":artifact,"readers":["alice","bob","admin","viewer"],
@@ -88,6 +92,15 @@ impl World {
     fn update_collect(&self, id: &str, row: &Value, maximum: u64, note: &str) -> Result<Outcome> {
         self.invoke("collections.update_collect", "alice", id,
             json!({"row_id":row["id"],"bucket":"keep","maximum_rows":maximum,"after":"","note":note}))
+    }
+
+    fn batch_update(&self, actor: &str, id: &str, changes: Value) -> Result<Outcome> {
+        self.invoke(
+            "collections.batch_update",
+            actor,
+            id,
+            json!({"changes":changes}),
+        )
     }
 
     fn changes(&self) -> Result<i64> {
@@ -208,6 +221,137 @@ fn assert_collection(outcome: &Outcome, expected: &[Value]) -> Result<()> {
     ensure!(
         sequence == expected_sequence,
         "complete ordered collection differs from independent state"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_batch_lifecycle_retains_rows_and_each_audit_change() -> Result<()> {
+    let world = World::new()?;
+    let outcome = world.invoke(
+        "collections.batch_lifecycle",
+        "alice",
+        "batch-lifecycle",
+        json!({"bucket":"cycle"}),
+    )?;
+    ensure!(
+        outcome.status == "success" && outcome.result["count"] == 2,
+        "batch lifecycle: {outcome:?}"
+    );
+    let connection = rusqlite::Connection::open(world.runtime.db())?;
+    let mut statement =
+        connection.prepare("SELECT version,note,deleted_at FROM entries ORDER BY rank")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        rows.len() == 2
+            && rows.iter().all(|(version, note, deleted)| *version == 3
+                && note == "after"
+                && deleted.is_some()),
+        "batch rows were not retained at version three: {rows:?}"
+    );
+    ensure!(
+        world.changes()? == 6,
+        "each batch mutation requires its own immutable audit change"
+    );
+    world.audit("batch-lifecycle", "success")?;
+    let before = world.snapshot()?;
+    ensure!(
+        world.invoke(
+            "collections.batch_lifecycle",
+            "alice",
+            "batch-lifecycle",
+            json!({"bucket":"cycle"})
+        )? == outcome,
+        "lifecycle replay changed result"
+    );
+    ensure!(
+        world.snapshot()? == before && world.changes()? == 6,
+        "lifecycle replay created another batch"
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_update_batches_are_atomic_cas_checked_and_replayable() -> Result<()> {
+    let world = World::new()?;
+    let first = world.insert("alice", "keep", 1)?;
+    let second = world.insert("alice", "keep", 2)?;
+    let updates = json!([
+        {"id":first["id"],"version":1,"note":"saved-first"},
+        {"id":second["id"],"version":1,"note":"saved-second"}
+    ]);
+    let saved = world.batch_update("alice", "batch-success", updates)?;
+    ensure!(saved.status == "success", "batch save: {saved:?}");
+    let connection = rusqlite::Connection::open(world.runtime.db())?;
+    let mut query = connection.prepare(
+        "SELECT ordinal FROM day2_audit_changes WHERE invocation='batch-success' ORDER BY ordinal",
+    )?;
+    let ordinals = query
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        ordinals == [0, 1],
+        "batch did not audit each row exactly once: {ordinals:?}"
+    );
+    let snapshot = world.snapshot()?;
+    for note in ["saved-first", "saved-second"] {
+        ensure!(
+            snapshot["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["note"] == note && row["version"] == 2),
+            "saved batch row {note}"
+        );
+    }
+    let before = snapshot;
+    let count = world.changes()?;
+    let stale = json!([
+        {"id":first["id"],"version":2,"note":"would-be-rollback"},
+        {"id":second["id"],"version":1,"note":"stale"}
+    ]);
+    let refused = world.batch_update("alice", "batch-stale", stale.clone())?;
+    ensure!(
+        refused.status == "failure" && refused.error == "conflict",
+        "stale batch: {refused:?}"
+    );
+    ensure!(
+        world.snapshot()? == before && world.changes()? == count,
+        "stale batch committed a prefix"
+    );
+    world.audit("batch-stale", "failure")?;
+    ensure!(
+        world.batch_update("alice", "batch-stale", stale)? == refused,
+        "batch replay changed outcome"
+    );
+    ensure!(
+        world.snapshot()? == before && world.changes()? == count,
+        "replay changed saved rows"
+    );
+
+    let bob = world.insert("bob", "keep", 3)?;
+    let denied_before = world.snapshot()?;
+    let denied_changes = world.changes()?;
+    let denied = world.batch_update(
+        "bob",
+        "batch-denied",
+        json!([
+            {"id":bob["id"],"version":1,"note":"would-be-prefix"},
+            {"id":first["id"],"version":2,"note":"not-visible-to-bob"}
+        ]),
+    )?;
+    ensure!(denied.status == "failure", "denied batch: {denied:?}");
+    ensure!(
+        world.snapshot()? == denied_before && world.changes()? == denied_changes,
+        "denied batch committed a prefix"
     );
     Ok(())
 }

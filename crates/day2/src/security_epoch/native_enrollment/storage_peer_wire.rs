@@ -163,6 +163,10 @@ impl StageStatement {
         now: Duration,
         purpose: StagePurpose,
     ) -> Result<()> {
+        ensure!(
+            purpose != StagePurpose::StorageMetadataObservation,
+            "storage_peer_metadata_purpose_refused"
+        );
         purpose.require_role(expected_role)?;
         self.certificate.verify(policy)?;
         ensure!(
@@ -242,6 +246,15 @@ pub(crate) struct StoragePeerRequest {
     pub binding: Digest,
 }
 
+impl StoragePeerPurpose {
+    pub(in crate::security_epoch) fn stage_purpose(self) -> StagePurpose {
+        match self {
+            Self::BootstrapCreate | Self::BootstrapComplete => StagePurpose::StorageBootstrap,
+            Self::CurrentServing => StagePurpose::CurrentRole,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CurrentExchange {
@@ -263,6 +276,7 @@ impl CurrentExchange {
     ) -> Result<()> {
         ensure!(
             offered == ready
+                && ready.stage.data.purpose == self.request.purpose.stage_purpose()
                 && self.controller_stage == ready.digest()?
                 && self.controller_nonce == *nonce,
             "storage_peer_current_ready_stage_or_nonce_changed"
@@ -379,23 +393,67 @@ impl Body {
         }
     }
 
-    pub(super) fn stage_purpose(&self) -> StagePurpose {
+    /// Validate purpose DATA against the native caller's expected purpose.
+    /// Completion signatures bind the exact stage statement and exchange;
+    /// metadata-observation grants never enter this peer protocol.
+    pub(super) fn require_stage_purpose(&self, expected: StagePurpose) -> Result<()> {
+        let current = || -> Result<()> {
+            ensure!(
+                matches!(
+                    expected,
+                    StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+                ),
+                "storage_peer_stage_purpose"
+            );
+            Ok(())
+        };
         match self {
-            Self::InitialReady { .. }
-            | Self::Hello { .. }
-            | Self::Offer { .. }
-            | Self::Confirm { .. }
-            | Self::Complete { .. }
-            | Self::Accepted { .. } => StagePurpose::InitialFirstHolder,
-            Self::CurrentBeginReady { .. }
-            | Self::CurrentHello { .. }
-            | Self::CurrentOffer { .. }
-            | Self::CurrentAck { .. }
+            Self::InitialReady { controller, .. } | Self::Offer { controller, .. } => ensure!(
+                expected == StagePurpose::InitialFirstHolder
+                    && controller.stage.data.purpose == expected,
+                "storage_peer_stage_purpose"
+            ),
+            Self::Hello { app, .. } => ensure!(
+                expected == StagePurpose::InitialFirstHolder && app.stage.data.purpose == expected,
+                "storage_peer_stage_purpose"
+            ),
+            Self::Confirm { .. } | Self::Complete { .. } | Self::Accepted { .. } => ensure!(
+                expected == StagePurpose::InitialFirstHolder,
+                "storage_peer_stage_purpose"
+            ),
+            Self::CurrentHello { app, request, .. } => {
+                current()?;
+                ensure!(
+                    request.purpose.stage_purpose() == expected
+                        && app.stage.data.purpose == expected,
+                    "storage_peer_stage_purpose"
+                );
+            }
+            Self::CurrentOffer {
+                controller,
+                exchange,
+            } => {
+                current()?;
+                ensure!(
+                    exchange.request.purpose.stage_purpose() == expected
+                        && controller.stage.data.purpose == expected,
+                    "storage_peer_stage_purpose"
+                );
+            }
+            Self::CurrentBeginReady { controller, .. } => {
+                current()?;
+                ensure!(
+                    controller.stage.data.purpose == expected,
+                    "storage_peer_stage_purpose"
+                );
+            }
+            Self::CurrentAck { .. }
             | Self::CurrentReady { .. }
             | Self::CurrentResult { .. }
             | Self::CurrentConsumed { .. }
-            | Self::CurrentReleased { .. } => StagePurpose::CurrentRole,
+            | Self::CurrentReleased { .. } => current()?,
         }
+        Ok(())
     }
 
     pub(super) fn matches_completion(&self, expected: &Digest, kind: CompletionKind) -> bool {
@@ -456,6 +514,7 @@ impl Message {
                 nonce,
                 controller_nonce: echoed,
             } => {
+                self.body.require_stage_purpose(app.stage.data.purpose)?;
                 ensure!(
                     selected == initial
                         && *number == sequence
@@ -495,10 +554,11 @@ impl Message {
     }
 
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
+        self.body
+            .require_stage_purpose(statement.stage.data.purpose)?;
         ensure!(
             self.sender == statement.digest()?
-                && self.body.sender_role() == statement.stage.data.role
-                && self.body.stage_purpose() == statement.stage.data.purpose,
+                && self.body.sender_role() == statement.stage.data.role,
             "storage_peer_message_sender"
         );
         protocol::verify(

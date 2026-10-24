@@ -10,9 +10,21 @@ interruption spend the same original interval; they do not advance a packet.
 
 Enrollment remains capped at five seconds, including authentication for an
 initial first-holder stage. The initial storage exchange remains capped at ten
-seconds. Serving and subsequent current exchanges remain capped at five seconds.
+seconds. The subsequent storage wire conversation records its explicit checked
+stage purpose: `StorageBootstrap` is capped at thirty seconds per action, and ordinary
+`CurrentRole` remains capped at five. Serving remains capped at five seconds.
 Deadline equality refuses. No deadline, signature, sender observation, content
 hash, namespace, socket, file, physical/provider or final consumer check is removed.
+
+The storage adapter selects this class only after matching the actual signed
+stage to the trusted request purpose and checking its purpose-specific native
+acquisition. It never selects a class from a scalar duration. Both role and full
+provider authentication still finish by the same original plus five seconds.
+Metadata observation and initial-first-holder purposes cannot start a subsequent
+storage transcript; bootstrap cannot start a serving transcript. Shorter signed
+or configured ceilings remain unchanged, including equal one-second ceilings
+that retain distinct purpose labels. Read-only metadata retains its separate
+ten-second native ceiling.
 
 The native adapters check actual owners before and after I/O as before. A full
 send advances only the local transcript. The remote endpoint advances only after
@@ -36,11 +48,14 @@ It needs no sockets, cloud resources, secrets or enrolled-owner fixtures:
 bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::
 ```
 
-Thirty-two seeds for each of enrollment, initial storage and initial serving
+Thirty-two seeds for each enrollment/serving family and each ordinary/bootstrap
+storage purpose
 exercise successful exchanges with interrupted calls, unavailable transport and
 delayed readiness. Storage and serving histories continue through two current
-exchanges and their acknowledgement/release messages. A further thirty-two seeds
-per initial protocol generate adversarial schedules from reachable prefixes.
+exchanges and their acknowledgement/release messages. Bootstrap histories spend
+eleven seconds before the first current packet under their original thirty-second
+ceiling. A further thirty-two seeds per family/purpose generate adversarial
+schedules from reachable prefixes.
 
 Every syscall return in the successful histories is also a fault cut before its
 final postcheck. Cuts explore local/peer death, expiry, rewind, native refusal,
@@ -49,12 +64,20 @@ exercise loss, duplicate packets and message substitution. Directed controls
 cover partial packets, buffered replies after peer death, deadline equality and
 the last instant strictly before the deadline. Clock controls also call the
 shared reducer directly so simulated native guards cannot mask its decisions.
+All forty family/purpose/fault combinations must reach executed refusal. Expiry
+cuts must refuse at the immediate postcheck, and waits exceed even the bootstrap
+ceiling. Direct controls independently check short purpose ceilings, the last
+instant before each deadline, deadline equality, metadata rejection and rejection
+of bootstrap for serving. Bootstrap accepts eleven- and thirty-second ceilings
+only strictly before expiry and rejects thirty-one- and sixty-second ceilings;
+ordinary Current and serving keep their five-second limit. These are controlled
+DATA observations, not evidence of native completion or the required live margin.
 
 The independent oracle records the accepted prefix of a separately specified
 wire conversation and the outstanding call/poll. It does not call the production
 message catalog, cursor, deadline helper or transition methods to predict a
 decision. Each event compares the result and complete bounded state of both
-endpoints, including pending syscall returns, clocks, liveness/refusal and every
+endpoints, including explicit purpose, pending syscall returns, clocks, liveness/refusal and every
 queued packet. Histories replay twice and must match exactly. Limits are 512
 events, 64 queued packets per direction and eight MiB per failure bundle;
 overflow refuses instead of truncating the compared state.

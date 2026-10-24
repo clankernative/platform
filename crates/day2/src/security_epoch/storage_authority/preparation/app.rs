@@ -8,6 +8,7 @@ use super::{INITIAL_FILE, IO_CHUNK_BYTES, observe_current_anchored_file};
 use crate::security_epoch::{
     native_enrollment::{
         AuthenticatedInitialHolderOffer, EnrolledRoleStage, NativeRole, SameEnrolledOwner,
+        StagePurpose,
     },
     preparation_image::ObservedInitialImage,
     storage_authority::{DirectoryIdentity, directory_identity},
@@ -17,6 +18,35 @@ use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapP
 use std::{fs::File, thread::ThreadId};
 
 const ANCHOR: &str = "/state/day2-native";
+
+#[derive(Clone, Copy)]
+enum ContinuityPurpose {
+    Current,
+    Bootstrap,
+}
+
+impl ContinuityPurpose {
+    fn require(self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        stage.require_purpose(match self {
+            Self::Current => StagePurpose::CurrentRole,
+            Self::Bootstrap => StagePurpose::StorageBootstrap,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn acquisition(
+        self,
+        stage: &mut EnrolledRoleStage<'_>,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        match self {
+            Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
+            Self::Bootstrap => stage
+                .storage()?
+                .narrow_storage_bootstrap_io_acquisition(max_lease_seconds),
+        }
+    }
+}
 
 pub(crate) struct AppPreparedFile<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,
@@ -286,7 +316,23 @@ impl AppFileContinuity {
     /// legitimate SQLite writes change those after activation. No active epoch,
     /// provider durability or writer permission is inferred from this check.
     pub(crate) fn check_current(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.check_physical(stage, ContinuityPurpose::Current)
+    }
+
+    pub(in crate::security_epoch) fn check_bootstrap_physical(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        self.check_physical(stage, ContinuityPurpose::Bootstrap)
+    }
+
+    fn check_physical(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        purpose: ContinuityPurpose,
+    ) -> Result<()> {
         let result = (|| {
+            purpose.require(stage)?;
             ensure!(self.valid, "app_file_continuity_refused");
             ensure!(
                 self.process == std::process::id() && self.thread == std::thread::current().id(),
@@ -303,7 +349,7 @@ impl AppFileContinuity {
             #[cfg(target_os = "linux")]
             {
                 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags};
-                let acquisition = &mut stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
+                let acquisition = &mut purpose.acquisition(stage, self.store.max_lease_seconds)?;
                 acquisition.remaining()?;
                 use std::os::unix::fs::MetadataExt;
                 let directory_metadata = self.directory.metadata()?;
@@ -363,9 +409,9 @@ impl AppFileContinuity {
 
     /// Before first activation only. The caller cannot switch to an active
     /// interpretation merely because current physical identity still matches.
-    pub(crate) fn check_initial(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+    pub(crate) fn check_bootstrap(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         let result = (|| {
-            self.check_current(stage)?;
+            self.check_bootstrap_physical(stage)?;
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("app_file_continuity_platform_unsupported");
             #[cfg(target_os = "linux")]
@@ -378,7 +424,7 @@ impl AppFileContinuity {
                 let mut bytes = vec![0; length];
                 let mut offset = 0;
                 while offset < length {
-                    self.check_current(stage)?;
+                    self.check_bootstrap_physical(stage)?;
                     let end = (offset + IO_CHUNK_BYTES).min(length);
                     let read =
                         rustix::io::pread(&self.file, &mut bytes[offset..end], offset as u64)?;
@@ -387,11 +433,13 @@ impl AppFileContinuity {
                         "app_file_initial_read_progress"
                     );
                     offset += read;
-                    self.check_current(stage)?;
+                    self.check_bootstrap_physical(stage)?;
                 }
-                let mut acquisition = stage.narrow_io_acquisition(self.store.max_lease_seconds)?;
+                let mut acquisition = stage
+                    .storage()?
+                    .narrow_storage_bootstrap_io_acquisition(self.store.max_lease_seconds)?;
                 self.image.decode_exact_readback(&bytes, &mut acquisition)?;
-                self.check_current(stage)
+                self.check_bootstrap_physical(stage)
             }
         })();
         if result.is_err() {

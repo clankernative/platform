@@ -2,6 +2,247 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "loopback_services_are_absent_by_default" {
+  command = plan
+
+  assert {
+    condition = (
+      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container) == 1 &&
+      length(kubernetes_manifest.loopback_service_secrets) == 0 &&
+      !contains(keys(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations), "day2.dev/loopback-services-sha256") &&
+      !strcontains(jsonencode(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0]), "loopback-service")
+    )
+    error_message = "Without loopback_services the workload has no companion container, secret class, or companion mounts."
+  }
+}
+
+run "loopback_service_uses_exact_secret_readonly_config_and_backed_up_state" {
+  command = plan
+  variables {
+    loopback_services = {
+      executor = {
+        image                 = "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        port                  = 43210
+        config_secret_version = "projects/example-tools/secrets/executor-private-config/versions/4"
+        state_subpath         = "companions/executor"
+        state_database_file   = "executor.sqlite"
+        health_check = {
+          path    = "/healthz"
+          command = ["/usr/local/bin/freetool-executor", "healthcheck"]
+        }
+        resources = { cpu_millis = 250, memory_mib = 256 }
+      }
+    }
+  }
+
+  assert {
+    condition     = length(kubernetes_stateful_set_v1.day2.spec[0].template[0].metadata[0].annotations["day2.dev/loopback-services-sha256"]) == 64
+    error_message = "A companion config or image change triggers a pod rollout."
+  }
+
+  assert {
+    condition = (
+      length(kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container) == 2 &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].name == "executor" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].image == "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].port[0].container_port == 43210
+    )
+    error_message = "The typed companion is a second digest-pinned container with its configured port and service argument."
+  }
+
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[0] == "serve"
+    error_message = "The companion starts the service command."
+  }
+
+  assert {
+    condition     = kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].args[1] == "/run/day2/private-config.json"
+    error_message = "The companion receives the mounted private config file as its argument."
+  }
+
+  assert {
+    condition = (
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[0] == "/usr/local/bin/freetool-executor" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[1] == "healthcheck" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].liveness_probe[0].exec[0].command[2] == "http://127.0.0.1:43210/healthz"
+    )
+    error_message = "The liveness probe executes the configured health command against the service's loopback path."
+  }
+
+  assert {
+    condition = (
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].run_as_user == "10001" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].run_as_non_root &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].read_only_root_filesystem &&
+      !kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].security_context[0].allow_privilege_escalation &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits.cpu == "250m" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits.memory == "256Mi" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].requests == kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].resources[0].limits
+    )
+    error_message = "The companion shares day2's non-root read-only security posture and has Guaranteed bounded resources."
+  }
+
+  assert {
+    condition = jsondecode(kubernetes_manifest.loopback_service_secrets[0].manifest.spec.parameters.secrets) == [
+      { resourceName = "projects/example-tools/secrets/executor-private-config/versions/4", path = "executor.json" },
+    ]
+    error_message = "The SecretProviderClass names only the selected exact Secret Manager version."
+  }
+
+  assert {
+    condition = anytrue([
+      for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container :
+      init.name == "loopback-service-config-files" && contains(init.command, "10001") && contains(init.command, "0600") && contains(init.command, "/run/day2/loopback-config-sources/executor.json")
+    ])
+    error_message = "The exact config is staged as a regular file owned by UID 10001 with mode 0600."
+  }
+
+  assert {
+    condition = anytrue([
+      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].volume_mount :
+      mount.name == "loopback-service-configs" && mount.mount_path == "/run/day2/private-config.json" && mount.sub_path == "executor.json" && mount.read_only
+    ])
+    error_message = "The companion mounts its private config file read-only at the service argument path."
+  }
+
+  assert {
+    condition = anytrue([
+      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[1].volume_mount :
+      mount.name == "state" && mount.sub_path == "companions/executor" && mount.mount_path == "/var/lib/day2/loopback-state"
+    ])
+    error_message = "The companion mounts its selected PVC state subpath."
+  }
+
+  assert {
+    condition = anytrue([
+      for init in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].init_container :
+      init.name == "loopback-state-executor" && contains(init.command, "10001:10001") && contains(init.command, "/loopback-state")
+    ])
+    error_message = "The companion PVC subpath is owned by UID 10001."
+  }
+
+  assert {
+    condition = (
+      contains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args, "companions/executor") &&
+      contains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args, "companions/executor/executor.sqlite")
+    )
+    error_message = "The verified backup selects companion state and its SQLite online snapshot."
+  }
+}
+
+run "two_loopback_companions_keep_private_config_isolated" {
+  command = plan
+  variables {
+    loopback_services = {
+      executor = {
+        image                 = "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        port                  = 43210
+        config_secret_version = "projects/example-tools/secrets/executor-private-config/versions/4"
+        state_subpath         = "companions/executor"
+        health_check          = { path = "/healthz", command = ["/usr/local/bin/executor", "healthcheck"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+      vault = {
+        image                 = "registry.example.com/freetool/vault@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        port                  = 43211
+        config_secret_version = "projects/example-tools/secrets/vault-private-config/versions/7"
+        state_subpath         = "companions/vault"
+        health_check          = { path = "/healthz", command = ["/usr/local/bin/vault", "healthcheck"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+    }
+  }
+
+  assert {
+    condition = length([
+      for mount in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].volume_mount : mount
+      if mount.name == "loopback-service-configs"
+    ]) == 0
+    error_message = "The main day2 host must not mount any companion's private configuration."
+  }
+
+  assert {
+    condition = alltrue([
+      for companion_name in ["executor", "vault"] :
+      length([
+        for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container : container
+        if container.name == companion_name && length([
+          for mount in container.volume_mount : mount
+          if mount.name == "loopback-service-configs" && mount.sub_path == "${companion_name}.json" && mount.read_only
+        ]) == 1
+      ]) == 1
+    ])
+    error_message = "Each companion must receive exactly its own read-only private config file."
+  }
+
+  assert {
+    condition = alltrue([
+      for container in kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container :
+      length(container.volume_mount) == length(distinct([for mount in container.volume_mount : mount.mount_path]))
+    ])
+    error_message = "Mount paths must be unique within every container."
+  }
+}
+
+run "rejects_floating_loopback_image_and_secret_version" {
+  command = plan
+  variables {
+    loopback_services = {
+      executor = {
+        image                 = "registry.example.com/freetool/executor:latest"
+        port                  = 43210
+        config_secret_version = "projects/example-tools/secrets/executor-private-config/versions/latest"
+        state_subpath         = "companions/executor"
+        health_check          = { path = "/healthz", command = ["/bin/check"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+    }
+  }
+  expect_failures = [var.loopback_services]
+}
+
+run "rejects_loopback_service_port_collision_and_state_traversal" {
+  command = plan
+  variables {
+    loopback_services = {
+      executor = {
+        image                 = "registry.example.com/freetool/executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        port                  = 8080
+        config_secret_version = "projects/example-tools/secrets/executor-private-config/versions/4"
+        state_subpath         = "companions/../executor"
+        health_check          = { path = "/healthz", command = ["/bin/check"] }
+        resources             = { cpu_millis = 250, memory_mib = 256 }
+      }
+    }
+  }
+  expect_failures = [var.loopback_services]
+}
+
+run "rejects_overlapping_loopback_state_subpaths" {
+  command = plan
+  variables {
+    loopback_services = {
+      first = {
+        image                 = "registry.example.com/first@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        port                  = 43210
+        config_secret_version = "projects/example-tools/secrets/first/versions/1"
+        state_subpath         = "companions/shared"
+        health_check          = { path = "/healthz", command = ["/bin/check"] }
+        resources             = { cpu_millis = 100, memory_mib = 64 }
+      }
+      second = {
+        image                 = "registry.example.com/second@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        port                  = 43211
+        config_secret_version = "projects/example-tools/secrets/second/versions/1"
+        state_subpath         = "companions/shared/nested"
+        health_check          = { path = "/healthz", command = ["/bin/check"] }
+        resources             = { cpu_millis = 100, memory_mib = 64 }
+      }
+    }
+  }
+  expect_failures = [var.loopback_services]
+}
+
 run "preserves_explicit_credential_client_membership" {
   command = plan
   variables {
@@ -1270,4 +1511,47 @@ run "refuses_fractional_trace_retention" {
     journal_trace_hours = 1.5
   }
   expect_failures = [var.journal_trace_hours]
+}
+
+run "renders_freetool_app_resource_scope" {
+  command = plan
+  variables {
+    resource_catalog = {
+      version = 1
+      connections = {
+        freetool_executor = {
+          revision = 1
+          provider = "freetool_executor"
+          live = {
+            provider       = "freetool_executor"
+            endpoint       = "http://127.0.0.1:43210"
+            credential_ref = { id = "freetool_transport_key", revision = 1 }
+          }
+        }
+      }
+      resources = {
+        freetool_resource = {
+          revision   = 1
+          connection = { id = "freetool_executor", revision = 1 }
+          target = {
+            kind                = "freetool_executor"
+            service_id          = "freetool_executor"
+            scope               = { kind = "any_app_resource" }
+            credential_managers = ["operator@example.com"]
+          }
+        }
+      }
+      policies = {}
+      budgets  = {}
+    }
+  }
+  assert {
+    condition = jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).resources.resources.freetool_resource.target == {
+      kind                = "freetool_executor"
+      service_id          = "freetool_executor"
+      scope               = { kind = "any_app_resource" }
+      credential_managers = ["operator@example.com"]
+    }
+    error_message = "day2-app must render the explicit any_app_resource Freetool scope without rewriting it."
+  }
 }
