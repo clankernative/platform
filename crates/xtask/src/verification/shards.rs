@@ -344,7 +344,7 @@ fn copy_programs(root: &Path, programs: &[Binary], restoring: bool) -> Result<()
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        fs::copy(source, &target)?;
+        crate::install_cli_file(&source, &target)?;
         admit_executable(&target, &program.digest, program.permissions)?;
     }
     Ok(())
@@ -1423,6 +1423,63 @@ mod tests {
             .is_err()
         );
         assert!(part_steps("unknown").is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiled_program_cache_replaces_readonly_bytes_and_preserves_identical_inodes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let ordinary = root.join(program_output("example"));
+        let cached = root.join(PROGRAM_CACHE).join("example");
+        fs::create_dir_all(ordinary.parent().context("program directory")?)?;
+        fs::write(&ordinary, b"first compiled program")?;
+        fs::set_permissions(&ordinary, fs::Permissions::from_mode(0o555))?;
+        let mut program = Binary {
+            package: "example".into(),
+            target: "example".into(),
+            kind: vec!["bin".into()],
+            directory: "crates/example".into(),
+            executable: program_output("example"),
+            digest: digest(b"first compiled program"),
+            permissions: 0o555,
+        };
+
+        copy_programs(&root, std::slice::from_ref(&program), false)?;
+        let original_cache_inode = fs::metadata(&cached)?.ino();
+        let original_program_inode = fs::metadata(&ordinary)?.ino();
+        copy_programs(&root, std::slice::from_ref(&program), false)?;
+        copy_programs(&root, std::slice::from_ref(&program), true)?;
+        assert_eq!(fs::metadata(&cached)?.ino(), original_cache_inode);
+        assert_eq!(fs::metadata(&ordinary)?.ino(), original_program_inode);
+
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"second compiled program")?;
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o555))?;
+        crate::install_cli_file(&replacement, &ordinary)?;
+        program.digest = digest(b"second compiled program");
+        copy_programs(&root, std::slice::from_ref(&program), false)?;
+        assert_ne!(fs::metadata(&cached)?.ino(), original_cache_inode);
+        admit_executable(&cached, &program.digest, 0o555)?;
+
+        // A changed cache entry must also replace a read-only installed program.
+        // Change the private producer through a fresh inode, as Bazel does.
+        let restored = root.join("restored");
+        fs::write(&restored, b"third compiled program")?;
+        fs::set_permissions(&restored, fs::Permissions::from_mode(0o555))?;
+        crate::install_cli_file(&restored, &cached)?;
+        program.digest = digest(b"third compiled program");
+        let changed_program_inode = fs::metadata(&ordinary)?.ino();
+        copy_programs(&root, std::slice::from_ref(&program), true)?;
+        assert_ne!(fs::metadata(&ordinary)?.ino(), changed_program_inode);
+        admit_executable(&ordinary, &program.digest, 0o555)?;
+        let restored_program_inode = fs::metadata(&ordinary)?.ino();
+        copy_programs(&root, std::slice::from_ref(&program), true)?;
+        assert_eq!(fs::metadata(&ordinary)?.ino(), restored_program_inode);
         Ok(())
     }
 
