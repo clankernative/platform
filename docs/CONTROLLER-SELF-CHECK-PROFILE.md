@@ -34,7 +34,7 @@ nanoseconds]`, in this fixed order:
 | 2 | Self process | Retained self executable FD and fresh proc-path identity checks |
 | 3 | Namespace | Fresh self proc/task/namespace observations |
 | 4 | Enrollment policy | Fresh selected policy file checks/read and byte interpretation |
-| 5 | Peer | Actual retained packet-sender validation, excluding executable-byte work |
+| 5 | Peer | Retained packet-sender identity body, excluding executable-byte work; terminal pidfd guards stay in the parent category |
 | 6 | Storage profile | Fresh fixed storage-profile file read and JSON decode |
 | 7 | Original file | Writable original image comparison and guards, excluding nested spans |
 | 8 | Volume | Current volume/provider/physical checks, excluding nested spans |

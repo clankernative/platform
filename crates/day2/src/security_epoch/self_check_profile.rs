@@ -167,9 +167,11 @@ pub(super) fn enter(category: Category) -> Guard {
     Guard(previous, PhantomData)
 }
 
-impl Drop for Guard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.0 {
+impl Guard {
+    /// Finish diagnostics before a terminal native guard. Error paths may rely
+    /// on Drop; finishing twice never charges a later category or clock read.
+    pub(super) fn finish(&mut self) {
+        if let Some(previous) = self.0.take() {
             ACTIVE.with(|slot| {
                 if let Some(mut active) = slot.get() {
                     active.boundary(clock());
@@ -178,6 +180,12 @@ impl Drop for Guard {
                 }
             });
         }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -255,5 +263,19 @@ mod tests {
         assert_eq!(profile.unwrap().samples, Some(1));
         let _disabled = enter(Category::Policy);
         assert!(ACTIVE.with(|slot| slot.get().is_none()));
+    }
+
+    #[test]
+    fn explicit_finish_cannot_restore_a_category_twice_after_a_terminal_guard() {
+        let (_, profile) = sample(|| {
+            let mut guard = enter(Category::Policy);
+            guard.finish();
+            assert!(guard.0.is_none());
+            let _peer = enter(Category::Peer);
+            guard.finish();
+            drop(guard);
+            assert!(ACTIVE.with(|slot| matches!(slot.get().unwrap().category, Category::Peer)));
+        });
+        assert_eq!(profile.unwrap().rows[Category::Policy as usize].0, Some(1));
     }
 }

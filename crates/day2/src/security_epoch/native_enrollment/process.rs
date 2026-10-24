@@ -230,7 +230,7 @@ impl MessageProcess {
         acquisition: &mut NativeAcquisition,
         costs: &HashCosts,
     ) -> Result<()> {
-        let _profile = crate::security_epoch::self_check_profile::enter(
+        let mut profile = crate::security_epoch::self_check_profile::enter(
             crate::security_epoch::self_check_profile::Category::Peer,
         );
         let mut timing = costs.start_identity();
@@ -318,6 +318,7 @@ impl MessageProcess {
             // Diagnostic sampling finishes before the final pidfd/original-clock
             // guard. Held executable FDs survive process exit.
             costs.finish_identity(&mut timing);
+            profile.finish();
             for owner in processes.iter() {
                 live(&owner.pidfd, acquisition)?;
             }
