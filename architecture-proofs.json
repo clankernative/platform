@@ -1865,6 +1865,7 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >",
         "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
         "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_current_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
@@ -1877,6 +1878,8 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
         "pub (crate) fn require_current_role (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
+        "fn require_role_data (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
+        "fn require_selection_data (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_role (& mut self) -> Result < NativeRole >",
@@ -1918,6 +1921,14 @@
         {
           "owner": "EnrolledOriginalClock",
           "signature": "pub (crate) fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Duration >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "fn require_role_data (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "fn require_selection_data (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
@@ -1989,6 +2000,10 @@
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check_current_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >"
         },
         {
@@ -2006,6 +2021,10 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch) fn current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < NativeAcquisition >"
         }
       ],
       "proof_uses": [],
@@ -2032,7 +2051,8 @@
         }
       ],
       "methods": [
-        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (in crate :: security_epoch) fn current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < NativeAcquisition >"
       ],
       "factories": [
         {
@@ -2044,6 +2064,10 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (crate) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "SameEnrolledOwner",
+          "signature": "pub (in crate :: security_epoch) fn current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < NativeAcquisition >"
         }
       ],
       "proof_uses": [],
@@ -2254,7 +2278,8 @@
         "pub (super) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
         "pub (super) fn check_durability_profile (& mut self) -> Result < () >",
-        "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (super) fn controller_stage_after_file_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
       ],
       "factories": [
         {
@@ -2302,6 +2327,10 @@
         {
           "owner": "CurrentVolumePhase < '_ , 'role >",
           "signature": "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , 'role >",
+          "signature": "pub (super) fn controller_stage_after_file_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         }
       ],
       "proof_uses": [],
@@ -2621,6 +2650,7 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_current_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)"
       ],
@@ -2650,6 +2680,10 @@
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         },
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
@@ -4392,7 +4426,8 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn sign_storage_message (& mut self , body : Body) -> Result < Message >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_role (& mut self) -> Result < NativeRole >",
-        "pub (in crate :: security_epoch :: native_enrollment) fn storage_statement (& mut self) -> Result < StageStatement >"
+        "pub (in crate :: security_epoch :: native_enrollment) fn storage_statement (& mut self) -> Result < StageStatement >",
+        "fn storage_statement_data (& mut self) -> Result < StageStatement >"
       ],
       "factories": [
         {
@@ -4412,6 +4447,10 @@
         {
           "owner": "EnrolledStorageStage < '_ , '_ >",
           "signature": "fn require_storage_peer_purpose (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "fn storage_statement_data (& mut self) -> Result < StageStatement >"
         },
         {
           "owner": "EnrolledStorageStage < '_ , '_ >",

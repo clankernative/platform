@@ -1099,6 +1099,18 @@ impl<'role> CurrentVolumePhase<'_, 'role> {
         self.reader.acquisition.remaining()?;
         Ok(&mut self.reader.stage)
     }
+
+    /// Only the owning current file phase calls this immediately after its
+    /// complete file/directory check, whose final step checked this reader.
+    /// No I/O or ownership transfer may intervene. This is the same lexical
+    /// stage borrow, not cached authentication, P3 permission or a new clock.
+    pub(super) fn controller_stage_after_file_check(
+        &mut self,
+    ) -> Result<&mut EnrolledRoleStage<'role>> {
+        ensure!(self.resources.valid, "storage_native_volume_refused");
+        self.reader.acquisition.remaining()?;
+        Ok(&mut self.reader.stage)
+    }
 }
 
 #[cfg(target_os = "linux")]

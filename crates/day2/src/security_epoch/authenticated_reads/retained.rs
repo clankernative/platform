@@ -372,12 +372,20 @@ impl RetainedEpochReads {
         let timings = self.timings.clone();
         let result = timings.measure(Operation::AuthenticationCheck, || {
             ensure!(self.valid, "epoch_retained_read_refused");
-            self.owner.check(stage)?;
-            stage.check_selection(&self.policy, &self.store, self.purpose)?;
-            self.scope.require(stage)?;
             // This child samples THIS actual stage's original domain; it
             // neither begins a new interval nor renews our retained owner.
-            let same_stage = self.scope.io(stage, self.store.max_lease_seconds)?;
+            let same_stage = match self.scope {
+                ReadScope::Current => {
+                    self.owner
+                        .current_read_view(stage, &self.policy, &self.store, self.purpose)?
+                }
+                ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
+                    self.owner.check(stage)?;
+                    stage.check_selection(&self.policy, &self.store, self.purpose)?;
+                    self.scope.require(stage)?;
+                    self.scope.io(stage, self.store.max_lease_seconds)?
+                }
+            };
             self.scope.join(&mut self.acquisition, same_stage)?;
             self.process.check(&mut self.acquisition)?;
             self.acquisition.sample()?;

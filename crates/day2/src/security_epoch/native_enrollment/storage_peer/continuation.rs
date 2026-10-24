@@ -272,12 +272,17 @@ impl RetainedPeer {
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
         self.same.check(stage)?;
-        let local = stage.storage()?.storage_statement()?;
-        ensure!(
-            self.local.same_enrollment(&local),
-            "storage_peer_enrollment_changed"
-        );
-        stage.storage()?.check_storage_acquisition(acquisition)?;
+        {
+            // One lexical facade; each operation still performs its own full
+            // native checks. No message/process I/O occurs between these calls.
+            let mut storage = stage.storage()?;
+            let local = storage.storage_statement()?;
+            ensure!(
+                self.local.same_enrollment(&local),
+                "storage_peer_enrollment_changed"
+            );
+            storage.check_storage_acquisition(acquisition)?;
+        }
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("storage_peer_platform_unsupported");
         #[cfg(target_os = "linux")]

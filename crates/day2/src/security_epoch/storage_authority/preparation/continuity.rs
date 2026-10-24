@@ -606,7 +606,18 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
 
     pub(crate) fn controller_stage(&mut self) -> Result<&mut EnrolledRoleStage<'role>> {
         self.check()?;
-        let result = self.inner.phase.controller_stage();
+        self.controller_stage_after_check()
+    }
+
+    /// Fixed current-phase composition only: the caller has just completed
+    /// this file's full check, with no intervening I/O. Every actual peer I/O
+    /// still validates the borrowed stage and is followed by a fresh file
+    /// check. No checked flag, transferable token or lifetime is introduced.
+    pub(in crate::security_epoch::storage_authority) fn controller_stage_after_check(
+        &mut self,
+    ) -> Result<&mut EnrolledRoleStage<'role>> {
+        self.inner.disposition.check()?;
+        let result = self.inner.phase.controller_stage_after_file_check();
         if result.is_err() {
             self.inner.disposition.refuse();
         }
