@@ -262,6 +262,7 @@
     "crates/day2/src/oauth/live_readiness.rs",
     "crates/day2/src/oauth/management.rs",
     "crates/day2/src/oauth/management/app.rs",
+    "crates/day2/src/oauth/management/app_native_lifecycle.rs",
     "crates/day2/src/oauth/management/shell.rs",
     "crates/day2/src/oauth/mod.rs",
     "crates/day2/src/oauth/native_http.rs",

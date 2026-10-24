@@ -4040,6 +4040,17 @@ pub(super) mod tests {
         Arc<ArtifactApprovalAuthority>,
         Arc<ArtifactShellSigner>,
     )> {
+        management_fixture_with_consumers(directory, false)
+    }
+
+    pub(in crate::oauth) fn management_fixture_with_consumers(
+        directory: &Path,
+        consumers: bool,
+    ) -> Result<(
+        crate::store::Runtime,
+        Arc<ArtifactApprovalAuthority>,
+        Arc<ArtifactShellSigner>,
+    )> {
         struct Host;
         impl crate::host_inputs::Clock for Host {
             fn wall_time(&self) -> Result<std::time::Duration> {
@@ -4098,6 +4109,19 @@ pub(super) mod tests {
             "models":{"entries":{"fields":{"note":"text"}}},
             "inputs":{"input":{"fields":{}}},"foreign_keys":[]
         }))?;
+        if consumers {
+            contract.operations.push(crate::artifact::Operation {
+                name: "read".into(),
+                kind: "query".into(),
+                input_type: "input".into(),
+                output_type: String::new(),
+            });
+            app.authority = Some(serde_json::from_value(json!({
+                "version":1,"admins":["operator@example.com"],
+                "operations":{"read":{"actors":["alice@example.com"],"mode":{"kind":"read"},"models":{},
+                    "observations":[crate::connection_codegen::RESOLVE,crate::connection_codegen::LIST_EVENTS]}}
+            }))?);
+        }
         let artifact =
             LoadedArtifact::from_contract_for_tests(original.id().into(), artifact_path, contract);
         fixture

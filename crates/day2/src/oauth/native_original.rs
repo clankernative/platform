@@ -35,6 +35,13 @@ impl<C: Clock> Original<C> {
         self.refused = true;
     }
 
+    #[cfg(test)]
+    pub(super) fn observation(&self) -> serde_json::Value {
+        serde_json::json!({"origin":self.origin,"latest":self.latest,"ceiling":self.ceiling,
+            "binding":self.binding,"refused":self.refused,
+            "same_executor":self.process == std::process::id() && self.thread == std::thread::current().id()})
+    }
+
     /// Only during the original creator's current Pending transaction, before
     /// its exact committed intent can be bound. The native adapter supplies the
     /// SAME captured clock sampled through the already held enrolled stage.

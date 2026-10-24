@@ -1356,9 +1356,13 @@ mod tests {
 
     impl Fixture {
         fn new(revoke_authority: bool) -> Result<Self> {
+            Self::selected(revoke_authority, false)
+        }
+
+        fn selected(revoke_authority: bool, consumers: bool) -> Result<Self> {
             let directory = tempfile::tempdir()?;
             let (runtime, authority, signer) =
-                admission::tests::management_fixture(directory.path())?;
+                admission::tests::management_fixture_with_consumers(directory.path(), consumers)?;
             let port = Arc::new(Port {
                 now: AtomicI64::new(100),
                 entropy: AtomicU64::new(1),
@@ -1430,6 +1434,10 @@ mod tests {
                 .append_pair("iss", crate::oauth::google::ISSUER);
             Ok((view, session, query.finish()))
         }
+    }
+
+    mod native_lifecycle {
+        include!("app_native_lifecycle.rs");
     }
 
     #[test]

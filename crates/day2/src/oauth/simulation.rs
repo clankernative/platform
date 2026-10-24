@@ -262,7 +262,7 @@ impl effects::Hooks for World {
     }
 }
 
-fn implementation() -> String {
+pub(super) fn implementation() -> String {
     crate::digest(
         &serde_json::to_vec(&(
             sources::SOURCES,

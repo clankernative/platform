@@ -19,6 +19,14 @@ pub(super) struct Model {
     last_clock: Option<Observation>,
 }
 
+impl Model {
+    pub(super) fn complete(&self) -> bool {
+        !self.terminal
+            && self.outstanding.is_none()
+            && self.accepted.len() == contract(self.protocol, self.sequence).len()
+    }
+}
+
 /// Specification transcripts used by the oracle and history generator. The
 /// generator does not ask the implementation what a valid exchange looks like.
 pub(super) fn contract(protocol: Protocol, sequence: u64) -> Vec<(Actor, Frame)> {

@@ -15,6 +15,12 @@ environment around each future poll; blocking dispatch inherits it explicitly.
 Real socket, concurrency, and subprocess kill/reopen tests remain separate native
 adapter qualification. Simulation does not qualify a live deployment or client.
 
+The [native lifecycle consumer campaign](NATIVE-OAUTH-CONSUMER-SIMULATION.md)
+additionally joins the storage and handshake independent models to actual
+connect/read/refresh/disconnect decisions under App, Shell and Controller fault
+schedules. Its observations remain test DATA; native role and live provider
+qualification are separate.
+
 ## Required campaigns
 
 `xtask verify-fast` and `xtask verify` execute these library tests through the

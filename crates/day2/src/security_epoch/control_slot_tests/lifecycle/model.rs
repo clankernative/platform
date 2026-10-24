@@ -46,6 +46,18 @@ fn digest<T: Serialize>(tag: &str, value: &T) -> Digest {
 }
 
 impl Model {
+    pub(super) fn observation(&self) -> Value {
+        serde_json::to_value(&self.state).unwrap()
+    }
+
+    pub(super) fn consumer_current(&self) -> bool {
+        self.active
+            && self.state.first_holder
+            && self.state.continuation
+            && !self.expired
+            && !self.file_refused
+    }
+
     pub(super) fn new(
         cores: &[LogicalCore; 2],
         physical: bool,
