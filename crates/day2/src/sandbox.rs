@@ -311,6 +311,8 @@ mod tests {
             while !serving.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS inherits the listener's nonblocking flag; use the bounded read below.
+                        stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
                         let mut request = Vec::new();
