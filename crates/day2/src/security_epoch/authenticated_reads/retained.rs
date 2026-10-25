@@ -835,8 +835,8 @@ mod app_authentication_boundary_tests {
             let syn::Stmt::Local(local) = &mut foreign.block.stmts[0] else {
                 unreachable!()
             };
-            local.init.as_mut().unwrap().expr =
-                Box::new(syn::parse_str("stage.begin_app_authentication(30)?").unwrap());
+            *local.init.as_mut().unwrap().expr =
+                syn::parse_str("stage.begin_app_authentication(30)?").unwrap();
             assert!(
                 !begins_at_entry(&foreign, selection),
                 "selected original lease cannot be replaced with a scalar"
