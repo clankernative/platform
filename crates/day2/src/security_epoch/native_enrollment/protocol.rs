@@ -62,6 +62,7 @@ pub(super) struct StageData {
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum StagePurpose {
     CurrentRole,
+    AppServing,
     InitialFirstHolder,
     StorageBootstrap,
     StorageMetadataObservation,
@@ -71,6 +72,7 @@ impl StagePurpose {
     pub(super) fn limit(self) -> std::time::Duration {
         match self {
             Self::CurrentRole => std::time::Duration::from_secs(5),
+            Self::AppServing => crate::security_epoch::native_clock::APP_SERVING_LIMIT,
             Self::InitialFirstHolder => {
                 crate::security_epoch::native_clock::INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT
             }
@@ -84,7 +86,7 @@ impl StagePurpose {
     pub(super) fn require_role(self, role: NativeRole) -> Result<()> {
         let allowed = match self {
             Self::CurrentRole => true,
-            Self::InitialFirstHolder | Self::StorageBootstrap => {
+            Self::AppServing | Self::InitialFirstHolder | Self::StorageBootstrap => {
                 matches!(role, NativeRole::EpochController | NativeRole::AppHost)
             }
             Self::StorageMetadataObservation => role == NativeRole::EpochController,

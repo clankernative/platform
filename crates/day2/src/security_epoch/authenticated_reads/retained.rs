@@ -9,7 +9,7 @@ use crate::security_epoch::{
     credential_material::CredentialMaterial,
     firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
-    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
+    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner, StagePurpose},
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
@@ -219,6 +219,10 @@ impl AuthenticatedReads<'_, '_> {
         self.retain_scoped(ReadScope::Current)
     }
 
+    pub(in crate::security_epoch) fn retain_app_serving(self) -> Result<RetainedEpochReads> {
+        self.retain_scoped(ReadScope::AppServing)
+    }
+
     pub(in crate::security_epoch) fn retain_storage_bootstrap(self) -> Result<RetainedEpochReads> {
         self.retain_scoped(ReadScope::StorageBootstrap)
     }
@@ -254,7 +258,9 @@ impl AuthenticatedReads<'_, '_> {
         } = self;
         let acquisition = match scope {
             ReadScope::Current => acquisition,
-            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => stage
+            ReadScope::AppServing
+            | ReadScope::StorageBootstrap
+            | ReadScope::StorageMetadataObservation => stage
                 .storage()?
                 .complete_storage_authentication(acquisition, store.max_lease_seconds)?,
         };
@@ -347,7 +353,10 @@ impl RetainedEpochReads {
             stage.check_selection(policy, store, NativeRole::EpochController)?;
             ensure!(
                 self.purpose == NativeRole::EpochController
-                    && self.scope != ReadScope::Current
+                    && matches!(
+                        self.scope,
+                        ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation
+                    )
                     && self.policy == *policy
                     && self.store == *store
                     && self.selection == Digest::of(store)?,
@@ -375,10 +384,20 @@ impl RetainedEpochReads {
             // This child samples THIS actual stage's original domain; it
             // neither begins a new interval nor renews our retained owner.
             let same_stage = match self.scope {
-                ReadScope::Current => {
-                    self.owner
-                        .current_read_view(stage, &self.policy, &self.store, self.purpose)?
-                }
+                ReadScope::Current => self.owner.current_read_view(
+                    stage,
+                    &self.policy,
+                    &self.store,
+                    self.purpose,
+                    StagePurpose::CurrentRole,
+                )?,
+                ReadScope::AppServing => self.owner.current_read_view(
+                    stage,
+                    &self.policy,
+                    &self.store,
+                    self.purpose,
+                    StagePurpose::AppServing,
+                )?,
                 ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
                     self.owner.check(stage)?;
                     stage.check_selection(&self.policy, &self.store, self.purpose)?;

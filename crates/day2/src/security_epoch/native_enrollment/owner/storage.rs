@@ -270,6 +270,7 @@ impl EnrolledStorageStage<'_, '_> {
                 matches!(
                     self.stage.purpose,
                     super::StagePurpose::CurrentRole
+                        | super::StagePurpose::AppServing
                         | super::StagePurpose::InitialFirstHolder
                         | super::StagePurpose::StorageBootstrap
                 ),

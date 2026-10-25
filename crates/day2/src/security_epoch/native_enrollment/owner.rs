@@ -1,6 +1,8 @@
 //! Stable native executor ownership. Nothing here adopts a parsed certificate as
 //! authority, moves a role between threads, or renews a failed original.
 
+#[cfg(target_os = "linux")]
+use crate::security_epoch::native_clock::AcquisitionScope;
 use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
@@ -175,6 +177,11 @@ impl EnrolledProcessRoleOwner {
         self.begin_stage(StagePurpose::CurrentRole)
     }
 
+    /// Fixed App/Controller serving entry, never Shell or generic Current.
+    pub(crate) fn begin_app_serving_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
+        self.begin_stage(StagePurpose::AppServing)
+    }
+
     /// Only the original Ready/file/first-peer composition calls this entry.
     /// Authentication still spends at most five seconds of the SAME origin.
     pub(crate) fn begin_initial_first_holder_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
@@ -207,10 +214,15 @@ impl EnrolledProcessRoleOwner {
             let result = (|| {
                 let mut acquisition = match purpose {
                     StagePurpose::CurrentRole => NativeAcquisition::begin(5)?,
+                    StagePurpose::AppServing => {
+                        NativeAcquisition::begin_storage_io(AcquisitionScope::AppServing)?
+                    }
                     StagePurpose::InitialFirstHolder => {
                         NativeAcquisition::begin_initial_first_holder()?
                     }
-                    StagePurpose::StorageBootstrap => NativeAcquisition::begin_storage_bootstrap()?,
+                    StagePurpose::StorageBootstrap => {
+                        NativeAcquisition::begin_storage_io(AcquisitionScope::StorageBootstrap)?
+                    }
                     StagePurpose::StorageMetadataObservation => {
                         NativeAcquisition::begin_storage_metadata_observation()?
                     }
@@ -373,6 +385,27 @@ impl EnrolledRoleStage<'_> {
         self.require_purpose(StagePurpose::CurrentRole)
     }
 
+    /// Current consumer gate. App serving is distinct signed authority; this
+    /// does not admit bootstrap/metadata purposes or extend generic Current.
+    pub(crate) fn require_current_consumer(&mut self) -> Result<()> {
+        let purpose = self.current_storage_purpose()?;
+        self.require_purpose(purpose)
+    }
+
+    pub(in crate::security_epoch) fn current_storage_purpose(&mut self) -> Result<StagePurpose> {
+        if !matches!(
+            self.purpose,
+            StagePurpose::CurrentRole | StagePurpose::AppServing
+        ) {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+            anyhow::bail!("native_enrollment_current_consumer_purpose");
+        }
+        // Purpose DATA only. Every consumer still checks the actual stage at
+        // its existing boundary; this selector adds no scan or cached proof.
+        Ok(self.purpose)
+    }
+
     pub(crate) fn capture_same_owner(&mut self) -> Result<SameEnrolledOwner> {
         self.check()?;
         Ok(SameEnrolledOwner {
@@ -411,6 +444,27 @@ impl<'role> EnrolledRoleStage<'role> {
 }
 
 impl EnrolledStorageStage<'_, '_> {
+    pub(in crate::security_epoch) fn narrow_app_serving_io_acquisition(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            self.stage.require_purpose(StagePurpose::AppServing)?;
+            self.stage.acquisition.require_app_serving()?;
+            let child = self
+                .stage
+                .acquisition
+                .narrow(max_lease_seconds, self.stage.deadline)?;
+            self.stage.check()?;
+            Ok(child)
+        })();
+        if result.is_err() {
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
+        }
+        result
+    }
+
     /// Full provider authentication shares the stage's original plus five
     /// seconds, including time already spent authenticating its enrolled role.
     pub(in crate::security_epoch) fn narrow_storage_authentication(
@@ -418,7 +472,13 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.require_storage_authentication_purpose()?;
-            let child = self.stage.acquisition.narrow_authentication()?;
+            let child = if self.stage.purpose == StagePurpose::AppServing {
+                self.stage
+                    .acquisition
+                    .narrow_app_serving_authentication(self.stage.deadline)?
+            } else {
+                self.stage.acquisition.narrow_authentication()?
+            };
             self.stage.check()?;
             Ok(child)
         })();
@@ -445,6 +505,9 @@ impl EnrolledStorageStage<'_, '_> {
         let result = (|| {
             self.stage.acquisition.complete_authentication(child)?;
             match self.stage.purpose {
+                StagePurpose::AppServing => {
+                    self.narrow_app_serving_io_acquisition(max_lease_seconds)
+                }
                 StagePurpose::StorageBootstrap => {
                     self.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
                 }
@@ -510,6 +573,7 @@ impl EnrolledStorageStage<'_, '_> {
         let result = (|| {
             self.stage.check()?;
             match self.stage.purpose {
+                StagePurpose::AppServing => self.stage.acquisition.require_app_serving(),
                 StagePurpose::StorageBootstrap => {
                     self.stage.acquisition.require_storage_bootstrap()
                 }
@@ -578,9 +642,11 @@ impl EnrolledRoleStage<'_> {
         policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
         store: &day2_capabilities::security_epoch::EpochStore,
         role: NativeRole,
+        purpose: StagePurpose,
     ) -> Result<()> {
         self.require_selection_data(policy, store, role)?;
-        self.require_purpose(StagePurpose::CurrentRole)
+        self.current_storage_purpose()?;
+        self.require_purpose(purpose)
     }
 
     fn require_selection_data(
@@ -623,6 +689,7 @@ impl EnrolledRoleStage<'_> {
             self.owner.check_local()?;
             self.purpose.require_role(self.owner.role)?;
             match self.purpose {
+                StagePurpose::AppServing => self.acquisition.require_app_serving()?,
                 StagePurpose::StorageBootstrap => self.acquisition.require_storage_bootstrap()?,
                 StagePurpose::StorageMetadataObservation => {
                     self.acquisition.require_storage_metadata_observation()?
@@ -660,8 +727,8 @@ impl EnrolledRoleStage<'_> {
 impl SameEnrolledOwner {
     /// One lexical Current read view: validate the actual owner fully, then
     /// perform only selection/purpose DATA checks and original-clock narrowing.
-    /// The sole caller observes its process under this child and fully checks
-    /// the same owner again before accepting the observation. No native check
+    /// Each purpose's fixed reader observes its process under this child and
+    /// fully checks the same owner again before acceptance. No native check
     /// is cached or omitted across that I/O boundary.
     pub(in crate::security_epoch) fn current_read_view(
         &mut self,
@@ -669,11 +736,19 @@ impl SameEnrolledOwner {
         policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
         store: &day2_capabilities::security_epoch::EpochStore,
         role: NativeRole,
+        purpose: StagePurpose,
     ) -> Result<NativeAcquisition> {
         let result = (|| {
+            ensure!(
+                matches!(
+                    purpose,
+                    StagePurpose::CurrentRole | StagePurpose::AppServing
+                ),
+                "native_enrollment_current_read_purpose"
+            );
             self.check(stage)?;
             stage.require_selection_data(policy, store, role)?;
-            stage.purpose.require_exact(StagePurpose::CurrentRole)?;
+            stage.purpose.require_exact(purpose)?;
             stage
                 .acquisition
                 .narrow(store.max_lease_seconds, stage.deadline)
@@ -724,7 +799,7 @@ impl EnrolledOriginalClock {
                     && self.incarnation == stage.owner.incarnation,
                 "native_enrollment_original_clock_owner"
             );
-            stage.require_purpose(StagePurpose::CurrentRole)?;
+            stage.require_current_consumer()?;
             #[cfg(target_os = "linux")]
             self.anchors.check(stage)?;
             let now = boottime()?;

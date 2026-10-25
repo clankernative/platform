@@ -182,12 +182,12 @@ impl Protocol {
             matches!(
                 (self, purpose),
                 (Self::InitialStorage, StagePurpose::InitialFirstHolder)
-                    | (Self::CurrentStorage, StagePurpose::StorageBootstrap)
                     | (
-                        Self::Enrollment
-                            | Self::CurrentStorage
-                            | Self::InitialServing
-                            | Self::CurrentServing,
+                        Self::CurrentStorage,
+                        StagePurpose::StorageBootstrap | StagePurpose::AppServing
+                    )
+                    | (
+                        Self::Enrollment | Self::InitialServing | Self::CurrentServing,
                         StagePurpose::CurrentRole
                     )
             ),

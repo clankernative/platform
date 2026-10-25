@@ -146,6 +146,11 @@ impl<'role> ProviderReader<'role> {
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let mut acquisition = match purpose {
             StagePurpose::CurrentRole => stage.narrow_io_acquisition(store.max_lease_seconds)?,
+            StagePurpose::AppServing => {
+                let mut child = stage.storage()?.narrow_storage_authentication()?;
+                let (_, ceiling) = child.interval_data()?;
+                child.narrow(store.max_lease_seconds, ceiling)?
+            }
             StagePurpose::InitialFirstHolder => {
                 stage.initial_first_holder_acquisition(store.max_lease_seconds)?
             }
@@ -248,6 +253,13 @@ impl<'role> ProviderReader<'role> {
             PreparationFailure::at(PreparationStep::KubernetesCredential, error)
         })?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
+        let acquisition = if purpose == StagePurpose::AppServing {
+            stage
+                .storage()?
+                .complete_storage_authentication(acquisition, store.max_lease_seconds)?
+        } else {
+            acquisition
+        };
         Ok(Self {
             stage,
             policy: policy.clone(),
@@ -963,9 +975,10 @@ impl NativeVolumeContinuity {
 
     pub(super) fn begin_current<'volume, 'role>(
         &'volume mut self,
-        stage: EnrolledRoleStage<'role>,
+        mut stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
-        self.begin_phase(stage, StagePurpose::CurrentRole)
+        let purpose = stage.current_storage_purpose()?;
+        self.begin_phase(stage, purpose)
     }
 
     pub(super) fn begin_first_holder<'volume, 'role>(

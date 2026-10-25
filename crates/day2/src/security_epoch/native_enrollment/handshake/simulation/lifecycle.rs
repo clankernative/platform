@@ -80,7 +80,11 @@ impl LifecycleHandshake {
                 events.push(Event::BeginCurrent {
                     endpoint,
                     sequence: self.sequence,
-                    purpose: StagePurpose::CurrentRole,
+                    purpose: if self.initial == Protocol::InitialStorage {
+                        StagePurpose::AppServing
+                    } else {
+                        StagePurpose::CurrentRole
+                    },
                 });
             }
             match self.initial {

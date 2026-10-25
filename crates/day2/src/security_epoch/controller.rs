@@ -204,7 +204,7 @@ fn run_inner(
                         .measure(serving_timing::ServingStep::RoleStage, || {
                             let _profile =
                                 self_check_profile::enter(self_check_profile::Category::RoleLocal);
-                            role.begin_current_stage()
+                            role.begin_app_serving_stage()
                         })
                         .and_then(|stage| {
                             trace.bind_progress(stage.diagnostic_progress());

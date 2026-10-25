@@ -50,6 +50,7 @@ pub(crate) struct AuthenticatedReads<'stage, 'role> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReadScope {
     Current,
+    AppServing,
     StorageBootstrap,
     StorageMetadataObservation,
 }
@@ -63,7 +64,12 @@ impl ReadScope {
         purpose: NativeRole,
     ) -> Result<()> {
         match self {
-            Self::Current => stage.check_current_selection(policy, selection, purpose),
+            Self::Current => {
+                stage.check_current_selection(policy, selection, purpose, StagePurpose::CurrentRole)
+            }
+            Self::AppServing => {
+                stage.check_current_selection(policy, selection, purpose, StagePurpose::AppServing)
+            }
             Self::StorageBootstrap | Self::StorageMetadataObservation => {
                 stage.check_selection(policy, selection, purpose)?;
                 self.require(stage)
@@ -74,6 +80,7 @@ impl ReadScope {
     fn require(self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         stage.require_purpose(match self {
             Self::Current => StagePurpose::CurrentRole,
+            Self::AppServing => StagePurpose::AppServing,
             Self::StorageBootstrap => StagePurpose::StorageBootstrap,
             Self::StorageMetadataObservation => StagePurpose::StorageMetadataObservation,
         })
@@ -87,7 +94,7 @@ impl ReadScope {
         self.require(stage)?;
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
-            Self::StorageBootstrap | Self::StorageMetadataObservation => {
+            Self::AppServing | Self::StorageBootstrap | Self::StorageMetadataObservation => {
                 let mut child = stage.storage()?.narrow_storage_authentication()?;
                 let (_, ceiling) = child.interval_data()?;
                 child.narrow(max_lease_seconds, ceiling)
@@ -103,6 +110,9 @@ impl ReadScope {
         self.require(stage)?;
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
+            Self::AppServing => stage
+                .storage()?
+                .narrow_app_serving_io_acquisition(max_lease_seconds),
             Self::StorageBootstrap => stage
                 .storage()?
                 .narrow_storage_bootstrap_io_acquisition(max_lease_seconds),
@@ -114,7 +124,7 @@ impl ReadScope {
 
     fn join(self, retained: &mut NativeAcquisition, actual: NativeAcquisition) -> Result<()> {
         match self {
-            Self::Current => retained.join_current_view(actual),
+            Self::Current | Self::AppServing => retained.join_current_view(actual),
             Self::StorageBootstrap => retained.join_storage_bootstrap_view(actual),
             Self::StorageMetadataObservation => {
                 retained.join_storage_metadata_observation_view(actual)
@@ -128,7 +138,7 @@ impl ReadScope {
         actual: &mut NativeAcquisition,
     ) -> Result<()> {
         match self {
-            Self::Current => retained.exchange_current_views(actual),
+            Self::Current | Self::AppServing => retained.exchange_current_views(actual),
             Self::StorageBootstrap => retained.exchange_storage_bootstrap_views(actual),
             Self::StorageMetadataObservation => {
                 retained.exchange_storage_metadata_observation_views(actual)
@@ -190,6 +200,15 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         stage: &'stage mut EnrolledRoleStage<'role>,
     ) -> Result<Self> {
         Self::acquire_scoped(policy, selection, purpose, stage, ReadScope::Current)
+    }
+
+    pub(super) fn acquire_app_serving(
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
+        purpose: NativeRole,
+        stage: &'stage mut EnrolledRoleStage<'role>,
+    ) -> Result<Self> {
+        Self::acquire_scoped(policy, selection, purpose, stage, ReadScope::AppServing)
     }
 
     pub(super) fn acquire_storage_bootstrap(

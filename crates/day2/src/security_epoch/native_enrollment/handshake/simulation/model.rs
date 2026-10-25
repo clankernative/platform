@@ -105,6 +105,10 @@ impl Model {
             && self.purpose == StagePurpose::StorageBootstrap
         {
             60_000_000_000
+        } else if self.protocol == Protocol::CurrentStorage
+            && self.purpose == StagePurpose::AppServing
+        {
+            30_000_000_000
         } else {
             5_000_000_000
         };
@@ -257,7 +261,7 @@ impl Machine for Model {
             let purpose_allowed = match protocol {
                 Protocol::CurrentStorage => matches!(
                     purpose,
-                    StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+                    StagePurpose::AppServing | StagePurpose::StorageBootstrap
                 ),
                 Protocol::CurrentServing => purpose == StagePurpose::CurrentRole,
                 _ => false,

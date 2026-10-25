@@ -358,7 +358,7 @@ fn with_app_participant<T>(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             storage.prepare_current()?;
             let mut role = owners.role.try_borrow_mut()?;
-            let mut stage = role.begin_current_stage()?;
+            let mut stage = role.begin_app_serving_stage()?;
             stage.check_for(scope, NativeRole::AppHost)?;
             stage.check_selection(
                 &owners.selection.policy,
@@ -860,7 +860,7 @@ enum BorrowedRoleStage<'stage, 'role> {
 impl BorrowedRoleStage<'_, '_> {
     fn check(&mut self) -> Result<()> {
         match self {
-            Self::Native(stage) => stage.require_current_role(),
+            Self::Native(stage) => stage.require_current_consumer(),
             #[cfg(test)]
             Self::Simulated(stage) => stage.check(),
         }
@@ -878,7 +878,7 @@ impl<'role> RoleStage<'role> {
 
     pub(crate) fn check(&mut self) -> Result<()> {
         match &mut self.source {
-            RoleSource::Native(stage) => stage.require_current_role(),
+            RoleSource::Native(stage) => stage.require_current_consumer(),
             #[cfg(test)]
             RoleSource::Simulated(stage) => stage.check(),
         }
@@ -887,7 +887,7 @@ impl<'role> RoleStage<'role> {
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
         match &mut self.source {
             RoleSource::Native(stage) => {
-                stage.require_current_role()?;
+                stage.require_current_consumer()?;
                 stage.check_for(scope, role)
             }
             #[cfg(test)]
@@ -905,7 +905,7 @@ impl<'role> RoleStage<'role> {
     ) -> Result<T> {
         match &mut self.source {
             RoleSource::Native(stage) => {
-                stage.require_current_role()?;
+                stage.require_current_consumer()?;
                 use_native(stage)
             }
             #[cfg(test)]
@@ -1142,7 +1142,7 @@ fn with_runtime_response<T>(
         crate::security_epoch::serving::require_runtime_response(participant, scope, identity)?;
         participant.prepare_current()?;
         let mut role = owner.role.try_borrow_mut()?;
-        let mut stage = role.begin_current_stage()?;
+        let mut stage = role.begin_app_serving_stage()?;
         stage.check_selection(&owner.selection.policy, &owner.selection.store, owner.kind)?;
         let purpose = if complete {
             crate::security_epoch::serving::RuntimeServingUse::ResponseComplete
@@ -1699,7 +1699,11 @@ fn with_current_for_role<T>(
         }
         let role = stored.original.clock.role.clone();
         let mut role = role.try_borrow_mut()?;
-        let mut enrolled = role.begin_current_stage()?;
+        let mut enrolled = if expected == Some(NativeRole::AppHost) {
+            role.begin_app_serving_stage()?
+        } else {
+            role.begin_current_stage()?
+        };
         enrolled.check_selection(
             &owners.selection.policy,
             &owners.selection.store,

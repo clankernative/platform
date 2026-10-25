@@ -200,6 +200,7 @@ fn storage_stage_purposes_are_closed_and_role_restricted_independent_of_duration
     use super::{NativeRole, protocol::StagePurpose};
     for purpose in [
         StagePurpose::CurrentRole,
+        StagePurpose::AppServing,
         StagePurpose::InitialFirstHolder,
         StagePurpose::StorageBootstrap,
         StagePurpose::StorageMetadataObservation,
@@ -211,9 +212,9 @@ fn storage_stage_purposes_are_closed_and_role_restricted_independent_of_duration
         ] {
             let expected = match purpose {
                 StagePurpose::CurrentRole => true,
-                StagePurpose::InitialFirstHolder | StagePurpose::StorageBootstrap => {
-                    role != NativeRole::SecurityShell
-                }
+                StagePurpose::AppServing
+                | StagePurpose::InitialFirstHolder
+                | StagePurpose::StorageBootstrap => role != NativeRole::SecurityShell,
                 StagePurpose::StorageMetadataObservation => role == NativeRole::EpochController,
             };
             assert_eq!(purpose.require_role(role).is_ok(), expected);

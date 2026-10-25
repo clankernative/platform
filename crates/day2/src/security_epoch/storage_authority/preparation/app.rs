@@ -28,7 +28,7 @@ enum ContinuityPurpose {
 impl ContinuityPurpose {
     fn require(self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         stage.require_purpose(match self {
-            Self::Current => StagePurpose::CurrentRole,
+            Self::Current => StagePurpose::AppServing,
             Self::Bootstrap => StagePurpose::StorageBootstrap,
         })
     }
@@ -40,7 +40,9 @@ impl ContinuityPurpose {
         max_lease_seconds: u32,
     ) -> Result<NativeAcquisition> {
         match self {
-            Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
+            Self::Current => stage
+                .storage()?
+                .narrow_app_serving_io_acquisition(max_lease_seconds),
             Self::Bootstrap => stage
                 .storage()?
                 .narrow_storage_bootstrap_io_acquisition(max_lease_seconds),

@@ -56,13 +56,13 @@ impl ActiveAppStorageContinuity {
         );
         let mut physical = self.storage.begin_current(stage, request)?;
         physical.await_known(stage)?;
-        let mut reads = AuthenticatedReads::acquire(
+        let mut reads = AuthenticatedReads::acquire_app_serving(
             &self.policy,
             &self.store,
             day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
             stage,
         )?
-        .retain_current()?;
+        .retain_app_serving()?;
         let names = request_names(&self.store, &self.completion)?;
         let observed = reads.read(stage, &self.store, &names)?;
         check_active_snapshot(

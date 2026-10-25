@@ -240,7 +240,13 @@ impl RetainedPeer {
             "storage_peer_local_role"
         );
         let mut acquisition = match purpose {
-            StoragePeerPurpose::CurrentServing => stage.narrow_io_acquisition(5)?,
+            StoragePeerPurpose::CurrentServing => {
+                stage.storage()?.narrow_app_serving_io_acquisition(
+                    crate::security_epoch::native_clock::APP_SERVING_LIMIT
+                        .as_secs()
+                        .try_into()?,
+                )?
+            }
             StoragePeerPurpose::BootstrapCreate | StoragePeerPurpose::BootstrapComplete => {
                 stage.storage()?.narrow_storage_bootstrap_io_acquisition(
                     STORAGE_BOOTSTRAP_LIMIT.as_secs().try_into()?,

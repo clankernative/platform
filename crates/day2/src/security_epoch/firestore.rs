@@ -115,6 +115,20 @@ impl Budget {
         )
     }
 
+    pub(super) fn from_app_serving(
+        acquisition: &mut super::native_clock::NativeAcquisition,
+    ) -> Result<Self> {
+        acquisition.require_app_serving()?;
+        let (origin, deadline) = acquisition.interval_data()?;
+        let sample = acquisition.sample()?;
+        Self::from_original_parts(
+            sample,
+            origin,
+            deadline,
+            super::native_clock::APP_SERVING_LIMIT,
+        )
+    }
+
     fn from_original_parts(
         sample: Sample,
         origin: Duration,

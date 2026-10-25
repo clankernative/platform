@@ -544,8 +544,13 @@ connection must complete full admission before requests can borrow it. Each
 request after actual readiness has a distinct bound transcript and original
 interval, rather than another full issuer grant.
 Neither this setup nor the current-operation wakeup renews an old acquisition,
-human original, failed operation or permission. The original five-second stage
-limits and all provider/consumer checks remain in force. These are source and
+human original, failed operation or permission. Generic Current and Shell stage
+limits remain five seconds. App/Controller serving instead requires the exact
+signed `AppServing` purpose: **temporary, user decision 2026-10-25, revert after
+3 measurement runs**. Its original ceiling is thirty seconds; role and provider
+authentication still consume the first five seconds of that same original.
+See [the bound and rollback rules](NATIVE-HANDSHAKE-SIMULATION.md).
+All provider/consumer checks remain in force. These are source and
 protocol properties; real-node timing and the complete OAuth lifecycle still
 require live qualification.
 

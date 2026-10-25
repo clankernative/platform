@@ -13,7 +13,17 @@ initial first-holder stage. The initial storage exchange remains capped at ten
 seconds. The subsequent storage wire conversation records its explicit checked
 stage purpose: `StorageBootstrap` has a temporary sixty-second ceiling per action,
 pending the kernel-integrity/Firestore redesign, and ordinary
-`CurrentRole` remains capped at five. Serving remains capped at five seconds.
+`CurrentRole` and Shell serving remain capped at five. App/Controller Current
+serving uses the closed signed `AppServing` purpose and one native thirty-second
+ceiling: **temporary, user decision 2026-10-25, revert after 3 measurement runs**.
+This replaces the fixed App-serving selection in place; no configuration switch
+or alternate App-serving path exists. Root counts every attempted measurement
+run (including refusals), stops at three, and follows with a PR changing only
+`APP_SERVING_LIMIT` back to five seconds plus the independent model, boundary
+controls and this note.
+The purpose remains distinct when its limit returns to five. The measurement
+must capture the complete serving exchange and one full browser query; no
+completion or margin is established by raising the ceiling.
 Deadline equality refuses. No request deadline, signature, actual sender,
 namespace, socket, file or final consumer boundary is removed. The selected
 [connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
@@ -77,7 +87,13 @@ instant before each deadline, deadline equality, metadata rejection and rejectio
 of bootstrap for serving. Bootstrap accepts eleven-, thirty-, thirty-one- and
 sixty-second ceilings only strictly before expiry and rejects sixty-one- and
 120-second ceilings;
-ordinary Current and serving keep their five-second limit. These are controlled
+generic Current and Shell serving keep their five-second limit. App-serving
+controls independently admit at most thirty seconds, refuse equality and
+cross-purpose substitution, and preserve shorter configured/signed ceilings.
+Authentication remains the first five seconds of the same App-serving origin:
+late role/provider authentication refuses instead of starting a new window.
+Successful authentication is consumed before deriving the longer retained I/O
+view; the authentication child itself is never widened. These are controlled
 DATA observations, not evidence of native completion or the required live margin.
 
 The independent oracle records the accepted prefix of a separately specified

@@ -24,6 +24,13 @@ failed request, rewind, process/binding change or expired credential refuses the
 actual owning phase. A new authentication operation cannot revive refusal or
 renew an existing request, human original or signed grant.
 
+App-serving reads require the separate signed `AppServing` purpose and its
+same-origin thirty-second ceiling: **temporary, user decision 2026-10-25, revert
+after 3 measurement runs**. Generic Current and Shell retain their five-second
+bounds. Shorter leases, signed ceilings and individual HTTP timeouts still
+narrow the caller's original interval. See the
+[scope and rollback rules](NATIVE-HANDSHAKE-SIMULATION.md).
+
 The process observer retains `/proc/self/exe`, hashes its actual bytes and
 checks the original descriptor and current executable identity at full admission.
 The selected

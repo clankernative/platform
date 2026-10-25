@@ -250,7 +250,7 @@ impl StoragePeerPurpose {
     pub(in crate::security_epoch) fn stage_purpose(self) -> StagePurpose {
         match self {
             Self::BootstrapCreate | Self::BootstrapComplete => StagePurpose::StorageBootstrap,
-            Self::CurrentServing => StagePurpose::CurrentRole,
+            Self::CurrentServing => StagePurpose::AppServing,
         }
     }
 }
@@ -401,7 +401,7 @@ impl Body {
             ensure!(
                 matches!(
                     expected,
-                    StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+                    StagePurpose::AppServing | StagePurpose::StorageBootstrap
                 ),
                 "storage_peer_stage_purpose"
             );

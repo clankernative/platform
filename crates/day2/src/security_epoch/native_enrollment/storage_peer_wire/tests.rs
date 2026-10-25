@@ -320,7 +320,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, K
         issuer: certificate.digest().unwrap(),
         policy: policy.digest().unwrap(),
         role,
-        purpose: StagePurpose::CurrentRole,
+        purpose: StagePurpose::AppServing,
         public_key: key.public(),
         challenge: Digest::new(b"fixture-role-challenge"),
         request: Digest::new(b"fixture-role-request"),
@@ -479,7 +479,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
             NativeRole::AppHost,
             &stage.stage.data.process,
             now,
-            StagePurpose::CurrentRole,
+            StagePurpose::AppServing,
         )
         .unwrap();
     for role in [NativeRole::EpochController, NativeRole::SecurityShell] {
@@ -491,7 +491,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     role,
                     &stage.stage.data.process,
                     now,
-                    StagePurpose::CurrentRole,
+                    StagePurpose::AppServing,
                 )
                 .is_err()
         );
@@ -506,7 +506,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 NativeRole::AppHost,
                 &process,
                 now,
-                StagePurpose::CurrentRole,
+                StagePurpose::AppServing,
             )
             .is_err()
     );
@@ -520,7 +520,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 NativeRole::AppHost,
                 &stage.stage.data.process,
                 now,
-                StagePurpose::CurrentRole,
+                StagePurpose::AppServing,
             )
             .is_err()
     );
@@ -533,7 +533,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                     NativeRole::AppHost,
                     &stage.stage.data.process,
                     time,
-                    StagePurpose::CurrentRole,
+                    StagePurpose::AppServing,
                 )
                 .is_err()
         );
@@ -548,7 +548,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 NativeRole::AppHost,
                 &stage.stage.data.process,
                 now,
-                StagePurpose::CurrentRole,
+                StagePurpose::AppServing,
             )
             .is_err()
     );
@@ -562,7 +562,7 @@ fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval()
                 NativeRole::AppHost,
                 &stage.stage.data.process,
                 now,
-                StagePurpose::CurrentRole,
+                StagePurpose::AppServing,
             )
             .is_err()
     );
@@ -914,7 +914,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             NativeRole::AppHost,
             &old.stage.data.process,
             now,
-            StagePurpose::CurrentRole,
+            StagePurpose::AppServing,
         )
         .is_err()
     );
@@ -925,7 +925,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
             NativeRole::AppHost,
             &old.stage.data.process,
             now,
-            StagePurpose::CurrentRole,
+            StagePurpose::AppServing,
         )
         .unwrap();
     let hello = signed(
@@ -1232,6 +1232,7 @@ fn every_current_completion_binds_actual_stage_purpose_and_excludes_metadata() {
         let (_, ordinary, key, issuer) = fixture_with_issuer(role);
         for purpose in [
             StagePurpose::CurrentRole,
+            StagePurpose::AppServing,
             StagePurpose::StorageBootstrap,
             StagePurpose::InitialFirstHolder,
             StagePurpose::StorageMetadataObservation,
@@ -1254,15 +1255,15 @@ fn every_current_completion_binds_actual_stage_purpose_and_excludes_metadata() {
             let message = signed(&statement, &key, body);
             let permitted = matches!(
                 purpose,
-                StagePurpose::CurrentRole | StagePurpose::StorageBootstrap
+                StagePurpose::AppServing | StagePurpose::StorageBootstrap
             );
             assert_eq!(message.verify(&statement).is_ok(), permitted);
             if permitted {
                 let mut replacement = statement.clone();
-                replacement.stage.data.purpose = if purpose == StagePurpose::CurrentRole {
+                replacement.stage.data.purpose = if purpose == StagePurpose::AppServing {
                     StagePurpose::StorageBootstrap
                 } else {
-                    StagePurpose::CurrentRole
+                    StagePurpose::AppServing
                 };
                 replacement.stage.signature =
                     issuer.sign("role-stage", &replacement.stage.data).unwrap();
@@ -1456,4 +1457,97 @@ fn signed_storage_messages_cannot_cross_initial_and_current_purposes() {
         },
     );
     assert!(message.verify(&current).is_err());
+}
+
+#[test]
+fn app_serving_signed_thirty_second_purpose_is_not_generic_or_shell_authority() {
+    use crate::security_epoch::native_enrollment::serving_peer_wire::Statement;
+    assert_eq!(StagePurpose::AppServing.limit(), Duration::from_secs(30));
+    assert_eq!(StagePurpose::CurrentRole.limit(), Duration::from_secs(5));
+    assert!(
+        StagePurpose::AppServing
+            .require_role(NativeRole::SecurityShell)
+            .is_err()
+    );
+    for role in [NativeRole::AppHost, NativeRole::EpochController] {
+        let (policy, original, _, issuer) = fixture_with_issuer(role);
+        for seconds in [1, 5, 30, 31] {
+            let mut statement = original.clone();
+            statement.stage.data.deadline_ns = 100_000_000_000 + seconds * 1_000_000_000;
+            statement.original.deadline_ns = statement.stage.data.deadline_ns;
+            statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+            let check = |statement: &StageStatement, now, purpose| {
+                statement.validate(
+                    &policy,
+                    &statement.certificate,
+                    role,
+                    &statement.stage.data.process,
+                    now,
+                    purpose,
+                )
+            };
+            assert_eq!(
+                check(
+                    &statement,
+                    Duration::from_nanos(statement.stage.data.deadline_ns - 1),
+                    StagePurpose::AppServing
+                )
+                .is_ok(),
+                seconds <= 30
+            );
+            assert!(
+                check(
+                    &statement,
+                    Duration::from_nanos(statement.stage.data.deadline_ns),
+                    StagePurpose::AppServing
+                )
+                .is_err()
+            );
+            assert!(
+                check(
+                    &statement,
+                    Duration::from_secs(100),
+                    StagePurpose::CurrentRole
+                )
+                .is_err()
+            );
+            let shell = Statement {
+                certificate: statement.certificate.clone(),
+                stage: statement.stage.clone(),
+                original: statement.original.clone(),
+            };
+            assert!(
+                shell
+                    .validate(
+                        &policy,
+                        &statement.certificate,
+                        role,
+                        statement.stage.data.process.process,
+                        Some(&statement.stage.data.process),
+                        Duration::from_secs(100)
+                    )
+                    .is_err()
+            );
+            // A correctly re-signed generic grant still cannot spend thirty seconds.
+            statement.stage.data.purpose = StagePurpose::CurrentRole;
+            statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
+            assert_eq!(
+                check(
+                    &statement,
+                    Duration::from_secs(100),
+                    StagePurpose::CurrentRole
+                )
+                .is_ok(),
+                seconds <= 5
+            );
+            assert!(
+                check(
+                    &statement,
+                    Duration::from_secs(100),
+                    StagePurpose::AppServing
+                )
+                .is_err()
+            );
+        }
+    }
 }

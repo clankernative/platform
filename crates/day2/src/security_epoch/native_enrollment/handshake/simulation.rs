@@ -21,7 +21,7 @@ const MAX_QUEUED: usize = 64;
 const MAX_BUNDLE: u64 = 8 * 1024 * 1024;
 const CAMPAIGNS: [(Protocol, StagePurpose); 4] = [
     (Protocol::Enrollment, StagePurpose::CurrentRole),
-    (Protocol::InitialStorage, StagePurpose::CurrentRole),
+    (Protocol::InitialStorage, StagePurpose::AppServing),
     (Protocol::InitialStorage, StagePurpose::StorageBootstrap),
     (Protocol::InitialServing, StagePurpose::CurrentRole),
 ];
@@ -321,10 +321,10 @@ impl<M: Machine> World<M> {
                         ))?,
                         origin: self.now,
                         deadline: self.now
-                            + Duration::from_secs(if purpose == StagePurpose::StorageBootstrap {
-                                60
-                            } else {
-                                5
+                            + Duration::from_secs(match purpose {
+                                StagePurpose::StorageBootstrap => 60,
+                                StagePurpose::AppServing => 30,
+                                _ => 5,
                             }),
                         now: self.now,
                     };
@@ -770,8 +770,11 @@ fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
                     purpose,
                 });
             }
-            if purpose == StagePurpose::StorageBootstrap {
-                // The checked bootstrap class can spend beyond ten seconds;
+            if matches!(
+                purpose,
+                StagePurpose::StorageBootstrap | StagePurpose::AppServing
+            ) {
+                // The checked longer class can spend beyond ten seconds;
                 // authentication itself remains a separate native five-second guard.
                 events.push(Event::Advance {
                     nanos: 11_000_000_000,
@@ -988,10 +991,11 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
                     12 => Event::BeginCurrent {
                         endpoint,
                         sequence: next(&mut random) % 5,
-                        purpose: match next(&mut random) % 4 {
+                        purpose: match next(&mut random) % 5 {
                             0 => StagePurpose::CurrentRole,
                             1 => StagePurpose::StorageBootstrap,
                             2 => StagePurpose::InitialFirstHolder,
+                            3 => StagePurpose::AppServing,
                             _ => StagePurpose::StorageMetadataObservation,
                         },
                     },
@@ -1011,6 +1015,7 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
     for protocol in [Protocol::InitialStorage, Protocol::InitialServing] {
         for purpose in [
             StagePurpose::CurrentRole,
+            StagePurpose::AppServing,
             StagePurpose::StorageBootstrap,
             StagePurpose::StorageMetadataObservation,
             StagePurpose::InitialFirstHolder,
@@ -1047,9 +1052,13 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
                         actual.delivered(frame, initial_clock.clone())?;
                         expected.delivered(frame, initial_clock.clone())?;
                     }
-                    let allowed = purpose == StagePurpose::CurrentRole
+                    let allowed = (protocol == Protocol::InitialServing
+                        && purpose == StagePurpose::CurrentRole)
                         || (protocol == Protocol::InitialStorage
-                            && purpose == StagePurpose::StorageBootstrap);
+                            && matches!(
+                                purpose,
+                                StagePurpose::AppServing | StagePurpose::StorageBootstrap
+                            ));
                     ensure!(
                         actual.begin_current(1, purpose).is_ok() == allowed,
                         "production purpose class"
@@ -1068,10 +1077,10 @@ fn explicit_purpose_keeps_short_caps_and_refuses_metadata_or_serving_widening() 
                     // The oracle's bound is literal and independent of the
                     // production purpose limit. Equal one-second ceilings
                     // keep distinct labels and never imply ordinary Current.
-                    let limit = if purpose == StagePurpose::StorageBootstrap {
-                        60
-                    } else {
-                        5
+                    let limit = match purpose {
+                        StagePurpose::StorageBootstrap => 60,
+                        StagePurpose::AppServing => 30,
+                        _ => 5,
                     };
                     let accepts = allowed && seconds <= limit && !at_deadline;
                     ensure!(

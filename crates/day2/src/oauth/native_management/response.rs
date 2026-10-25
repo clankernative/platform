@@ -487,7 +487,7 @@ impl Sink {
                 };
                 transport.scope_attempt();
                 participant.prepare_current()?;
-                let mut stage = role.begin_current_stage()?;
+                let mut stage = role.begin_app_serving_stage()?;
                 stage.check_selection(
                     &owners.selection.policy,
                     &owners.selection.store,
