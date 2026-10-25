@@ -136,7 +136,13 @@ unknown commit, rollback, close, policy check or owner check refuses the unit;
 another timer, callback or identical selection cannot rearm it. These guards
 apply to trusted private Rust callbacks and do not claim hostile native-code
 containment. Native-node and live-provider qualification remain separate from
-SQLite conformance and deterministic simulation tests.
+these local ownership and replay controls. Fresh readiness subject lookups borrow
+that same owner through a sealed reader; the reader cannot acquire Current,
+return a SQL handle, or replace an original clock. Each subject snapshot closes
+before edge/key-provider work or the final consumer continuation. Production
+approval and credential fresh-owner purposes remain unavailable at this OAuth
+receiver; only connect/disconnect and the existing registration handler are
+mounted. Standalone ordinary-database approval adapters exist only in tests.
 
 Migration/activation requires pending invocations to drain, including commands
 whose local decision committed while external delivery remains incomplete.
