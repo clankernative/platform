@@ -147,8 +147,10 @@ enum NativeBoundary {
 impl Guard {
     fn check(&mut self, segments: &[String]) {
         let path = segments.join("::");
-        // Only native owner identity and fixed HTTP executor plumbing. This
-        // does not admit a module alias, arbitrary thread work, entropy, time
+        // Only native owner identity and fixed HTTP executor plumbing. The
+        // exact JoinHandle type retains an existing HTTP thread through TLS
+        // cleanup; its constructors and the thread namespace stay refused.
+        // This does not admit a module alias, arbitrary thread work, entropy, time
         // sampling or provider HTTP outside the controlled effect boundary.
         if !matches!(self.native, NativeBoundary::None)
             && matches!(
@@ -161,7 +163,7 @@ impl Guard {
         if matches!(self.native, NativeBoundary::Http)
             && matches!(
                 path.as_str(),
-                "std::thread::Builder::new" | "tokio::time::timeout"
+                "std::thread::Builder::new" | "std::thread::JoinHandle" | "tokio::time::timeout"
             )
         {
             return;
@@ -353,6 +355,8 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
         for source in [
             "use std::thread as worker; fn f() { worker::sleep(delay); }",
             "fn f() { std::thread::sleep(delay); }",
+            "fn f() { std::thread::spawn(work); }",
+            "fn f() { std::thread::JoinHandle::new(); }",
             "fn f() { tokio::spawn(work); }",
             "fn f() { reqwest::blocking::Client::new(); }",
             "fn f() { std::time::SystemTime::now(); }",
@@ -369,6 +373,22 @@ fn ambient_macro_effects_and_namespace_aliases_cannot_bypass_the_guard() -> Resu
                 "native owner exception escaped its fixed ports"
             );
         }
+    }
+    let retained = "use std::thread::JoinHandle; fn cleanup(thread: JoinHandle<()>) { let _ = thread.join(); }";
+    for boundary in [
+        NativeBoundary::None,
+        NativeBoundary::Original,
+        NativeBoundary::Http,
+    ] {
+        let mut guard = Guard {
+            native: boundary,
+            ..Guard::default()
+        };
+        guard.visit_file(&syn::parse_file(retained)?);
+        ensure!(
+            guard.violations.is_empty() == matches!(boundary, NativeBoundary::Http),
+            "thread handle retention escaped its HTTP boundary"
+        );
     }
     let mut timer = Guard {
         native: NativeBoundary::Http,
