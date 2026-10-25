@@ -152,16 +152,16 @@ pub(crate) enum SqlDecision<T> {
 /// One nonescaping connection under an actual existing owning borrow. There is
 /// no raw/mutable connection getter, owned transaction result, role acquisition,
 /// clock replacement or finalization factory in this facade.
-pub(crate) struct RuntimeSql<'owner> {
+pub(crate) struct RuntimeSql<'owner, 'stage, 'role, 'original> {
     connection: Option<Connection>,
-    owner: SqlOwner<'owner>,
+    owner: SqlOwner<'owner, 'stage, 'role, 'original>,
     failed: bool,
 }
 
-impl<'owner> RuntimeSql<'owner> {
+impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'original> {
     pub(crate) fn with_owner<T>(
         runtime: &Runtime,
-        mut owner: SqlOwner<'owner>,
+        mut owner: SqlOwner<'owner, 'stage, 'role, 'original>,
         operation: impl for<'sql> FnOnce(&'sql mut Self) -> Result<T>,
     ) -> Result<T> {
         // Runtime/Pending are already armed. A human adapter arms only its

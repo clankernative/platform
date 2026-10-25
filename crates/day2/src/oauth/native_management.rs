@@ -996,65 +996,61 @@ enum SqlCommit {
 
 // The adapter is closed here to the three existing owning borrows. It cannot
 // be built from Runtime metadata, a Boolean, a receipt or a serialized value.
-pub(crate) struct SqlOwner<'owner> {
-    source: SqlOwnerSource<'owner>,
+pub(crate) struct SqlOwner<'owner, 'stage, 'role, 'original> {
+    source: SqlOwnerSource<'owner, 'stage, 'role, 'original>,
     commit: SqlCommit,
 }
 
-enum SqlOwnerSource<'owner> {
-    Pending(&'owner mut dyn SqlAuthority),
-    Human(&'owner mut dyn SqlAuthority),
-    Runtime(&'owner mut dyn SqlAuthority),
+enum SqlOwnerSource<'owner, 'stage, 'role, 'original> {
+    Pending(&'owner mut PendingWriter<'stage, 'role>),
+    Human(&'owner mut Consumer<'stage, 'role, 'original>),
+    Runtime(&'owner mut RuntimeConsumer<'stage, 'role>),
 }
 
-trait SqlAuthority {
-    fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()>;
-    fn check_sql(&mut self) -> Result<()>;
-    fn require_sql_write(&mut self) -> Result<()>;
-    fn prepare_sql_finalization(&mut self) -> Result<()>;
-    fn refuse_sql(&mut self);
-}
-
-impl<'owner> SqlOwner<'owner> {
-    fn runtime(owner: &'owner mut RuntimeConsumer<'_, '_>) -> Self {
+impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original> {
+    fn runtime(owner: &'owner mut RuntimeConsumer<'stage, 'role>) -> Self {
         Self {
             source: SqlOwnerSource::Runtime(owner),
             commit: SqlCommit::Intermediate,
         }
     }
 
-    fn pending(owner: &'owner mut PendingWriter<'_, '_>, commit: SqlCommit) -> Self {
+    fn pending(owner: &'owner mut PendingWriter<'stage, 'role>, commit: SqlCommit) -> Self {
         Self {
             source: SqlOwnerSource::Pending(owner),
             commit,
         }
     }
 
-    fn human(owner: &'owner mut Consumer<'_, '_, '_>, commit: SqlCommit) -> Self {
+    fn human(owner: &'owner mut Consumer<'stage, 'role, 'original>, commit: SqlCommit) -> Self {
         Self {
             source: SqlOwnerSource::Human(owner),
             commit,
         }
     }
 
-    fn authority(&mut self) -> &mut dyn SqlAuthority {
+    pub(crate) fn prepare(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         match &mut self.source {
-            SqlOwnerSource::Pending(owner)
-            | SqlOwnerSource::Human(owner)
-            | SqlOwnerSource::Runtime(owner) => *owner,
+            SqlOwnerSource::Pending(owner) => owner.prepare_sql(runtime),
+            SqlOwnerSource::Human(owner) => owner.prepare_sql(runtime),
+            SqlOwnerSource::Runtime(owner) => owner.prepare_sql(runtime),
         }
     }
 
-    pub(crate) fn prepare(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
-        self.authority().prepare_sql(runtime)
-    }
-
     pub(crate) fn check(&mut self) -> Result<()> {
-        self.authority().check_sql()
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.check(),
+            SqlOwnerSource::Human(owner) => owner.check(),
+            SqlOwnerSource::Runtime(owner) => owner.check(),
+        }
     }
 
     pub(crate) fn require_write(&mut self) -> Result<()> {
-        self.authority().require_sql_write()
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.require_sql_write(),
+            SqlOwnerSource::Human(owner) => owner.require_sql_write(),
+            SqlOwnerSource::Runtime(owner) => owner.require_sql_write(),
+        }
     }
 
     pub(crate) fn commit_read(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
@@ -1069,7 +1065,13 @@ impl<'owner> SqlOwner<'owner> {
     ) -> Result<()> {
         self.check()?;
         if matches!(self.commit, SqlCommit::Final) {
-            self.authority().prepare_sql_finalization()?;
+            match &mut self.source {
+                SqlOwnerSource::Pending(owner) => owner.prepare_sql_commit()?,
+                SqlOwnerSource::Human(owner) => owner.prepare_finalization()?,
+                SqlOwnerSource::Runtime(_) => {
+                    anyhow::bail!("runtime SQL cannot finalize a human or Pending original")
+                }
+            }
         }
         tx.commit()?;
         self.check()
@@ -1085,7 +1087,11 @@ impl<'owner> SqlOwner<'owner> {
     }
 
     pub(crate) fn refuse(&mut self) {
-        self.authority().refuse_sql();
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.refuse(),
+            SqlOwnerSource::Human(owner) => owner.refuse(),
+            SqlOwnerSource::Runtime(owner) => owner.refuse(),
+        }
     }
 }
 
@@ -1107,7 +1113,7 @@ fn sql_runtime_scope(runtime: &crate::store::Runtime) -> Result<AuthorityScope> 
     })
 }
 
-impl SqlAuthority for RuntimeConsumer<'_, '_> {
+impl RuntimeConsumer<'_, '_> {
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         self.require_runtime(runtime)?;
         ensure!(self.phase.is_some(), "native SQL runtime phase absent");
@@ -1129,10 +1135,6 @@ impl SqlAuthority for RuntimeConsumer<'_, '_> {
         self.check()
     }
 
-    fn check_sql(&mut self) -> Result<()> {
-        self.check()
-    }
-
     fn require_sql_write(&mut self) -> Result<()> {
         ensure!(
             matches!(
@@ -1148,17 +1150,9 @@ impl SqlAuthority for RuntimeConsumer<'_, '_> {
         );
         Ok(())
     }
-
-    fn prepare_sql_finalization(&mut self) -> Result<()> {
-        anyhow::bail!("runtime SQL cannot finalize a human or Pending original")
-    }
-
-    fn refuse_sql(&mut self) {
-        self.refuse();
-    }
 }
 
-impl SqlAuthority for PendingWriter<'_, '_> {
+impl PendingWriter<'_, '_> {
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         match &mut self.source {
             PendingSource::Native { stage, .. } => {
@@ -1180,25 +1174,13 @@ impl SqlAuthority for PendingWriter<'_, '_> {
         self.check()
     }
 
-    fn check_sql(&mut self) -> Result<()> {
-        self.check()
-    }
-
     fn require_sql_write(&mut self) -> Result<()> {
         ensure!(!self.committed, "native Pending commit already attempted");
         self.check()
     }
-
-    fn prepare_sql_finalization(&mut self) -> Result<()> {
-        self.prepare_sql_commit()
-    }
-
-    fn refuse_sql(&mut self) {
-        self.refuse();
-    }
 }
 
-impl SqlAuthority for Consumer<'_, '_, '_> {
+impl Consumer<'_, '_, '_> {
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
         ensure!(
             self.original.intent.app() == runtime.app(),
@@ -1229,10 +1211,6 @@ impl SqlAuthority for Consumer<'_, '_, '_> {
         }
     }
 
-    fn check_sql(&mut self) -> Result<()> {
-        self.check()
-    }
-
     fn require_sql_write(&mut self) -> Result<()> {
         ensure!(
             !self.finalized,
@@ -1240,20 +1218,14 @@ impl SqlAuthority for Consumer<'_, '_, '_> {
         );
         self.check()
     }
-
-    fn prepare_sql_finalization(&mut self) -> Result<()> {
-        self.prepare_finalization()
-    }
-
-    fn refuse_sql(&mut self) {
-        self.refuse();
-    }
 }
 
 pub(crate) fn with_runtime_sql<T>(
     runtime: &crate::store::Runtime,
     phase: RuntimePhase,
-    operation: impl for<'sql> FnOnce(&mut crate::store::RuntimeSql<'sql>) -> Result<T>,
+    operation: impl for<'sql, 'stage, 'role, 'original> FnOnce(
+        &mut crate::store::RuntimeSql<'sql, 'stage, 'role, 'original>,
+    ) -> Result<T>,
 ) -> Result<T> {
     ensure!(
         matches!(phase, RuntimePhase::SqlRead | RuntimePhase::SqlWrite),
