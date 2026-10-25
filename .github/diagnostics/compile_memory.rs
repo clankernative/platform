@@ -198,6 +198,7 @@ fn run() -> io::Result<i32> {
                 "{{\"event\":\"after\",\"elapsed_ms\":{},\"samples\":{},\"inventory_truncated\":{},\"child_code\":{},\"cgroup\":{},\"process_peaks\":[{}]}}",
                 start.elapsed().as_millis(),
                 samples,
+                inventory_truncated,
                 status
                     .code()
                     .map_or_else(|| "null".into(), |v| v.to_string()),
