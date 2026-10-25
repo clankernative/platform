@@ -652,15 +652,19 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "fn authorize_checked (db : & mut Connection , input : OutboundQualification < '_ > , now : i64) -> Result < Option < ExchangeDispatchPermit > >"
         },
         {
           "owner": null,
-          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>, current: &mut super::native_management::Consumer<'_, '_, '_>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub (in crate :: oauth) fn authorize_managed_exchange (runtime : & crate :: store :: Runtime , input : OutboundQualification < '_ > , now : i64 , guard : & super :: management :: app :: FinishGuard < '_ > , current : & mut super :: native_management :: Consumer < '_ , '_ , '_ >) -> Result < Option < ExchangeDispatchPermit > >"
         },
         {
           "owner": null,
-          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>,)>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub fn authorize_and_commit_qualified_exchange (db : & mut Connection , input : OutboundQualification < '_ > , now : i64) -> Result < Option < ExchangeDispatchPermit > >"
+        },
+        {
+          "owner": "CheckedExchangeDispatch",
+          "signature": "fn committed (self) -> ExchangeDispatchPermit"
         }
       ]
     },
