@@ -8679,10 +8679,13 @@ mod tests {
                 connection.pragma_update(None, "synchronous", "FULL")?;
                 connection.pragma_update(None, "trusted_schema", false)?;
                 let ticks = Arc::new(AtomicUsize::new(0));
-                connection.progress_handler(1_000, Some(move || {
-                    let runtime_exhausted = ticks.fetch_add(1, Ordering::Relaxed) > 10_000;
-                    crate::oauth::schema::admission_step(1_000) || runtime_exhausted
-                }))?;
+                connection.progress_handler(
+                    1_000,
+                    Some(move || {
+                        let runtime_exhausted = ticks.fetch_add(1, Ordering::Relaxed) > 10_000;
+                        crate::oauth::schema::admission_step(1_000) || runtime_exhausted
+                    }),
+                )?;
                 Ok(())
             }
         };
