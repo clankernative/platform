@@ -1,5 +1,29 @@
 # Native process enrollment
 
+## Terminal refusal in the App and Controller entrypoints
+
+The normal container commands stay `day2-serve INSTANCE APP --edge` and
+`day2-epoch-controller INSTANCE APP`. After a native refusal the actual
+executor/resources unwind before a fixed, ownerless wait of at most 300 seconds.
+The App retains and joins its actual HTTP owner threads, including TLS cleanup,
+and permanently closes further owner launches before entering the wait. An
+HTTP result alone is not evidence of thread exit. Ordinary argument failures
+and non-native App errors keep their immediate failure behavior.
+
+The refusal remains a failure. The wait performs no enrollment, provider call,
+storage open, original capture, retry or clock/grant renewal. Its stop listeners
+survive teardown of the former Tokio readiness runtime; SIGTERM and SIGINT stop
+the wait promptly. Refusal messages remain redacted. No wrapper process, new
+native actor/workload profile, auth bound or probe timeout is introduced.
+
+An operator must disable startup/liveness probes for this single-original
+qualification and stop all roles on the first refusal, using a shutdown budget
+strictly below the 300-second hold. Readiness probes may remain. A 1200-second
+whole-run observation cap is not the post-refusal shutdown budget. Expiry of the
+hold exits with failure and a Deployment can restart it; this is no hard OS
+scheduling bound or once-across-restarts guarantee during control-plane outage
+or reboot. Capture actual Pod/container histories and verify resource closure.
+
 `day2-native-enrollment` implements the operator provisioner and its private
 issuer child. It supplies `AppHost`, `SecurityShell` and `EpochController` stages.
 A role stage does not supply human authentication, storage, an epoch, a first

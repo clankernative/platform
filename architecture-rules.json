@@ -180,6 +180,7 @@
     "crates/day2/src/delegation_status_tests.rs",
     "crates/day2/src/delegation_wire.rs",
     "crates/day2/src/deployment.rs",
+    "crates/day2/src/deployment/terminal.rs",
     "crates/day2/src/development.rs",
     "crates/day2/src/development/verification_failure_tests.rs",
     "crates/day2/src/domain.rs",

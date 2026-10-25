@@ -18,9 +18,15 @@ fn main() {
             None => Err(anyhow::anyhow!("controller app argument")),
         },
         [instance, app] => match app.to_str() {
-            Some(app) => {
-                day2::deployment::run_epoch_controller(std::path::Path::new(instance), app)
-            }
+            Some(app) => fail_stop_after_refusal(
+                || day2::deployment::run_epoch_controller(std::path::Path::new(instance), app),
+                || {
+                    eprintln!(
+                        "day2-epoch-controller refused or stopped; terminal hold at most 300 seconds"
+                    );
+                    hold_after_observation()
+                },
+            ),
             None => Err(anyhow::anyhow!("controller app argument")),
         },
         _ => Err(anyhow::anyhow!("controller arguments")),
@@ -39,38 +45,37 @@ fn main() {
 /// hard OS scheduling bound is supplied.
 fn observe_then_idle(
     observe: impl FnOnce() -> anyhow::Result<()>,
-    idle: impl FnOnce(),
+    idle: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let result = observe();
-    idle();
-    result
+    let held = idle();
+    result.and(held)
 }
 
-fn hold_after_observation() {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    idle_until(
-        || deadline.checked_duration_since(std::time::Instant::now()),
-        std::thread::park_timeout,
-    );
+fn hold_after_observation() -> anyhow::Result<()> {
+    day2::deployment::NativeTerminalHold::prepare()?.wait()
 }
 
-fn idle_until(
-    mut remaining: impl FnMut() -> Option<std::time::Duration>,
-    mut park: impl FnMut(std::time::Duration),
-) {
-    while let Some(remaining) = remaining() {
-        if remaining.is_zero() {
-            break;
+fn fail_stop_after_refusal(
+    run: impl FnOnce() -> anyhow::Result<()>,
+    hold: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match run() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // The executor and its resources have unwound. Do not retain its
+            // error payload or retry it while waiting for the operator.
+            drop(error);
+            hold()?;
+            anyhow::bail!("native controller refused")
         }
-        // Recheck after spurious wakeups without repeating the observation.
-        park(remaining.min(std::time::Duration::from_secs(1)));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, time::Duration};
+    use std::cell::RefCell;
 
     #[test]
     fn one_observation_then_ownerless_idle_runs_on_success_and_refusal() {
@@ -84,7 +89,10 @@ mod tests {
                     }
                     Ok(())
                 },
-                || events.borrow_mut().push("ownerless idle"),
+                || {
+                    events.borrow_mut().push("ownerless idle");
+                    Ok(())
+                },
             );
             assert_eq!(result.is_err(), fails);
             assert_eq!(*events.borrow(), ["observe", "ownerless idle"]);
@@ -92,23 +100,32 @@ mod tests {
     }
 
     #[test]
-    fn spurious_wakeups_only_recheck_hold_deadline_not_observation() {
-        let mut times = [
-            Some(Duration::from_secs(5)),
-            Some(Duration::from_secs(5)),
-            Some(Duration::from_millis(200)),
-            Some(Duration::ZERO),
-        ]
-        .into_iter();
-        let mut waits = Vec::new();
-        idle_until(|| times.next().unwrap(), |duration| waits.push(duration));
-        assert_eq!(
-            waits,
-            [
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_millis(200)
-            ]
-        );
+    fn executor_unwinds_before_terminal_hold_and_is_never_repeated() {
+        struct Resource<'a>(&'a RefCell<Vec<&'static str>>);
+        impl Drop for Resource<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("drop actual scope");
+            }
+        }
+        for fails in [false, true] {
+            let events = RefCell::new(Vec::new());
+            let result = fail_stop_after_refusal(
+                || {
+                    let _actual = Resource(&events);
+                    events.borrow_mut().push("run once");
+                    if fails {
+                        anyhow::bail!("private fixture failure");
+                    }
+                    Ok(())
+                },
+                || {
+                    assert_eq!(*events.borrow(), ["run once", "drop actual scope"]);
+                    events.borrow_mut().push("terminal hold");
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_err(), fails);
+            assert_eq!(events.borrow().len(), if fails { 3 } else { 2 });
+        }
     }
 }
