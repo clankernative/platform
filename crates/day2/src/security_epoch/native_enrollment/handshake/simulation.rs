@@ -14,7 +14,7 @@ use std::{collections::VecDeque, time::Duration};
 
 mod lifecycle;
 mod model;
-pub(in crate::security_epoch) use lifecycle::LifecycleHandshake;
+pub(in crate::security_epoch) use lifecycle::{LifecycleHandshake, LifecycleModelError};
 
 const MAX_EVENTS: usize = 512;
 const MAX_QUEUED: usize = 64;

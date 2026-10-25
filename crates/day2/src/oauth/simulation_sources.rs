@@ -33,6 +33,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("management", ""),
     ("management.rs", include_str!("management.rs")),
     ("management/app.rs", include_str!("management/app.rs")),
+    (
+        "management/app_native_lifecycle.rs",
+        include_str!("management/app_native_lifecycle.rs"),
+    ),
     ("management/shell.rs", include_str!("management/shell.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("native_http.rs", include_str!("native_http.rs")),
@@ -393,7 +397,10 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
     );
     for (name, expected) in [
         ("admission", &["desired_epochs.rs"][..]),
-        ("management", &["app.rs", "shell.rs"][..]),
+        (
+            "management",
+            &["app.rs", "app_native_lifecycle.rs", "shell.rs"][..],
+        ),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {
@@ -422,6 +429,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
                 | "refresh_tests.rs"
                 | "registration_tests.rs"
                 | "shell_transport_tests.rs"
+                | "management/app_native_lifecycle.rs"
         ) || name.contains("day2-capabilities")
             || !name.ends_with(".rs")
         {

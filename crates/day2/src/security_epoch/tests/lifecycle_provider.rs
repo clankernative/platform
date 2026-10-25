@@ -10,6 +10,7 @@ pub(in crate::security_epoch) fn open(path: &Path) -> Provider {
 /// mutate even the fixture schema, and a missing file refuses.
 pub(in crate::security_epoch) fn observe_read_only(
     path: &Path,
+    selected: &EpochStore,
     request: &Request,
 ) -> Result<Snapshot> {
     let mut reader = Provider {
@@ -21,7 +22,22 @@ pub(in crate::security_epoch) fn observe_read_only(
         calls: Vec::new(),
         refused: false,
     };
-    reader.read(request)
+    Ok(observe_selected(&mut reader, selected, request)?.into_data())
+}
+
+pub(in crate::security_epoch) fn observe_selected(
+    provider: &mut Provider,
+    selected: &EpochStore,
+    request: &Request,
+) -> Result<firestore::EpochObservation> {
+    let active = match request {
+        Request::CompleteInitialFirstActivation { operation, .. } => Some(operation),
+        _ => None,
+    };
+    firestore::read(
+        provider,
+        &Names::new(selected, request.bootstrap(), active)?,
+    )
 }
 
 pub(in crate::security_epoch) fn snapshot(provider: &Provider) -> Value {
@@ -59,8 +75,12 @@ pub(in crate::security_epoch) fn reopen(provider: &mut Provider, path: &Path) {
     *provider = replacement;
 }
 
-pub(in crate::security_epoch) fn rewrite_root(provider: &mut Provider, request: &Request) {
-    let name = Names::new(&selection(), request.bootstrap(), None)
+pub(in crate::security_epoch) fn rewrite_selected_root(
+    provider: &mut Provider,
+    selected: &EpochStore,
+    request: &Request,
+) {
+    let name = Names::new(selected, request.bootstrap(), None)
         .unwrap()
         .root;
     provider

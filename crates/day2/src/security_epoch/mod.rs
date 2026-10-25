@@ -66,6 +66,10 @@ mod runtime_identity_tests;
 #[cfg(test)]
 mod control_slot_tests;
 #[cfg(test)]
+pub(crate) use control_slot_tests::lifecycle::{
+    ConsumerEvent, ConsumerLifecycle, ConsumerModelError,
+};
+#[cfg(test)]
 mod identity_tests;
 #[cfg(test)]
 mod tests;

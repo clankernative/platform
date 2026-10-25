@@ -932,6 +932,8 @@ enum RuntimeSource<'a, 'role> {
         stage: &'a mut EnrolledRoleStage<'role>,
     },
     Ordinary,
+    #[cfg(test)]
+    Simulated(&'a mut RoleStage<'role>),
 }
 
 impl RuntimeConsumer<'_, '_> {
@@ -947,6 +949,8 @@ impl RuntimeConsumer<'_, '_> {
         match &mut self.source {
             RuntimeSource::Native { current, stage } => current.check(stage),
             RuntimeSource::Ordinary => Ok(()),
+            #[cfg(test)]
+            RuntimeSource::Simulated(stage) => stage.check(),
         }
     }
 
@@ -993,6 +997,12 @@ impl RuntimeConsumer<'_, '_> {
     }
 
     pub(super) fn refuse(&mut self) {
+        #[cfg(test)]
+        if let RuntimeSource::Simulated(stage) = &mut self.source
+            && let RoleSource::Simulated(stage) = &mut stage.source
+        {
+            stage.refuse();
+        }
         if let RuntimeSource::Native { current, .. } = &mut self.source {
             current.refuse();
         }
@@ -1037,6 +1047,16 @@ pub(super) fn with_runtime_consumer<T>(
         }
     };
     if !runtime.uses_native_storage() {
+        #[cfg(test)]
+        if let Some(scope) = fixtures::runtime_scope(runtime)? {
+            return fixtures::with_app_role(&scope, phase, |stage| {
+                RuntimeConsumer {
+                    source: RuntimeSource::Simulated(stage),
+                    runtime: Some(runtime),
+                }
+                .run(operation)
+            });
+        }
         return RuntimeConsumer {
             source: RuntimeSource::Ordinary,
             runtime: Some(runtime),
@@ -2947,6 +2967,8 @@ pub(crate) mod fixtures {
         origin: Duration,
         latest: Duration,
         owner_refused: Rc<Cell<bool>>,
+        role: NativeRole,
+        scope: Option<AuthorityScope>,
     }
     pub(crate) struct SimulationStage {
         hooks: std::sync::Arc<dyn Hooks>,
@@ -2959,6 +2981,11 @@ pub(crate) mod fixtures {
         owner_refused: Rc<Cell<bool>>,
     }
     impl SimulationStage {
+        pub(super) fn refuse(&mut self) {
+            self.refused = true;
+            self.owner_refused.set(true);
+        }
+
         pub(super) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
             self.check()?;
             ensure!(
@@ -2969,6 +2996,14 @@ pub(crate) mod fixtures {
         }
         pub(super) fn check(&mut self) -> Result<()> {
             let result = (|| {
+                ensure!(
+                    !self.refused
+                        && !self.owner_refused.get()
+                        && super::super::effects::current_domain() == Some(self.hooks.domain())
+                        && self.thread == std::thread::current().id(),
+                    "simulated native owner or executor changed"
+                );
+                self.hooks.native_check(self.role, self.scope.as_ref())?;
                 let now = self.hooks.monotonic();
                 ensure!(
                     !self.refused
@@ -3005,6 +3040,10 @@ pub(crate) mod fixtures {
                 self.owner_refused.set(true);
                 anyhow::bail!("native simulation role or clock domain refused");
             }
+            if let Err(error) = hooks.native_check(self.role, self.scope.as_ref()) {
+                self.owner_refused.set(true);
+                return Err(error);
+            }
             let now = hooks.monotonic();
             if now < self.origin || now < self.latest {
                 self.owner_refused.set(true);
@@ -3034,6 +3073,8 @@ pub(crate) mod fixtures {
             origin,
             latest: origin,
             owner_refused,
+            role,
+            scope: fixture.scopes.get(app).cloned(),
         };
         clock.sample()?;
         Original::capture(clock)
@@ -3130,7 +3171,7 @@ pub(crate) mod fixtures {
             thread: std::thread::current().id(),
             refused: false,
             role: NativeRole::AppHost,
-            scope: None,
+            scope: original.clock.scope.clone(),
             owner_refused: original.clock.owner_refused.clone(),
         };
         PendingWriter {
@@ -3305,6 +3346,58 @@ pub(crate) mod fixtures {
                 .entry((NativeRole::AppHost, scope.app.as_str().into()))
                 .or_insert_with(|| Rc::new(Cell::new(false)));
             Ok(())
+        })
+    }
+
+    /// Complete allowlisted simulator owner DATA, never a native owner factory.
+    pub(crate) fn observation() -> Result<serde_json::Value> {
+        FIXTURE.with(|slot| {
+            let slot = slot.try_borrow()?;
+            let fixture = slot.as_ref().context("native fixture observation absent")?;
+            let originals = fixture.originals.iter().map(|((role, attempt), stored)| {
+                Ok::<_, anyhow::Error>(serde_json::json!({"role":role,"attempt":attempt,
+                    "intent":stored.response.intent.commitment()?,"scope":stored.original.clock.scope,
+                    "clock":{"origin":stored.original.clock.origin,"latest":stored.original.clock.latest,
+                        "supplier_alive":stored.original.clock.hooks.strong_count() > 0},
+                    "original":stored.original.observation(),"role_refused":stored.original.clock.owner_refused.get(),
+                    "response_bound":stored.response.connection.is_some()}))
+            }).collect::<Result<Vec<_>>>()?;
+            let roles = fixture.roles.iter().map(|((role, app), refused)| {
+                serde_json::json!({"role":role,"app":app,"refused":refused.get()})
+            }).collect::<Vec<_>>();
+            Ok(serde_json::json!({"scopes":fixture.scopes,"roles":roles,"originals":originals,
+                "selected_domain":super::super::effects::current_domain() == Some(fixture.domain)}))
+        })
+    }
+
+    pub(super) fn runtime_scope(runtime: &crate::store::Runtime) -> Result<Option<AuthorityScope>> {
+        FIXTURE.with(|slot| {
+            let slot = slot.try_borrow()?;
+            let Some(fixture) = slot.as_ref() else {
+                return Ok(None);
+            };
+            let hooks = fixture
+                .hooks
+                .upgrade()
+                .context("native simulation supplier ended")?;
+            if !hooks.simulate_runtime_owner() {
+                return Ok(None);
+            }
+            let selected = fixture
+                .scopes
+                .get(runtime.app())
+                .context("simulated runtime scope missing")?;
+            ensure!(
+                runtime.scope()
+                    == format!(
+                        "{}/{}/{}",
+                        selected.installation.as_str(),
+                        selected.environment.as_str(),
+                        selected.app.as_str()
+                    ),
+                "simulated runtime namespace changed"
+            );
+            Ok(Some(selected.clone()))
         })
     }
 

@@ -56,6 +56,10 @@ fn completion(create: &LogicalCore) -> LogicalCore {
 
 fn fixture() -> (EpochStore, LogicalCore) {
     let selection = tests::selection();
+    fixture_for_store(selection)
+}
+
+fn fixture_for_store(selection: EpochStore) -> (EpochStore, LogicalCore) {
     let policy = policy(&selection);
     let seed = OriginalSeedCore::new(
         &policy,

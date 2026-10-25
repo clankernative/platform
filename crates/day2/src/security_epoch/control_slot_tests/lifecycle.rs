@@ -3,8 +3,10 @@
 //! adds actual original-file observations to these same schedules.
 use super::*;
 use crate::security_epoch::{
-    bootstrap::check_active_snapshot, journal::snapshot_digest,
-    native_enrollment::LifecycleHandshake, storage_authority::lifecycle_fixture,
+    bootstrap::check_active_snapshot,
+    journal::snapshot_digest,
+    native_enrollment::{LifecycleHandshake, LifecycleModelError},
+    storage_authority::lifecycle_fixture,
     tests::lifecycle_provider as counter_fixture,
 };
 use serde::{Deserialize, Serialize};
@@ -134,6 +136,25 @@ struct World {
 
 impl World {
     fn new(seed: u64, physical: Option<&[u8]>) -> Result<Self> {
+        Self::selected(seed, physical, None)
+    }
+
+    fn selected(
+        seed: u64,
+        physical: Option<&[u8]>,
+        scope: Option<&day2_capabilities::security_epoch::AuthorityScope>,
+    ) -> Result<Self> {
+        ensure!(
+            physical.is_none() || scope.is_none(),
+            "physical fixture scope is fixed"
+        );
+        let portable = || {
+            let mut selection = tests::selection();
+            if let Some(scope) = scope {
+                selection.scope = scope.clone();
+            }
+            fixture_for_store(selection)
+        };
         #[cfg(not(target_os = "linux"))]
         ensure!(physical.is_none(), "physical lifecycle requires Linux");
         #[cfg(target_os = "linux")]
@@ -149,15 +170,19 @@ impl World {
             let core = LogicalCore::new(&store, policy, original, &request)?;
             (store, core, Some(image))
         } else {
-            let (store, core) = fixture();
+            let (store, core) = portable();
             (store, core, None)
         };
         #[cfg(not(target_os = "linux"))]
-        let (selection, create) = fixture();
+        let (selection, create) = portable();
         #[cfg(not(target_os = "linux"))]
         let image_binding = None;
+        let mut expected_selection = tests::selection();
+        if let Some(scope) = scope {
+            expected_selection.scope = scope.clone();
+        }
         ensure!(
-            selection == tests::selection(),
+            selection == expected_selection,
             "conditional fixture provider selection changed"
         );
         let mut counter = Request::CompleteInitialFirstActivation {
@@ -342,11 +367,12 @@ impl World {
                 )?
                 .send(&self.selection, &mut self.port)?;
                 if stage == 1 {
-                    let snapshot = self
-                        .port
-                        .counter
-                        .observe(&self.cores[1].counter)?
-                        .into_data();
+                    let snapshot = counter_fixture::observe_selected(
+                        &mut self.port.counter,
+                        &self.selection,
+                        &self.cores[1].counter,
+                    )?
+                    .into_data();
                     self.activation = Some(snapshot_digest(&snapshot)?);
                 }
             }
@@ -354,13 +380,19 @@ impl World {
         Ok(())
     }
 
-    fn current(&mut self, death_cut: Option<usize>, rewrite_provider: bool) -> Result<()> {
+    fn current(
+        &mut self,
+        death_cut: Option<usize>,
+        rewrite_provider: bool,
+        endpoint: usize,
+    ) -> Result<()> {
         let activation = self.activation.clone().context("activation not settled")?;
-        let observed = self
-            .port
-            .counter
-            .observe(&self.cores[1].counter)?
-            .into_data();
+        let observed = counter_fixture::observe_selected(
+            &mut self.port.counter,
+            &self.selection,
+            &self.cores[1].counter,
+        )?
+        .into_data();
         check_active_snapshot(
             &self.selection,
             &self.cores[1].counter,
@@ -368,17 +400,22 @@ impl World {
             &observed,
         )?;
         ensure!(
-            self.handshake.exchange(death_cut)?,
+            self.handshake.exchange_peer(death_cut, endpoint)?,
             "current exchange incomplete"
         );
         if rewrite_provider {
-            counter_fixture::rewrite_root(&mut self.port.counter, &self.cores[1].counter);
+            counter_fixture::rewrite_selected_root(
+                &mut self.port.counter,
+                &self.selection,
+                &self.cores[1].counter,
+            );
         }
-        let observed = self
-            .port
-            .counter
-            .observe(&self.cores[1].counter)?
-            .into_data();
+        let observed = counter_fixture::observe_selected(
+            &mut self.port.counter,
+            &self.selection,
+            &self.cores[1].counter,
+        )?
+        .into_data();
         check_active_snapshot(
             &self.selection,
             &self.cores[1].counter,
@@ -390,6 +427,10 @@ impl World {
     }
 
     fn step(&mut self, event: Event) -> Result<Record> {
+        self.step_peer(event, 0)
+    }
+
+    fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<Record> {
         let accepted = match event {
             Event::Reopen => {
                 counter_fixture::reopen(
@@ -426,6 +467,7 @@ impl World {
             }
             Event::Observe { stage } => counter_fixture::observe_read_only(
                 &self.directory.path().join("counter.sqlite"),
+                &self.selection,
                 &self.cores[stage].counter,
             )
             .and_then(|observed| {
@@ -463,7 +505,7 @@ impl World {
                         Event::Current {
                             death_cut,
                             rewrite_provider,
-                        } => self.current(death_cut, rewrite_provider),
+                        } => self.current(death_cut, rewrite_provider, endpoint),
                         _ => unreachable!(),
                     }?;
                     #[cfg(target_os = "linux")]
@@ -473,7 +515,11 @@ impl World {
                     Ok(())
                 });
                 self.continuation = continuation;
-                result.is_ok()
+                match result {
+                    Ok(()) => true,
+                    Err(error) if error.is::<LifecycleModelError>() => return Err(error),
+                    Err(_) => false,
+                }
             }
         };
         let counter = counter_fixture::snapshot(&self.port.counter);
@@ -510,6 +556,262 @@ impl World {
             &self.image_binding,
         ))
     }
+}
+
+/// Test DATA composition, never a native role, permission or stage constructor.
+/// Each step retains the complete provider/handshake records and checks the
+/// existing independent model before exposing any observation to consumers.
+pub(crate) struct ConsumerLifecycle {
+    world: World,
+    model: model::Model,
+    steps: usize,
+    shell: LifecycleHandshake,
+    enrollment: [LifecycleHandshake; 3],
+}
+
+#[derive(Debug)]
+pub(crate) struct ConsumerModelError;
+impl std::fmt::Display for ConsumerModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("composed native model divergence")
+    }
+}
+impl std::error::Error for ConsumerModelError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ConsumerEvent {
+    FirstHolder {
+        death_cut: Option<usize>,
+    },
+    Shell {
+        death_cut: Option<usize>,
+    },
+    Reserve {
+        activation: bool,
+    },
+    Dispatch {
+        activation: bool,
+    },
+    Settle {
+        activation: bool,
+    },
+    Current {
+        death_cut: Option<usize>,
+        rewrite_provider: bool,
+    },
+    ControllerDeath {
+        cut: usize,
+    },
+    Reopen,
+    RestoreClock,
+}
+
+impl ConsumerLifecycle {
+    pub(crate) fn new(
+        seed: u64,
+        scope: &day2_capabilities::security_epoch::AuthorityScope,
+    ) -> Result<Self> {
+        let world = World::selected(seed, None, Some(scope))?;
+        let model = model::Model::new(&world.cores, false, &world.image_binding)?;
+        let mut enrollment = [
+            LifecycleHandshake::enrollment(seed ^ 1)?,
+            LifecycleHandshake::enrollment(seed ^ 2)?,
+            LifecycleHandshake::enrollment(seed ^ 3)?,
+        ];
+        for role in &mut enrollment {
+            ensure!(role.exchange(None)?, ConsumerModelError);
+        }
+        Ok(Self {
+            world,
+            model,
+            steps: 0,
+            shell: LifecycleHandshake::serving(seed)?,
+            enrollment,
+        })
+    }
+
+    pub(crate) fn source() -> Digest {
+        Digest::of(&(source(), LifecycleHandshake::source())).unwrap()
+    }
+
+    pub(crate) fn observation(&self) -> Result<Value> {
+        Ok(
+            json!({"storage":self.world.record(false, counter_fixture::snapshot(&self.world.port.counter))?,
+            "expected":self.model.observation(),"serving":self.shell.snapshot(),
+            "enrollment":self.enrollment.iter().map(LifecycleHandshake::snapshot).collect::<Vec<_>>()}),
+        )
+    }
+
+    /// Reobserve the actual active counter, never turn a saved success into
+    /// current permission. The independent model separately predicts refusal.
+    pub(crate) fn check(
+        &mut self,
+        scope: &day2_capabilities::security_epoch::AuthorityScope,
+        shell: bool,
+    ) -> Result<()> {
+        ensure!(
+            &self.world.selection.scope == scope,
+            "consumer native scope changed"
+        );
+        for role in &self.enrollment {
+            ensure!(
+                role.current().map_err(|_| ConsumerModelError)?,
+                "consumer enrollment transcript refused"
+            );
+        }
+        let actual = (|| {
+            ensure!(
+                self.world.continuation && self.world.first_holder,
+                "consumer native continuation refused"
+            );
+            let activation = self
+                .world
+                .activation
+                .as_ref()
+                .context("consumer activation missing")?;
+            let observed = counter_fixture::observe_selected(
+                &mut self.world.port.counter,
+                &self.world.selection,
+                &self.world.cores[1].counter,
+            )?
+            .into_data();
+            check_active_snapshot(
+                &self.world.selection,
+                &self.world.cores[1].counter,
+                activation,
+                &observed,
+            )
+        })();
+        ensure!(
+            actual.is_ok() == self.model.consumer_current(),
+            ConsumerModelError
+        );
+        actual?;
+        ensure!(
+            !shell || self.shell.current().map_err(|_| ConsumerModelError)?,
+            "consumer Shell transcript refused"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn step(&mut self, event: ConsumerEvent) -> Result<serde_json::Value> {
+        self.steps += 1;
+        ensure!(self.steps <= MAX_EVENTS, "consumer lifecycle event bound");
+        if let ConsumerEvent::Shell { death_cut } = event {
+            let accepted = self
+                .shell
+                .exchange(death_cut)
+                .map_err(|_| ConsumerModelError)?;
+            let record = self.world.record(
+                accepted,
+                counter_fixture::snapshot(&self.world.port.counter),
+            )?;
+            return Ok(json!({"actual":record,"serving":self.shell.snapshot()}));
+        }
+        let endpoint = usize::from(matches!(event, ConsumerEvent::ControllerDeath { .. }));
+        let event = match event {
+            ConsumerEvent::FirstHolder { death_cut } => Event::FirstHolder { death_cut },
+            ConsumerEvent::Shell { .. } => unreachable!(),
+            ConsumerEvent::Reserve { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Reserve,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Dispatch { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Dispatch,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Settle { activation } => Event::Bootstrap {
+                stage: usize::from(activation),
+                operation: Operation::Settle,
+                fault: Fault::None,
+            },
+            ConsumerEvent::Current {
+                death_cut,
+                rewrite_provider,
+            } => Event::Current {
+                death_cut,
+                rewrite_provider,
+            },
+            ConsumerEvent::ControllerDeath { cut } => Event::Current {
+                death_cut: Some(cut),
+                rewrite_provider: false,
+            },
+            ConsumerEvent::Reopen => Event::Reopen,
+            ConsumerEvent::RestoreClock => Event::RestoreClock,
+        };
+        let actual = self
+            .world
+            .step_peer(event, endpoint)
+            .map_err(|_| ConsumerModelError)?;
+        let (accepted, state) = self.model.step(event).map_err(|_| ConsumerModelError)?;
+        ensure!(
+            (actual.accepted, &actual.state) == (accepted, &state),
+            ConsumerModelError
+        );
+        Ok(
+            json!({"actual":actual,"expected":{"accepted":accepted,"state":state},"serving":self.shell.snapshot()}),
+        )
+    }
+}
+
+#[test]
+fn expected_peer_death_cannot_hide_a_handshake_oracle_error() -> Result<()> {
+    fn active() -> Result<ConsumerLifecycle> {
+        let mut consumer = ConsumerLifecycle::new(71, &tests::selection().scope)?;
+        consumer.step(ConsumerEvent::FirstHolder { death_cut: None })?;
+        for activation in [false, true] {
+            consumer.step(ConsumerEvent::Reserve { activation })?;
+            consumer.step(ConsumerEvent::Dispatch { activation })?;
+            consumer.step(ConsumerEvent::Settle { activation })?;
+        }
+        consumer.step(ConsumerEvent::Current {
+            death_cut: None,
+            rewrite_provider: false,
+        })?;
+        Ok(consumer)
+    }
+
+    for event in [
+        ConsumerEvent::Current {
+            death_cut: Some(0),
+            rewrite_provider: false,
+        },
+        ConsumerEvent::ControllerDeath { cut: 0 },
+    ] {
+        let mut ordinary = active()?;
+        let refused = ordinary.step(event)?;
+        assert_eq!(refused["actual"]["accepted"], false);
+        assert_eq!(refused["expected"]["accepted"], false);
+        assert_eq!(refused["actual"]["state"]["continuation"], false);
+
+        let mut divergent = active()?;
+        divergent.world.handshake.corrupt_reference_for_control();
+        let error = divergent
+            .step(event)
+            .expect_err("oracle disagreement became an ordinary expected refusal");
+        assert!(error.is::<ConsumerModelError>());
+        assert!(!divergent.world.continuation);
+        // Reproduce the masking condition: ordinary storage denial and the
+        // complete outer State still agree. The transcript disagreement must
+        // remain independently fatal rather than relying on that comparison.
+        let expected = divergent.model.step(Event::Current {
+            death_cut: Some(0),
+            rewrite_provider: false,
+        })?;
+        let observed = divergent.world.record(
+            false,
+            counter_fixture::snapshot(&divergent.world.port.counter),
+        )?;
+        assert_eq!(
+            (observed.accepted, &observed.state),
+            (expected.0, &expected.1)
+        );
+        assert_ne!(observed.handshake["actual"], observed.handshake["oracle"]);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -773,41 +1075,47 @@ fn successful(seed: u64) -> Program {
 
 #[test]
 fn independent_observation_after_semantic_refusal_never_revives_the_writer() -> Result<()> {
-    let mut world = World::new(71, None)?;
-    assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
-    for operation in [Operation::Reserve, Operation::Dispatch] {
+    let original = tests::selection().scope;
+    let mut selected = original.clone();
+    selected.installation = "scoped_company".to_owned().try_into()?;
+    selected.environment = "production".to_owned().try_into()?;
+    for scope in [original, selected] {
+        let mut world = World::selected(71, None, Some(&scope))?;
+        assert!(world.step(Event::FirstHolder { death_cut: None })?.accepted);
+        for operation in [Operation::Reserve, Operation::Dispatch] {
+            assert!(
+                world
+                    .step(Event::Bootstrap {
+                        stage: 0,
+                        operation,
+                        fault: Fault::None
+                    })?
+                    .accepted
+            );
+        }
         assert!(
-            world
+            !world
                 .step(Event::Bootstrap {
                     stage: 0,
-                    operation,
+                    operation: Operation::Reserve,
                     fault: Fault::None
                 })?
                 .accepted
         );
+        assert!(world.port.sample().is_err());
+        let observed = world.step(Event::Observe { stage: 0 })?;
+        assert!(observed.accepted);
+        assert!(!observed.state.continuation);
+        assert!(world.port.sample().is_err());
+        let denied = world.step(Event::Bootstrap {
+            stage: 0,
+            operation: Operation::Settle,
+            fault: Fault::None,
+        })?;
+        assert!(!denied.accepted);
+        assert_eq!(denied.state.slot_posts, observed.state.slot_posts);
+        assert_eq!(denied.state.counter_posts, observed.state.counter_posts);
     }
-    assert!(
-        !world
-            .step(Event::Bootstrap {
-                stage: 0,
-                operation: Operation::Reserve,
-                fault: Fault::None
-            })?
-            .accepted
-    );
-    assert!(world.port.sample().is_err());
-    let observed = world.step(Event::Observe { stage: 0 })?;
-    assert!(observed.accepted);
-    assert!(!observed.state.continuation);
-    assert!(world.port.sample().is_err());
-    let denied = world.step(Event::Bootstrap {
-        stage: 0,
-        operation: Operation::Settle,
-        fault: Fault::None,
-    })?;
-    assert!(!denied.accepted);
-    assert_eq!(denied.state.slot_posts, observed.state.slot_posts);
-    assert_eq!(denied.state.counter_posts, observed.state.counter_posts);
     Ok(())
 }
 

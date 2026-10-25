@@ -25,6 +25,18 @@ pub(crate) trait Hooks: Send + Sync {
     fn send(&self, request: blocking::Request) -> Result<Response>;
     fn provider_observation(&self, data: super::shell_oidc::ProviderObservationData) -> Result<()>;
     fn refresh_boundary(&self, _boundary: RefreshBoundary) {}
+    /// Explicit DATA-only composition of the native lifecycle oracle with the
+    /// existing test owners. No production enrollment or permission is minted.
+    fn native_check(
+        &self,
+        _role: day2_capabilities::security_epoch::bootstrap::NativeRole,
+        _scope: Option<&day2_capabilities::security_epoch::AuthorityScope>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn simulate_runtime_owner(&self) -> bool {
+        false
+    }
 }
 
 /// One fixed private operator record. It carries no authority and is emitted

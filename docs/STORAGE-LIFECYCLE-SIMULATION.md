@@ -93,8 +93,13 @@ Replay refuses a different source identity, unsupported version or excessive
 history/bundle size. Preserve original evidence when fixing a failure and add its
 reduced semantic history as a regression on the corrected source.
 
-This campaign does not execute native Controller/App/Shell owners, authenticated
-provider adapters, actual current-writer effects or OAuth consumers. It does not
+The [OAuth consumer campaign](NATIVE-OAUTH-CONSUMER-SIMULATION.md) retains this
+campaign's independent state and transcript models while driving actual
+connect/read/refresh/disconnect decisions. Its closed DATA composition exposes
+observations, never a native permission or current writer.
+
+This storage campaign does not execute native Controller/App/Shell owners,
+authenticated provider adapters or actual current-writer effects. It does not
 prove physical durability, kernel admission, AppArmor, provider fidelity or timing
-margin. The real kernel conformance tests remain unchanged. Joining the complete
-native producer/consumer lifecycle and OAuth operations is further work.
+margin. The real kernel conformance tests remain unchanged. Executing the complete
+native producer/consumer lifecycle remains separate qualification work.

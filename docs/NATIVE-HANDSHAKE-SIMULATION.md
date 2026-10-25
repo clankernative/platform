@@ -123,6 +123,8 @@ or evidence of timing margin for OAuth startup.
 
 The campaign schedules closed packet classifications, not signed wire bodies.
 Signature, nonce/request binding, issuer selection and enrollment rekey/table
-checks retain their separate cryptographic DATA and native controls. Joining
-those bodies and actual storage/OAuth lifecycle models into one campaign is
-additional composition work; the new transcript alone does not establish it.
+checks retain their separate cryptographic DATA and native controls. The
+[OAuth consumer campaign](NATIVE-OAUTH-CONSUMER-SIMULATION.md) now joins these
+transcript decisions to the storage lifecycle and OAuth consumers under controlled
+DATA observations. It does not join signed wire bodies or native owner acquisition
+into that simulation; the transcript alone does not establish those guarantees.
