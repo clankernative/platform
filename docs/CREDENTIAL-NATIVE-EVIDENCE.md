@@ -407,6 +407,81 @@ five-second fit is established. Native27 and later evidence must likewise be
 joined to its actual source, operation scope and outcome; later serving work
 can add scans beyond this prefix.
 
+#### Provider requests and round multiplicity
+
+The native26 ProviderHttp leaf counts entered HTTP scopes, including the metadata
+token call; it does not establish that every request reached the server or
+completed. Its 25 entries are **not five storage rounds**. Before the first
+storage round, `ProviderReader::acquire` performs six profiled calls: metadata
+source token, project, cluster, Controller service account, token mint and epoch
+database. The Kubernetes credential projection is a local file read. These are
+provider-reader authentication, separate from the issuer transport bucket and
+from the later serving caller's `AuthenticatedReads::acquire`.
+
+Each `ProviderReader::observe_provider_inner` storage round requests exactly
+claim, volume, node, disk and instance, in that order. `ProviderReader::check`,
+`NativeVolumeResources::check_current` and a plain physical-file `check` retain
+local role/profile/FD/path/mount/clock observations; they do not start this HTTP
+round. The failed native26 prefix has the following source ordering:
+
+| Round and call site | Entered storage HTTP scopes in native26 | Boundary decision |
+| --- | --- | --- |
+| Fresh physical volume: `NativeVolumeContinuity::finish_begin` -> `observe_provider` | 5 | Keep: join the selected current attachment under the new actual Controller stage before returning the current volume owner. |
+| Initial file durability: `begin_current_app` -> file `check_current_durability` -> `NativeVolumeResources::check_durability_profile` | 5 | Keep: mount/block/directory/file acquisition and observation I/O followed the first round. Rejoin the provider before accepting the live ext4/journal contract and entering the peer exchange. In #270 this operation is inside `acquire_durable`, before physical publication. |
+| First composite: `begin_current_app` -> phase `check` -> durability | 5 | Keep: Hello/Ack receive, Offer/Ready signing and send, and new-peer acceptance intervene. The provider attachment must be fresh again after that handshake. |
+| Immediate ProviderAcquire argument: `serve_app_current` -> `physical.controller_stage` -> phase `check` -> durability | 4 of an intended 5 | Remove in #268: the preceding full composite just completed; only bounded binding DATA selection/clone intervened. This repeated durability attempt failed before the peer and final-file steps. |
+
+The three earlier rounds returned successfully before the first composite's
+peer/final-file checks completed. Their fifteen HTTP scopes plus the six setup
+calls account for 21 entries. The remaining four of the measured 25 therefore
+belong to the failed repeated round. This allocation is a source/control-flow
+inference joined to the aggregate profile, not a per-route trace or evidence
+that all four requests completed. It does not identify the exact failing guard.
+The two **marked** durability entries omit the earlier initial file-durability
+call: there are three durability invocations here (two returned, one failed),
+plus the separate initial volume round.
+
+#268 removes one attempted storage round from this prefix: four observed HTTP
+scope entries in native26, or five reads if that round completes. It leaves
+three complete storage rounds (15 reads) and the six setup calls before the
+serving caller's authentication begins. It does not remove five rounds or the
+whole 1.316678-second HTTP bucket. The failed repeated composite was only
+79.545 ms inclusive; that is the baseline duplicate's envelope, not measured net
+saving. Newly reachable authentication/serving I/O can increase a later whole
+Current request count. No round duration can be obtained by dividing the HTTP
+bucket by five, and inclusive durability time must not be added to its nested
+exclusive HTTP time.
+
+The same native26 prefix accounts for all eighteen App scans: three preparation,
+thirteen peer acceptance and two first-composite scans. The failed repeated
+round reached no peer check, so #268 removes no *observed* App scan from that
+failed capture; a completed duplicate composite would also rescan both retained
+and current peer sets. #269 removes one prefix Ack scan (eighteen to seventeen
+at the same frontier); #270 removes a local file check and no provider round
+or App scan. These counts describe that prefix, not a complete later serving
+operation. Original intervals, permanent refusal and every real boundary remain.
+
+Native27 used #268's runtime change, without #269 or #270. Its independently
+joined ordinary App-serving refusal took 5.001278 seconds, versus native26's
+5.001639 seconds. It entered 21 provider HTTP scopes (1.214255 s), matching
+six setup calls and three completed storage rounds before the composite peer
+check. It started seventeen App scans (1.619518 s), with namespaces 0.151016 s,
+issuer transport 1.301037 s across four calls, and packet waiting 0.582002 s.
+App scans remained the largest named exclusive leaf, about 32.4% of elapsed time.
+
+The marked physical rows were one completed durability check (325.382 ms),
+one failed peer check (80.593 ms), and zero FinalFile/ProviderStage entries.
+This failure was in the **first** composite, before the removed ProviderAcquire
+argument check and before authentication's stage handoff ran. The 17 versus 18
+scan count reflects that different failure frontier, not #269, which was absent.
+Likewise, 21 versus 25 HTTP entries must not be presented as measured request
+savings from #268: a run failing at this earlier frontier never reaches the old
+duplicate either. The profile gives no exact inner failure cause. All six
+bootstrap operations and activation completed, but neither failed Current prefix
+establishes serving completion, net saving or five-second fitness. Root captured
+the original records and closed its node window before this audit update; no
+new probe, timeout change or issuer work is part of the update.
+
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App
 paired reads request a token-free strong snapshot. Both decoded observations
