@@ -831,16 +831,21 @@ fn exchange(
     let public_key = key.public();
     let policy_hash = policy.digest()?;
     let mut channel = Channel::connect(acquisition)?;
-    channel.send(
-        &Packet::StageHello {
-            policy: policy_hash.clone(),
-            role,
-            purpose,
-            public_key: public_key.clone(),
-            request: request.clone(),
-        },
-        acquisition,
-    )?;
+    {
+        let _profile = crate::security_epoch::self_check_profile::enter(
+            crate::security_epoch::self_check_profile::Category::IssuerTransport,
+        );
+        channel.send(
+            &Packet::StageHello {
+                policy: policy_hash.clone(),
+                role,
+                purpose,
+                public_key: public_key.clone(),
+                request: request.clone(),
+            },
+            acquisition,
+        )?;
+    }
     let (packet, mut nonce_peer) = channel.receive_issuer(acquisition)?;
     let Packet::StageNonce {
         request: echoed,
@@ -859,18 +864,23 @@ fn exchange(
         &challenge,
     );
     let signature = key.sign("role-bind", &binding)?;
-    channel.send(
-        &Packet::StageBind {
-            policy: policy_hash.clone(),
-            role,
-            purpose,
-            public_key: public_key.clone(),
-            request: request.clone(),
-            challenge: challenge.clone(),
-            signature,
-        },
-        acquisition,
-    )?;
+    {
+        let _profile = crate::security_epoch::self_check_profile::enter(
+            crate::security_epoch::self_check_profile::Category::IssuerTransport,
+        );
+        channel.send(
+            &Packet::StageBind {
+                policy: policy_hash.clone(),
+                role,
+                purpose,
+                public_key: public_key.clone(),
+                request: request.clone(),
+                challenge: challenge.clone(),
+                signature,
+            },
+            acquisition,
+        )?;
+    }
     let (packet, mut issuer) = channel.receive_issuer(acquisition)?;
     let Packet::StageGrant { certificate, stage } = packet else {
         anyhow::bail!("native_enrollment_stage_order")

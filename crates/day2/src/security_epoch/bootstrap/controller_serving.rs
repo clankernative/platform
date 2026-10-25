@@ -4,6 +4,7 @@
 use super::{
     ActiveControllerStorageContinuity, ServingObservation, check_active_snapshot, request_names,
 };
+use crate::security_epoch::self_check_profile::{self, Category, PhysicalStep};
 use crate::security_epoch::{AuthenticatedReads, native_enrollment::EnrolledRoleStage};
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::bootstrap::NativeRole;
@@ -18,10 +19,14 @@ impl ActiveControllerStorageContinuity {
         &mut self,
         stage: EnrolledRoleStage<'_>,
     ) -> Result<ServingObservation> {
+        let _profile = self_check_profile::enter(Category::ServingLocal);
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
-            let mut physical = self.storage.begin_current_app(stage)?;
+            let mut physical = {
+                let _profile = self_check_profile::enter(Category::PhysicalLocal);
+                self.storage.begin_current_app(stage)?
+            };
             // Authenticated request selection is DATA. This can only be the
             // original App enrollment and a fresh current-serving transcript.
             let binding = physical.app_request()?.binding.clone();
@@ -29,7 +34,9 @@ impl ActiveControllerStorageContinuity {
                 &self.policy,
                 &self.store,
                 NativeRole::EpochController,
-                physical.controller_stage()?,
+                self_check_profile::physical(PhysicalStep::ProviderStage, || {
+                    physical.controller_stage()
+                })?,
             )?
             .retain_current()?;
             let names = request_names(&self.store, &self.completion)?;

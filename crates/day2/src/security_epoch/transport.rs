@@ -350,6 +350,8 @@ impl NativeHttp {
         acquisition: &mut NativeAcquisition,
         ceiling: Duration,
     ) -> Result<Vec<u8>> {
+        let mut profile =
+            super::self_check_profile::enter(super::self_check_profile::Category::ProviderHttp);
         let result = (|| {
             let (address, method, kube) = self.address(&route)?;
             ensure!(
@@ -408,6 +410,7 @@ impl NativeHttp {
                 .take(MAX_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|_| anyhow::anyhow!("epoch_native_response_unavailable"))?;
+            profile.finish();
             acquisition.remaining()?;
             ensure!(bytes.len() <= MAX_BYTES, "epoch_native_response_bound");
             Ok(bytes)

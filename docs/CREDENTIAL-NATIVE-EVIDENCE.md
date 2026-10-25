@@ -213,6 +213,82 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 
 ## Preparation timing diagnosis
 
+Ordinary Current App-serving has a distinct diagnostic root around its actual
+operation, including role acquisition. After the role/file/peer borrows unwind,
+the Controller can emit `day2-native-controller-self-check` with format
+`controller_current_app_serving_exclusive_ns_v2`, scope
+`whole_current_app_serving_operation`, and the following main record's sequence,
+selection and Controller incarnation. It is historical DATA, not readiness,
+permission, current validity or a sampled remaining budget. It has no bootstrap
+action field and cannot be interpreted as a bootstrap full-check sample.
+
+`profile.samples` counts whole Current operations, not full checks. The sixteen
+fixed rows are `[span_attempts, exclusive_ns]`, in the following order:
+
+| Row | Current work |
+| --- | --- |
+| 0 | Other, outside named spans |
+| 1 | Peer executable bytes/SHA and chunk guards |
+| 2 | Retained self-process identity |
+| 3 | Self namespaces |
+| 4 | Enrollment policy |
+| 5 | Peer identity, excluding nested leaves |
+| 6 | Storage profile |
+| 7 | Initial-image byte loop; not the active writable-file guard |
+| 8 | Volume, excluding nested leaves |
+| 9 | Self-acquisition executable SHA and chunk guards |
+| 10 | Issuer send/receive transport, including synchronous waits and bounded decode |
+| 11 | Other packet polls; issuer transport is excluded |
+| 12 | Provider HTTP and metadata-token exchange, including bounded response reads |
+| 13 | Local role-acquisition composition, excluding nested leaves |
+| 14 | Local physical composition, excluding nested leaves |
+| 15 | Local remaining serving composition, excluding nested leaves |
+
+These exclusive rows partition the attempted Current operation; sum them once.
+Local rows are residual host composition, including local descriptor/byte work,
+not a claim of CPU-only time. Issuer transport measures the caller's synchronous
+wait and local packet work; it does not profile the remote issuer's execution.
+Span attempts are not RPC counts. The intended next native capture attributes
+at least 90% to named rows, but coverage and cost remain unmeasured until that
+actual run. Inspect Other and the local residual rows before claiming a dominant
+leaf, a net verity saving or complete request latency. Bootstrap retains its
+separate nine-row full-check scope; these extra marks are disabled in that scope.
+Optional `physical` DATA identifies the last attempted composite-check subcall,
+whether that call succeeded, and the first failed subcall. An enclosing call's
+later failure does not overwrite a nested call's successful outcome. Rows are fixed in order
+durability, current/retained peer, final file, ProviderAcquire stage argument;
+each is `[count, inclusive_us]`. The fourth row encloses the full physical check
+re-entered through `physical.controller_stage()` before authentication can start.
+These rows overlap the exclusive profile and must not be added to it. A subcall
+can contain several guards; the marker does not establish a failed statement or
+cause. If role acquisition fails first, no physical row is fabricated.
+
+The Current record is capped separately at 1536 bytes and emitted at most once
+for the first actual App-serving result/refusal. The existing 1024-byte
+bootstrap profile and 2048-byte authority-record bounds stay unchanged. Missing,
+rewound, nested-root or overflowed metric samples are inconclusive, never zero
+cost. The collector does not replace native clocks, reset an original, cache a
+check, suppress an error, skip I/O or change any five-second guard. Leaf spans
+still finish before terminal native checks. Diagnostic clocks and output can
+perturb elapsed time; no measured saving or complete serving margin follows
+from enabling them. Bootstrap counts/costs do not transfer to Current.
+
+### ProviderAcquire argument: duplicate composition, not another S1 boundary
+
+In `serve_app_current`, `begin_current_app` ends with a full physical check.
+The next operation reads/clones the request binding DATA, then the
+ProviderAcquire argument getter performs that full physical check again.
+There is no intervening work I/O, signing, wait or ownership transfer. **That
+second full composite observation is a pure duplicate in this exact call chain,
+not a separately required S1 effect boundary.** S1 still requires the actual
+same owner, current file/peer/role, original shortest clock and refusal checks
+before and after real provider I/O. `AuthenticatedReads::acquire` performs its
+own fresh stage checks. A later consolidation can borrow the just-checked
+stage only through this closed composition; the general stage getter must
+continue checking after intervening I/O. This diagnostic leaves both full
+checks in place and measures the fourth row, without caching a positive result,
+removing a guard, changing a lifetime or promising the resulting margin.
+
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App
 paired reads request a token-free strong snapshot. Both decoded observations

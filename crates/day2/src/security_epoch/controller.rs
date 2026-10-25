@@ -7,6 +7,7 @@ use crate::security_epoch::{
         ControllerServingListener, ControllerServingPeer, EnrolledProcessRoleOwner,
         InitialHolderListener, NativeRole,
     },
+    self_check_profile,
     storage_authority::{self, InitialStorageContinuity, InitialStorageOutcome},
 };
 use anyhow::{Context, Result, ensure};
@@ -196,7 +197,18 @@ fn run_inner(
             evidence.enter(FailurePhase::AppPending);
             if active.app_pending()? {
                 evidence.enter(FailurePhase::AppServing);
-                let observed = active.serve_app_current(role.begin_current_stage()?)?;
+                let (result, profile) = self_check_profile::sample_current(|| {
+                    let stage = {
+                        let _profile =
+                            self_check_profile::enter(self_check_profile::Category::RoleLocal);
+                        role.begin_current_stage()?
+                    };
+                    active.serve_app_current(stage)
+                });
+                // Only historical DATA leaves the operation, after its native
+                // role/file/peer borrows and final checks have completed.
+                evidence.current_serving_profile(profile);
+                let observed = result?;
                 evidence.serving(ServingRole::App, observed)?;
             }
             if let Some(peer) = &mut shell {

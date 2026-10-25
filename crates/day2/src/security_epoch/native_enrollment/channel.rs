@@ -358,7 +358,12 @@ impl Channel {
         acquisition: &mut NativeAcquisition,
     ) -> Result<(Packet, super::issuer_peer::IssuerReceipt)> {
         let result = (|| {
-            let (packet, received) = self.receive_kernel(acquisition)?;
+            let (packet, received) = {
+                let _profile = crate::security_epoch::self_check_profile::enter(
+                    crate::security_epoch::self_check_profile::Category::IssuerTransport,
+                );
+                self.receive_kernel(acquisition)?
+            };
             let receipt = super::issuer_peer::IssuerReceipt::receive(received, acquisition)?;
             self.packet_delivered(packet.frame(), acquisition)?;
             Ok((packet, receipt))
@@ -525,7 +530,11 @@ fn wait(fd: &File, events: PollFlags, acquisition: &mut NativeAcquisition) -> Re
     loop {
         let timeout = rustix::event::Timespec::try_from(acquisition.remaining()?)?;
         let mut fds = [PollFd::new(fd, events)];
-        let observation = match rustix::event::poll(&mut fds, Some(&timeout)) {
+        let observed = {
+            let _profile = crate::security_epoch::self_check_profile::packet_wait();
+            rustix::event::poll(&mut fds, Some(&timeout))
+        };
+        let observation = match observed {
             Ok(0) => PollObservation::Timeout,
             Ok(1) if fds[0].revents() == events => PollObservation::Ready,
             Ok(_) => PollObservation::UnexpectedEvents,
