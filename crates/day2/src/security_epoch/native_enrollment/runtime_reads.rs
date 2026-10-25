@@ -337,11 +337,13 @@ mod tests {
 
     // Actual loopback HTTP/2 + protobuf adapter only. These fixtures do not
     // construct a process, runtime witness, enrollment or current permission.
+    type RuntimeReply = (wire::Container, wire::CriStatus);
+
     fn loopback(
         tasks: wire::Tasks,
         last: wire::TaskReply,
         limit: Duration,
-    ) -> Result<(Result<(wire::Container, wire::CriStatus)>, Vec<String>)> {
+    ) -> Result<(Result<RuntimeReply>, Vec<String>)> {
         let executor = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
