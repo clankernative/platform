@@ -83,6 +83,8 @@ impl CredentialMaterial {
     }
 
     pub(super) fn metadata_source(acquisition: &mut NativeAcquisition) -> Result<Self> {
+        let mut profile =
+            super::self_check_profile::enter(super::self_check_profile::Category::ProviderHttp);
         let result = (|| {
             acquisition.remaining()?;
             let client = Client::builder()
@@ -110,6 +112,7 @@ impl CredentialMaterial {
                 .take(12_289)
                 .read_to_end(&mut bytes)
                 .map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"))?;
+            profile.finish();
             acquisition.remaining()?;
             ensure!(bytes.len() <= 12_288, "epoch_native_metadata_bound");
             Self::metadata_reply(&bytes)

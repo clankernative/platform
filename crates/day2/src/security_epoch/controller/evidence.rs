@@ -22,6 +22,7 @@ const MAX_RECORD_BYTES: usize = 2048;
 const MAX_RECORDS: u8 = 12;
 const SELF_CHECK_PREFIX: &str = "day2-native-controller-self-check ";
 const MAX_SELF_CHECK_BYTES: usize = 1024;
+const MAX_CURRENT_SELF_CHECK_BYTES: usize = 1536;
 
 pub(in crate::security_epoch) type Evidence = Recorder<StderrOutput>;
 
@@ -55,6 +56,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     preparation_timing: Option<Summary>,
     bootstrap_timing: Option<BootstrapSnapshot>,
     serving_timing: Option<ServingSnapshot>,
+    current_serving_profile: Option<super::super::self_check_profile::CurrentProfile>,
     read_only_observed: bool,
 }
 
@@ -541,6 +543,7 @@ impl<W: RecordOutput> Recorder<W> {
             preparation_timing: None,
             bootstrap_timing: None,
             serving_timing: None,
+            current_serving_profile: None,
             read_only_observed: false,
         }
     }
@@ -548,10 +551,18 @@ impl<W: RecordOutput> Recorder<W> {
     pub(in crate::security_epoch) fn enter(&mut self, at: FailurePhase) {
         self.at = at;
         self.serving_timing = None;
+        self.current_serving_profile = None;
     }
 
     pub(super) fn serving_timing(&mut self, timing: ServingSnapshot) {
         self.serving_timing = Some(timing);
+    }
+
+    pub(super) fn current_serving_profile(
+        &mut self,
+        profile: Option<super::super::self_check_profile::CurrentProfile>,
+    ) {
+        self.current_serving_profile = profile;
     }
 
     pub(super) fn select(
@@ -782,7 +793,8 @@ impl<W: RecordOutput> Recorder<W> {
             !self.refused && !self.export_failed && self.records < MAX_RECORDS,
             "native_evidence_closed"
         );
-        // At most one numeric profile for each of the six fixed actions.
+        // At most one numeric profile for each fixed bootstrap action and the
+        // first actual Current App-serving operation, under distinct formats.
         // All permission borrows have unwound before diagnostic output.
         self.emit_self_check(&observation)?;
         let record = Record {
@@ -809,6 +821,18 @@ impl<W: RecordOutput> Recorder<W> {
     }
 
     fn emit_self_check(&mut self, observation: &Observation) -> Result<()> {
+        if matches!(
+            observation,
+            Observation::FirstServingRelease {
+                role: ServingRole::App,
+                ..
+            } | Observation::Refused {
+                at: FailurePhase::AppServing,
+                ..
+            }
+        ) {
+            return self.emit_current_self_check();
+        }
         let (step, profile) = match observation {
             Observation::BootstrapCompleted {
                 step,
@@ -866,8 +890,46 @@ impl<W: RecordOutput> Recorder<W> {
             profile,
         };
         let json = serde_json::to_string(&record)?;
+        self.append_self_check(&json, MAX_SELF_CHECK_BYTES)?;
+        self.self_check_exported |= bit;
+        Ok(())
+    }
+
+    fn emit_current_self_check(&mut self) -> Result<()> {
+        const BIT: u8 = 64;
+        if self.self_check_exported & BIT != 0 {
+            return Ok(());
+        }
+        let Some(profile) = self.current_serving_profile else {
+            return Ok(());
+        };
+        #[derive(Serialize)]
+        struct CurrentRecord<'a> {
+            format: &'static str,
+            scope: &'static str,
+            sequence: u8,
+            selection: &'a Option<Digest>,
+            controller_incarnation: &'a Option<Digest>,
+            #[serde(flatten)]
+            costs: super::super::self_check_profile::CurrentProfile,
+        }
+        let record = CurrentRecord {
+            format: "controller_current_app_serving_exclusive_ns_v2",
+            scope: "whole_current_app_serving_operation",
+            sequence: self.records + 1,
+            selection: &self.selection,
+            controller_incarnation: &self.incarnation,
+            costs: profile,
+        };
+        let json = serde_json::to_string(&record)?;
+        self.append_self_check(&json, MAX_CURRENT_SELF_CHECK_BYTES)?;
+        self.self_check_exported |= BIT;
+        Ok(())
+    }
+
+    fn append_self_check(&mut self, json: &str, limit: usize) -> Result<()> {
         ensure!(
-            SELF_CHECK_PREFIX.len() + json.len() < MAX_SELF_CHECK_BYTES,
+            SELF_CHECK_PREFIX.len() + json.len() < limit,
             "native_self_check_record_bound"
         );
         if self
@@ -878,7 +940,6 @@ impl<W: RecordOutput> Recorder<W> {
             self.export_failed = true;
             anyhow::bail!("native_evidence_export_failed");
         }
-        self.self_check_exported |= bit;
         Ok(())
     }
 }
@@ -982,6 +1043,160 @@ mod tests {
                 serde_json::from_str(line.strip_prefix(PREFIX).unwrap()).unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn current_profile_is_bounded_phase_local_joined_and_emitted_once_after_refusal() {
+        for phase in [
+            FailurePhase::AppServing,
+            FailurePhase::ShellServing,
+            FailurePhase::Preparation,
+        ] {
+            let (mut recorder, ..) = fixture();
+            recorder
+                .enrolled(Digest::new(b"actual Controller DATA"))
+                .unwrap();
+            recorder.enter(phase);
+            recorder.current_serving_profile(Some(
+                super::super::super::self_check_profile::CurrentProfile::maximal_fixture(),
+            ));
+            if phase == FailurePhase::AppServing {
+                recorder.preparation_timings(
+                    super::super::preparation_timing::Timings::maximal_summary_fixture(),
+                );
+            }
+            recorder.refuse(None).unwrap();
+            let text = std::str::from_utf8(&recorder.output).unwrap();
+            let profiles = text
+                .lines()
+                .filter_map(|line| line.strip_prefix(SELF_CHECK_PREFIX))
+                .collect::<Vec<_>>();
+            if phase == FailurePhase::AppServing {
+                assert_eq!(profiles.len(), 1);
+                assert!(SELF_CHECK_PREFIX.len() + profiles[0].len() < MAX_CURRENT_SELF_CHECK_BYTES);
+                let profile: Value = serde_json::from_str(profiles[0]).unwrap();
+                assert_eq!(
+                    profile["format"],
+                    "controller_current_app_serving_exclusive_ns_v2"
+                );
+                assert_eq!(profile["scope"], "whole_current_app_serving_operation");
+                assert_eq!(profile["sequence"], 2);
+                assert_eq!(
+                    profile["selection"],
+                    serde_json::to_value(&recorder.selection).unwrap()
+                );
+                assert_eq!(
+                    profile["controller_incarnation"],
+                    serde_json::to_value(&recorder.incarnation).unwrap()
+                );
+                assert_eq!(profile["profile"]["rows"].as_array().unwrap().len(), 16);
+                assert_eq!(profile["physical"]["rows"].as_array().unwrap().len(), 4);
+                assert!(
+                    profile.get("step").is_none(),
+                    "Current is not a bootstrap action"
+                );
+                assert_eq!(
+                    records(&recorder.output)[1]["sequence"],
+                    profile["sequence"]
+                );
+                assert!(
+                    records(&recorder.output)[1]["observation"]
+                        .get("timing")
+                        .is_none()
+                );
+            } else {
+                assert!(profiles.is_empty());
+            }
+            let length = recorder.output.len();
+            recorder.refuse(None).unwrap();
+            assert_eq!(length, recorder.output.len());
+            assert!(recorder.refused && !recorder.activated);
+        }
+        let (mut recorder, ..) = fixture();
+        recorder.current_serving_profile(Some(
+            super::super::super::self_check_profile::CurrentProfile::maximal_fixture(),
+        ));
+        recorder.enter(FailurePhase::AppServing);
+        assert!(recorder.current_serving_profile.is_none());
+    }
+
+    #[test]
+    fn serving_steps_and_exclusive_profile_share_one_bounded_refusal_without_stale_slots() {
+        let (mut recorder, ..) = fixture();
+        recorder
+            .enrolled(Digest::new(b"actual Controller DATA"))
+            .unwrap();
+        recorder.enter(FailurePhase::AppServing);
+        recorder.serving_timing(super::super::serving_timing::ServingTiming::maximal_fixture());
+        recorder.current_serving_profile(Some(
+            super::super::super::self_check_profile::CurrentProfile::maximal_fixture(),
+        ));
+        recorder.refuse(None).unwrap();
+        let ordinary = records(&recorder.output);
+        assert_eq!(
+            ordinary[1]["observation"]["serving"]["scope"],
+            "current_app_serving"
+        );
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let numeric = text
+            .lines()
+            .filter_map(|line| line.strip_prefix(SELF_CHECK_PREFIX))
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(numeric.len(), 1);
+        assert_eq!(numeric[0]["sequence"], ordinary[1]["sequence"]);
+        assert!(recorder.refused && !recorder.activated && recorder.serving == [false; 2]);
+        // Phase reset clears both independently retained DATA slots.
+        recorder.enter(FailurePhase::ShellServing);
+        assert!(recorder.serving_timing.is_none() && recorder.current_serving_profile.is_none());
+    }
+
+    #[test]
+    fn current_profile_before_physical_work_has_no_fabricated_rows_or_native_success() {
+        let (mut recorder, ..) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::AppServing);
+        let (result, profile) = crate::security_epoch::self_check_profile::sample_current(|| {
+            Err::<(), _>("role refused")
+        });
+        assert_eq!(result, Err("role refused"));
+        recorder.current_serving_profile(profile);
+        recorder.refuse(None).unwrap();
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let row: Value = serde_json::from_str(
+            text.lines()
+                .find_map(|line| line.strip_prefix(SELF_CHECK_PREFIX))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(row.get("physical").is_none());
+        assert_eq!(row["profile"]["samples"], 1);
+        assert_eq!(
+            records(&recorder.output)[1]["observation"]["event"],
+            "refused"
+        );
+        assert!(!recorder.activated && recorder.serving == [false; 2]);
+    }
+
+    #[test]
+    fn current_profile_export_failure_keeps_the_actual_native_error() {
+        struct Fails;
+        impl RecordOutput for Fails {
+            fn append(&mut self, _: &[u8]) -> std::io::Result<()> {
+                Err(std::io::Error::other("private logger refused"))
+            }
+        }
+        let mut recorder = Recorder::with_writer(Fails);
+        recorder.enter(FailurePhase::AppServing);
+        recorder.current_serving_profile(Some(
+            crate::security_epoch::self_check_profile::CurrentProfile::maximal_fixture(),
+        ));
+        let native = Err(anyhow::anyhow!("private original refusal").context(MustNotDisplay));
+        let recorded = recorder.refuse(native.as_ref().err());
+        assert!(recorded.is_err() && recorder.export_failed);
+        let error = super::super::preserve_native_failure(native, recorded).unwrap_err();
+        assert!(error.downcast_ref::<MustNotDisplay>().is_some());
+        assert!(!recorder.activated && recorder.serving == [false; 2]);
     }
 
     #[test]

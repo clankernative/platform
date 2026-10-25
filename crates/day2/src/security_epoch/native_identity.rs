@@ -42,6 +42,9 @@ impl NativeProcessObservation {
                     "epoch_native_executable_bound"
                 );
                 let code: Digest = costs.hash(|read_bytes| {
+                    let _profile = super::self_check_profile::enter(
+                        super::self_check_profile::Category::SelfExecutableBytes,
+                    );
                     let mut hash = Context::new(&SHA256);
                     let mut buffer = [0_u8; 65_536];
                     let mut size = 0_u64;
@@ -176,20 +179,23 @@ mod tests {
     fn linux_observer_retains_actual_self_executable_and_refuses_wrong_pin() {
         let code = Digest::new(&std::fs::read("/proc/self/exe").unwrap());
         let mut acquisition = NativeAcquisition::begin(5).unwrap();
-        let mut observed =
+        let (observed, profile) = super::super::self_check_profile::sample_current(|| {
             NativeProcessObservation::acquire(&code, &mut acquisition, &HashCosts::disabled())
-                .unwrap();
+        });
+        let mut observed = observed.unwrap();
+        assert_eq!(profile.unwrap().profile.rows[9].0, Some(1));
         assert_eq!(observed.code(), &code);
         observed.check(&mut acquisition).unwrap();
         let mut wrong = NativeAcquisition::begin(5).unwrap();
-        assert!(
+        let (refused, profile) = super::super::self_check_profile::sample_current(|| {
             NativeProcessObservation::acquire(
                 &Digest::new(b"other-code"),
                 &mut wrong,
-                &HashCosts::disabled()
+                &HashCosts::disabled(),
             )
-            .is_err()
-        );
+        });
+        assert!(refused.is_err());
+        assert_eq!(profile.unwrap().profile.rows[9].0, Some(1));
         assert!(wrong.remaining().is_err());
     }
 }

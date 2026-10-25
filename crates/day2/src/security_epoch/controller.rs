@@ -7,6 +7,7 @@ use crate::security_epoch::{
         ControllerServingListener, ControllerServingPeer, EnrolledProcessRoleOwner,
         InitialHolderListener, NativeRole,
     },
+    self_check_profile,
     storage_authority::{self, InitialStorageContinuity, InitialStorageOutcome},
 };
 use anyhow::{Context, Result, ensure};
@@ -198,19 +199,24 @@ fn run_inner(
             if active.app_pending()? {
                 evidence.enter(FailurePhase::AppServing);
                 let trace = serving_timing::ServingTiming::new();
-                let result = trace
-                    .measure(serving_timing::ServingStep::RoleStage, || {
-                        role.begin_current_stage()
-                    })
-                    .and_then(|stage| {
-                        trace.bind_progress(stage.diagnostic_progress());
-                        trace.measure(serving_timing::ServingStep::Operation, || {
-                            active.serve_app_current(stage, &trace)
+                let (result, profile) = self_check_profile::sample_current(|| {
+                    trace
+                        .measure(serving_timing::ServingStep::RoleStage, || {
+                            let _profile =
+                                self_check_profile::enter(self_check_profile::Category::RoleLocal);
+                            role.begin_current_stage()
                         })
-                    });
-                // The role/physical/provider borrows have returned or unwound.
-                // Only historical DATA is exported; no logging in the phase.
+                        .and_then(|stage| {
+                            trace.bind_progress(stage.diagnostic_progress());
+                            trace.measure(serving_timing::ServingStep::Operation, || {
+                                active.serve_app_current(stage, &trace)
+                            })
+                        })
+                });
+                // Both records contain only historical DATA after all native
+                // role/physical/provider borrows have returned or unwound.
                 evidence.serving_timing(trace.snapshot(result.as_ref().err()));
+                evidence.current_serving_profile(profile);
                 let observed = result?;
                 evidence.serving(ServingRole::App, observed)?;
             }
