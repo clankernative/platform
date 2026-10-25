@@ -36,13 +36,13 @@ impl FreshMemoryDatabase {
     /// Fresh scratch memory only. No pathname, original creator or native
     /// acquisition is accepted or produced by this constructor.
     fn data_only() -> Result<Self> {
-        let connection = Connection::open_in_memory()?;
+        let mut connection = Connection::open_in_memory()?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
         ensure!(
             connection.pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))? == 2,
             "epoch_preparation_temp_store_required"
         );
-        crate::store::configure_connection(&connection)?;
+        crate::store::configure_connection(&mut connection)?;
         Ok(Self { connection })
     }
 

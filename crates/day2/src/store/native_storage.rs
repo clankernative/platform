@@ -1,12 +1,20 @@
 //! Native-only existing-file Runtime admission under its actual serving scope.
 //! This never initializes, creates, adopts or migrates an installation.
 use super::{InitialStoreMetadata, Runtime, check_storage_binding, configure_connection};
+use crate::oauth::native_management::SqlOwner;
 use crate::security_epoch::{native_enrollment::EnrolledRoleStage, serving::CurrentServingPhase};
-use anyhow::{Result, ensure};
-use rusqlite::{Connection, OpenFlags};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{
+    Connection, OpenFlags,
+    hooks::{AuthAction, AuthContext, Authorization},
+};
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const DATABASE: &str = "/state/day2-native/day2-initial.sqlite";
@@ -24,8 +32,8 @@ impl Runtime {
             current.check_runtime_selection(stage, &metadata)?;
             // SQLite open can recover a journal; arm BEFORE any such attempt.
             current.arm(stage)?;
-            let connection = open_existing(Path::new(DATABASE))?;
-            configure_connection(&connection)?;
+            let mut connection = open_existing(Path::new(DATABASE))?;
+            configure_connection(&mut connection)?;
             current.admit_runtime_database(stage, &metadata, &connection)?;
             check_storage_binding(&connection, &metadata.artifact, &metadata.scope)?;
             let active = crate::authority_state::current(&connection)?;
@@ -75,6 +83,11 @@ impl Runtime {
                 host: Arc::new(crate::host::System(inputs.clone())),
                 inputs,
             };
+            if let Err((connection, error)) = connection.close() {
+                current.refuse();
+                drop(connection);
+                return Err(error).context("native initial SQL close refused");
+            }
             current.check(stage)?;
             current.finish_known(stage)?;
             Ok(runtime)
@@ -114,7 +127,7 @@ fn require_existing_oauth_schema(db: &Connection) -> Result<()> {
 
 // Lower SQLite adapter only. Production passes the fixed native leaf above;
 // the native scope, selection and postchecks remain mandatory at its caller.
-pub(super) fn open_existing(path: &Path) -> Result<Connection> {
+fn open_existing(path: &Path) -> Result<Connection> {
     Ok(Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -127,6 +140,291 @@ pub(super) fn open_existing(path: &Path) -> Result<Connection> {
 // retained native scope remain mandatory. No permission is derived from this.
 pub(super) fn is_native_database(path: &Path) -> bool {
     path == Path::new(DATABASE)
+}
+
+/// A deliberate business rollback is a known result only after SQLite confirms
+/// it and the same owner passes its postchecks. An error is never such a result.
+pub(crate) enum SqlDecision<T> {
+    Commit(T),
+    Rollback(T),
+}
+
+/// One nonescaping connection under an actual existing owning borrow. There is
+/// no raw/mutable connection getter, owned transaction result, role acquisition,
+/// clock replacement or finalization factory in this facade.
+pub(crate) struct RuntimeSql<'owner> {
+    connection: Option<Connection>,
+    owner: SqlOwner<'owner>,
+    failed: bool,
+}
+
+impl<'owner> RuntimeSql<'owner> {
+    pub(crate) fn with_owner<T>(
+        runtime: &Runtime,
+        mut owner: SqlOwner<'owner>,
+        operation: impl for<'sql> FnOnce(&'sql mut Self) -> Result<T>,
+    ) -> Result<T> {
+        // Runtime/Pending are already armed. A human adapter arms only its
+        // first actual SQL attempt. The actual same borrow remains held below.
+        owner.prepare(runtime)?;
+        let opened = if runtime.uses_native_storage() {
+            (|| {
+                let mut connection = open_existing(Path::new(DATABASE))?;
+                configure_connection(&mut connection)?;
+                Ok(connection)
+            })()
+        } else {
+            super::open(runtime.db())
+        };
+        let connection = match opened {
+            Ok(connection) => connection,
+            Err(error) => {
+                owner.refuse();
+                return Err(error);
+            }
+        };
+        let mut sql = Self {
+            connection: Some(connection),
+            owner,
+            failed: false,
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            sql.check()?;
+            runtime.check_binding(sql.connection.as_ref().context("SQL connection closed")?)?;
+            operation(&mut sql)
+        }));
+        // Close/recovery/rollback cleanup happens while the genuine owner is
+        // still borrowed, before its outer finish_known and final postchecks.
+        let closed = sql.close();
+        match result {
+            Ok(Ok(value)) => {
+                closed?;
+                sql.check()?;
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                sql.fail();
+                if closed.is_err() {
+                    return Err(error.context("SQL cleanup also refused"));
+                }
+                Err(error)
+            }
+            Err(payload) => {
+                sql.fail();
+                let _ = closed;
+                resume_unwind(payload)
+            }
+        }
+    }
+
+    pub(crate) fn check(&mut self) -> Result<()> {
+        ensure!(!self.failed, "native SQL unit already refused");
+        if let Err(error) = self.owner.check() {
+            self.fail();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn fail(&mut self) {
+        self.failed = true;
+        self.owner.refuse();
+    }
+
+    fn unit<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.check()?;
+        match catch_unwind(AssertUnwindSafe(|| operation(self))) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                self.fail();
+                Err(error)
+            }
+            Err(payload) => {
+                self.fail();
+                resume_unwind(payload)
+            }
+        }
+    }
+
+    pub(crate) fn read<T>(
+        &mut self,
+        operation: impl for<'db> FnOnce(&'db Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.unit(|sql| {
+            let connection = sql.connection.as_mut().context("SQL connection closed")?;
+            connection.pragma_update(None, "query_only", true)?;
+            let result = (|| {
+                sql.owner.check()?;
+                let tx = connection.transaction()?;
+                sql.owner.check()?;
+                let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
+                let value = operation(&tx);
+                let admitted = policy.finish();
+                match (value, admitted) {
+                    (Ok(value), Ok(())) => {
+                        sql.owner.commit_read(tx)?;
+                        Ok(value)
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        let rolled_back = tx.rollback();
+                        if rolled_back.is_err() {
+                            return Err(error.context("SQL rollback also refused"));
+                        }
+                        Err(error)
+                    }
+                }
+            })();
+            let restored = connection.pragma_update(None, "query_only", false);
+            match result {
+                Ok(value) => {
+                    restored?;
+                    Ok(value)
+                }
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    pub(crate) fn write<T>(
+        &mut self,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Transaction<'_>) -> Result<SqlDecision<T>>,
+    ) -> Result<T> {
+        self.unit(|sql| {
+            sql.owner.require_write()?;
+            sql.owner.check()?;
+            let connection = sql.connection.as_mut().context("SQL connection closed")?;
+            // Preserve the ordinary FIFO, its bounds and SQLite busy handler.
+            let tx = crate::write_queue::immediate(connection)?;
+            sql.owner.check()?;
+            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let value = operation(&tx);
+            let admitted = policy.finish();
+            match (value, admitted) {
+                (Ok(SqlDecision::Commit(value)), Ok(())) => {
+                    sql.owner.commit_write(tx)?;
+                    Ok(value)
+                }
+                (Ok(SqlDecision::Rollback(value)), Ok(())) => {
+                    sql.owner.rollback_write(tx)?;
+                    Ok(value)
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    let rolled_back = tx.rollback();
+                    if rolled_back.is_err() {
+                        return Err(error.context("SQL rollback also refused"));
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn close(&mut self) -> Result<()> {
+        let Some(connection) = self.connection.take() else {
+            self.fail();
+            anyhow::bail!("SQL connection already closed");
+        };
+        if let Err((connection, error)) = connection.close() {
+            self.fail();
+            // Owned cleanup only. A failed close never becomes Known or a
+            // retry, even if dropping the remaining handle later succeeds.
+            drop(connection);
+            return Err(error).context("native SQL close refused");
+        }
+        ensure!(!self.failed, "native SQL unit already refused");
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SqlMode {
+    Read,
+    Write,
+}
+
+struct CallbackPolicy<'db> {
+    db: &'db Connection,
+    denied: Arc<AtomicBool>,
+    installed: bool,
+}
+
+impl<'db> CallbackPolicy<'db> {
+    fn install(db: &'db Connection, mode: SqlMode) -> Result<Self> {
+        let denied = Arc::new(AtomicBool::new(false));
+        let callback_denied = denied.clone();
+        db.authorizer(Some(move |context: AuthContext<'_>| {
+            if allowed_sql(context.action, mode) {
+                Authorization::Allow
+            } else {
+                callback_denied.store(true, Ordering::SeqCst);
+                Authorization::Deny
+            }
+        }))?;
+        Ok(Self {
+            db,
+            denied,
+            installed: true,
+        })
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.installed = false;
+        self.db
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        ensure!(
+            !self.denied.load(Ordering::SeqCst),
+            "native SQL callback control refused"
+        );
+        Ok(())
+    }
+}
+
+impl Drop for CallbackPolicy<'_> {
+    fn drop(&mut self) {
+        // Restore control before Transaction's rollback during unwinding. The
+        // surrounding unit records terminal refusal and resumes the panic.
+        if self.installed
+            && self
+                .db
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .is_err()
+        {
+            self.denied.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn allowed_sql(action: AuthAction<'_>, mode: SqlMode) -> bool {
+    match action {
+        AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => true,
+        AuthAction::Function { function_name } => {
+            !["load_extension", "readfile", "writefile", "fts3_tokenizer"]
+                .iter()
+                .any(|name| function_name.eq_ignore_ascii_case(name))
+        }
+        AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. } => {
+            matches!(mode, SqlMode::Write)
+        }
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value,
+        } => {
+            (pragma_name.eq_ignore_ascii_case("foreign_key_check") && pragma_value.is_none())
+                || [
+                    "table_info",
+                    "table_xinfo",
+                    "index_list",
+                    "index_info",
+                    "index_xinfo",
+                    "foreign_key_list",
+                ]
+                .iter()
+                .any(|name| pragma_name.eq_ignore_ascii_case(name))
+        }
+        // BEGIN/COMMIT/ROLLBACK, savepoints, attach/detach, DDL, unknown codes
+        // and state-changing pragmas belong to the facade, never its callback.
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -177,8 +475,8 @@ mod tests {
     #[test]
     fn existing_oauth_admission_never_installs_repairs_or_restamps_native_state()
     -> anyhow::Result<()> {
-        let db = Connection::open_in_memory()?;
-        super::configure_connection(&db)?;
+        let mut db = Connection::open_in_memory()?;
+        super::configure_connection(&mut db)?;
         assert!(require_existing_oauth_schema(&db).is_err());
         assert_eq!(
             db.query_row("SELECT count(*) FROM sqlite_master", [], |row| row
