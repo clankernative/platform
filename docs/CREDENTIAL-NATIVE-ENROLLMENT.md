@@ -470,3 +470,14 @@ Metadata equality and observer read-only access do not justify an issuer-lifetim
 containerd digest cache under this contract. Fresh full hashing remains required
 at each distinct identity observation, including guards around runtime and
 Kubernetes work.
+
+The issuer's owner and selected-container projections come from one bounded,
+validated Pod body. `runtime_profile::container` returns both DATA values after
+the existing Pod lifecycle, namespace, subject, service-account, controlling-owner,
+container, image, state and restart checks. The caller no longer repeats the same
+Pod validation immediately before invoking that helper. Missing or ambiguous
+owners and foreign Pod identity still refuse without a result. This shares only
+pure processing of the same captured bytes: Kubernetes requests, actual process
+owners, fresh hash/check boundaries and original intervals are unchanged. It is
+not a cached workload observation or native permission; no node-latency saving
+is established by this parsing-only change.

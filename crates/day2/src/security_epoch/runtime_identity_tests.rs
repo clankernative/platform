@@ -113,10 +113,48 @@ fn fixture() -> (GkeRoleSelection, ReviewedSubject, Value) {
 }
 
 #[test]
+fn container_facts_and_owner_require_the_same_checked_pod_body() {
+    let (role, subject, good) = fixture();
+    let observed =
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&good).unwrap()).unwrap();
+    assert_eq!(observed.facts.pod_uid, subject.pod_uid);
+    assert_eq!(
+        observed.owner["uid"],
+        good["metadata"]["ownerReferences"][0]["uid"]
+    );
+    for change in 0..3 {
+        let mut bad = good.clone();
+        match change {
+            0 => bad["metadata"]["ownerReferences"] = json!([]),
+            1 => bad["metadata"]["ownerReferences"][0]["controller"] = json!(false),
+            _ => {
+                let second = bad["metadata"]["ownerReferences"][0].clone();
+                bad["metadata"]["ownerReferences"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(second);
+            }
+        }
+        assert!(
+            runtime_profile::container(&role, &subject, &serde_json::to_vec(&bad).unwrap())
+                .is_err()
+        );
+    }
+    let mut foreign = good.clone();
+    foreign["metadata"]["uid"] = json!("other-pod");
+    assert!(
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&foreign).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
 fn selected_container_response_is_data_and_refuses_replacement_ambiguous_or_unpinned_image() {
     let (role, subject, good) = fixture();
     let bytes = serde_json::to_vec(&good).unwrap();
-    let facts = runtime_profile::container(&role, &subject, &bytes).unwrap();
+    let observed = runtime_profile::container(&role, &subject, &bytes).unwrap();
+    assert_eq!(observed.owner["uid"], "replica-uid");
+    let facts = observed.facts;
     assert_eq!(facts.pod_uid, "pod-uid");
     assert_eq!(facts.image, role.container.image);
     let mut not_ready = good.clone();
