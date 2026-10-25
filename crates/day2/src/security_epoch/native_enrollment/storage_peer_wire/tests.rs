@@ -297,6 +297,101 @@ fn signed(statement: &StageStatement, key: &KeyOwner, body: Body) -> Message {
 }
 
 #[test]
+fn received_message_has_exactly_one_final_observation_after_valid_signature() {
+    let (_, statement, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    struct Owner {
+        statement: StageStatement,
+        observations: u32,
+    }
+    let original = statement.original.clone();
+    let mut owner = Owner {
+        statement,
+        observations: 0,
+    };
+    verify_message_then_observe(
+        &mut owner,
+        &message,
+        |owner| &owner.statement,
+        |owner| {
+            owner.observations += 1;
+            assert!(owner.statement.original == original);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(owner.observations, 1);
+}
+
+#[test]
+fn invalid_message_never_reaches_a_successful_native_observation() {
+    let (_, mut statement, key) = fixture(NativeRole::AppHost);
+    let mut message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    message.signature = "invalid".into();
+    let mut observed = false;
+    let result = verify_message_then_observe(
+        &mut statement,
+        &message,
+        |statement| statement,
+        |_| {
+            observed = true;
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!observed);
+}
+
+#[test]
+fn every_valid_message_reobserves_and_preserves_the_actual_observation_refusal() {
+    let (_, mut statement, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    let mut observations = 0;
+    for allowed in [true, false, false] {
+        let result = verify_message_then_observe(
+            &mut statement,
+            &message,
+            |statement| statement,
+            |_| {
+                observations += 1;
+                anyhow::ensure!(allowed, "actual sender observation refused");
+                Ok(())
+            },
+        );
+        if allowed {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "actual sender observation refused"
+            );
+        }
+    }
+    assert_eq!(
+        observations, 3,
+        "a prior observation is never a cached grant"
+    );
+}
+
+#[test]
 fn stage_data_requires_the_same_issuer_role_process_and_live_original_interval() {
     let (policy, stage, _key) = fixture(NativeRole::AppHost);
     let now = Duration::from_secs(102);
