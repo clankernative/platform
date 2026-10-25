@@ -54,12 +54,10 @@ impl ActiveControllerStorageContinuity {
             trace.measure(ServingStep::ProviderBefore, || {
                 reads.check_observation(physical.controller_stage()?, &mut observed)
             })?;
-            physical.announce_and_await_app_consumed(trace)?;
-            // The actual App has now recorded its consumer and original
-            // postchecks. Reobserve the fixed counter before final release.
-            observed = trace.measure(ServingStep::CounterAfter, || {
-                reads.read(physical.controller_stage()?, &self.store, &names)
-            })?;
+            // Await the actual App consumer and original postchecks, then
+            // reobserve the fixed counter through one closed physical join.
+            observed =
+                physical.announce_and_read_app_consumed(&mut reads, &self.store, &names, trace)?;
             trace.measure(ServingStep::ValidateAfter, || {
                 check_active_snapshot(
                     &self.store,

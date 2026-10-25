@@ -513,7 +513,7 @@ net saving. The roughly 90.5-ms App scan mean is likewise not a guarantee.
 | Observation validation followed by physical admission | Keep a full check after validation: `RetainedEpochReads::check_observation` samples through real self-process/FD and stage observations. A preceding physical check cannot cover that intervening I/O. | No deletion of the required post-I/O boundary. |
 | App's last explicit `physical.check`, pure `snapshot_digest`, then `finish_app_known`'s entry check | Removed in the settlement child. The digest is bounded public DATA and the closed finisher keeps its full entry check before release work. | One composite. |
 | `announce_app_known` postcheck then immediately `await_app_consumed` entry check | Removed by the closed `announce_and_await_app_consumed` operation. One middle full check serves post-send and pre-wait; pre-announcement and post-wait full checks remain. | One composite. |
-| Acknowledgement postcheck then next epoch-read stage getter | Closed-composition candidate. Retain the actual phase across the immediate checked-stage handoff into the fixed read, as with initial authentication; do not expose a cached checked token. | One composite if that handoff is implemented. |
+| Acknowledgement postcheck then next epoch-read stage getter | Removed in the fixed acknowledgement/read child. The closed phase operation performs the post-wait full check once and directly calls the same retained reader through its checked file stage. Reader checks and later physical post-read validation remain. | One composite. |
 | Terminal composite's last file check then explicit durability's first file check | Local file-check fusion candidate. Keep the later provider round: peer executable/proc/namespace observations separated it from the prior durability round. | One local file check; no provider round or App scan. |
 | App scope physical checks around `reads.check_observation` in `CurrentAppServingPhase::check` | Keep: real self-process/FD/stage I/O intervenes. The physical App file/peer must be observed again afterward. | None from deleting a repeat. |
 
@@ -534,6 +534,16 @@ completed App Current operation: ten metadata reads and four App scans. The
 preceding first-observation fix removes one more composite in that App path.
 Those are structural counts at a later frontier not reached by native26/27;
 no measured net saving, action completion or five-second fit is claimed.
+
+The acknowledgement/read child extends the same closed operation through the
+fixed next epoch read. Its full post-acknowledgement check now serves the
+immediate pre-read boundary, with no intervening work or stage publication.
+The actual retained reader still checks exact selection and names, original
+clock, process and owner before and after transport. Its failure also refuses
+the physical phase; the caller's later full observation-admission checks remain.
+This saves one additional composite per completed App Current operation: five
+metadata reads and two App scan groups. These later-frontier counts remain
+structural, with no native26/27 net saving or successful completion claim.
 
 No later candidate changes the frozen #268/#269 sources selected for native28.
 A temporary canary measurement ceiling, authentication limits and issuer work
