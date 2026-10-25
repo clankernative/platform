@@ -21,12 +21,14 @@ struct Process {
     hwm: u64,
     threads: u64,
     jobserver_fifo_visible: bool,
+    jobserver_env_matches: Option<bool>,
+    jobserver_open_observed: Option<bool>,
 }
 
 impl Process {
     fn json(&self) -> String {
         format!(
-            "{{\"pid\":{},\"parent\":{},\"birth_ticks\":{},\"kind\":\"{}\",\"owner\":\"{}\",\"rss_kib\":{},\"hwm_kib\":{},\"threads\":{},\"jobserver_fifo_visible\":{}}}",
+            "{{\"pid\":{},\"parent\":{},\"birth_ticks\":{},\"kind\":\"{}\",\"owner\":\"{}\",\"rss_kib\":{},\"hwm_kib\":{},\"threads\":{},\"jobserver_fifo_visible\":{},\"jobserver_env_matches\":{},\"jobserver_open_observed\":{}}}",
             self.pid,
             self.parent,
             self.birth,
@@ -35,7 +37,11 @@ impl Process {
             self.rss,
             self.hwm,
             self.threads,
-            self.jobserver_fifo_visible
+            self.jobserver_fifo_visible,
+            self.jobserver_env_matches
+                .map_or("null", |v| if v { "true" } else { "false" }),
+            self.jobserver_open_observed
+                .map_or("null", |v| if v { "true" } else { "false" })
         )
     }
 }
@@ -95,6 +101,27 @@ fn process(pid: u32) -> Option<Process> {
     } else {
         "not_a_rust_unit"
     };
+    // Inspect two closed scheduling facts only. Never retain environment bytes,
+    // other variable names/values, or descriptor targets.
+    let jobserver_env_matches = if kind == "rustc" {
+        read(format!("{directory}/environ"), 65536).map(|env| {
+            env.split('\0').any(|value| {
+                value == "CARGO_MAKEFLAGS=--jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver"
+            })
+        })
+    } else {
+        None
+    };
+    let jobserver_open_observed = if kind == "rustc" {
+        fs::read_dir(format!("{directory}/fd")).ok().map(|fds| {
+            fds.take(128).flatten().any(|fd| {
+                fs::read_link(fd.path())
+                    .is_ok_and(|target| target == Path::new("/var/tmp/day2-rustc-jobserver"))
+            })
+        })
+    } else {
+        None
+    };
     Some(Process {
         pid,
         parent: field(&status, "PPid:")?.try_into().ok()?,
@@ -108,6 +135,8 @@ fn process(pid: u32) -> Option<Process> {
             "{directory}/root/var/tmp/day2-rustc-jobserver"
         ))
         .is_ok_and(|metadata| metadata.file_type().is_fifo()),
+        jobserver_env_matches,
+        jobserver_open_observed,
     })
 }
 
@@ -166,6 +195,15 @@ fn run() -> io::Result<i32> {
                     peak.rss = peak.rss.max(item.rss);
                     peak.hwm = peak.hwm.max(item.hwm);
                     peak.threads = peak.threads.max(item.threads);
+                    if peak.jobserver_env_matches != Some(true) {
+                        peak.jobserver_env_matches =
+                            item.jobserver_env_matches.or(peak.jobserver_env_matches);
+                    }
+                    if peak.jobserver_open_observed != Some(true) {
+                        peak.jobserver_open_observed = item
+                            .jobserver_open_observed
+                            .or(peak.jobserver_open_observed);
+                    }
                 } else {
                     inventory_truncated = true;
                 }

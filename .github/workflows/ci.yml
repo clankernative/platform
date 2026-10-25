@@ -67,7 +67,6 @@ jobs:
         part:
         - tests
     env:
-      CARGO_MAKEFLAGS: "--jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver"
       DAY2_TEMPORAL_CLI: "/tmp/day2-tools/temporal"
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -76,8 +75,6 @@ jobs:
     - name: Compile the std-only numeric observer
       run: rustc --edition=2024 -Copt-level=0 .github/diagnostics/compile_memory.rs
         -o /tmp/day2-compile-memory
-      env:
-        CARGO_MAKEFLAGS: ''
     - name: Check out the exact source under observation
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
