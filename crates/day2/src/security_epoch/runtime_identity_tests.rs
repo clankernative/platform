@@ -112,11 +112,182 @@ fn fixture() -> (GkeRoleSelection, ReviewedSubject, Value) {
     (role, subject, value)
 }
 
+// The DATA tests cannot construct a native issuer. This finite AST guard binds
+// their projection to its actual caller and rejects the historical duplicate
+// calls. It is not a general alias resolver or call-graph proof.
+fn issuer_pod_projection_shape(native: &str, profile: &str) -> bool {
+    use syn::visit::Visit;
+
+    fn is_name(value: &syn::Expr, name: &str) -> bool {
+        matches!(value, syn::Expr::Path(path) if path.path.is_ident(name))
+    }
+
+    fn is_ref(value: &syn::Expr, name: &str) -> bool {
+        matches!(value, syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && is_name(&reference.expr, name))
+    }
+
+    struct Calls {
+        profile: bool,
+        events: Vec<&'static str>,
+        arguments: bool,
+    }
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func {
+                let names = path.path.segments.iter().rev().take(2).collect::<Vec<_>>();
+                if names.len() == 2 {
+                    let args = node.args.iter().collect::<Vec<_>>();
+                    if names[1].ident == "runtime_profile" && names[0].ident == "container" {
+                        self.events.push("container");
+                        self.arguments &= args.len() == 3
+                            && is_name(args[0], "selected")
+                            && is_ref(args[1], "reviewed")
+                            && is_ref(args[2], "pod");
+                    } else if names[1].ident == "identity_protocol" && names[0].ident == "pod" {
+                        self.events.push("pod");
+                        self.arguments &= self.profile
+                            && args.len() == 3
+                            && is_name(args[0], "role")
+                            && is_name(args[1], "reviewed")
+                            && is_name(args[2], "bytes");
+                    } else if names[1].ident == "identity_protocol" && names[0].ident == "workload"
+                    {
+                        self.events.push("workload");
+                        self.arguments &= args.len() == 4
+                            && is_name(args[0], "selected")
+                            && is_ref(args[1], "owner");
+                    } else if self.profile && names[1].ident == "json" && names[0].ident == "decode"
+                    {
+                        self.events.push("decode");
+                        self.arguments &= args.len() == 1 && is_name(args[0], "bytes");
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+
+    fn calls(source: &str, name: &str, profile: bool) -> Calls {
+        let source = syn::parse_file(source).expect("actual production source must parse");
+        let methods = source
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods.len(), 1, "one actual projection caller/helper");
+        let mut result = Calls {
+            profile,
+            events: Vec::new(),
+            arguments: true,
+        };
+        result.visit_block(&methods[0].block);
+        result
+    }
+
+    let caller = calls(native, "kubernetes", false);
+    let helper = calls(profile, "container", true);
+    caller.arguments
+        && helper.arguments
+        && caller.events == ["container", "workload"]
+        && helper.events == ["pod", "decode"]
+}
+
+#[test]
+fn issuer_pod_projection_uses_one_identity_validation_in_the_actual_path() {
+    assert!(issuer_pod_projection_shape(
+        include_str!("native_enrollment/runtime.rs"),
+        include_str!("runtime_profile.rs"),
+    ));
+}
+
+#[test]
+fn issuer_pod_projection_guard_rejects_restored_duplicates_and_decode_reordering() {
+    let native = include_str!("native_enrollment/runtime.rs");
+    let profile = include_str!("runtime_profile.rs");
+    let replace = |source: &str, old: &str, new: &str| {
+        assert_eq!(source.matches(old).count(), 1, "exact restoration control");
+        source.replacen(old, new, 1)
+    };
+    let caller = "    let observed = runtime_profile::container(selected, &reviewed, &pod)?;";
+    let restored = replace(
+        native,
+        caller,
+        &format!("    let _ = identity_protocol::pod(selected, &reviewed, &pod)?;\n{caller}"),
+    );
+    assert!(!issuer_pod_projection_shape(&restored, profile));
+
+    let validator = "    let owner = identity_protocol::pod(role, reviewed, bytes)?;";
+    let restored = replace(
+        profile,
+        validator,
+        &format!("{validator}\n    let _ = identity_protocol::pod(role, reviewed, bytes)?;"),
+    );
+    assert!(!issuer_pod_projection_shape(native, &restored));
+
+    let foreign_body = replace(
+        native,
+        caller,
+        "    let observed = runtime_profile::container(selected, &reviewed, &ca)?;",
+    );
+    assert!(!issuer_pod_projection_shape(&foreign_body, profile));
+
+    let decoding = "    let value: Value = crate::json::decode(bytes)?;";
+    let reversed = replace(
+        profile,
+        &format!("{validator}\n{decoding}"),
+        &format!("{decoding}\n{validator}"),
+    );
+    assert!(!issuer_pod_projection_shape(native, &reversed));
+}
+
+#[test]
+fn container_facts_and_owner_require_the_same_checked_pod_body() {
+    let (role, subject, good) = fixture();
+    let observed =
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&good).unwrap()).unwrap();
+    assert_eq!(observed.facts.pod_uid, subject.pod_uid);
+    assert_eq!(
+        observed.owner["uid"],
+        good["metadata"]["ownerReferences"][0]["uid"]
+    );
+    for change in 0..3 {
+        let mut bad = good.clone();
+        match change {
+            0 => bad["metadata"]["ownerReferences"] = json!([]),
+            1 => bad["metadata"]["ownerReferences"][0]["controller"] = json!(false),
+            _ => {
+                let second = bad["metadata"]["ownerReferences"][0].clone();
+                bad["metadata"]["ownerReferences"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(second);
+            }
+        }
+        assert!(
+            runtime_profile::container(&role, &subject, &serde_json::to_vec(&bad).unwrap())
+                .is_err()
+        );
+    }
+    let mut foreign = good.clone();
+    foreign["metadata"]["uid"] = json!("other-pod");
+    assert!(
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&foreign).unwrap())
+            .is_err()
+    );
+}
+
 #[test]
 fn selected_container_response_is_data_and_refuses_replacement_ambiguous_or_unpinned_image() {
     let (role, subject, good) = fixture();
     let bytes = serde_json::to_vec(&good).unwrap();
-    let facts = runtime_profile::container(&role, &subject, &bytes).unwrap();
+    let observed = runtime_profile::container(&role, &subject, &bytes).unwrap();
+    assert_eq!(observed.owner["uid"], "replica-uid");
+    let facts = observed.facts;
     assert_eq!(facts.pod_uid, "pod-uid");
     assert_eq!(facts.image, role.container.image);
     let mut not_ready = good.clone();

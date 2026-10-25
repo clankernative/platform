@@ -20,6 +20,14 @@ pub(super) struct ContainerFacts {
     pub restart_count: u64,
 }
 
+/// Both projections come from the same bounded, validated Pod response.
+/// These are DATA, not an authenticated runtime or current permission.
+#[derive(Debug)]
+pub(super) struct ContainerObservation {
+    pub facts: ContainerFacts,
+    pub owner: Value,
+}
+
 fn selected_digest(value: &str) -> Result<Digest> {
     ensure!(value.len() <= 1024, "epoch_native_image_bound");
     let (repository, hash) = value
@@ -57,12 +65,12 @@ pub(super) fn container(
     role: &GkeRoleSelection,
     reviewed: &ReviewedSubject,
     bytes: &[u8],
-) -> Result<ContainerFacts> {
+) -> Result<ContainerObservation> {
     let selected = &role.container;
     selected.validate()?;
     // Reuse actual response-shape/lifecycle/role/owner joins. This remains DATA:
     // authenticated transport and real runtime identity are separate owners.
-    identity_protocol::pod(role, reviewed, bytes)?;
+    let owner = identity_protocol::pod(role, reviewed, bytes)?;
     let value: Value = crate::json::decode(bytes)?;
     let containers = value
         .pointer("/spec/containers")
@@ -140,13 +148,16 @@ pub(super) fn container(
         .get("restartCount")
         .and_then(Value::as_u64)
         .context("epoch_native_restart_count")?;
-    Ok(ContainerFacts {
-        pod_name: reviewed.pod_name.clone(),
-        pod_uid: reviewed.pod_uid.clone(),
-        node_name: node_name.to_owned(),
-        container_name: selected.name.clone(),
-        container_id: container_id.to_owned(),
-        image: selected.image.clone(),
-        restart_count,
+    Ok(ContainerObservation {
+        facts: ContainerFacts {
+            pod_name: reviewed.pod_name.clone(),
+            pod_uid: reviewed.pod_uid.clone(),
+            node_name: node_name.to_owned(),
+            container_name: selected.name.clone(),
+            container_id: container_id.to_owned(),
+            image: selected.image.clone(),
+            restart_count,
+        },
+        owner,
     })
 }

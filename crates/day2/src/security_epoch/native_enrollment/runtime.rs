@@ -373,8 +373,9 @@ fn kubernetes(
         None,
         acquisition,
     )?);
-    let owner = identity_protocol::pod(selected, &reviewed, &pod)?;
-    let facts = runtime_profile::container(selected, &reviewed, &pod)?;
+    let observed = runtime_profile::container(selected, &reviewed, &pod)?;
+    let owner = observed.owner;
+    let facts = observed.facts;
     ensure!(
         facts.container_id == format!("containerd://{}", container.id)
             && facts.node_name == policy.runtime.node_name,
