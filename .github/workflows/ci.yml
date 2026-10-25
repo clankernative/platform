@@ -67,7 +67,7 @@ jobs:
         part:
         - tests
     env:
-      CARGO_MAKEFLAGS: "--jobserver-auth=fifo:/tmp/day2-rustc-jobserver"
+      CARGO_MAKEFLAGS: "--jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver"
       DAY2_TEMPORAL_CLI: "/tmp/day2-tools/temporal"
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -84,7 +84,7 @@ jobs:
         ref: "${{ inputs.source }}"
         persist-credentials: false
     - name: Create the single-job Rust codegen jobserver
-      run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
+      run: mkfifo --mode=600 /var/tmp/day2-rustc-jobserver
     - name: Download the pinned Linux Bazel executable
       if: "${{ runner.os == 'Linux' }}"
       run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64

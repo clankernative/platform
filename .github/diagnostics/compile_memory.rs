@@ -20,12 +20,13 @@ struct Process {
     rss: u64,
     hwm: u64,
     threads: u64,
+    jobserver_fifo_visible: bool,
 }
 
 impl Process {
     fn json(&self) -> String {
         format!(
-            "{{\"pid\":{},\"parent\":{},\"birth_ticks\":{},\"kind\":\"{}\",\"owner\":\"{}\",\"rss_kib\":{},\"hwm_kib\":{},\"threads\":{}}}",
+            "{{\"pid\":{},\"parent\":{},\"birth_ticks\":{},\"kind\":\"{}\",\"owner\":\"{}\",\"rss_kib\":{},\"hwm_kib\":{},\"threads\":{},\"jobserver_fifo_visible\":{}}}",
             self.pid,
             self.parent,
             self.birth,
@@ -33,7 +34,8 @@ impl Process {
             self.owner,
             self.rss,
             self.hwm,
-            self.threads
+            self.threads,
+            self.jobserver_fifo_visible
         )
     }
 }
@@ -60,6 +62,7 @@ fn field(text: &str, name: &str) -> Option<u64> {
 }
 
 fn process(pid: u32) -> Option<Process> {
+    use std::os::unix::fs::FileTypeExt;
     let directory = format!("/proc/{pid}");
     let name = read(format!("{directory}/comm"), 64)?;
     let kind = match name.trim() {
@@ -101,6 +104,10 @@ fn process(pid: u32) -> Option<Process> {
         rss: field(&status, "VmRSS:").unwrap_or(0),
         hwm: field(&status, "VmHWM:").unwrap_or(0),
         threads: field(&status, "Threads:").unwrap_or(0),
+        jobserver_fifo_visible: fs::metadata(format!(
+            "{directory}/root/var/tmp/day2-rustc-jobserver"
+        ))
+        .is_ok_and(|metadata| metadata.file_type().is_fifo()),
     })
 }
 
