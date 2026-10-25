@@ -417,6 +417,96 @@ mod current_acquisition_tests {
     use day2_capabilities::Digest;
     use std::{cell::Cell, rc::Rc, time::Duration};
 
+    // The DATA fixture below exercises ordering and refusal. This separate AST
+    // guard binds it to the actual native caller, which cannot be constructed
+    // by a macOS test. It counts the full check and its checked field borrow,
+    // rather than accepting a helper test whose caller might repeat the work.
+    fn native_handoff_shape(source: &str) -> (usize, usize, usize, usize) {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            handoffs: usize,
+            checks: usize,
+            full_getters: usize,
+            checked_borrows: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                if matches!(&*node.func, syn::Expr::Path(path)
+                    if path.path.is_ident("acquire_initial_current_stage"))
+                {
+                    self.handoffs += 1;
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("phase")) {
+                    self.checks += usize::from(node.method == "check");
+                    self.full_getters += usize::from(node.method == "controller_stage");
+                }
+                if node.method == "controller_stage_after_check"
+                    && matches!(&*node.receiver, syn::Expr::Field(field)
+                        if field.member == syn::Member::Named(syn::Ident::new("file", proc_macro2::Span::call_site()))
+                        && matches!(&*field.base, syn::Expr::Path(path) if path.path.is_ident("phase")))
+                {
+                    self.checked_borrows += 1;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let method = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.is_ident("InitialStorageContinuity")) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| &item.items)
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "begin_current_app" => {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .expect("actual native Current constructor");
+        let mut calls = Calls::default();
+        calls.visit_block(&method.block);
+        (
+            calls.handoffs,
+            calls.checks,
+            calls.full_getters,
+            calls.checked_borrows,
+        )
+    }
+
+    #[test]
+    fn native_current_caller_has_one_full_check_and_borrows_its_checked_stage() {
+        assert_eq!(
+            native_handoff_shape(include_str!("initial.rs")),
+            (1, 1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn native_current_caller_guard_rejects_restoring_the_full_getter() {
+        let source = include_str!("initial.rs");
+        let repeated = source.replacen(
+            "phase.file.controller_stage_after_check()",
+            "phase.controller_stage()",
+            1,
+        );
+        assert_ne!(source, repeated);
+        assert_ne!(native_handoff_shape(&repeated), (1, 1, 0, 1));
+    }
+
     // Only controlled DATA and the existing test clock. There is no conversion
     // to a native role, file, peer, physical phase or authenticated reader.
     struct Stage {
