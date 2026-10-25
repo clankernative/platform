@@ -42,11 +42,17 @@ def platform_rust_static_library(name, crate_name, internal_deps = [], linux_dep
 def platform_rust_binary(name, crate_name, internal_deps = [], linux_deps = [], own_library = None, rustc_env = {}, **kwargs):
     rust_binary(name = name, **dict(_attributes(crate_name, internal_deps, linux_deps, own_library, False, rustc_env), **kwargs))
 
-def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], own_library = None, rustc_env = {}, program_data = [], **kwargs):
+def platform_rust_test(name, crate_name, internal_deps = [], linux_deps = [], own_library = None, rustc_env = {}, program_data = [], linux_ci_jobserver = False, **kwargs):
     env = dict(rustc_env)
     for program in program_data:
         env["CARGO_BIN_EXE_" + program.rsplit(":", 1)[-1]] = "build-out/bin/" + program.rsplit(":", 1)[-1]
     attributes = _attributes(crate_name, internal_deps, linux_deps, own_library, True, env)
+    if linux_ci_jobserver:
+        # The large unit harness needs one LLVM job, not a smaller target set.
+        attributes["rustc_env"] = select({
+            "//build/bazel:linux_ci": dict(attributes["rustc_env"], CARGO_MAKEFLAGS = "--jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver"),
+            "//conditions:default": attributes["rustc_env"],
+        })
     # Harnesses unwind. The selected CI target profile, not the host OS alone,
     # supplies Linux LLVM partitioning/LTO overrides in the reviewed toolchain.
     attributes["rustc_flags"] = attributes["rustc_flags"] + ["-Cpanic=unwind"]
