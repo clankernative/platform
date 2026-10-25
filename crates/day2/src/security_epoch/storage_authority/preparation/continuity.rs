@@ -676,6 +676,123 @@ mod durable_acquisition_tests {
     use anyhow::Result;
     use std::{cell::Cell, rc::Rc};
 
+    // Bind the controlled sequencing tests to the real factory and both
+    // Controller callers. No fixture may construct a native phase or replace
+    // Linux conformance; this guard also runs where those owners are absent.
+    fn native_durable_shape(source: &str, initial: &str) -> (usize, usize, usize, usize, usize) {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            finishes: usize,
+            file_checks: usize,
+            observations: usize,
+            acquisitions: usize,
+            repeats: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                self.finishes += usize::from(matches!(&*node.func, syn::Expr::Path(path)
+                    if path.path.is_ident("finish_current_durability")));
+                syn::visit::visit_expr_call(self, node);
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                self.file_checks += usize::from(
+                    node.method == "check"
+                        && matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("current") || path.path.is_ident("file")),
+                );
+                self.observations += usize::from(node.method == "check_durability_profile");
+                self.acquisitions += usize::from(node.method == "acquire_durable");
+                self.repeats += usize::from(node.method == "check_current_durability");
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        fn method<'a>(file: &'a syn::File, owner: &str, name: &str) -> &'a syn::ImplItemFn {
+            file.items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Impl(item)
+                        if matches!(&*item.self_ty, syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|part| part.ident == owner)) =>
+                    {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .flat_map(|item| &item.items)
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                    _ => None,
+                })
+                .expect("actual native factory or caller")
+        }
+        let file = syn::parse_file(source).unwrap();
+        let initial = syn::parse_file(initial).unwrap();
+        let mut calls = Calls::default();
+        calls.visit_block(&method(&file, "PendingPhysicalFilePhase", "acquire_durable").block);
+        calls.visit_block(&method(&initial, "InitialStorageContinuity", "begin_current_app").block);
+        calls.visit_block(&method(&initial, "PendingControllerStoragePhase", "acquire").block);
+        (
+            calls.finishes,
+            calls.file_checks,
+            calls.observations,
+            calls.acquisitions,
+            calls.repeats,
+        )
+    }
+
+    #[test]
+    fn native_durable_factory_and_both_callers_do_not_repeat_the_acquisition_check() {
+        assert_eq!(
+            native_durable_shape(include_str!("continuity.rs"), include_str!("../initial.rs")),
+            (1, 1, 1, 2, 0),
+        );
+    }
+
+    #[test]
+    fn native_durable_guard_rejects_extra_factory_or_caller_checks() {
+        let source = include_str!("continuity.rs");
+        let initial = include_str!("../initial.rs");
+        let repeated_factory = source
+            .replacen(
+                "let current = CurrentPhysicalFilePhase",
+                "let mut current = CurrentPhysicalFilePhase",
+                1,
+            )
+            .replacen(
+                "let durable = || {",
+                "current.check()?; let durable = || {",
+                1,
+            );
+        assert_ne!(source, repeated_factory);
+        assert_ne!(
+            native_durable_shape(&repeated_factory, initial),
+            (1, 1, 1, 2, 0)
+        );
+        // Mutate each caller separately, so neither App nor Shell can silently
+        // restore the old immediate durability precheck after this factory.
+        let needle = "let mut file = ";
+        let mut count = 0;
+        for (offset, _) in initial.match_indices(needle) {
+            let tail = &initial[offset..];
+            let end = tail.find(';').unwrap() + offset + 1;
+            if !initial[offset..end].contains(".acquire_durable(stage") {
+                continue;
+            }
+            for repeat in [" file.check()?;", " file.check_current_durability()?;"] {
+                let mut repeated_caller = initial.to_owned();
+                repeated_caller.insert_str(end, repeat);
+                assert_ne!(
+                    native_durable_shape(source, &repeated_caller),
+                    (1, 1, 1, 2, 0)
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 2, "both native Controller paths are covered");
+    }
+
     struct Physical {
         checks: u32,
         observations: u32,
