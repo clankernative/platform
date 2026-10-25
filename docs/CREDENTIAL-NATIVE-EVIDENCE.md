@@ -466,7 +466,8 @@ joined ordinary App-serving refusal took 5.001278 seconds, versus native26's
 5.001639 seconds. It entered 21 provider HTTP scopes (1.214255 s), matching
 six setup calls and three completed storage rounds before the composite peer
 check. It started seventeen App scans (1.619518 s), with namespaces 0.151016 s,
-issuer transport 1.301037 s across four calls, and packet waiting 0.582002 s.
+issuer transport 1.301037 s across four transport spans (two sends and two
+receives in one issuer exchange), and packet waiting 0.582002 s.
 App scans remained the largest named exclusive leaf, about 32.4% of elapsed time.
 
 The marked physical rows were one completed durability check (325.382 ms),
@@ -510,11 +511,29 @@ net saving. The roughly 90.5-ms App scan mean is likewise not a guarantee.
 | --- | --- | --- |
 | First post-read `physical.check` then observation argument's full stage getter, App and Shell | Removed in this child; keep the getter's whole check before native observation validation. | One composite per fixed native operation, as counted above. |
 | Observation validation followed by physical admission | Keep a full check after validation: `RetainedEpochReads::check_observation` samples through real self-process/FD and stage observations. A preceding physical check cannot cover that intervening I/O. | No deletion of the required post-I/O boundary. |
-| App's last explicit `physical.check`, pure `snapshot_digest`, then `finish_app_known`'s entry check | Clear consecutive full-check candidate for a separate child. The digest is bounded public DATA and the closed finisher checks before any release operation; keep that entry check. | One composite. |
-| `announce_app_known` postcheck then immediately `await_app_consumed` entry check | Clear consecutive full-check candidate. Combine the fixed announcement/acknowledgement operation so one middle full check serves post-send and pre-wait; keep pre-announcement and post-wait checks. | One composite. |
+| App's last explicit `physical.check`, pure `snapshot_digest`, then `finish_app_known`'s entry check | Removed in the settlement child. The digest is bounded public DATA and the closed finisher keeps its full entry check before release work. | One composite. |
+| `announce_app_known` postcheck then immediately `await_app_consumed` entry check | Removed by the closed `announce_and_await_app_consumed` operation. One middle full check serves post-send and pre-wait; pre-announcement and post-wait full checks remain. | One composite. |
 | Acknowledgement postcheck then next epoch-read stage getter | Closed-composition candidate. Retain the actual phase across the immediate checked-stage handoff into the fixed read, as with initial authentication; do not expose a cached checked token. | One composite if that handoff is implemented. |
 | Terminal composite's last file check then explicit durability's first file check | Local file-check fusion candidate. Keep the later provider round: peer executable/proc/namespace observations separated it from the prior durability round. | One local file check; no provider round or App scan. |
 | App scope physical checks around `reads.check_observation` in `CurrentAppServingPhase::check` | Keep: real self-process/FD/stage I/O intervenes. The physical App file/peer must be observed again afterward. | None from deleting a repeat. |
+
+The settlement child replaces the two announcement/acknowledgement methods in
+place; no old entry point or checked token remains. Its native operation is
+full check, signed announcement/send, full check, acknowledgement wait, full
+check. The middle check covers both adjacent boundaries without returning a
+permission to a caller. Final observation validation still performs actual
+native I/O; the App's terminal admission now happens once at the closed
+finisher's first statement after bounded snapshot-DATA hashing. Its release,
+peer completion and file completion checks are unchanged. Native-source
+regressions require the operation order, reject an extra or missing check,
+require the finisher's first check, and bind the actual Controller caller.
+The observation-caller controls are updated for that consumed terminal owner.
+
+Together these two settlement removals eliminate two complete composites per
+completed App Current operation: ten metadata reads and four App scans. The
+preceding first-observation fix removes one more composite in that App path.
+Those are structural counts at a later frontier not reached by native26/27;
+no measured net saving, action completion or five-second fit is claimed.
 
 No later candidate changes the frozen #268/#269 sources selected for native28.
 A temporary canary measurement ceiling, authentication limits and issuer work
