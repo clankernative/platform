@@ -163,7 +163,7 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     // source. Orphan files remain inspected, so moving code out of the module
     // graph cannot make it disappear from the ratchet.
     let test_only = test_only_sources(&parsed);
-    require_canonical_html_crate(&parsed, &test_only)?;
+    require_canonical_external_crates(&parsed, &test_only)?;
     require_sql_callback_controls(root, &parsed, &test_only)?;
     let ambient_names = ambient_import_names(&parsed, &test_only)?;
     let mut findings = BTreeMap::new();
@@ -287,7 +287,63 @@ fn sql_control_name(name: &str) -> bool {
 // Pin the entire function, not the call: moving an identical setter into a
 // borrowed callback is not admitted. New/changed sites have no allowance path.
 fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
-    const REVIEWED: &[(&str, &str)] = &[];
+    const REVIEWED: &[(&str, &str)] = &[
+        // Existing synthetic/live provider and delegated-journal adapters set
+        // the fixed two-second busy timeout on a connection they just opened.
+        // These pins do not establish native SQL ownership or admit a callback.
+        (
+            "crates/day2/src/carta.rs",
+            "sha256:bf05f4c05e391c7efd0f0176e4e7b47bc09fa4e78f4b8081bf46ee57e2761584",
+        ),
+        (
+            "crates/day2/src/carta_live.rs",
+            "sha256:d0c13c2ba2a523b1a316256b49697b08e3562e879b5d41b4884f42690a560258",
+        ),
+        (
+            "crates/day2/src/people_providers.rs",
+            "sha256:f1b6a0eac6d467e0cb30e81e655aa57d8f1d13d1515419dc2df67a664095be34",
+        ),
+        (
+            "crates/day2/src/release_binding.rs",
+            "sha256:903a5c5da43e15b2f1edb2fc6ee33f3c55aeeffd14fc535dc361f8cd6fa346e6",
+        ),
+        // Existing ordinary registry adapters likewise configure their OWN
+        // read-only connections. Runtime native scope remains independently
+        // required; these are not module-wide or future-site exemptions.
+        (
+            "crates/day2/src/oauth/approval_registry.rs",
+            "sha256:5322d8ccd4c8e46aaa42ef5e92692985a05630659624ed621cfb294524670775",
+        ),
+        (
+            "crates/day2/src/oauth/approval_registry.rs",
+            "sha256:d640668939728c83e37e0e621f41d701c2c8f1ec26492ae3c540a11e8e170df7",
+        ),
+        (
+            "crates/day2/src/oauth/approval_registry.rs",
+            "sha256:6d7d59514e0856ed79b3fc15ccee1d44bc9374c84083a6e7408c592d46da09f5",
+        ),
+        // The sole permanent hook initializer takes an OWNED &mut Connection;
+        // callbacks receive only shared borrows and cannot call it on theirs.
+        (
+            "crates/day2/src/store.rs",
+            "sha256:2e4d111602f0e8ec49db5c664dc5a99f1510c76cd0a42a9b668c7cf168f4792c",
+        ),
+        // Immutable memory-image DATA only: current acquisition checks and
+        // memory/path/attached-db/image bounds precede serialize and copying.
+        (
+            "crates/day2/src/security_epoch/preparation_image.rs",
+            "sha256:ef460385d60ac63ff2e48de9bd43a5d69a35c8b6b4a2fdc021c567bae9f9d668",
+        ),
+        // Serde wire serialization, unrelated to SQLite Connection::serialize.
+        (
+            "crates/day2/src/managed_credentials/issuance.rs",
+            "sha256:08ca2dd33535e9af80d71113eeaf363652f32913bfc20676023a980547a93e83",
+        ),
+        (
+            "crates/day2/src/workspace_directory.rs",
+            "sha256:91dc48687c67a48b8413f5e62a268a6b465a51d25d6022023a6e4c37ef05ee6f",
+        ),
+    ];
     REVIEWED.contains(&(source, digest))
 }
 
@@ -359,6 +415,12 @@ impl<'ast> Visit<'ast> for SqlCallbackControls<'_> {
         (self.admitted_function, self.function) = previous;
     }
 
+    fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+        if !definitely_test_only(&function.attrs) {
+            visit::visit_trait_item_fn(self, function);
+        }
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         self.reference(&identifier_name(&call.method));
         visit::visit_expr_method_call(self, call);
@@ -406,7 +468,7 @@ pub fn check(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_canonical_html_crate(
+fn require_canonical_external_crates(
     parsed: &BTreeMap<String, syn::File>,
     test_only: &BTreeSet<String>,
 ) -> Result<()> {
@@ -415,6 +477,7 @@ fn require_canonical_html_crate(
     // already bounded authored-source inventory; do not resolve module graphs.
     struct CrateBindings {
         invalid: bool,
+        invalid_sqlite: bool,
     }
     impl<'ast> Visit<'ast> for CrateBindings {
         fn visit_item(&mut self, item: &'ast Item) {
@@ -449,17 +512,30 @@ fn require_canonical_html_crate(
             {
                 self.invalid = true;
             }
+            if binding.unraw() == "rusqlite"
+                && (item.ident.unraw() != "rusqlite" || !unconditional_scope(&item.attrs))
+            {
+                self.invalid_sqlite = true;
+            }
         }
     }
     for (source, syntax) in parsed {
         if test_only.contains(source) || definitely_test_only(&syntax.attrs) {
             continue;
         }
-        let mut bindings = CrateBindings { invalid: false };
+        let mut bindings = CrateBindings {
+            invalid: false,
+            invalid_sqlite: false,
+        };
         bindings.visit_file(syntax);
         ensure!(
             !bindings.invalid,
             "noncanonical Maud extern-crate binding in {}",
+            source.chars().take(256).collect::<String>()
+        );
+        ensure!(
+            !bindings.invalid_sqlite,
+            "noncanonical SQLite extern-crate binding in {}",
             source.chars().take(256).collect::<String>()
         );
     }
@@ -8482,7 +8558,7 @@ mod tests {
 
     fn scan_syntax(syntax: syn::File) -> Vec<Finding> {
         let parsed = BTreeMap::from([("crates/fixture/src/lib.rs".to_owned(), syntax)]);
-        require_canonical_html_crate(&parsed, &BTreeSet::new()).unwrap();
+        require_canonical_external_crates(&parsed, &BTreeSet::new()).unwrap();
         let ambient_names = ambient_import_names(&parsed, &BTreeSet::new()).unwrap();
         let mut findings = BTreeMap::new();
         let mut scanner = Scanner::new("crates/fixture/src/lib.rs", &mut findings, &ambient_names);
@@ -8587,6 +8663,72 @@ mod tests {
             error.contains("SQL callback control core requires exact source review"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn sql_callback_controls_pin_owned_configure_function_not_its_name_or_call() {
+        let syntax = syn::parse_file(include_str!("../../day2/src/store.rs")).unwrap();
+        let function = syntax
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Fn(function) if function.sig.ident == "configure_connection" => {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let source = "crates/day2/src/store.rs";
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        assert!(sql_control_function_reviewed(source, &digest), "{digest}");
+        let mut checker = SqlCallbackControls {
+            source,
+            admitted_function: false,
+            function: None,
+            errors: BTreeSet::new(),
+        };
+        checker.visit_item_fn(function);
+        assert!(checker.errors.is_empty());
+        let mut changed = function.clone();
+        changed
+            .block
+            .stmts
+            .push(syn::parse_quote! { connection.authorizer(None); });
+        checker.visit_item_fn(&changed);
+        assert!(
+            !checker.errors.is_empty(),
+            "an appended setter must require review"
+        );
+        assert!(!sql_control_function_reviewed(
+            "crates/day2/src/impostor.rs",
+            &digest
+        ));
+    }
+
+    #[test]
+    fn sql_callback_controls_require_canonical_sqlite_extern_crate() {
+        for source in [
+            "extern crate fake as rusqlite;",
+            "#[cfg(unix)] extern crate rusqlite;",
+            "extern crate fake as r#rusqlite;",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/alias.rs".to_owned(),
+                syn::parse_file(source).unwrap(),
+            )]);
+            let error = require_canonical_external_crates(&parsed, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("noncanonical SQLite extern-crate binding"),
+                "{source}: {error}"
+            );
+        }
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/alias.rs".to_owned(),
+            syn::parse_file("extern crate rusqlite;").unwrap(),
+        )]);
+        require_canonical_external_crates(&parsed, &BTreeSet::new()).unwrap();
     }
 
     fn fixture(source: &str) -> tempfile::TempDir {
