@@ -5,7 +5,9 @@
 use super::security_shell;
 use super::{connect, external, profiles, shell_transport};
 use crate::{artifact::Instance, managed_credentials::crypto::KeyLease};
-use anyhow::{Context, Result, ensure};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::{Result, ensure};
 use day2_capabilities::{
     BindingRef,
     oauth::{ConnectionRequirement, ProviderPermissionContract},
