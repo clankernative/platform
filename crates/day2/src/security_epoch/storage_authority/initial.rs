@@ -752,18 +752,20 @@ impl CurrentAppStoragePhase<'_> {
 
 impl<'role> CurrentControllerStoragePhase<'_, 'role> {
     pub(in crate::security_epoch) fn check(&mut self) -> Result<()> {
+        use crate::security_epoch::self_check_profile::{self, PhysicalStep};
+        let _profile = self_check_profile::enter(self_check_profile::Category::PhysicalLocal);
         let result = (|| {
             ensure!(!*self.continuation, "controller_storage_phase_released");
-            self.file.check_current_durability()?;
-            match &mut self.peer {
-                PeerFence::Current(peer) => {
-                    peer.check(self.file.controller_stage_after_check()?)?
-                }
+            self_check_profile::physical(PhysicalStep::Durability, || {
+                self.file.check_current_durability()
+            })?;
+            self_check_profile::physical(PhysicalStep::Peer, || match &mut self.peer {
+                PeerFence::Current(peer) => peer.check(self.file.controller_stage_after_check()?),
                 PeerFence::Retained(peer) => {
-                    peer.check_retained_identity(self.file.controller_stage_after_check()?)?
+                    peer.check_retained_identity(self.file.controller_stage_after_check()?)
                 }
-            }
-            self.file.check()
+            })?;
+            self_check_profile::physical(PhysicalStep::FinalFile, || self.file.check())
         })();
         if result.is_err() {
             self.refuse();
