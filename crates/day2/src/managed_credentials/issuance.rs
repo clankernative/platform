@@ -765,9 +765,7 @@ impl Runtime {
         &self,
         invocation: &str,
     ) -> Result<Option<PreparedCredential>> {
-        let (record, active, now) = {
-            let mut db = open(self.db())?;
-            let read = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let prepared = self.sql_read(|read| {
             let (operation, pending): (String, bool) = read.query_row(
                 "SELECT operation,status='pending' FROM day2_invocations WHERE id=?1",
                 [invocation],
@@ -802,8 +800,10 @@ impl Runtime {
                     && now < proof.expires_at,
                 "credential confirmation expired"
             );
-            read.commit()?;
-            (record, active, now)
+            Ok(Some((record, active, now)))
+        })?;
+        let Some((record, active, now)) = prepared else {
+            return Ok(None);
         };
         let proof = &record.confirmation;
         let selected = active

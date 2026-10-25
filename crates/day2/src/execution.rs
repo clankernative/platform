@@ -124,8 +124,7 @@ fn save(
     settlement: bool,
 ) -> Result<()> {
     let phase = phase.persistence_code()?;
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
+    runtime.sql_write(|tx| {
     if settlement {
         let authority = previous
             .guard
@@ -145,22 +144,20 @@ fn save(
     // A competing executor may already have advanced. The next iteration reloads
     // the winner's transcript; it never overwrites a more advanced execution.
     tx.execute("UPDATE day2_execution SET phase=?1,trace=?2 WHERE invocation=?3 AND phase='effects' AND trace=?4", params![phase, serde_json::to_string(next)?, next.request.context.invocation_id, serde_json::to_string(previous)?])?;
-    tx.commit()?;
     Ok(())
+    })
 }
 
 pub(crate) fn advance(runtime: &Runtime, id: &str, fault: Fault) -> Result<bool> {
     if runtime.artifact().contract().format < 13 {
         return Ok(false);
     }
-    let connection = store::open(runtime.db())?;
-    let Some(phase) = phase(&connection, id)? else {
+    let Some(phase) = runtime.sql_read(|connection| phase(connection, id))? else {
         return Ok(false);
     };
     if phase == Phase::Complete {
         return Ok(true);
     }
-    drop(connection);
     let mut worker = runtime.worker(Phase::Effects)?;
     for _ in 0..64 {
         let Some(work) = claim_with_worker(runtime, id, &mut worker)? else {
@@ -274,14 +271,12 @@ fn require_authority(
 }
 
 pub(crate) fn claim(runtime: &Runtime, id: &str) -> Result<Option<Work>> {
-    let connection = store::open(runtime.db())?;
-    let Some(phase) = phase(&connection, id)? else {
+    let Some(phase) = runtime.sql_read(|connection| phase(connection, id))? else {
         return Ok(None);
     };
     if phase == Phase::Complete {
         return Ok(None);
     }
-    drop(connection);
     let mut worker = runtime.worker(Phase::Effects)?;
     claim_with_worker(runtime, id, &mut worker)
 }
@@ -291,20 +286,23 @@ fn claim_with_worker(
     id: &str,
     worker: &mut crate::host::Session,
 ) -> Result<Option<Work>> {
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
-    if phase(&tx, id)?.context("execution_journal_missing")? == Phase::Complete {
+    let Some((mut trace, response)) = runtime.sql_decide(|tx| {
+        if phase(&tx, id)?.context("execution_journal_missing")? == Phase::Complete {
+            return Ok(store::SqlDecision::Rollback(None));
+        }
+        let (_, current) = load(&tx, id)?.context("execution_journal_missing")?;
+        let trace = current;
+        ensure!(
+            trace.artifact == runtime.artifact().id() && trace.scope == runtime.scope(),
+            "execution_binding_changed"
+        );
+        require_authority(&tx, runtime, &trace)?;
+        let response: Response = worker.exchange(&trace.request)?;
+        Ok(store::SqlDecision::Commit(Some((trace, response))))
+    })?
+    else {
         return Ok(None);
-    }
-    let (_, current) = load(&tx, id)?.context("execution_journal_missing")?;
-    let mut trace = current;
-    ensure!(
-        trace.artifact == runtime.artifact().id() && trace.scope == runtime.scope(),
-        "execution_binding_changed"
-    );
-    require_authority(&tx, runtime, &trace)?;
-    let response: Response = worker.exchange(&trace.request)?;
-    tx.commit()?;
+    };
     let reply = response.decode()?;
     ensure!(
         response.consumed == trace.request.observations.len(),
@@ -378,29 +376,29 @@ fn claim_with_worker(
         &crate::digest(format!("{}\n{id}\n{ordinal}", runtime.scope()).as_bytes())[7..]
     );
     let encoded = serde_json::to_string(&instruction)?;
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
-    runtime.check_binding(&tx)?;
-    let active = require_authority(&tx, runtime, &trace)?;
-    crate::capabilities::authorized(
-        &tx,
-        runtime,
-        &trace.request,
-        &instruction,
-        active.policy()?,
-        &identity,
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO day2_external_effects VALUES(?1,?2,?3,?4,NULL)",
-        params![id, ordinal, identity, encoded],
-    )?;
-    let stored: String = tx.query_row(
-        "SELECT instruction FROM day2_external_effects WHERE invocation=?1 AND ordinal=?2",
-        params![id, ordinal],
-        |row| row.get(0),
-    )?;
-    ensure!(stored == encoded, "external_intent_mismatch");
-    tx.commit()?;
+    runtime.sql_write(|tx| {
+        runtime.check_binding(&tx)?;
+        let active = require_authority(&tx, runtime, &trace)?;
+        crate::capabilities::authorized(
+            &tx,
+            runtime,
+            &trace.request,
+            &instruction,
+            active.policy()?,
+            &identity,
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO day2_external_effects VALUES(?1,?2,?3,?4,NULL)",
+            params![id, ordinal, identity, encoded],
+        )?;
+        let stored: String = tx.query_row(
+            "SELECT instruction FROM day2_external_effects WHERE invocation=?1 AND ordinal=?2",
+            params![id, ordinal],
+            |row| row.get(0),
+        )?;
+        ensure!(stored == encoded, "external_intent_mismatch");
+        Ok(())
+    })?;
 
     Ok(Some(Work {
         database: runtime.db().to_path_buf(),
@@ -453,8 +451,7 @@ pub(crate) fn check_settlement_binding(
 /// Every retry gets a new attempt identity and retains the original effect ID.
 pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit> {
     check_work(runtime, work)?;
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
+    runtime.sql_write(|tx| {
     runtime.check_binding(&tx)?;
     let active = require_authority(&tx, runtime, &work.trace)?;
     let capability = crate::capabilities::authorized(
@@ -568,7 +565,6 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
             reservation,
         }
     };
-    tx.commit()?;
     Ok(DispatchPermit {
         database: runtime.db().to_path_buf(),
         artifact: runtime.artifact().id().to_owned(),
@@ -576,6 +572,7 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
         instruction: work.instruction.clone(),
         effect: work.identity.clone(),
         payload,
+    })
     })
 }
 
@@ -657,8 +654,7 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
     let encoded = serde_json::to_string(&result.observation)?;
     ensure!(encoded.len() <= 65_536, "external_result_budget");
     let id = &work.trace.request.context.invocation_id;
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
+    let observation = runtime.sql_write(|tx| {
     let authority = work
         .trace
         .guard
@@ -682,8 +678,7 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
     if result.pending {
         // The attempt evidence settles, while the effect remains unresolved.
         // Workers and transactions are released until the bounded retry is due.
-        tx.commit()?;
-        return Ok(());
+        return Ok(None);
     }
     tx.execute("UPDATE day2_external_effects SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND observation IS NULL",
         params![encoded, id, work.ordinal])?;
@@ -695,7 +690,11 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
         observation.instruction == work.instruction,
         "external_intent_mismatch"
     );
-    tx.commit()?;
+    Ok(Some(observation))
+    })?;
+    let Some(observation) = observation else {
+        return Ok(());
+    };
     let mut next = work.trace.clone();
     next.request.observations.push(observation);
     save(runtime, &work.trace, &next, Phase::Effects, true)

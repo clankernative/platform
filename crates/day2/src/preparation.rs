@@ -6,6 +6,24 @@ use rusqlite::{Connection, params};
 const MAX_OBSERVATIONS: usize = 32;
 const MAX_OBSERVATION_BYTES: usize = 65_536;
 
+// Results of one SQL unit, not native storage permission. Provider work begins
+// only after the transaction and its actual Current scope have both closed.
+enum PreparedStep {
+    Local(Result<String>),
+    Connection {
+        ordinal: i64,
+        attempt: i64,
+    },
+    External {
+        ordinal: i64,
+        attempt: i64,
+        capability: Box<crate::capabilities::Authorized>,
+        resource: crate::resources::ResourceUse,
+        reservation: crate::budget::Reservation,
+        identity: String,
+    },
+}
+
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS day2_preparation (
@@ -51,67 +69,82 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
     if runtime.artifact().contract().format < 13 {
         return Ok(Vec::new());
     }
-    let mut connection = store::open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut connection)?;
-    runtime.check_binding(&tx)?;
-    upgrade(&tx)?;
-    let (operation, input, actor, artifact, status): (String, String, String, String, String) = tx
-        .query_row(
-            "SELECT operation,input,actor,artifact,status FROM day2_invocations WHERE id=?1",
-            [id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-    ensure!(
-        artifact == runtime.artifact().id(),
-        "pinned_artifact_unavailable"
-    );
-    if status != "pending" {
-        // Completed receipts have their own authority-aware retrieval path.
-        // Do not turn an old receipt into blocked unfinished work here.
+    let Some((operation, policy, durable, registered_operation, mut request)) = runtime
+        .sql_decide(|tx| {
+            runtime.check_binding(&tx)?;
+            let (operation, input, actor, artifact, status): (
+                String,
+                String,
+                String,
+                String,
+                String,
+            ) = tx.query_row(
+                "SELECT operation,input,actor,artifact,status FROM day2_invocations WHERE id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            ensure!(
+                artifact == runtime.artifact().id(),
+                "pinned_artifact_unavailable"
+            );
+            if status != "pending" {
+                // Completed receipts have their own authority-aware retrieval path.
+                // Do not turn an old receipt into blocked unfinished work here.
+                return Ok(store::SqlDecision::Rollback(None));
+            }
+            let active = crate::authority_state::require_invocation_in(
+                &tx, runtime, id, &operation, &actor,
+            )?;
+            let policy = active.policy()?.clone();
+            let definition = runtime.artifact().route(&operation)?;
+            let durable = definition.kind == "command";
+            let registered_operation = definition.name.clone();
+            let request = Request {
+                operation: operation.clone(),
+                input,
+                context: store::invocation_context(&tx, id)?,
+                observations: if durable {
+                    recorded(&tx, id)?
+                } else {
+                    Vec::new()
+                },
+            };
+            Ok(store::SqlDecision::Commit(Some((
+                operation,
+                policy,
+                durable,
+                registered_operation,
+                request,
+            ))))
+        })?
+    else {
         return Ok(Vec::new());
-    }
-    let active =
-        crate::authority_state::require_invocation_in(&tx, runtime, id, &operation, &actor)?;
-    let policy = active.policy()?.clone();
-    let definition = runtime.artifact().route(&operation)?;
-    let durable = definition.kind == "command";
-    let registered_operation = definition.name.clone();
-    let mut request = Request {
-        operation: operation.clone(),
-        input,
-        context: store::invocation_context(&tx, id)?,
-        observations: if durable {
-            recorded(&tx, id)?
-        } else {
-            Vec::new()
-        },
     };
-    tx.commit()?;
     let mut worker = runtime.worker(Phase::Prepare)?;
     loop {
         // Keep the authority snapshot valid while pure code consumes recorded
         // inputs. Activation can only commit before or after this replay step.
-        let tx = crate::write_queue::immediate(&mut connection)?;
-        crate::authority_state::require_invocation_in(
-            &tx,
-            runtime,
-            id,
-            &operation,
-            &request.context.actor,
-        )?;
-        for observation in &request.observations {
-            crate::resources::validate_cached(&tx, runtime, &request, observation)?;
-        }
-        let response = worker.exchange(&request)?;
-        tx.commit()?;
+        let response = runtime.sql_write(|tx| {
+            crate::authority_state::require_invocation_in(
+                &tx,
+                runtime,
+                id,
+                &operation,
+                &request.context.actor,
+            )?;
+            for observation in &request.observations {
+                crate::resources::validate_cached(&tx, runtime, &request, observation)?;
+            }
+            worker.exchange(&request)
+        })?;
         let reply = response.decode()?;
         ensure!(
             response.consumed == request.observations.len(),
@@ -153,7 +186,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // pins. Reserve the local writer before reading rows, avoiding a deferred
         // snapshot-to-writer race with another preparation. This transaction still
         // ends before any provider call, and permits no application mutation.
-        let tx = crate::write_queue::immediate(&mut connection)?;
+        let (authority, prepared) = runtime.sql_write(|tx| {
         runtime.check_binding(&tx)?;
         let active = crate::authority_state::require_invocation_in(
             &tx,
@@ -162,10 +195,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             &operation,
             &request.context.actor,
         )?;
-        let mut admitted_attempt = None;
-        let mut provider_usage = None;
-        let mut connection_attempt = None;
-        let result = if matches!(step, Step::Database(_)) {
+        let prepared = if matches!(step, Step::Database(_)) {
             let result = store::effect(
                 &tx,
                 store::StorageContract {
@@ -182,22 +212,19 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                     entropy: runtime.inputs().entropy.as_ref(),
                 },
             );
-            tx.commit()?;
-            result
+            PreparedStep::Local(result)
         } else if matches!(step, Step::Observe { .. })
             && [crate::resources::BIND, crate::resources::ATTENUATE]
                 .contains(&instruction.model.as_str())
         {
             let result = crate::resources::host_operation(&tx, runtime, &request, &instruction)?
                 .context("resource_host_operation")?;
-            tx.commit()?;
-            Ok(result)
+            PreparedStep::Local(Ok(result))
         } else if matches!(step, Step::Observe { .. })
             && crate::credential_codegen::observation(&instruction.model)
         {
             let result = crate::managed_credentials::observe(&tx, runtime, &request, &instruction);
-            tx.commit()?;
-            result
+            PreparedStep::Local(result)
         } else if matches!(step, Step::Observe { .. })
             && crate::oauth::usage::observation(&instruction.model)
         {
@@ -207,8 +234,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 params![id, ordinal], |row| row.get(0),
             )?;
             if prior >= 3 {
-                tx.commit()?;
-                Ok(serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string())
+                PreparedStep::Local(Ok(serde_json::json!({"Unavailable":"CapacityDeferred"}).to_string()))
             } else {
                 let attempt = prior + 1;
                 tx.execute(
@@ -222,9 +248,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                         i64::try_from(active.stamp.revision)?
                     ],
                 )?;
-                tx.commit()?;
-                connection_attempt = Some((ordinal, attempt));
-                crate::oauth::usage::execute(runtime, &request, &instruction)
+                PreparedStep::Connection { ordinal, attempt }
             }
         } else if matches!(step, Step::Observe { .. }) && instruction.model == crate::audit::HISTORY
         {
@@ -234,8 +258,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             // exactly as a provider read's is.
             crate::audit::require_history(active.policy()?, runtime, &operation)?;
             let result = crate::audit::history(&tx, runtime, &request, &instruction);
-            tx.commit()?;
-            result
+            PreparedStep::Local(result)
         } else if matches!(step, Step::Observe { .. }) {
             // The observation's position in this invocation, which is what makes
             // a name derived here survive a retry: the same read, retried, is
@@ -288,21 +311,48 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                     i64::try_from(active.stamp.revision)?
                 ],
             )?;
-            // Release the application database before crossing a provider boundary.
-            tx.commit()?;
-            let completed = crate::capabilities::observe(runtime, capability, &identity);
-            admitted_attempt = Some((
+            PreparedStep::External {
                 ordinal,
                 attempt,
+                capability: Box::new(capability),
                 reservation,
                 resource,
                 identity,
-                completed.correlation,
-            ));
-            provider_usage = Some(completed.usage);
-            completed.result
+            }
         } else {
             bail!("preparation_write_forbidden: {}", instruction.kind);
+        };
+        Ok((active.stamp, prepared))
+        })?;
+        let mut admitted_attempt = None;
+        let mut provider_usage = None;
+        let mut connection_attempt = None;
+        let result = match prepared {
+            PreparedStep::Local(result) => result,
+            PreparedStep::Connection { ordinal, attempt } => {
+                connection_attempt = Some((ordinal, attempt));
+                crate::oauth::usage::execute(runtime, &request, &instruction)
+            }
+            PreparedStep::External {
+                ordinal,
+                attempt,
+                capability,
+                resource,
+                reservation,
+                identity,
+            } => {
+                let completed = crate::capabilities::observe(runtime, *capability, &identity);
+                admitted_attempt = Some((
+                    ordinal,
+                    attempt,
+                    reservation,
+                    resource,
+                    identity,
+                    completed.correlation,
+                ));
+                provider_usage = Some(completed.usage);
+                completed.result
+            }
         };
         let result = if let Some((_, _, _, resource, _, _)) = &admitted_attempt {
             result.and_then(|result| {
@@ -331,19 +381,20 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             "preparation_result_budget"
         );
         if let Some((ordinal, attempt)) = connection_attempt {
-            let tx = crate::write_queue::immediate(&mut connection)?;
-            crate::execution::check_settlement_binding(&tx, runtime, id, &active.stamp)?;
+            runtime.sql_write(|tx| {
+            crate::execution::check_settlement_binding(&tx, runtime, id, &authority)?;
             tx.execute(
                 "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
                 params![encoded, id, ordinal, attempt],
             )?;
-            tx.commit()?;
+            Ok(())
+            })?;
         }
         if let Some((ordinal, attempt, reservation, _, identity, correlation)) = admitted_attempt {
             // Retain provider knowledge even if policy changed during the call.
             // A separate reauthorization below gates use by application code.
-            let tx = crate::write_queue::immediate(&mut connection)?;
-            crate::execution::check_settlement_binding(&tx, runtime, id, &active.stamp)?;
+            runtime.sql_write(|tx| {
+            crate::execution::check_settlement_binding(&tx, runtime, id, &authority)?;
             crate::resources::record_correlation_in(&tx, &identity, &correlation)?;
             tx.execute(
                 "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
@@ -354,40 +405,40 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 &reservation,
                 provider_usage.context("provider_usage_missing")?,
             )?;
-            tx.commit()?;
+            Ok(())
+            })?;
         }
-        let tx = crate::write_queue::immediate(&mut connection)?;
-        runtime.check_binding(&tx)?;
-        crate::authority_state::require_invocation_in(
-            &tx,
-            runtime,
-            id,
-            &operation,
-            &request.context.actor,
-        )?;
-        if !durable {
-            tx.commit()?;
-            request.observations.push(observation);
-            continue;
-        }
-        let ordinal = i64::try_from(request.observations.len())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO day2_preparation VALUES(?1,?2,?3)",
-            params![id, ordinal, encoded],
-        )?;
-        // Concurrent read-only executors must use the first journaled observation,
-        // even if their live reads returned different values.
-        let winner: String = tx.query_row(
-            "SELECT observation FROM day2_preparation WHERE invocation=?1 AND ordinal=?2",
-            params![id, ordinal],
-            |row| row.get(0),
-        )?;
-        let winner: Observation = serde_json::from_str(&winner)?;
-        ensure!(
-            winner.instruction == observation.instruction,
-            "preparation_branch_mismatch"
-        );
-        tx.commit()?;
+        let winner = runtime.sql_write(|tx| {
+            runtime.check_binding(&tx)?;
+            crate::authority_state::require_invocation_in(
+                &tx,
+                runtime,
+                id,
+                &operation,
+                &request.context.actor,
+            )?;
+            if !durable {
+                return Ok(observation);
+            }
+            let ordinal = i64::try_from(request.observations.len())?;
+            tx.execute(
+                "INSERT OR IGNORE INTO day2_preparation VALUES(?1,?2,?3)",
+                params![id, ordinal, encoded],
+            )?;
+            // Concurrent read-only executors must use the first journaled observation,
+            // even if their live reads returned different values.
+            let winner: String = tx.query_row(
+                "SELECT observation FROM day2_preparation WHERE invocation=?1 AND ordinal=?2",
+                params![id, ordinal],
+                |row| row.get(0),
+            )?;
+            let winner: Observation = serde_json::from_str(&winner)?;
+            ensure!(
+                winner.instruction == observation.instruction,
+                "preparation_branch_mismatch"
+            );
+            Ok(winner)
+        })?;
         request.observations.push(winner);
     }
 }

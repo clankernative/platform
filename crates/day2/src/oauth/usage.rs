@@ -493,17 +493,16 @@ fn resolve(
         requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman,
         "unsupported connection owner"
     );
-    let mut db = store::open(runtime.db())?;
-    let snapshot = db.transaction()?;
-    runtime.check_binding(&snapshot)?;
-    require_action(
-        &snapshot,
-        runtime,
-        request,
-        crate::connection_codegen::RESOLVE,
-    )?;
-    let subject = human(&snapshot, runtime, request)?;
-    serving.commit(snapshot)?;
+    let subject = serving.sql_read(runtime, |snapshot| {
+        runtime.check_binding(&snapshot)?;
+        require_action(
+            &snapshot,
+            runtime,
+            request,
+            crate::connection_codegen::RESOLVE,
+        )?;
+        human(&snapshot, runtime, request)
+    })?;
     let Some(subject) = subject else {
         return Ok(unavailable("PermissionDenied"));
     };
@@ -544,11 +543,10 @@ fn resolve(
         "cu1_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce)
     );
-    let tx = crate::write_queue::immediate(&mut db)?;
+    serving.sql_write(runtime, |tx| {
     let now = super::effects::wall_time()?;
     if !refresh.validate(&tx, now)? {
-        serving.commit_write(tx)?;
-        return Ok(unavailable("ReauthRequired"));
+        return Ok(store::SqlDecision::Commit(unavailable("ReauthRequired")));
     }
     runtime.check_binding(&tx)?;
     ensure!(
@@ -567,10 +565,10 @@ fn resolve(
         )
         .optional()?;
     if pending && status.as_deref() != Some("active") {
-        return Ok(unavailable("AccountApprovalRequired"));
+        return Ok(store::SqlDecision::Rollback(unavailable("AccountApprovalRequired")));
     }
     if status.as_deref() == Some("disabled") {
-        return Ok(unavailable("NeedsConnection"));
+        return Ok(store::SqlDecision::Rollback(unavailable("NeedsConnection")));
     }
     let claims = match capture(
         &tx,
@@ -582,15 +580,15 @@ fn resolve(
         now,
     ) {
         Ok(Some(claims)) => claims,
-        Ok(None) => return Ok(unavailable("NeedsConnection")),
-        Err(_) => return Ok(unavailable("ReauthRequired")),
+        Ok(None) => return Ok(store::SqlDecision::Rollback(unavailable("NeedsConnection"))),
+        Err(_) => return Ok(store::SqlDecision::Rollback(unavailable("ReauthRequired"))),
     };
     tx.execute("DELETE FROM oauth_use_handles WHERE json_extract(claims,'$.expires_at') <= ?1 OR invocation IN (SELECT id FROM day2_invocations WHERE status != 'pending')", [now])?;
     let count: i64 = tx.query_row("SELECT count(*) FROM oauth_use_handles", [], |row| {
         row.get(0)
     })?;
     if count >= MAX_HANDLES {
-        return Ok(unavailable("CapacityDeferred"));
+        return Ok(store::SqlDecision::Rollback(unavailable("CapacityDeferred")));
     }
     tx.execute(
         "INSERT INTO oauth_use_handles VALUES(?1,?2,?3)",
@@ -600,8 +598,8 @@ fn resolve(
             serde_json::to_string(&claims)?
         ],
     )?;
-    serving.commit_write(tx)?;
-    Ok(json!({"Available": reference}).to_string())
+    Ok(store::SqlDecision::Commit(json!({"Available": reference}).to_string()))
+    })
 }
 
 pub(crate) fn execute(
@@ -657,24 +655,23 @@ fn execute_current(
     );
     let input: ReadInput = crate::json::decode(instruction.data.as_bytes())?;
     let started = super::effects::wall_time()?;
-    let mut db = store::open(runtime.db())?;
-    let snapshot = db.transaction()?;
-    runtime.check_binding(&snapshot)?;
-    require_action(
-        &snapshot,
-        runtime,
-        request,
-        crate::connection_codegen::LIST_EVENTS,
-    )?;
-    let mut claims = load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        started,
-    )?;
-    serving.commit(snapshot)?;
+    let mut claims = serving.sql_read(runtime, |snapshot| {
+        runtime.check_binding(&snapshot)?;
+        require_action(
+            &snapshot,
+            runtime,
+            request,
+            crate::connection_codegen::LIST_EVENTS,
+        )?;
+        load(
+            &snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            started,
+        )
+    })?;
     if !input.window.valid() {
         return Ok(json!("InvalidWindow").to_string());
     }
@@ -694,9 +691,10 @@ fn execute_current(
     );
     let selected_at = super::effects::wall_time()?;
     if selected_at < started {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
     serving.check()?;
@@ -712,56 +710,58 @@ fn execute_current(
     };
     let now = super::effects::wall_time()?;
     if now < selected_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let snapshot = crate::write_queue::immediate(&mut db)?;
-    let current = load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        now,
-    )?;
-    ensure!(
-        current == claims,
-        "connection use changed during key retrieval"
-    );
-    let (intent, binding) = activation(&snapshot, &claims, &selection)?;
-    serving.check()?;
-    let token = super::custody::load_access(
-        &snapshot,
-        &key,
-        &intent,
-        &binding,
-        &claims.account,
-        claims.token_version,
-        now,
-    )?;
-    if let Some(token) = &token {
-        claims.expires_at = claims.expires_at.min(token.expires_at);
-        snapshot.execute(
-            "UPDATE oauth_use_handles SET claims=?1 WHERE reference=?2 AND invocation=?3",
-            params![
-                serde_json::to_string(&claims)?,
-                input.reference,
-                request.context.invocation_id
-            ],
+    let token = serving.sql_write(runtime, |snapshot| {
+        let current = load(
+            &snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            now,
         )?;
-    }
-    serving.commit_write(snapshot)?;
+        ensure!(
+            current == claims,
+            "connection use changed during key retrieval"
+        );
+        let (intent, binding) = activation(&snapshot, &claims, &selection)?;
+        let token = super::custody::load_access(
+            &snapshot,
+            &key,
+            &intent,
+            &binding,
+            &claims.account,
+            claims.token_version,
+            now,
+        )?;
+        if let Some(token) = &token {
+            claims.expires_at = claims.expires_at.min(token.expires_at);
+            snapshot.execute(
+                "UPDATE oauth_use_handles SET claims=?1 WHERE reference=?2 AND invocation=?3",
+                params![
+                    serde_json::to_string(&claims)?,
+                    input.reference,
+                    request.context.invocation_id
+                ],
+            )?;
+        }
+        Ok(store::SqlDecision::Commit(token))
+    })?;
     let Some(token) = token else {
         return Ok(unavailable("ReauthRequired"));
     };
     let result = serving.send(|| super::calendar::list(&token, &input.window))?;
     let at = super::effects::wall_time()?;
     if at < now || at >= token.expires_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
     let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
@@ -774,21 +774,23 @@ fn execute_current(
     );
     let completed_at = super::effects::wall_time()?;
     if completed_at < at || completed_at >= token.expires_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let snapshot = db.transaction()?;
-    load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        completed_at,
-    )?;
-    serving.commit(snapshot)?;
+    serving.sql_read(runtime, |snapshot| {
+        load(
+            &snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            completed_at,
+        )?;
+        Ok(())
+    })?;
     Ok(result)
 }
 

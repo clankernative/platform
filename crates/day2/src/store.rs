@@ -873,13 +873,14 @@ impl SchemaInitialization<'_> {
 
 pub(crate) fn open(path: &Path) -> Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
-    let connection = if native_storage::is_native_database(path) {
-        native_storage::open_existing(path)?
-    } else {
-        let connection = Connection::open(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        connection
-    };
+    // A Runtime pathname is selection DATA, never the current participant or
+    // enrolled role. Refuse BEFORE SQLite open/recovery on this raw adapter.
+    ensure!(
+        !native_storage::is_native_database(path),
+        "native_runtime_sql_owner_required"
+    );
+    let connection = Connection::open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     configure_connection(&connection)?;
     Ok(connection)
 }
@@ -903,6 +904,7 @@ pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
 }
 
 mod native_storage;
+pub(crate) use native_storage::{RuntimeSql, SqlDecision};
 
 impl Runtime {
     pub(crate) fn credential_authority(
@@ -983,6 +985,43 @@ impl Runtime {
     /// actual retained participant and enrolled stage at each consumer.
     pub(crate) fn uses_native_storage(&self) -> bool {
         native_storage::is_native_database(&self.db)
+    }
+
+    /// One complete snapshot under the actual current native owner. Only owned
+    /// result DATA escapes; no connection or snapshot survives the callback.
+    pub(crate) fn sql_read<T>(
+        &self,
+        operation: impl for<'sql> FnOnce(&'sql Connection) -> Result<T>,
+    ) -> Result<T> {
+        crate::oauth::native_management::with_runtime_sql(
+            self,
+            crate::oauth::native_management::RuntimePhase::SqlRead,
+            |sql| sql.read(operation),
+        )
+    }
+
+    /// One FIFO writer with the same owner's checks at the actual commit and
+    /// known settlement. The callback cannot commit or return its transaction.
+    pub(crate) fn sql_write<T>(
+        &self,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'sql>) -> Result<T>,
+    ) -> Result<T> {
+        crate::oauth::native_management::with_runtime_sql(
+            self,
+            crate::oauth::native_management::RuntimePhase::SqlWrite,
+            |sql| sql.write(|tx| operation(tx).map(SqlDecision::Commit)),
+        )
+    }
+
+    pub(crate) fn sql_decide<T>(
+        &self,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'sql>) -> Result<SqlDecision<T>>,
+    ) -> Result<T> {
+        crate::oauth::native_management::with_runtime_sql(
+            self,
+            crate::oauth::native_management::RuntimePhase::SqlWrite,
+            |sql| sql.write(operation),
+        )
     }
 
     pub fn scope(&self) -> &str {
@@ -1128,10 +1167,10 @@ impl Runtime {
         check_storage_binding(connection, &self.artifact, &self.scope)
     }
     pub(crate) fn authority(&self, operation: &str, actor: &str) -> Result<Policy> {
-        let mut connection = open(&self.db)?;
-        let tx = connection.transaction()?;
-        let active = crate::authority_state::authorize_in(&tx, self, operation, actor)?;
-        Ok(active.policy()?.clone())
+        self.sql_read(|connection| {
+            let active = crate::authority_state::authorize_in(connection, self, operation, actor)?;
+            Ok(active.policy()?.clone())
+        })
     }
     /// The installation's operators, excluded from AnyHuman delegation.
     ///
@@ -1152,13 +1191,14 @@ impl Runtime {
     /// A session may belong to a principal whose only permission is acting for
     /// others. This admits the session, never an operation or a chosen target.
     pub(crate) fn may_request_delegation(&self, authenticated: &str) -> Result<bool> {
-        let db = open(&self.db)?;
-        self.check_binding(&db)?;
-        let active = crate::authority_state::current(&db)?;
-        Ok(active.document.enabled
-            && active.policy()?.delegations.values().any(|rule| {
-                rule.authenticated.contains(authenticated) && rule.paths.contains("request")
-            }))
+        self.sql_read(|db| {
+            self.check_binding(db)?;
+            let active = crate::authority_state::current(db)?;
+            Ok(active.document.enabled
+                && active.policy()?.delegations.values().any(|rule| {
+                    rule.authenticated.contains(authenticated) && rule.paths.contains("request")
+                }))
+        })
     }
 
     fn check_authority(
@@ -1388,8 +1428,7 @@ impl Runtime {
                 )?;
             }
             reason = AttemptReason::StorageRejected;
-            let mut connection = open(&self.db)?;
-            let tx = crate::write_queue::immediate(&mut connection)?;
+            self.sql_write(|tx| {
             self.check_binding(&tx)?;
             reason = AttemptReason::AuthorizationRejected;
             let active = crate::authority_state::authorize_in(&tx, self, operation, actor)?;
@@ -1422,7 +1461,6 @@ impl Runtime {
                             at_ms: now.checked_mul(1000).context("audit_clock")?,
                         },
                     )?;
-                    tx.commit()?;
                     return Ok(());
                 }
                 ensure!(remote_fence, "app_send_original_receiver_missing");
@@ -1575,8 +1613,8 @@ impl Runtime {
                     at_ms: now.checked_mul(1000).context("audit clock overflow")?,
                 },
             )?;
-            tx.commit()?;
             Ok(())
+            })
         })();
         if result.is_err() {
             self.audit_admission_rejection(operation, (actor, initiator), id, now, reason, trigger)
@@ -1650,12 +1688,13 @@ impl Runtime {
     pub fn execute(&self, id: &str, fault: Fault) -> Result<Outcome> {
         // Blocking is host-owned execution metadata, not an application failure or
         // permission to rerun already committed work with another identity.
-        let connection = open(&self.db)?;
-        self.check_binding(&connection)?;
-        if crate::authority_state::is_blocked(&connection, id)? {
+        let blocked = self.sql_read(|connection| {
+            self.check_binding(connection)?;
+            crate::authority_state::is_blocked(connection, id)
+        })?;
+        if blocked {
             return Ok(blocked_outcome(id));
         }
-        drop(connection);
         let result = self.execute_inner(id, fault);
         let exhausted_send = if result.as_ref().err().is_some_and(|error| {
             matches!(
@@ -1664,7 +1703,7 @@ impl Runtime {
                     | crate::error::Failure::BudgetExhausted
             )
         }) {
-            open(&self.db)?.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?
+            self.sql_read(|connection| Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?))?
         } else {
             false
         };
@@ -1681,20 +1720,22 @@ impl Runtime {
                         | crate::error::Failure::CredentialAuthorityChanged
                 ))
         {
-            let mut connection = open(&self.db)?;
-            let tx = crate::write_queue::immediate(&mut connection)?;
-            let pending: bool = tx.query_row(
-                "SELECT status='pending' FROM day2_invocations WHERE id=?1",
-                [id],
-                |row| row.get(0),
-            )?;
-            if pending {
-                crate::authority_state::block_invocation(
-                    &tx,
-                    id,
-                    crate::error::classify(error).code(),
+            let pending = self.sql_write(|tx| {
+                let pending: bool = tx.query_row(
+                    "SELECT status='pending' FROM day2_invocations WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
                 )?;
-                tx.commit()?;
+                if pending {
+                    crate::authority_state::block_invocation(
+                        tx,
+                        id,
+                        crate::error::classify(error).code(),
+                    )?;
+                }
+                Ok(pending)
+            })?;
+            if pending {
                 return Ok(blocked_outcome(id));
             }
         }
@@ -1715,8 +1756,12 @@ impl Runtime {
         if fault == Fault::AfterPrepare {
             return Err(fault.interruption("simulated_process_loss"));
         }
-        let mut connection = open(&self.db)?;
-        let tx = crate::write_queue::immediate(&mut connection)?;
+        enum Decision {
+            Existing(Outcome),
+            Committed(Outcome),
+            Rejected(Trace, Policy),
+        }
+        let decision = self.sql_decide(|tx| {
         self.check_binding(&tx)?;
         crate::audit::upgrade(&tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
@@ -1729,7 +1774,9 @@ impl Runtime {
         let active = crate::authority_state::authorize_in(&tx, self, &operation, &actor)?;
         let policy = active.policy()?.clone();
         if status != "pending" {
-            return completed_outcome(&tx, id, completed.as_deref(), &policy);
+            return completed_outcome(&tx, id, completed.as_deref(), &policy)
+                .map(Decision::Existing)
+                .map(SqlDecision::Rollback);
         }
         crate::authority_state::require_invocation_in(&tx, self, id, &operation, &actor)?;
         // Still pending, so any saved trace is intact: compaction only touches
@@ -1739,11 +1786,11 @@ impl Runtime {
             .as_ref()
             .is_some_and(|(phase, _)| *phase != Phase::Complete)
         {
-            return Ok(Outcome {
+            return Ok(SqlDecision::Rollback(Decision::Existing(Outcome {
                 status: "pending".into(),
                 result: json!({"invocation_id":id}),
                 error: String::new(),
-            });
+            })));
         }
         let definition = self.artifact.route(&operation)?;
         let kind = definition.kind.clone();
@@ -1854,29 +1901,13 @@ impl Runtime {
             if fault == Fault::BeforeCommit {
                 return Err(fault.interruption("simulated_process_loss"));
             }
-            tx.commit()?;
-            if fault == Fault::AfterDecisionCommit || fault == Fault::AfterCommit {
-                return Err(fault.interruption("simulated_process_loss"));
-            }
-            return Ok(outcome);
+            return Ok(SqlDecision::Commit(Decision::Committed(outcome)));
         }
         if outcome.status == "failure" {
             // A refusal needs a durable receipt but must retain no app effects.
-            // Roll back first, then recheck authority and any competing completion.
-            tx.rollback()?;
-            let tx = crate::write_queue::immediate(&mut connection)?;
-            self.check_binding(&tx)?;
-            self.check_authority(&tx, &trace.request, &policy)?;
-            let existing: Option<String> = tx.query_row(
-                "SELECT outcome FROM day2_invocations WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )?;
-            if let Some(existing) = existing {
-                return completed_outcome(&tx, id, Some(&existing), &policy);
-            }
-            complete(&tx, id, &trace)?;
-            tx.commit()?;
+            // Confirm rollback and settle this scope before a separate SQL
+            // unit rechecks authority and any competing completion.
+            return Ok(SqlDecision::Rollback(Decision::Rejected(trace, policy)));
         } else {
             crate::invocations::validate_requests(self, &tx, &trace.request)?;
             crate::managed_credentials::issuance::validate_commit(
@@ -1889,12 +1920,38 @@ impl Runtime {
                 return Err(fault.interruption("simulated_process_loss"));
             }
             complete(&tx, id, &trace)?;
-            tx.commit()?;
-            if fault == Fault::AfterCommit {
-                return Err(fault.interruption("ambiguous_after_commit"));
-            }
         }
-        Ok(outcome)
+        Ok(SqlDecision::Commit(Decision::Committed(outcome)))
+        })?;
+        match decision {
+            Decision::Existing(outcome) => Ok(outcome),
+            Decision::Committed(outcome) => {
+                if outcome.status == "pending"
+                    && (fault == Fault::AfterDecisionCommit || fault == Fault::AfterCommit)
+                {
+                    return Err(fault.interruption("simulated_process_loss"));
+                }
+                if fault == Fault::AfterCommit {
+                    return Err(fault.interruption("ambiguous_after_commit"));
+                }
+                Ok(outcome)
+            }
+            Decision::Rejected(trace, policy) => self.sql_decide(|tx| {
+                self.check_binding(tx)?;
+                self.check_authority(tx, &trace.request, &policy)?;
+                let existing: Option<String> = tx.query_row(
+                    "SELECT outcome FROM day2_invocations WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if let Some(existing) = existing {
+                    return completed_outcome(tx, id, Some(&existing), &policy)
+                        .map(SqlDecision::Rollback);
+                }
+                complete(tx, id, &trace)?;
+                Ok(SqlDecision::Commit(trace.outcome))
+            }),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2137,17 +2194,18 @@ impl Runtime {
     }
 
     pub fn trace(&self, id: &str) -> Result<Trace> {
-        let connection = open(&self.db)?;
-        self.check_binding(&connection)?;
-        let raw: Option<String> = connection.query_row(
-            "SELECT trace FROM day2_invocations WHERE id=?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        // Completed invocations keep only a receipt once the journal window passes.
-        Ok(serde_json::from_str(
-            &raw.context("invocation_trace_compacted")?,
-        )?)
+        self.sql_read(|connection| {
+            self.check_binding(connection)?;
+            let raw: Option<String> = connection.query_row(
+                "SELECT trace FROM day2_invocations WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            // Completed invocations keep only a receipt once the journal window passes.
+            Ok(serde_json::from_str(
+                &raw.context("invocation_trace_compacted")?,
+            )?)
+        })
     }
     pub fn render_page(
         &self,
@@ -2184,8 +2242,7 @@ impl Runtime {
     /// property snapshot. Backups must not inherit the simulator's row budget.
     /// This checks storage bindings, row codecs and references, not app invariants.
     pub fn validate_storage(&self) -> Result<()> {
-        let mut connection = open(&self.db)?;
-        validate_storage_snapshot(&mut connection, &self.artifact, &self.scope)
+        self.sql_read(|connection| validate_storage_in(connection, &self.artifact, &self.scope))
     }
 
     /// Retained rows, including tombstones, for storage comparison and inspection.
@@ -2201,78 +2258,76 @@ impl Runtime {
     /// Operation generators and checks can explicitly inspect either lifecycle scope.
     /// Both complete bounded views belong to one consistent database snapshot.
     pub fn verification_snapshot(&self) -> Result<Value> {
-        let mut connection = open(&self.db)?;
-        let snapshot = connection.transaction()?;
-        self.check_binding(&snapshot)?;
-        let schema = &self.artifact.contract().schema;
-        let limits = &self.artifact.contract().verification_limits;
-        let live = read_model_snapshot_bounded(
-            &snapshot,
-            schema,
-            SnapshotScope::Live,
-            limits.rows_per_model,
-            limits.total_facts,
-            limits.snapshot_bytes,
-        )?;
-        let deleted = read_model_snapshot_bounded(
-            &snapshot,
-            schema,
-            SnapshotScope::Deleted,
-            limits.rows_per_model,
-            limits.total_facts,
-            limits.snapshot_bytes,
-        )?;
-        let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
-        ensure!(
-            facts <= limits.total_facts,
-            "verification_total_fact_budget"
-        );
-        let combined = serde_json::to_vec(&json!({
-            "live": live.to_string(),
-            "deleted": deleted.to_string()
-        }))?;
-        ensure!(
-            combined.len() <= limits.snapshot_bytes,
-            "verification_snapshot_byte_budget"
-        );
-        for rollup in &schema.rollups {
+        self.sql_read(|snapshot| {
+            self.check_binding(&snapshot)?;
+            let schema = &self.artifact.contract().schema;
+            let limits = &self.artifact.contract().verification_limits;
+            let live = read_model_snapshot_bounded(
+                &snapshot,
+                schema,
+                SnapshotScope::Live,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )?;
+            let deleted = read_model_snapshot_bounded(
+                &snapshot,
+                schema,
+                SnapshotScope::Deleted,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )?;
+            let facts = snapshot_fact_count(&live)?.saturating_add(snapshot_fact_count(&deleted)?);
             ensure!(
-                rollup.mismatches(&snapshot)? == 0,
-                "rollup_recount_mismatch: {}",
-                rollup.table()
+                facts <= limits.total_facts,
+                "verification_total_fact_budget"
             );
-        }
-        snapshot.commit()?;
-        Ok(json!({"live":live.to_string(),"deleted":deleted.to_string()}))
+            let combined = serde_json::to_vec(&json!({
+                "live": live.to_string(),
+                "deleted": deleted.to_string()
+            }))?;
+            ensure!(
+                combined.len() <= limits.snapshot_bytes,
+                "verification_snapshot_byte_budget"
+            );
+            for rollup in &schema.rollups {
+                ensure!(
+                    rollup.mismatches(&snapshot)? == 0,
+                    "rollup_recount_mismatch: {}",
+                    rollup.table()
+                );
+            }
+            Ok(json!({"live":live.to_string(),"deleted":deleted.to_string()}))
+        })
     }
 
     fn snapshot(&self, scope: SnapshotScope) -> Result<Value> {
-        let mut connection = open(&self.db)?;
-        let snapshot = connection.transaction()?;
-        self.check_binding(&snapshot)?;
-        let limits = &self.artifact.contract().verification_limits;
-        let models = read_model_snapshot_bounded(
-            &snapshot,
-            &self.artifact.contract().schema,
-            scope,
-            limits.rows_per_model,
-            limits.total_facts,
-            limits.snapshot_bytes,
-        )?;
-        let encoded = serde_json::to_vec(&models)?;
-        ensure!(
-            encoded.len() <= limits.snapshot_bytes,
-            "verification_snapshot_byte_budget"
-        );
-        for rollup in &self.artifact.contract().schema.rollups {
+        self.sql_read(|snapshot| {
+            self.check_binding(&snapshot)?;
+            let limits = &self.artifact.contract().verification_limits;
+            let models = read_model_snapshot_bounded(
+                &snapshot,
+                &self.artifact.contract().schema,
+                scope,
+                limits.rows_per_model,
+                limits.total_facts,
+                limits.snapshot_bytes,
+            )?;
+            let encoded = serde_json::to_vec(&models)?;
             ensure!(
-                rollup.mismatches(&snapshot)? == 0,
-                "rollup_recount_mismatch: {}",
-                rollup.table()
+                encoded.len() <= limits.snapshot_bytes,
+                "verification_snapshot_byte_budget"
             );
-        }
-        snapshot.commit()?;
-        Ok(models)
+            for rollup in &self.artifact.contract().schema.rollups {
+                ensure!(
+                    rollup.mismatches(&snapshot)? == 0,
+                    "rollup_recount_mismatch: {}",
+                    rollup.table()
+                );
+            }
+            Ok(models)
+        })
     }
 }
 
@@ -2315,6 +2370,16 @@ pub fn validate_storage_snapshot(
     scope: &str,
 ) -> Result<()> {
     let snapshot = connection.transaction()?;
+    validate_storage_in(&snapshot, artifact, scope)?;
+    snapshot.commit()?;
+    Ok(())
+}
+
+fn validate_storage_in(
+    snapshot: &Connection,
+    artifact: &LoadedArtifact,
+    scope: &str,
+) -> Result<()> {
     check_storage_binding(&snapshot, artifact, scope)?;
     for (name, record) in &artifact.contract().schema.models {
         let sql = format!("SELECT {} FROM \"{name}\" ORDER BY id", projection(record));
@@ -2344,7 +2409,6 @@ pub fn validate_storage_snapshot(
             rollup.table()
         );
     }
-    snapshot.commit()?;
     Ok(())
 }
 

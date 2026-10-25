@@ -59,8 +59,16 @@ fn status_as(
     actor: &str,
     authenticated: Option<&str>,
 ) -> Result<Receipt> {
-    let mut database = store::open(runtime.db())?;
-    let connection = database.transaction()?;
+    runtime.sql_read(|connection| status_in(runtime, connection, id, actor, authenticated))
+}
+
+fn status_in(
+    runtime: &Runtime,
+    connection: &Connection,
+    id: &str,
+    actor: &str,
+    authenticated: Option<&str>,
+) -> Result<Receipt> {
     runtime.check_binding(&connection)?;
     let (operation, owner, artifact, status, outcome): (
         String,
@@ -386,9 +394,10 @@ pub(crate) fn validate_requests(
 }
 
 pub fn children(runtime: &Runtime, parent: &str) -> Result<Vec<Invocation>> {
-    let connection = store::open(runtime.db())?;
-    runtime.check_binding(&connection)?;
-    children_in(&connection, parent)
+    runtime.sql_read(|connection| {
+        runtime.check_binding(connection)?;
+        children_in(connection, parent)
+    })
 }
 
 fn children_in(connection: &Connection, parent: &str) -> Result<Vec<Invocation>> {
@@ -410,26 +419,34 @@ fn children_in(connection: &Connection, parent: &str) -> Result<Vec<Invocation>>
 /// and SQLite transaction determine the winner, not process-local ownership.
 pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
     ensure!(budget <= 1000, "invocation_drain_budget");
+    // Immutable admitted declarations can exclude this pump without opening
+    // SQLite. Queue emptiness itself must be read under the SQL-unit guard.
+    let commands: Vec<_> = runtime
+        .artifact()
+        .contract()
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == "command")
+        .map(|operation| operation.name.clone())
+        .collect();
+    if commands.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut completed = Vec::new();
     let mut interrupted = Vec::new();
     let mut first_error = None;
     for _ in 0..budget {
-        let connection = store::open(runtime.db())?;
-        runtime.check_binding(&connection)?;
-        let commands: Vec<_> = runtime
-            .artifact()
-            .contract()
-            .operations
-            .iter()
-            .filter(|operation| operation.kind == "command")
-            .map(|operation| operation.name.clone())
-            .collect();
-        let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(&commands)?,serde_json::to_string(&interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-        let Some((id, parent, operation)) = next else {
+        let next = runtime
+            .sql_read(|connection| select_ready(runtime, connection, &commands, &interrupted))?;
+        let Some(ReadyInvocation {
+            id,
+            parent,
+            operation,
+            continuing,
+        }) = next
+        else {
             break;
         };
-        let continuing = crate::execution::phase(&connection, &id)?.is_some();
-        drop(connection);
         let outcome = match runtime.execute(&id, store::Fault::None) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -456,6 +473,34 @@ pub fn drain(runtime: &Runtime, budget: usize) -> Result<Vec<Invocation>> {
         return Err(error);
     }
     Ok(completed)
+}
+
+/// Selected queue facts only. Its connection must end before execution can
+/// enter its own SQL/provider phases; this cannot carry storage permission.
+struct ReadyInvocation {
+    id: String,
+    parent: String,
+    operation: String,
+    continuing: bool,
+}
+
+fn select_ready(
+    runtime: &Runtime,
+    connection: &Connection,
+    commands: &[String],
+    interrupted: &[String],
+) -> Result<Option<ReadyInvocation>> {
+    runtime.check_binding(connection)?;
+    let next: Option<(String,String,String)> = connection.query_row("SELECT i.id,COALESCE(r.parent,''),i.operation FROM day2_invocations i LEFT JOIN day2_command_requests r ON i.id=r.id WHERE i.status='pending' AND i.artifact=?1 AND NOT EXISTS(SELECT 1 FROM day2_authority_blocks b WHERE b.invocation=i.id) AND i.operation IN (SELECT value FROM json_each(?2)) AND i.id NOT IN (SELECT value FROM json_each(?3)) AND NOT EXISTS(SELECT 1 FROM day2_external_effects e JOIN day2_external_retries q ON q.effect=e.identity WHERE e.invocation=i.id AND e.observation IS NULL AND q.due_ms>?4) ORDER BY i.rowid LIMIT 1", params![runtime.artifact().id(),serde_json::to_string(commands)?,serde_json::to_string(interrupted)?,runtime.host().now_ms()?], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+    next.map(|(id, parent, operation)| {
+        Ok(ReadyInvocation {
+            continuing: crate::execution::phase(connection, &id)?.is_some(),
+            id,
+            parent,
+            operation,
+        })
+    })
+    .transpose()
 }
 
 #[cfg(test)]

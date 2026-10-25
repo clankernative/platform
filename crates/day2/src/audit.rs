@@ -1,6 +1,6 @@
 use crate::{
     protocol::{Request, Row},
-    store::{Runtime, open},
+    store::Runtime,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -998,8 +998,7 @@ impl Runtime {
     /// the returned entry retains every change in that invocation.
     pub fn audit_page(&self, actor: &str, request: &PageRequest) -> Result<Page<Entry>> {
         request.validate(false)?;
-        let mut db = open(self.db())?;
-        let tx = crate::write_queue::immediate(&mut db)?;
+        self.sql_write(|tx| {
         self.authorize_audit_in(&tx, actor)?;
         let now = self.host().now_ms()?.div_euclid(1000);
         let binding = request.binding(self, actor, false)?;
@@ -1032,15 +1031,14 @@ impl Runtime {
         } else {
             String::new()
         };
-        tx.commit()?;
         Ok(Page { items, next_cursor })
+        })
     }
 
     /// Read the common admission, execution, completion and HTTP event stream.
     pub fn audit_event_page(&self, actor: &str, request: &PageRequest) -> Result<Page<Event>> {
         request.validate(true)?;
-        let mut db = open(self.db())?;
-        let tx = crate::write_queue::immediate(&mut db)?;
+        self.sql_write(|tx| {
         self.authorize_audit_in(&tx, actor)?;
         validate_event_stream(&tx)?;
         let now = self.host().now_ms()?.div_euclid(1000);
@@ -1068,8 +1066,8 @@ impl Runtime {
         } else {
             String::new()
         };
-        tx.commit()?;
         Ok(Page { items, next_cursor })
+        })
     }
 
     pub(crate) fn audit_rejection(
@@ -1098,90 +1096,84 @@ impl Runtime {
         } else {
             self.host().now_ms()?
         };
-        let mut connection = open(self.db())?;
-        let transaction = crate::write_queue::immediate(&mut connection)?;
-        self.check_binding(&transaction)?;
-        upgrade(&transaction)?;
-        record_attempt(
-            &transaction,
-            self,
-            Attempt {
-                kind: AttemptKind::Admission,
-                trigger,
-                identity,
-                actor,
-                initiator,
-                operation,
-                outcome: AttemptOutcome::Rejected,
-                reason: Some(reason),
-                at_ms,
-            },
-        )?;
-        transaction.commit()?;
-        Ok(())
+        self.sql_write(|transaction| {
+            self.check_binding(&transaction)?;
+            record_attempt(
+                &transaction,
+                self,
+                Attempt {
+                    kind: AttemptKind::Admission,
+                    trigger,
+                    identity,
+                    actor,
+                    initiator,
+                    operation,
+                    outcome: AttemptOutcome::Rejected,
+                    reason: Some(reason),
+                    at_ms,
+                },
+            )?;
+            Ok(())
+        })
     }
 
     pub(crate) fn audit_execution_interruption(&self, identity: &str) -> Result<()> {
-        let mut connection = open(self.db())?;
-        let transaction = crate::write_queue::immediate(&mut connection)?;
-        self.check_binding(&transaction)?;
-        upgrade(&transaction)?;
-        let metadata: Option<(String, String, String)> = transaction
-            .query_row(
-                "SELECT COALESCE(NULLIF(authenticated,''),actor),operation,trigger
+        self.sql_write(|transaction| {
+            self.check_binding(&transaction)?;
+            let metadata: Option<(String, String, String)> = transaction
+                .query_row(
+                    "SELECT COALESCE(NULLIF(authenticated,''),actor),operation,trigger
                  FROM day2_invocations WHERE id=?1",
-                [identity],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let (initiator, operation, cause) = metadata.unwrap_or_else(|| {
-            (
-                String::new(),
-                String::new(),
-                Trigger::Request.as_str().into(),
-            )
-        });
-        // The cause is the invocation's own, recorded when it was admitted.
-        let trigger = match cause.as_str() {
-            "schedule" => Trigger::Schedule,
-            "command_request" => Trigger::CommandRequest,
-            "ingress" => Trigger::Ingress,
-            "delegated" => Trigger::Delegated,
-            "credential" => Trigger::Credential,
-            _ => Trigger::Request,
-        };
-        record_attempt(
-            &transaction,
-            self,
-            Attempt {
-                kind: AttemptKind::ExecutionAttempt,
-                trigger,
-                identity,
-                actor: "",
-                initiator: &initiator,
-                operation: &operation,
-                outcome: AttemptOutcome::Interrupted,
-                reason: Some(AttemptReason::ExecutionInterrupted),
-                at_ms: self.host().now_ms()?,
-            },
-        )?;
-        transaction.commit()?;
-        Ok(())
+                    [identity],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let (initiator, operation, cause) = metadata.unwrap_or_else(|| {
+                (
+                    String::new(),
+                    String::new(),
+                    Trigger::Request.as_str().into(),
+                )
+            });
+            // The cause is the invocation's own, recorded when it was admitted.
+            let trigger = match cause.as_str() {
+                "schedule" => Trigger::Schedule,
+                "command_request" => Trigger::CommandRequest,
+                "ingress" => Trigger::Ingress,
+                "delegated" => Trigger::Delegated,
+                "credential" => Trigger::Credential,
+                _ => Trigger::Request,
+            };
+            record_attempt(
+                &transaction,
+                self,
+                Attempt {
+                    kind: AttemptKind::ExecutionAttempt,
+                    trigger,
+                    identity,
+                    actor: "",
+                    initiator: &initiator,
+                    operation: &operation,
+                    outcome: AttemptOutcome::Interrupted,
+                    reason: Some(AttemptReason::ExecutionInterrupted),
+                    at_ms: self.host().now_ms()?,
+                },
+            )?;
+            Ok(())
+        })
     }
 
     pub fn audit_events(&self, actor: &str, before: i64) -> Result<Vec<Event>> {
         ensure!(before >= 0, crate::error::Failure::InvalidCursor);
-        let mut db = open(self.db())?;
-        let tx = db.transaction()?;
+        self.sql_read(|tx| {
         self.authorize_audit_in(&tx, actor)?;
         validate_event_stream(&tx)?;
         let events = tx.prepare("SELECT sequence,scope,kind,identity,actor,initiator,operation,outcome,at_ms,artifact,reason,trigger FROM day2_audit_events WHERE scope=?1 AND (?2=0 OR sequence<?2) ORDER BY sequence DESC LIMIT 51")?.query_map(params![self.scope(),before], |row| Ok(Event {sequence:row.get(0)?,scope:row.get(1)?,kind:row.get(2)?,identity:row.get(3)?,actor:row.get(4)?,initiator:row.get(5)?,operation:row.get(6)?,outcome:row.get(7)?,at_ms:row.get(8)?,artifact:row.get(9)?,reason:row.get(10)?,trigger:row.get(11)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(events)
+        })
     }
     pub fn authorize_audit(&self, actor: &str) -> Result<()> {
-        let mut db = open(self.db())?;
-        let tx = db.transaction()?;
-        self.authorize_audit_in(&tx, actor)
+        self.sql_read(|tx| self.authorize_audit_in(tx, actor))
     }
     fn authorize_audit_in(&self, db: &Connection, actor: &str) -> Result<()> {
         self.check_binding(db)?;
@@ -1194,8 +1186,7 @@ impl Runtime {
     }
     pub fn audit_entries(&self, actor: &str, filter: &Filter) -> Result<Vec<Entry>> {
         ensure!(filter.before >= 0, crate::error::Failure::InvalidCursor);
-        let mut db = open(self.db())?;
-        let tx = db.transaction()?;
+        self.sql_read(|tx| {
         self.authorize_audit_in(&tx, actor)?;
         let mut statement = tx.prepare("SELECT a.rowid,a.invocation,a.actor,a.operation,a.status,a.at,i.artifact FROM day2_audit a JOIN day2_invocations i ON a.invocation=i.id WHERE (?1=0 OR a.rowid<?1) AND (?2 IS NULL OR a.actor=?2) AND (?3 IS NULL OR a.operation=?3) AND (?4 IS NULL OR a.status=?4) ORDER BY a.rowid DESC LIMIT 51")?;
         let mut entries = statement
@@ -1219,6 +1210,7 @@ impl Runtime {
             entry.changes = read_changes(&tx, &entry.invocation)?;
         }
         Ok(entries)
+        })
     }
     pub(crate) fn web_event(
         &self,
@@ -1231,16 +1223,14 @@ impl Runtime {
             (100..=599).contains(&status) && at >= 0 && category.len() <= 80,
             "invalid_web_audit_metadata"
         );
-        let mut db = open(self.db())?;
-        let tx = crate::write_queue::immediate(&mut db)?;
-        self.check_binding(&tx)?;
-        upgrade(&tx)?;
-        tx.execute(
-            "INSERT INTO day2_web_events(at,actor,category,status) VALUES(?1,?2,?3,?4)",
-            params![at, actor, category, status],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.sql_write(|tx| {
+            self.check_binding(&tx)?;
+            tx.execute(
+                "INSERT INTO day2_web_events(at,actor,category,status) VALUES(?1,?2,?3,?4)",
+                params![at, actor, category, status],
+            )?;
+            Ok(())
+        })
     }
 }
 
