@@ -74,6 +74,16 @@ tools use level 2, with assertions and overflow checks enabled and debug info
 disabled. Native non-incremental builds leave codegen partitioning at the
 compiler default; Linux CI applies its existing explicit256 and disabled-LTO
 test settings to target units while build tools retain their own defaults.
+Linux CI gives the large `//crates/day2:unit_lib` harness one implicit LLVM
+job through its declared Rust action environment. Each Linux workflow job
+creates the empty private GNU jobserver FIFO at `/var/tmp/day2-rustc-jobserver`,
+outside Bazel's private action `/tmp`. The existing Linux CI resource profile
+selects the fixed `CARGO_MAKEFLAGS` value on this harness; other compilers retain
+their current concurrency. Bazel's one-action limit alone does not constrain
+rustc's otherwise 32-token LLVM backend pool. Codegen partitioning, optimization,
+assertions, overflow checks and the complete target set stay the same; the
+container memory allowance is not increased. The ordinary configuration digest
+binds the selected action environment for strict compiler-cache admission.
 Debug-disabled compilation strips debug information as before. Linux selects the existing GNU binutils linker instead of Bazel's
 default deprecated gold selection. Release programs and native worker archives retain the previous release
 panic/profile policy; build tools keep their separate build-override profile.
