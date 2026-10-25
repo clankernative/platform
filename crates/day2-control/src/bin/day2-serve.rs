@@ -5,7 +5,7 @@
 //! provider and requires one to be declared; `--development-auth` prints a
 //! one-use sign-in link and is refused when one is.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use std::{num::NonZeroU16, path::PathBuf, time::Duration};
 
 enum ServiceExit {
@@ -72,15 +72,68 @@ fn run() -> Result<ServiceExit> {
         .map(|_| day2::deployment::NativeTerminalHold::prepare());
     runtime.shutdown_timeout(Duration::from_secs(1));
     let native_ran = day2::deployment::close_native_http_executors()?;
+    service_exit(result, native_ran, terminal)
+}
+
+fn service_exit(
+    result: Result<()>,
+    native_ran: bool,
+    terminal: Option<Result<day2::deployment::NativeTerminalHold>>,
+) -> Result<ServiceExit> {
     match result {
         Ok(()) => Ok(ServiceExit::Stopped),
         Err(error) if native_ran => {
             drop(error);
             Ok(ServiceExit::NativeRefused(
-                terminal.expect("captured before native cleanup"),
+                terminal.context("native terminal listeners were not prepared")?,
             ))
         }
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[derive(Debug)]
+    struct PrivateFailure(Arc<AtomicBool>);
+    impl std::fmt::Display for PrivateFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("private fixture error")
+        }
+    }
+    impl std::error::Error for PrivateFailure {}
+    impl Drop for PrivateFailure {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn only_closed_native_execution_selects_hold_and_drops_private_failure_first() {
+        assert!(matches!(
+            service_exit(Ok(()), true, None).unwrap(),
+            ServiceExit::Stopped
+        ));
+        assert!(service_exit(Err(anyhow::anyhow!("ordinary failure")), false, None).is_err());
+        assert!(service_exit(Err(anyhow::anyhow!("native failure")), true, None).is_err());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let result = service_exit(
+            Err(anyhow::Error::new(PrivateFailure(dropped.clone()))),
+            true,
+            Some(Err(anyhow::anyhow!("fixture stop unavailable"))),
+        )
+        .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        let ServiceExit::NativeRefused(hold) = result else {
+            panic!("wrong disposition")
+        };
+        assert!(hold.is_err());
     }
 }
 
