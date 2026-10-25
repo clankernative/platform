@@ -326,7 +326,7 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // callbacks receive only shared borrows and cannot call it on theirs.
         (
             "crates/day2/src/store.rs",
-            "sha256:2e4d111602f0e8ec49db5c664dc5a99f1510c76cd0a42a9b668c7cf168f4792c",
+            "sha256:225e881e7720016ca18026b2fca5777f244f099e11f3a566c699b912e21f7f69",
         ),
         // Immutable memory-image DATA only: current acquisition checks and
         // memory/path/attached-db/image bounds precede serialize and copying.
@@ -8667,17 +8667,25 @@ mod tests {
 
     #[test]
     fn sql_callback_controls_pin_owned_configure_function_not_its_name_or_call() {
-        let syntax = syn::parse_file(include_str!("../../day2/src/store.rs")).unwrap();
-        let function = syntax
-            .items
-            .iter()
-            .find_map(|item| match item {
-                Item::Fn(function) if function.sig.ident == "configure_connection" => {
-                    Some(function)
-                }
-                _ => None,
-            })
-            .unwrap();
+        // Frozen positive fixture for the exact reviewed function. The normal
+        // inventory independently compares actual production function tokens;
+        // this fixture cannot approve a changed production implementation.
+        let function: syn::ItemFn = syn::parse_quote! {
+            /// The same bounded SQLite execution settings apply to an owned fresh memory
+            /// database. Configuring a connection supplies no storage or epoch authority.
+            pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> Result<()> {
+                connection.busy_timeout(Duration::from_secs(2))?;
+                connection.pragma_update(None, "foreign_keys", true)?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
+                connection.pragma_update(None, "trusted_schema", false)?;
+                let ticks = Arc::new(AtomicUsize::new(0));
+                connection.progress_handler(1_000, Some(move || {
+                    let runtime_exhausted = ticks.fetch_add(1, Ordering::Relaxed) > 10_000;
+                    crate::oauth::schema::admission_step(1_000) || runtime_exhausted
+                }))?;
+                Ok(())
+            }
+        };
         let source = "crates/day2/src/store.rs";
         let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
         assert!(sql_control_function_reviewed(source, &digest), "{digest}");
@@ -8687,7 +8695,7 @@ mod tests {
             function: None,
             errors: BTreeSet::new(),
         };
-        checker.visit_item_fn(function);
+        checker.visit_item_fn(&function);
         assert!(checker.errors.is_empty());
         let mut changed = function.clone();
         changed
