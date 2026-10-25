@@ -399,10 +399,14 @@ strong post-read, native postchecks and peer acknowledgement/release.
 Body preparation preserves headers and trailers and retains at most 64 frames,
 64 KiB of body bytes and 64 KiB of trailer names/values. These checks bound what
 this layer retains, not allocations already performed by a body producer.
-Deferred/live, larger and Shell responses keep their existing scope composition;
+Unknown-length/live, larger and Shell responses keep their existing scope composition;
 this App-only change does not silently remove their guards or extend a stage
 into the thirty-second HTTP connection lifetime. A retained response that
 exhausts its original five-second or any shorter deadline refuses permanently.
+A deferred producer with a bounded exact length completes before the actual
+owner is leased. During delivery the same App's native registry entry is busy;
+other consumers fail closed rather than borrow that response's grant. This can
+affect concurrent requests and background work and needs native qualification.
 
 The private `day2-native-response-delivery ` prefix carries
 `finite_app_response_delivery_v1` DATA: one process-local sequence, completed or

@@ -531,7 +531,7 @@ impl<T: rt::Write + Unpin + 'static> rt::Write for OwnerIo<T> {
 }
 
 /// Only a bounded, fully prepared App body enters a retained delivery scope.
-/// Deferred/live bodies retain their own existing admission choreography: do
+/// Unknown-length/live bodies retain their existing admission choreography: do
 /// not lease an owner that their producer still needs to render the next frame.
 async fn prepare_finite_app_body(
     response: Response,
