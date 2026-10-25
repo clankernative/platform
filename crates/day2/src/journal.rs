@@ -92,6 +92,7 @@ pub fn compact(runtime: &crate::store::Runtime, now: i64, batch: usize) -> Resul
     runtime.sql_write(|tx| compact_in(tx, cutoff, batch))
 }
 
+#[cfg(test)]
 pub(crate) fn compact_before(db: &std::path::Path, cutoff: i64, batch: usize) -> Result<usize> {
     let mut connection = crate::store::open(db)?;
     let tx = crate::write_queue::immediate(&mut connection)?;

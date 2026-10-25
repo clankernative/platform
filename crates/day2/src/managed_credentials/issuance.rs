@@ -5,10 +5,7 @@ use super::{
     lifecycle::{self, Intent},
     store,
 };
-use crate::{
-    authority_state, protocol,
-    store::{Runtime, open},
-};
+use crate::{authority_state, protocol, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
@@ -1088,6 +1085,7 @@ pub(crate) fn validate_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::open;
     use crate::store::{Fault, replay};
     use std::path::PathBuf;
 

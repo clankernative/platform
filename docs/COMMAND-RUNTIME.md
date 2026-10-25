@@ -120,6 +120,24 @@ further execution and does not become current again if identical grants are
 restored. Already admitted calls may finish; settlement records their outcome
 even after revocation without invoking application completion writes. Retries
 require fresh admission, a distinct attempt identity and the original effect ID.
+For the fixed native App database, a pathname or previously admitted Runtime is
+not current storage permission. Each SQL unit borrows the actual enrolled owner
+before open/recovery, retains it through its snapshot or FIFO transaction, checks
+the same owner at commit, and closes the connection before known settlement.
+Command selection, schedule cursors, journal compaction and ordinary execution
+phases follow this rule even when their queries find no work. Immutable admitted
+declarations can exclude an absent command pump before opening the database;
+an earlier empty queue read cannot supply that exclusion.
+
+OAuth's Pending and human consumers use their existing original owner for these
+units. Intermediate writes do not finalize the original; the final consumer
+commit does so once. SQL handles cannot escape into provider calls. A failed or
+unknown commit, rollback, close, policy check or owner check refuses the unit;
+another timer, callback or identical selection cannot rearm it. These guards
+apply to trusted private Rust callbacks and do not claim hostile native-code
+containment. Native-node and live-provider qualification remain separate from
+SQLite conformance and deterministic simulation tests.
+
 Migration/activation requires pending invocations to drain, including commands
 whose local decision committed while external delivery remains incomplete.
 
