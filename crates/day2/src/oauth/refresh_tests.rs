@@ -310,7 +310,14 @@ struct NativeAuthority {
 }
 
 impl Authority for NativeAuthority {
-    fn current(&self, _: &str, _: &str, _: &str, _: i64) -> Result<Option<Selection>> {
+    fn current(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: i64,
+        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<Option<Selection>> {
         if self.port.case == Case::AbsentReturnRewind {
             let db = store::open(&self.port.db)?;
             let missing: bool = db.query_row(
@@ -334,6 +341,7 @@ impl Authority for NativeAuthority {
         _: &str,
         expected: &Digest,
         _: i64,
+        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<KeyLease>> {
         assert_eq!(&self.selection.identity()?, expected);
         Ok(Some(profiles::tests::exchange_key()))
@@ -345,6 +353,7 @@ impl Authority for NativeAuthority {
         _: &str,
         expected: &Digest,
         _: i64,
+        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<refresh::ClientCredential>> {
         assert_eq!(&self.selection.identity()?, expected);
         if self.port.case == Case::CredentialRewind {
@@ -370,13 +379,17 @@ impl Authority for NativeAuthority {
             checked_at,
         )?))
     }
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         _: &str,
         _: &str,
         _: &str,
         _: i64,
-        commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+        subjects: &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            &Selection,
+            &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let call = self.commits.fetch_add(1, SeqCst);
         if call == 0 && self.port.case == Case::DispatchReturnRewind {
@@ -409,7 +422,7 @@ impl Authority for NativeAuthority {
                 self.port.publication_clock_reads.store(0, SeqCst);
             }
         }
-        let result = commit(&self.selection);
+        let result = commit(&self.selection, subjects);
         if call == 0 && self.port.case == Case::DispatchErrorRecovery {
             self.port.now.store(250, SeqCst);
         }

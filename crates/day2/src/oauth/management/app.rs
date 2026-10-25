@@ -197,16 +197,18 @@ impl Manager {
         registration: &str,
         identity: &iap::Verified,
         now: i64,
+        subjects: &mut admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<usage::Selection> {
         use crate::oauth::approval_registry::ApprovalAuthority as _;
         self.authority
-            .observe_identity(self.runtime.app(), identity, now)?;
+            .observe_identity(self.runtime.app(), identity, now, subjects)?;
         let selection = usage::Authority::current(
             self.authority.as_ref(),
             self.runtime.app(),
             registration,
             &identity.email,
             now,
+            subjects,
         )?
         .context("OAuth registration not ready")?;
         ensure!(
@@ -310,7 +312,8 @@ impl Manager {
                 self.authority_in(db, identity)?;
                 Ok(store::SqlDecision::Commit(()))
             })?;
-            let selection = self.selection(registration, identity, now)?;
+            let selection = self.selection(registration, identity, now,
+                &mut admission::SubjectReader::pending(&self.runtime, current))?;
             let suffix = effects::random()?;
             let challenge = Digest::new(effects::random()?.as_bytes());
             let captured_at = effects::wall_time()?;
@@ -407,7 +410,12 @@ impl Manager {
                 if state != "pending" {
                     return Ok(None);
                 }
-                let selection = self.selection(&view.registration, identity, now)?;
+                let selection = self.selection(
+                    &view.registration,
+                    identity,
+                    now,
+                    &mut admission::SubjectReader::human(&self.runtime, current),
+                )?;
                 ensure!(
                     selection.identity()? == view.selection,
                     "OAuth management selection changed"
@@ -498,7 +506,12 @@ impl Manager {
         };
         guard.with_current(now, |consumer| {
             consumer.arm()?;
-            let selection = self.selection(&view.registration, identity, now)?;
+            let selection = self.selection(
+                &view.registration,
+                identity,
+                now,
+                &mut admission::SubjectReader::human(&self.runtime, consumer),
+            )?;
             ensure!(
                 selection.identity()? == view.selection,
                 "OAuth management selection changed"
@@ -511,6 +524,7 @@ impl Manager {
                     &identity.email,
                     &view.selection,
                     now,
+                    &mut admission::SubjectReader::human(&self.runtime, consumer),
                 )?
                 .context("OAuth custody unavailable")?;
             let verifier = effects::random()?;
@@ -604,21 +618,24 @@ impl Manager {
                 &view.registration,
                 &identity.email,
                 checking,
-                &mut |current| {
-                    ensure!(
-                        current.identity()? == view.selection,
-                        "OAuth connect readiness changed"
-                    );
-                    let finished = effects::wall_time()?;
-                    ensure!(finished >= checking, "OAuth connect clock moved backwards");
-                    view.validate(identity, finished)?;
-                    crate::oauth::connect::begin_managed(
-                        &self.runtime,
-                        prepared.take().context("OAuth connect permit consumed")?,
-                        finished,
-                        &guard,
-                        consumer,
-                    )
+                &mut admission::SubjectReader::human(&self.runtime, consumer),
+                &mut |current, subjects| {
+                    subjects.with_human(|consumer| {
+                        ensure!(
+                            current.identity()? == view.selection,
+                            "OAuth connect readiness changed"
+                        );
+                        let finished = effects::wall_time()?;
+                        ensure!(finished >= checking, "OAuth connect clock moved backwards");
+                        view.validate(identity, finished)?;
+                        crate::oauth::connect::begin_managed(
+                            &self.runtime,
+                            prepared.take().context("OAuth connect permit consumed")?,
+                            finished,
+                            &guard,
+                            consumer,
+                        )
+                    })
                 },
             )?;
             ensure!(started, "OAuth connect intent already consumed");
@@ -687,7 +704,12 @@ impl Manager {
                     let Some((view, intent, binding, private)) = local else {
                         return Ok(None);
                     };
-                    let selection = self.selection(&view.registration, identity, now)?;
+                    let selection = self.selection(
+                        &view.registration,
+                        identity,
+                        now,
+                        &mut admission::SubjectReader::human(&self.runtime, current),
+                    )?;
                     ensure!(
                         selection.identity()? == view.selection,
                         "OAuth callback selection changed"
@@ -715,6 +737,7 @@ impl Manager {
                         &identity.email,
                         &view.selection,
                         now,
+                        &mut admission::SubjectReader::human(&self.runtime, current),
                     )?
                     .context("OAuth custody unavailable")
             },
@@ -732,6 +755,7 @@ impl Manager {
                         &identity.email,
                         &view.selection,
                         now,
+                        &mut admission::SubjectReader::human(&self.runtime, current),
                     )?
                     .context("OAuth client unavailable")
             },
@@ -819,21 +843,24 @@ impl Manager {
                     &view.registration,
                     &identity.email,
                     at,
-                    &mut |current| {
-                        ensure!(
-                            current.identity()? == view.selection,
-                            "OAuth exchange readiness changed"
-                        );
-                        let checked = effects::wall_time()?;
-                        ensure!(checked >= at, "OAuth exchange clock moved backwards");
-                        permit = crate::oauth::exchange::authorize_managed_exchange(
-                            &self.runtime,
-                            input(),
-                            checked,
-                            &guard,
-                            consumer,
-                        )?;
-                        Ok(permit.is_some())
+                    &mut admission::SubjectReader::human(&self.runtime, consumer),
+                    &mut |current, subjects| {
+                        subjects.with_human(|consumer| {
+                            ensure!(
+                                current.identity()? == view.selection,
+                                "OAuth exchange readiness changed"
+                            );
+                            let checked = effects::wall_time()?;
+                            ensure!(checked >= at, "OAuth exchange clock moved backwards");
+                            permit = crate::oauth::exchange::authorize_managed_exchange(
+                                &self.runtime,
+                                input(),
+                                checked,
+                                &guard,
+                                consumer,
+                            )?;
+                            Ok(permit.is_some())
+                        })
                     },
                 )
             },
@@ -902,30 +929,33 @@ impl Manager {
                     &view.registration,
                     &identity.email,
                     checking,
-                    &mut |current| {
-                        ensure!(
-                            current.identity()? == view.selection,
-                            "OAuth settlement readiness changed"
-                        );
-                        let finished = effects::wall_time()?;
-                        ensure!(
-                            finished >= checking,
-                            "OAuth settlement clock moved backwards"
-                        );
-                        let prepared = response
-                            .take()
-                            .context("OAuth settlement consumed")?
-                            .validate_mapped(input(), &mapped, &account)?
-                            .prepare_tokens(&key)?;
-                        crate::oauth::exchange::settle_managed(
-                            &self.runtime,
-                            prepared,
-                            input(),
-                            &mapping.revision,
-                            finished,
-                            &guard,
-                            consumer,
-                        )
+                    &mut admission::SubjectReader::human(&self.runtime, consumer),
+                    &mut |current, subjects| {
+                        subjects.with_human(|consumer| {
+                            ensure!(
+                                current.identity()? == view.selection,
+                                "OAuth settlement readiness changed"
+                            );
+                            let finished = effects::wall_time()?;
+                            ensure!(
+                                finished >= checking,
+                                "OAuth settlement clock moved backwards"
+                            );
+                            let prepared = response
+                                .take()
+                                .context("OAuth settlement consumed")?
+                                .validate_mapped(input(), &mapped, &account)?
+                                .prepare_tokens(&key)?;
+                            crate::oauth::exchange::settle_managed(
+                                &self.runtime,
+                                prepared,
+                                input(),
+                                &mapping.revision,
+                                finished,
+                                &guard,
+                                consumer,
+                            )
+                        })
                     },
                 )
             },
@@ -969,7 +999,9 @@ impl Manager {
                     &view.registration,
                     &identity.email,
                     checking,
-                    &mut |current| {
+                    &mut admission::SubjectReader::human(&self.runtime, consumer),
+                    &mut |current, subjects| {
+                        subjects.with_human(|consumer| {
                         ensure!(
                             current.identity()? == view.selection,
                             "OAuth disconnect readiness changed"
@@ -1008,6 +1040,7 @@ impl Manager {
                 params![view.id, proof.session.as_str()])?;
                         Ok(true)
                         })
+                    })
                     },
                 )
             },
@@ -1169,7 +1202,10 @@ impl FinishGuard<'_> {
                 current.arm()?;
                 // Readiness may contact the edge/key provider on a cold lease.
                 // Retain the same original, but open no SQL unit across it.
-                let selected_at = self.require_send_selection(entry)?;
+                let selected_at = self.require_send_selection(
+                    entry,
+                    &mut admission::SubjectReader::human(&self.manager.runtime, current),
+                )?;
                 current.check()?;
                 let prepared = current.sql_read(&self.manager.runtime, |db| {
                     self.require_send(db, selected_at)?;
@@ -1183,13 +1219,17 @@ impl FinishGuard<'_> {
         )
     }
 
-    fn require_send_selection(&self, entry: i64) -> Result<i64> {
+    fn require_send_selection(
+        &self,
+        entry: i64,
+        subjects: &mut admission::SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<i64> {
         let now = effects::wall_time()?;
         ensure!(now >= entry, "OAuth initial dispatch clock moved backwards");
         self.view.validate(self.identity, now)?;
-        let selection = self
-            .manager
-            .selection(&self.view.registration, self.identity, now)?;
+        let selection =
+            self.manager
+                .selection(&self.view.registration, self.identity, now, subjects)?;
         ensure!(
             selection.identity()? == self.view.selection,
             "OAuth initial dispatch selection changed"

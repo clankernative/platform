@@ -1296,6 +1296,7 @@ impl ArtifactApprovalAuthority {
         intent: &connect::ConnectIntent,
         callback: &connect::CallbackBinding,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<ApprovalTerms>> {
         let selected = &state.selected;
         if let Some(runtime) = &selected.instance.oauth_runtime {
@@ -1344,7 +1345,10 @@ impl ArtifactApprovalAuthority {
             "OAuth selected binding generation changed"
         );
         let started = crate::oauth::effects::Instant::now();
-        let Some(evidence) = self.readiness.current(&candidate.binding, &slot, now)? else {
+        let Some(evidence) = self
+            .readiness
+            .current(&candidate.binding, &slot, now, subjects)?
+        else {
             return Ok(None);
         };
         let (account, policy) = match &evidence.account {
@@ -1390,7 +1394,7 @@ impl ArtifactApprovalAuthority {
                 .clone()
                 .context("OAuth selected key provider missing")?,
         )?;
-        let Some(terms) = authority.current(app, intent, callback, now)? else {
+        let Some(terms) = authority.current(app, intent, callback, now, subjects)? else {
             return Ok(None);
         };
         // Exact-version key retrieval may consume the readiness lease. Check
@@ -1398,7 +1402,10 @@ impl ArtifactApprovalAuthority {
         let at = now
             .checked_add(i64::try_from(started.elapsed().as_secs())?)
             .context("OAuth readiness clock overflow")?;
-        let Some(current) = self.readiness.current(&candidate.binding, &slot, at)? else {
+        let Some(current) = self
+            .readiness
+            .current(&candidate.binding, &slot, at, subjects)?
+        else {
             return Ok(None);
         };
         ensure!(
@@ -1410,7 +1417,13 @@ impl ArtifactApprovalAuthority {
 }
 
 impl ApprovalAuthority for ArtifactApprovalAuthority {
-    fn observe_identity(&self, app: &str, identity: &crate::iap::Verified, now: i64) -> Result<()> {
+    fn observe_identity(
+        &self,
+        app: &str,
+        identity: &crate::iap::Verified,
+        now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<()> {
         let state = self
             .state
             .read()
@@ -1419,7 +1432,7 @@ impl ApprovalAuthority for ArtifactApprovalAuthority {
             state.selected.instance.apps.contains_key(app),
             "OAuth human observation app mismatch"
         );
-        self.readiness.observe_identity(identity, now)
+        self.readiness.observe_identity(identity, now, subjects)
     }
 
     fn current(
@@ -1428,30 +1441,35 @@ impl ApprovalAuthority for ArtifactApprovalAuthority {
         intent: &connect::ConnectIntent,
         callback: &connect::CallbackBinding,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<ApprovalTerms>> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        self.terms(&state, app, intent, callback, now)
+        self.terms(&state, app, intent, callback, now, subjects)
     }
 
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         app: &str,
         intent: &connect::ConnectIntent,
         callback: &connect::CallbackBinding,
         now: i64,
-        commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+        subjects: &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            ApprovalTerms,
+            &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let Some(terms) = self.terms(&state, app, intent, callback, now)? else {
+        let Some(terms) = self.terms(&state, app, intent, callback, now, subjects)? else {
             return Ok(false);
         };
-        commit(terms)
+        commit(terms, subjects)
     }
 }
 
@@ -1463,6 +1481,7 @@ impl ArtifactApprovalAuthority {
         registration: &str,
         owner: &str,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<super::usage::Selection>> {
         let selected = &state.selected;
         if let Some(runtime) = &selected.instance.oauth_runtime {
@@ -1490,7 +1509,10 @@ impl ArtifactApprovalAuthority {
                 subject: owner.to_owned(),
             },
         };
-        let Some(instance) = self.readiness.current(&candidate.binding, &slot, now)? else {
+        let Some(instance) = self
+            .readiness
+            .current(&candidate.binding, &slot, now, subjects)?
+        else {
             return Ok(None);
         };
         let (account, policy, observed_owner) = match &instance.account {
@@ -1536,23 +1558,29 @@ impl ArtifactApprovalAuthority {
 }
 
 impl super::usage::Authority for ArtifactApprovalAuthority {
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         app: &str,
         registration: &str,
         owner: &str,
         now: i64,
-        commit: &mut dyn FnMut(&super::usage::Selection) -> Result<bool>,
+        subjects: &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            &super::usage::Selection,
+            &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+        let Some(selection) =
+            self.use_selection(&state, app, registration, owner, now, subjects)?
+        else {
             return Ok(false);
         };
         // Selection replacement cannot race the local dispatch/publication CAS.
-        commit(&selection)
+        commit(&selection, subjects)
     }
 
     fn refresh_client(
@@ -1562,12 +1590,15 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<super::refresh::ClientCredential>> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+        let Some(selection) =
+            self.use_selection(&state, app, registration, owner, now, subjects)?
+        else {
             return Ok(None);
         };
         ensure!(
@@ -1627,7 +1658,7 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         if at < now {
             return Err(super::refresh::ClockRefusal.into());
         }
-        let current = self.use_selection(&state, app, registration, owner, at);
+        let current = self.use_selection(&state, app, registration, owner, at, subjects);
         let completed_at = super::effects::wall_time()?;
         if completed_at < at {
             return Err(super::refresh::ClockRefusal.into());
@@ -1653,12 +1684,13 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         registration: &str,
         owner: &str,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<super::usage::Selection>> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
-        self.use_selection(&state, app, registration, owner, now)
+        self.use_selection(&state, app, registration, owner, now, subjects)
     }
 
     fn custody(
@@ -1668,13 +1700,16 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<crate::managed_credentials::crypto::KeyLease>> {
         let state = self
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("OAuth selection lock poisoned"))?;
         let started = super::effects::Instant::now();
-        let Some(selection) = self.use_selection(&state, app, registration, owner, now)? else {
+        let Some(selection) =
+            self.use_selection(&state, app, registration, owner, now, subjects)?
+        else {
             return Ok(None);
         };
         ensure!(
@@ -1713,7 +1748,8 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
         let at = now
             .checked_add(i64::try_from(started.elapsed().as_secs())?)
             .context("OAuth use clock overflow")?;
-        let Some(current) = self.use_selection(&state, app, registration, owner, at)? else {
+        let Some(current) = self.use_selection(&state, app, registration, owner, at, subjects)?
+        else {
             return Ok(None);
         };
         ensure!(
@@ -2118,7 +2154,13 @@ pub(super) mod tests {
             app_keys,
         ));
         let terms = authority
-            .current("workspace", &facts.intent, &facts.callback, 1_000)?
+            .current(
+                "workspace",
+                &facts.intent,
+                &facts.callback,
+                1_000,
+                &mut SubjectReader::fixture(database),
+            )?
             .context("replay app selection unavailable")?;
         let input = || OutboundQualification {
             intent: &facts.intent,
@@ -4001,7 +4043,13 @@ pub(super) mod tests {
             ArtifactApprovalAuthority::with_keys(selected, source.clone(), keys.clone());
         assert!(
             authority
-                .current("workspace", &facts.intent, &facts.callback, 5)
+                .current(
+                    "workspace",
+                    &facts.intent,
+                    &facts.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )
                 .is_err()
         );
         assert_eq!(source.calls.load(Ordering::SeqCst), 0);
@@ -4308,7 +4356,13 @@ pub(super) mod tests {
         for _ in 0..2 {
             assert!(
                 authority
-                    .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                    .current(
+                        "workspace",
+                        &fixture.intent,
+                        &fixture.callback,
+                        5,
+                        &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                    )?
                     .is_some()
             );
         }
@@ -4317,7 +4371,13 @@ pub(super) mod tests {
         *readiness.current.write().unwrap() = None;
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         assert_eq!(keys.calls.load(Ordering::SeqCst), 6);
@@ -4341,7 +4401,13 @@ pub(super) mod tests {
         authority.replace_with_gcp(fixture.qualify()?, Arc::new(NoTokens))?;
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         assert_eq!(readiness.calls.load(Ordering::SeqCst), 5);
@@ -4385,7 +4451,13 @@ pub(super) mod tests {
         );
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         *readiness.current.write().unwrap() = Some(fixture.evidence);
@@ -4395,7 +4467,8 @@ pub(super) mod tests {
             &fixture.intent,
             &fixture.callback,
             5,
-            &mut |_| {
+            &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite")),
+            &mut |_, _| {
                 settlements += 1;
                 Ok(true)
             }
@@ -4425,12 +4498,24 @@ pub(super) mod tests {
         other_owner.owner = "human_2".into();
         assert!(
             authority
-                .current("workspace", &other_owner, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &other_owner,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         assert!(
             authority
-                .current("other", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "other",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         for mutation in 0..10 {
@@ -4459,7 +4544,13 @@ pub(super) mod tests {
             *readiness.current.write().unwrap() = Some(evidence);
             assert!(
                 authority
-                    .current("workspace", &fixture.intent, &fixture.callback, 5)
+                    .current(
+                        "workspace",
+                        &fixture.intent,
+                        &fixture.callback,
+                        5,
+                        &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                    )
                     .is_err(),
                 "mutation {mutation}"
             );
@@ -4483,7 +4574,13 @@ pub(super) mod tests {
         authority.replace_with_gcp(next, Arc::new(NoTokens))?;
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )
                 .is_err()
         );
         assert_eq!(keys.calls.load(Ordering::SeqCst), 0);
@@ -4509,7 +4606,13 @@ pub(super) mod tests {
         let authority = ArtifactApprovalAuthority::with_keys(selected, readiness, keys.clone());
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_some()
         );
         let key_reads = keys.calls.load(Ordering::SeqCst);
@@ -4523,7 +4626,13 @@ pub(super) mod tests {
         authority.replace_with_gcp(selected, Arc::new(NoTokens))?;
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )
                 .is_err()
         );
         assert_eq!(keys.calls.load(Ordering::SeqCst), key_reads);
@@ -4546,7 +4655,13 @@ pub(super) mod tests {
         );
         assert!(
             authority
-                .current("workspace", &fixture.intent, &fixture.callback, 5)?
+                .current(
+                    "workspace",
+                    &fixture.intent,
+                    &fixture.callback,
+                    5,
+                    &mut SubjectReader::fixture(Path::new("/fixture/unused.sqlite"))
+                )?
                 .is_none()
         );
         assert_eq!(readiness.calls.load(Ordering::SeqCst), 0);

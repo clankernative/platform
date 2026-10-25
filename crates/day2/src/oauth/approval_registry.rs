@@ -1,21 +1,23 @@
 //! Durable approval lookup. The browser supplies only an attempt identifier;
 //! current contracts and keys come from a host-owned admission authority.
 
-use super::{connect, external, profiles, security_shell, shell_transport};
+#[cfg(test)]
+use super::security_shell;
+use super::{connect, external, profiles, shell_transport};
 use crate::{artifact::Instance, managed_credentials::crypto::KeyLease};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef,
     oauth::{ConnectionRequirement, ProviderPermissionContract},
 };
+#[cfg(test)]
 use rusqlite::{Connection, OpenFlags};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
+    collections::BTreeMap,
     sync::{Arc, RwLock},
-    time::Duration,
 };
+#[cfg(test)]
+use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
 
 /// Current admitted facts for a stored attempt. The authority must resolve
 /// these from the selected installation and reviewed host catalog, and obtain
@@ -36,6 +38,7 @@ pub(crate) trait ApprovalAuthority: Send + Sync {
         _app: &str,
         _identity: &crate::iap::Verified,
         _now: i64,
+        _subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<()> {
         Ok(())
     }
@@ -46,17 +49,22 @@ pub(crate) trait ApprovalAuthority: Send + Sync {
         intent: &connect::ConnectIntent,
         binding: &connect::CallbackBinding,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<ApprovalTerms>>;
 
     /// Hold current selection through the local settlement transaction. A
     /// resolver that cannot provide this lease cannot authorize a commit.
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         _app: &str,
         _intent: &connect::ConnectIntent,
         _binding: &connect::CallbackBinding,
         _now: i64,
-        _commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+        _subjects: &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        _commit: &mut dyn FnMut(
+            ApprovalTerms,
+            &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         anyhow::bail!("OAuth authority cannot lease settlement")
     }
@@ -256,6 +264,7 @@ impl ApprovalAuthority for SelectedApprovalAuthority {
         intent: &connect::ConnectIntent,
         binding: &connect::CallbackBinding,
         _: i64,
+        _: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<ApprovalTerms>> {
         let entries = self
             .entries
@@ -267,13 +276,17 @@ impl ApprovalAuthority for SelectedApprovalAuthority {
         Ok(Some(self.terms(entry, intent, binding)?))
     }
 
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         app: &str,
         intent: &connect::ConnectIntent,
         binding: &connect::CallbackBinding,
         _: i64,
-        commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+        subjects: &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            ApprovalTerms,
+            &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let entries = self
             .entries
@@ -283,17 +296,67 @@ impl ApprovalAuthority for SelectedApprovalAuthority {
             return Ok(false);
         };
         // Replacement waits until the SQLite commit (or rollback) finishes.
-        commit(self.terms(entry, intent, binding)?)
+        commit(self.terms(entry, intent, binding)?, subjects)
     }
 }
 
-/// The registry scans the host-selected OAuth app databases before consulting
+/// No production approval fallback exists beside the typed management owner.
+/// The receiver still needs its app identity for authenticated route binding.
+pub(crate) struct UnavailableAppApprovals {
+    app: String,
+}
+
+impl UnavailableAppApprovals {
+    pub(crate) fn new(app: String) -> Result<Self> {
+        day2_contracts::names::identifier(&app)?;
+        Ok(Self { app })
+    }
+}
+
+impl shell_transport::AppApprovals for UnavailableAppApprovals {
+    fn app(&self) -> &str {
+        &self.app
+    }
+
+    fn lookup(
+        &self,
+        _: &str,
+        _: &crate::iap::Verified,
+        _: i64,
+    ) -> Result<shell_transport::HostLookup> {
+        anyhow::bail!("OAuth approval purpose unavailable")
+    }
+
+    fn fresh_owner(
+        &self,
+        _: &super::fresh_owner::CallData,
+        _: &crate::iap::Verified,
+        _: i64,
+    ) -> Result<super::fresh_owner::ReplyData> {
+        anyhow::bail!("OAuth approval purpose unavailable")
+    }
+
+    fn confirm(
+        &self,
+        _: &str,
+        _: &day2_capabilities::Digest,
+        _: &crate::iap::Verified,
+        _: external::FreshExternalApproval,
+        _: i64,
+    ) -> Result<bool> {
+        anyhow::bail!("OAuth approval purpose unavailable")
+    }
+}
+
+/// The test registry scans the selected ordinary app databases before consulting
 /// admission. Two apps may never answer the same opaque attempt identifier.
+#[cfg(test)]
 pub(crate) struct StoredApprovalRegistry {
     app_databases: BTreeMap<String, PathBuf>,
     authority: Arc<dyn ApprovalAuthority>,
 }
 
+#[cfg(test)]
 impl StoredApprovalRegistry {
     fn owner(&self, attempt: &str) -> Result<Option<String>> {
         let mut owner = None;
@@ -335,7 +398,12 @@ impl StoredApprovalRegistry {
         );
         crate::iap::bind_subject(&db, identity, now)?;
         drop(db);
-        self.authority.observe_identity(&app, identity, now)?;
+        self.authority.observe_identity(
+            &app,
+            identity,
+            now,
+            &mut super::admission::SubjectReader::fixture(&self.app_databases[&app]),
+        )?;
         let Some(context) = self.resolve(attempt, now)? else {
             return Ok(shell_transport::HostLookup {
                 owned: true,
@@ -393,10 +461,20 @@ impl StoredApprovalRegistry {
         let db = crate::store::open(path)?;
         crate::iap::bind_subject(&db, identity, now)?;
         drop(db);
-        self.authority.observe_identity(&app, identity, now)?;
+        self.authority.observe_identity(
+            &app,
+            identity,
+            now,
+            &mut super::admission::SubjectReader::fixture(path),
+        )?;
         let mut evidence = Some(evidence);
-        self.authority
-            .with_current(&app, &intent, &binding, now, &mut |terms| {
+        self.authority.with_current(
+            &app,
+            &intent,
+            &binding,
+            now,
+            &mut super::admission::SubjectReader::fixture(path),
+            &mut |terms, _| {
                 // Re-read the clock after key acquisition and the pending state
                 // after obtaining the selection lease. No network call occurs in
                 // the SQLite settlement transaction.
@@ -440,7 +518,8 @@ impl StoredApprovalRegistry {
                         .context("OAuth confirmation already consumed")?,
                     at,
                 )
-            })
+            },
+        )
     }
 
     fn fresh_owner(
@@ -467,45 +546,54 @@ impl StoredApprovalRegistry {
             "OAuth fresh pending human changed"
         );
         drop(db);
-        self.authority.observe_identity(&app, identity, now)?;
+        self.authority.observe_identity(
+            &app,
+            identity,
+            now,
+            &mut super::admission::SubjectReader::fixture(path),
+        )?;
         let mut reply = None;
-        let committed =
-            self.authority
-                .with_current(&app, &intent, &binding, now, &mut |terms| {
-                    let at = clock()?;
-                    ensure!(at >= now, "OAuth host clock moved backwards");
-                    let context = security_shell::ApprovalContext {
-                        db: path.clone(),
-                        intent: intent.clone(),
-                        binding: binding.clone(),
-                        requirement: terms.requirement,
-                        permission: terms.permission,
-                        reviewed: terms.reviewed,
-                        instance: terms.instance,
-                        custody_key: terms.custody_key,
-                        shell_key: terms.shell_key,
-                    };
-                    let mut db = crate::store::open(path)?;
-                    let tx = crate::write_queue::immediate(&mut db)?;
-                    crate::iap::bind_subject(&tx, identity, at)?;
-                    let pending = external::load_pending_external(
-                        &tx,
-                        context.qualification(),
-                        &context.custody_key,
-                        at,
-                    )?
-                    .context("OAuth fresh pending changed")?;
-                    let view = shell_transport::ApprovalView::from_pending(
-                        &app, &context, &pending, identity,
-                    )?;
-                    let current = FreshIntent::approval(&view, identity)?;
-                    let result = super::fresh_owner::apply_in_current_app_transaction(
-                        &tx, &current, call, at,
-                    )?;
-                    tx.commit()?;
-                    reply = Some(result);
-                    Ok(true)
-                })?;
+        let committed = self.authority.with_current(
+            &app,
+            &intent,
+            &binding,
+            now,
+            &mut super::admission::SubjectReader::fixture(path),
+            &mut |terms, _| {
+                let at = clock()?;
+                ensure!(at >= now, "OAuth host clock moved backwards");
+                let context = security_shell::ApprovalContext {
+                    db: path.clone(),
+                    intent: intent.clone(),
+                    binding: binding.clone(),
+                    requirement: terms.requirement,
+                    permission: terms.permission,
+                    reviewed: terms.reviewed,
+                    instance: terms.instance,
+                    custody_key: terms.custody_key,
+                    shell_key: terms.shell_key,
+                };
+                let mut db = crate::store::open(path)?;
+                let tx = crate::write_queue::immediate(&mut db)?;
+                crate::iap::bind_subject(&tx, identity, at)?;
+                let pending = external::load_pending_external(
+                    &tx,
+                    context.qualification(),
+                    &context.custody_key,
+                    at,
+                )?
+                .context("OAuth fresh pending changed")?;
+                let view = shell_transport::ApprovalView::from_pending(
+                    &app, &context, &pending, identity,
+                )?;
+                let current = FreshIntent::approval(&view, identity)?;
+                let result =
+                    super::fresh_owner::apply_in_current_app_transaction(&tx, &current, call, at)?;
+                tx.commit()?;
+                reply = Some(result);
+                Ok(true)
+            },
+        )?;
         ensure!(committed, "OAuth fresh current authority unavailable");
         reply.context("OAuth fresh owner commit unavailable")
     }
@@ -522,12 +610,14 @@ impl StoredApprovalRegistry {
         let mut selected = BTreeMap::new();
         for (app, path) in app_databases {
             day2_contracts::names::identifier(&app)?;
+            crate::store::require_ordinary_database(&path)?;
             let metadata = fs::symlink_metadata(&path)?;
             ensure!(
                 metadata.is_file() && !metadata.file_type().is_symlink(),
                 "invalid OAuth app database path"
             );
             let path = path.canonicalize()?;
+            crate::store::require_ordinary_database(&path)?;
             ensure!(paths.insert(path.clone()), "duplicate OAuth app database");
             selected.insert(app, path);
         }
@@ -540,12 +630,14 @@ impl StoredApprovalRegistry {
 
 /// A private receiver holds exactly one app's database and credential authority.
 /// The shell cannot ask this backend to select another app or filesystem path.
+#[cfg(test)]
 pub(crate) struct StoredAppApprovals {
     app: String,
     registry: StoredApprovalRegistry,
     clock: Arc<dyn Fn() -> Result<i64> + Send + Sync>,
 }
 
+#[cfg(test)]
 impl StoredAppApprovals {
     pub(crate) fn new(
         app: String,
@@ -568,6 +660,7 @@ impl StoredAppApprovals {
     }
 }
 
+#[cfg(test)]
 impl shell_transport::AppApprovals for StoredAppApprovals {
     fn app(&self) -> &str {
         &self.app
@@ -668,6 +761,7 @@ impl shell_transport::ApprovalSigner for LocalShellApprovals {
     }
 }
 
+#[cfg(test)]
 impl security_shell::ApprovalRegistry for StoredApprovalRegistry {
     fn resolve(&self, attempt: &str, now: i64) -> Result<Option<security_shell::ApprovalContext>> {
         let mut found = None;
@@ -687,7 +781,14 @@ impl security_shell::ApprovalRegistry for StoredApprovalRegistry {
         let Some((app, path, intent, binding)) = found else {
             return Ok(None);
         };
-        let Some(terms) = self.authority.current(app, &intent, &binding, now)? else {
+        let Some(terms) = self.authority.current(
+            app,
+            &intent,
+            &binding,
+            now,
+            &mut super::admission::SubjectReader::fixture(path),
+        )?
+        else {
             return Ok(None);
         };
         profiles::qualify_outbound_connect(

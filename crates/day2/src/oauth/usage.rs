@@ -39,6 +39,7 @@ pub(crate) trait Authority: Send + Sync {
         registration: &str,
         owner: &str,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<Selection>>;
     fn custody(
         &self,
@@ -47,6 +48,7 @@ pub(crate) trait Authority: Send + Sync {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<KeyLease>>;
     fn refresh_client(
         &self,
@@ -55,17 +57,23 @@ pub(crate) trait Authority: Send + Sync {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<super::refresh::ClientCredential>>;
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         app: &str,
         registration: &str,
         owner: &str,
         now: i64,
-        commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+        subjects: &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            &Selection,
+            &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool>;
 }
 
+use super::admission::SubjectReader;
 use crate::{
     authority_state::AuthorityStamp,
     protocol::{Instruction, Observation, Request},
@@ -515,6 +523,7 @@ fn resolve(
         &input.registration,
         &request.context.actor,
         started,
+        &mut SubjectReader::runtime(runtime, serving),
     )?
     else {
         return Ok(unavailable("BindingUnavailable"));
@@ -678,8 +687,13 @@ fn execute_current(
     let Some(authority) = runtime.connections.as_deref() else {
         return Ok(unavailable("BindingUnavailable"));
     };
-    let Some(selection) =
-        authority.current(runtime.app(), &input.registration, &claims.actor, started)?
+    let Some(selection) = authority.current(
+        runtime.app(),
+        &input.registration,
+        &claims.actor,
+        started,
+        &mut SubjectReader::runtime(runtime, serving),
+    )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
@@ -704,6 +718,7 @@ fn execute_current(
         &claims.actor,
         &claims.selection,
         selected_at,
+        &mut SubjectReader::runtime(runtime, serving),
     )?
     else {
         return Ok(unavailable("BindingUnavailable"));
@@ -764,7 +779,13 @@ fn execute_current(
         })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
+    let Some(current) = authority.current(
+        runtime.app(),
+        &input.registration,
+        &claims.actor,
+        at,
+        &mut SubjectReader::runtime(runtime, serving),
+    )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
@@ -1426,22 +1447,27 @@ mod tests {
             _: &str,
             _: &Digest,
             _: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<super::super::refresh::ClientCredential>> {
             anyhow::bail!("unexpected refresh of an unexpired original test token")
         }
 
-        fn with_current(
+        fn with_current<'owner, 'stage, 'role, 'original>(
             &self,
             app: &str,
             registration: &str,
             owner: &str,
             now: i64,
-            commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+            subjects: &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+            commit: &mut dyn FnMut(
+                &Selection,
+                &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+            ) -> Result<bool>,
         ) -> Result<bool> {
-            let Some(current) = self.current(app, registration, owner, now)? else {
+            let Some(current) = self.current(app, registration, owner, now, subjects)? else {
                 return Ok(false);
             };
-            commit(&current)
+            commit(&current, subjects)
         }
 
         fn current(
@@ -1450,6 +1476,7 @@ mod tests {
             registration: &str,
             owner: &str,
             _: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<Selection>> {
             ensure!(
                 app == "app" && registration == "calendar" && owner == "alice@example.com",
@@ -1486,6 +1513,7 @@ mod tests {
             _: &str,
             expected: &Digest,
             now: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<KeyLease>> {
             assert_eq!(&self.selection.identity()?, expected);
             let mut db = store::open(&self.port.db)?;

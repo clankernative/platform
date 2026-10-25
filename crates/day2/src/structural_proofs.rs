@@ -45,6 +45,22 @@ const _: () = {
     assert_not_impl!(crate::oauth::native_management::SqlOwner<'static>, Send);
     assert_not_impl!(crate::oauth::native_management::SqlOwner<'static>, Sync);
     assert_secret_references!(crate::oauth::native_management::SqlOwner<'static>);
+    assert_consuming!(crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>);
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_secret_references!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>,

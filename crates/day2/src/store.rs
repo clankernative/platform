@@ -875,14 +875,19 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
     // A Runtime pathname is selection DATA, never the current participant or
     // enrolled role. Refuse BEFORE SQLite open/recovery on this raw adapter.
-    ensure!(
-        !native_storage::is_native_database(path),
-        "native_runtime_sql_owner_required"
-    );
+    require_ordinary_database(path)?;
     let mut connection = Connection::open(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     configure_connection(&mut connection)?;
     Ok(connection)
+}
+
+pub(crate) fn require_ordinary_database(path: &Path) -> Result<()> {
+    ensure!(
+        !native_storage::is_native_database(path),
+        "native_runtime_sql_owner_required"
+    );
+    Ok(())
 }
 
 /// The same bounded SQLite execution settings apply to an owned fresh memory

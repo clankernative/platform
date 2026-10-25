@@ -1,6 +1,6 @@
 //! Private, demand-driven Google refresh. The worker can request a connection;
 //! only this host path chooses current custody and consumes a durable send permit.
-use super::{custody, effects, google, store, usage};
+use super::{admission::SubjectReader, custody, effects, google, store, usage};
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::{BindingRef, Digest};
 use rusqlite::Connection;
@@ -360,6 +360,7 @@ pub(super) fn ensure_current(
         &request.context.actor,
         &selected,
         started_at,
+        &mut SubjectReader::runtime(runtime, serving),
     )?
     else {
         return Ok(Resolution::unavailable("BindingUnavailable"));
@@ -413,6 +414,7 @@ pub(super) fn ensure_current(
         &request.context.actor,
         &selected,
         now,
+        &mut SubjectReader::runtime(runtime, serving),
     );
     let client = match client {
         Err(error) if error.downcast_ref::<ClockRefusal>().is_some() => {
@@ -446,29 +448,32 @@ pub(super) fn ensure_current(
         registration,
         &request.context.actor,
         dispatch_at,
-        &mut |current| {
-            if current.identity()? != selected {
-                return Ok(false);
-            }
-            let eligible = serving.sql_read(runtime, |snapshot| {
-                local_matches(snapshot, current, dispatch_at)
-            })?;
-            if !eligible {
-                return Ok(false);
-            }
-            // Reclaiming an unsent Ready attempt is safe; the durable CAS still
-            // returns at most one process-local permit across processes/restarts.
-            serving.check()?;
-            store::claim_current_refresh(runtime, serving, &attempt, expected)?;
-            permit = store::authorize_checked_dispatch(runtime, serving, &attempt, |tx| {
-                let at = effects::wall_time()?;
-                if at < dispatch_at {
-                    return Err(ClockRefusal.into());
+        &mut SubjectReader::runtime(runtime, serving),
+        &mut |current, subjects| {
+            subjects.with_runtime(|serving| {
+                if current.identity()? != selected {
+                    return Ok(false);
                 }
-                checked_dispatch = at;
-                local_matches(tx, current, at)
-            })?;
-            Ok(permit.is_some())
+                let eligible = serving.sql_read(runtime, |snapshot| {
+                    local_matches(snapshot, current, dispatch_at)
+                })?;
+                if !eligible {
+                    return Ok(false);
+                }
+                // Reclaiming an unsent Ready attempt is safe; the durable CAS still
+                // returns at most one process-local permit across processes/restarts.
+                serving.check()?;
+                store::claim_current_refresh(runtime, serving, &attempt, expected)?;
+                permit = store::authorize_checked_dispatch(runtime, serving, &attempt, |tx| {
+                    let at = effects::wall_time()?;
+                    if at < dispatch_at {
+                        return Err(ClockRefusal.into());
+                    }
+                    checked_dispatch = at;
+                    local_matches(tx, current, at)
+                })?;
+                Ok(permit.is_some())
+            })
         },
     );
     let admitted = match admitted {
@@ -550,7 +555,13 @@ pub(super) fn ensure_current(
             }
             last_clock = at;
             let current = authority
-                .current(runtime.app(), registration, &request.context.actor, at)?
+                .current(
+                    runtime.app(),
+                    registration,
+                    &request.context.actor,
+                    at,
+                    &mut SubjectReader::runtime(runtime, serving),
+                )?
                 .context("OAuth refresh readiness unavailable")?;
             ensure!(
                 current.identity()? == selected,
@@ -665,31 +676,34 @@ pub(super) fn ensure_current(
         registration,
         &request.context.actor,
         observed_at,
-        &mut |current| {
-            if current.identity()? != selected {
-                return Ok(false);
-            }
-            Ok(store::publish_replacement(
-                runtime,
-                serving,
-                prepared
-                    .take()
-                    .context("refresh settlement already consumed")?,
-                |tx| {
-                    let at = effects::wall_time()?;
-                    if at < observed_at || at >= expires_at {
-                        publication_clock_refused = true;
-                        return Err(ClockRefusal.into());
-                    }
-                    ensure!(
-                        monotonic.elapsed() <= BUDGET,
-                        "refresh publication elapsed fence changed"
-                    );
-                    freshest = at;
-                    local_matches(tx, current, at)
-                },
-            )?
-            .is_some())
+        &mut SubjectReader::runtime(runtime, serving),
+        &mut |current, subjects| {
+            subjects.with_runtime(|serving| {
+                if current.identity()? != selected {
+                    return Ok(false);
+                }
+                Ok(store::publish_replacement(
+                    runtime,
+                    serving,
+                    prepared
+                        .take()
+                        .context("refresh settlement already consumed")?,
+                    |tx| {
+                        let at = effects::wall_time()?;
+                        if at < observed_at || at >= expires_at {
+                            publication_clock_refused = true;
+                            return Err(ClockRefusal.into());
+                        }
+                        ensure!(
+                            monotonic.elapsed() <= BUDGET,
+                            "refresh publication elapsed fence changed"
+                        );
+                        freshest = at;
+                        local_matches(tx, current, at)
+                    },
+                )?
+                .is_some())
+            })
         },
     );
     serving.check()?;
