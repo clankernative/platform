@@ -682,7 +682,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
+          "signature": "pub(super) fn authorize_checked_dispatch(runtime: &crate::store::Runtime, current: &mut super::native_management::RuntimeConsumer<'_, '_>, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
         }
       ]
     },
