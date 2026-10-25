@@ -307,21 +307,6 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
             "crates/day2/src/release_binding.rs",
             "sha256:903a5c5da43e15b2f1edb2fc6ee33f3c55aeeffd14fc535dc361f8cd6fa346e6",
         ),
-        // Existing ordinary registry adapters likewise configure their OWN
-        // read-only connections. Runtime native scope remains independently
-        // required; these are not module-wide or future-site exemptions.
-        (
-            "crates/day2/src/oauth/approval_registry.rs",
-            "sha256:5322d8ccd4c8e46aaa42ef5e92692985a05630659624ed621cfb294524670775",
-        ),
-        (
-            "crates/day2/src/oauth/approval_registry.rs",
-            "sha256:d640668939728c83e37e0e621f41d701c2c8f1ec26492ae3c540a11e8e170df7",
-        ),
-        (
-            "crates/day2/src/oauth/approval_registry.rs",
-            "sha256:6d7d59514e0856ed79b3fc15ccee1d44bc9374c84083a6e7408c592d46da09f5",
-        ),
         // The sole permanent hook initializer takes an OWNED &mut Connection;
         // callbacks receive only shared borrows and cannot call it on theirs.
         (
