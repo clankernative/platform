@@ -155,6 +155,14 @@ cargo_context_controls(
     tool = ":exec_context_probe",
 )
 
+# Match the existing Linux CI resource profile without changing any compiler flags.
+config_setting(
+    name = "linux_ci",
+    constraint_values = ["@platforms//os:linux"],
+    define_values = {"DAY2_PLATFORM_JOBS": "1", "DAY2_PLATFORM_CODEGEN_UNITS": "256"},
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "release",
     define_values = {"DAY2_PLATFORM_RUST_PROFILE": "release"},

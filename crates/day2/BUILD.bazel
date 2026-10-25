@@ -188,6 +188,7 @@ platform_rust_library(
 
 platform_rust_test(
     name = "unit_lib",
+    linux_ci_jobserver = True,
     crate_name = "day2",
     crate_root = "src/lib.rs",
     srcs = glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], exclude = ["tests/fixtures/fonts/test-subset.rs"], allow_empty = True),
