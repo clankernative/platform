@@ -1166,8 +1166,13 @@ impl FinishGuard<'_> {
             crate::oauth::native_management::Phase::ProviderSend,
             entry,
             |current| {
+                current.arm()?;
+                // Readiness may contact the edge/key provider on a cold lease.
+                // Retain the same original, but open no SQL unit across it.
+                let selected_at = self.require_send_selection(entry)?;
+                current.check()?;
                 let prepared = current.sql_read(&self.manager.runtime, |db| {
-                    self.require_send(db, entry)?;
+                    self.require_send(db, selected_at)?;
                     prepare(db)
                 })?;
                 // The actual same original/role remains held through dispatch,
@@ -1178,7 +1183,7 @@ impl FinishGuard<'_> {
         )
     }
 
-    fn require_send(&self, db: &Connection, entry: i64) -> Result<()> {
+    fn require_send_selection(&self, entry: i64) -> Result<i64> {
         let now = effects::wall_time()?;
         ensure!(now >= entry, "OAuth initial dispatch clock moved backwards");
         self.view.validate(self.identity, now)?;
@@ -1194,7 +1199,16 @@ impl FinishGuard<'_> {
             finished >= now,
             "OAuth initial dispatch clock moved backwards"
         );
-        self.check(db, finished)?;
+        Ok(finished)
+    }
+
+    fn require_send(&self, db: &Connection, selected_at: i64) -> Result<()> {
+        let at = effects::wall_time()?;
+        ensure!(
+            at >= selected_at,
+            "OAuth initial dispatch clock moved backwards"
+        );
+        self.check(db, at)?;
         self.require_dispatched(db)
     }
 

@@ -495,7 +495,6 @@ pub(super) fn ensure_current(
     let permit = permit.context("refresh dispatch permit missing")?;
     let monotonic = effects::Instant::now();
     let mut last_clock = sent_at;
-    let mut clock_failed = false;
     let result = permit.send(
         |bound| -> Result<Option<super::profiles::ValidatedTokenResponse>> {
             ensure!(bound == expected, "refresh dispatch material changed");
@@ -547,7 +546,6 @@ pub(super) fn ensure_current(
                 .context("OAuth refresh expiry overflow")?;
             let at = effects::wall_time()?;
             if at < last_clock || at >= expiry {
-                clock_failed = true;
                 anyhow::bail!("OAuth refresh response clock fence changed");
             }
             last_clock = at;
@@ -560,7 +558,6 @@ pub(super) fn ensure_current(
             );
             let at = effects::wall_time()?;
             if at < last_clock || at >= expiry {
-                clock_failed = true;
                 anyhow::bail!("OAuth refresh account dispatch clock fence changed");
             }
             last_clock = at;
@@ -616,10 +613,9 @@ pub(super) fn ensure_current(
         }
         Err(_) => {
             serving.refuse();
-            if clock_failed {
-                current_clock_refusal(runtime, serving, &context)?;
-            }
-            current_uncertain(runtime, serving, &attempt)?;
+            // Dispatch already durably fenced this exact attempt. Once its
+            // owner is refused, even relabeling that row is new SQL authority.
+            // Keep may_have_been_sent: it already blocks use and redispatch.
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
     };

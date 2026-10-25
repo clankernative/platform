@@ -689,7 +689,11 @@ impl Oracle {
             if fault == Some(RefreshFault::LostReply)
                 || matches!(fault, Some(RefreshFault::Delay { millis }) if millis >= 5_000)
             {
-                self.refresh_rows.push((base, "uncertain".into(), None));
+                // The original send fence remains unresolved. Refusing the
+                // App owner does not authorize a cleanup write afterwards.
+                // Replacing this with such a write must fail the row oracle.
+                self.refresh_rows
+                    .push((base, "may_have_been_sent".into(), None));
                 self.app = false;
                 return false;
             }
