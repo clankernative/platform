@@ -5,7 +5,7 @@
 //! provider and requires one to be declared; `--development-auth` prints a
 //! one-use sign-in link and is refused when one is.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{num::NonZeroU16, path::PathBuf, time::Duration};
 
 enum ServiceExit {
@@ -115,8 +115,8 @@ fn main() {
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     #[derive(Debug)]
