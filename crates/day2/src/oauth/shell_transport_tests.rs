@@ -297,6 +297,57 @@ fn production_approval_backend_refuses_authenticated_unsupported_routes_without_
 }
 
 #[test]
+fn authenticated_credential_fresh_route_refuses_before_instance_or_sql_open() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (runtime, authority, _) =
+        crate::oauth::admission::tests::management_fixture(directory.path())?;
+    let database = runtime.db().to_path_buf();
+    let instance = runtime.instance_path().to_path_buf();
+    let before = crate::oauth::simulation::snapshot(&crate::store::open(&database)?)?;
+    let saved_database = directory.path().join("unavailable-database");
+    let saved_instance = directory.path().join("unavailable-instance");
+    std::fs::rename(&database, &saved_database)?;
+    std::fs::rename(&instance, &saved_instance)?;
+    let assertions = Assertions::new();
+    let receiver = assertions
+        .receiver(Arc::new(
+            crate::oauth::approval_registry::UnavailableAppApprovals::new(runtime.app().into())?,
+        ))
+        .with_management(Arc::new(crate::oauth::management::app::Manager::new(
+            runtime, authority,
+        )))?;
+    let request = RequestBody::FreshOwner {
+        version: VERSION,
+        human_assertion: assertions.assertion(SHELL_AUDIENCE, HUMAN, SUBJECT),
+        call: Box::new(crate::json::decode(&serde_json::to_vec(&json!({
+            "purpose":"credential_intent", "attempt":"credential-unsupported",
+            "original":Digest::of(&"unsupported-original")?,
+            "owner":Digest::of(&"unsupported-owner")?, "operation":{"operation":"claim"}
+        }))?)?),
+    };
+    let error = receiver
+        .dispatch(
+            &Method::POST,
+            PATH,
+            None,
+            &assertions.headers(),
+            &serde_json::to_vec(&request)?,
+            6,
+        )
+        .err()
+        .context("unsupported credential purpose unexpectedly succeeded")?;
+    assert_eq!(error.to_string(), "OAuth management fresh purpose refused");
+    assert!(!database.exists() && !instance.exists());
+    std::fs::rename(&saved_database, &database)?;
+    std::fs::rename(&saved_instance, &instance)?;
+    assert_eq!(
+        crate::oauth::simulation::snapshot(&crate::store::open(&database)?)?,
+        before
+    );
+    Ok(())
+}
+
+#[test]
 fn receiver_requires_independent_machine_and_human_assertions_before_sqlite() {
     struct Spy(AtomicUsize);
     impl AppApprovals for Spy {

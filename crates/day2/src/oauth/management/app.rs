@@ -435,14 +435,6 @@ impl Manager {
         now: i64,
     ) -> Result<crate::oauth::fresh_owner::ReplyData> {
         use crate::oauth::{fresh_auth::FreshIntent, fresh_owner::PurposeData};
-        if call.purpose == PurposeData::CredentialIntent {
-            return crate::managed_credentials::browser::fresh_owner(
-                &self.runtime,
-                call,
-                identity,
-                now,
-            );
-        }
         ensure!(
             matches!(
                 call.purpose,
