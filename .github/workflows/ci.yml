@@ -215,8 +215,14 @@ jobs:
         path: "/__w/${{ github.event.repository.name }}/.toolchains"
         key: "${{ steps.native_tools.outputs.cache-primary-key }}"
     - run: build-out/bin/xtask configure-tofu
+    - name: Create the single-job Rust codegen jobserver
+      if: "${{ matrix.part == 'tests' }}"
+      run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
     - run: "/tmp/day2-compile-memory"
       id: native_preparation
+      env:
+        CARGO_MAKEFLAGS: "${{ matrix.part == 'tests' && '--jobserver-auth=fifo:/tmp/day2-rustc-jobserver'
+          || '' }}"
       name: Observe the unchanged all-target test preparation
     - name: Retain numeric process and cgroup observations
       if: "${{ always() }}"
