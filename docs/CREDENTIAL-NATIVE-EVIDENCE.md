@@ -257,8 +257,9 @@ Optional `physical` DATA identifies the last attempted composite-check subcall,
 whether that call succeeded, and the first failed subcall. An enclosing call's
 later failure does not overwrite a nested call's successful outcome. Rows are fixed in order
 durability, current/retained peer, final file, ProviderAcquire stage argument;
-each is `[count, inclusive_us]`. The fourth row encloses the full physical check
-re-entered through `physical.controller_stage()` before authentication can start.
+each is `[count, inclusive_us]`. The fourth row identifies a full physical check
+at the ProviderAcquire stage argument; the fixed initial handoff below does not
+enter it, unlike the preceding diagnostic baseline.
 These rows overlap the exclusive profile and must not be added to it. A subcall
 can contain several guards; the marker does not establish a failed statement or
 cause. If role acquisition fails first, no physical row is fabricated.
@@ -273,21 +274,34 @@ still finish before terminal native checks. Diagnostic clocks and output can
 perturb elapsed time; no measured saving or complete serving margin follows
 from enabling them. Bootstrap counts/costs do not transfer to Current.
 
-### ProviderAcquire argument: duplicate composition, not another S1 boundary
+### Initial Current authentication: immediate checked-stage handoff
 
-In `serve_app_current`, `begin_current_app` ends with a full physical check.
-The next operation reads/clones the request binding DATA, then the
-ProviderAcquire argument getter performs that full physical check again.
-There is no intervening work I/O, signing, wait or ownership transfer. **That
-second full composite observation is a pure duplicate in this exact call chain,
-not a separately required S1 effect boundary.** S1 still requires the actual
-same owner, current file/peer/role, original shortest clock and refusal checks
-before and after real provider I/O. `AuthenticatedReads::acquire` performs its
-own fresh stage checks. A later consolidation can borrow the just-checked
-stage only through this closed composition; the general stage getter must
-continue checking after intervening I/O. This diagnostic leaves both full
-checks in place and measures the fourth row, without caching a positive result,
-removing a guard, changing a lifetime or promising the resulting margin.
+`begin_current_app` performs its full physical check and immediately passes the
+same borrowed Controller stage to `AuthenticatedReads::acquire`. It returns the
+physical owner and retained reader together. The private one-use handoff gives
+authentication only the lexical stage borrow; neither the borrow nor a checked
+token can escape to a caller or be saved across intervening I/O. No clock is
+constructed or reset by this handoff. Authentication keeps its own fresh stage,
+identity, purpose, original-clock and refusal checks around real provider I/O.
+
+Previously, `serve_app_current` read/cloned binding DATA and used
+`physical.controller_stage()` as the ProviderAcquire argument immediately after
+`begin_current_app` completed the same full check. With no intervening work I/O,
+wait, effect or ownership transfer, that second full composite check was a pure
+duplicate, not another S1 boundary. The fixed handoff removes only that repeat.
+The general stage getter and every later read, peer, acknowledgement and release
+boundary retain their checks. Binding DATA is now read after authentication;
+it remains historical request selection, not current permission.
+
+The Current v2 profile keeps its fourth inclusive physical row, ProviderStage,
+to compare against the prior diagnostic baseline. This closed acquisition no
+longer enters that row. Authentication now runs inside the initial physical
+composition, so its residual local work is in row 14; nested SHA, HTTP and other
+named leaves retain their own exclusive attribution. A zero ProviderStage count
+is not proof that the required checks or the complete serving operation passed.
+The controlled handoff regressions cover one full check, the same stage and
+original interval, later-boundary refusal, and error/unwind ownership. Actual
+Linux/provider qualification and measured canary savings remain separate.
 
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App

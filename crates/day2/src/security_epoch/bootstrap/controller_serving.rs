@@ -5,7 +5,7 @@ use super::{
     ActiveControllerStorageContinuity, ServingObservation, check_active_snapshot, request_names,
 };
 use crate::security_epoch::controller::serving_timing::{ServingStep, ServingTiming};
-use crate::security_epoch::self_check_profile::{self, Category, PhysicalStep};
+use crate::security_epoch::self_check_profile::{self, Category};
 use crate::security_epoch::{AuthenticatedReads, native_enrollment::EnrolledRoleStage};
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::bootstrap::NativeRole;
@@ -25,25 +25,15 @@ impl ActiveControllerStorageContinuity {
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
-            let mut physical = trace.measure(ServingStep::PhysicalBegin, || {
+            let (mut physical, mut reads) = trace.measure(ServingStep::PhysicalBegin, || {
                 let _profile = self_check_profile::enter(Category::PhysicalLocal);
-                self.storage.begin_current_app(stage, trace)
+                self.storage
+                    .begin_current_app(stage, &self.policy, &self.store, trace)
             })?;
             // Authenticated request selection is DATA. This can only be the
             // original App enrollment and a fresh current-serving transcript.
             let binding = trace.measure(ServingStep::RequestBinding, || {
                 Ok(physical.app_request()?.binding.clone())
-            })?;
-            let mut reads = trace.measure(ServingStep::ProviderAcquire, || {
-                AuthenticatedReads::acquire(
-                    &self.policy,
-                    &self.store,
-                    NativeRole::EpochController,
-                    self_check_profile::physical(PhysicalStep::ProviderStage, || {
-                        physical.controller_stage()
-                    })?,
-                )?
-                .retain_current()
             })?;
             let names = trace.measure(ServingStep::Names, || {
                 request_names(&self.store, &self.completion)
