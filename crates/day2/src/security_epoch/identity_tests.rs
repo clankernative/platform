@@ -109,7 +109,9 @@ fn deleting_or_replaced_objects_and_workload_lineage_refuse() {
         "pod-uid",
         Some(owner("ReplicaSet", "replica", "replica-uid")),
     );
-    let selected = identity_protocol::pod(&role, &subject, &bytes(&pod)).unwrap();
+    let (_, selected) = identity_protocol::pod(&role, &subject, &bytes(&pod))
+        .unwrap()
+        .into_parts();
     let replica = object(
         "ReplicaSet",
         "replica",
@@ -212,7 +214,9 @@ fn stateful_set_requires_one_current_controller_and_exact_service_account() {
         "pod-uid",
         Some(owner("StatefulSet", "controller", "deployment-uid")),
     );
-    let selected = identity_protocol::pod(&role, &subject, &bytes(&pod)).unwrap();
+    let (_, selected) = identity_protocol::pod(&role, &subject, &bytes(&pod))
+        .unwrap()
+        .into_parts();
     let workload = object("StatefulSet", "controller", "deployment-uid", None);
     identity_protocol::workload(&role, &selected, None, &bytes(&workload)).unwrap();
     let mut ambiguous = pod.clone();

@@ -506,6 +506,14 @@ owners, fresh hash/check boundaries and original intervals are unchanged. It is
 not a cached workload observation or native permission; no node-latency saving
 is established by this parsing-only change.
 
+The bounded Pod decoder returns one closed `PodObservation` containing its
+parsed body and checked controlling owner. Container extraction consumes those
+same two DATA values instead of decoding the bytes again. Owner-only callers
+discard the unused parsed body. No arbitrary parsed-body constructor or
+serialization is exposed; runtime authority and all real I/O, signing and
+freshness checks stay at their original boundaries. The source regression
+controls reject a restored extra decode or bypass of the bounded validator.
+
 ## Issuer work inside one Current exchange
 
 The Current profile's four issuer-transport spans are two sends and two

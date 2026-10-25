@@ -324,7 +324,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 &mut acquisition,
             )?,
         )?;
-        let owner = identity_protocol::pod(
+        let (_, owner) = identity_protocol::pod(
             role,
             &reviewed,
             &guard.request(
@@ -337,7 +337,8 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 None,
                 &mut acquisition,
             )?,
-        )?;
+        )?
+        .into_parts();
         let replica = match role.workload_kind {
             WorkloadKind::DeploymentV1 => Some(
                 guard.request(
