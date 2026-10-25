@@ -654,7 +654,13 @@ fn selection_replacement_waits_for_the_leased_sqlite_commit() {
     assert!(
         fixture
             .authority
-            .current("app", &fixture.facts.intent, &fixture.facts.binding, 6)
+            .current(
+                "app",
+                &fixture.facts.intent,
+                &fixture.facts.binding,
+                6,
+                &mut crate::oauth::admission::SubjectReader::fixture(&fixture.path)
+            )
             .unwrap()
             .is_none()
     );
