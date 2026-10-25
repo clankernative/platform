@@ -83,10 +83,15 @@ jobs:
       reused: ${{ steps.admit.outputs.reused }}
       cache_run: ${{ steps.admit.outputs.run }}
       cache_attempt: ${{ steps.admit.outputs.attempt }}
+    env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
@@ -190,6 +195,8 @@ jobs:
       matrix:
         part: [inputs, tests]
     env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
       # Do not compile the largest test targets concurrently inside 6 GiB.
       # Partition optimized tests into smaller LLVM units without local LTO.
       # Keep debug assertions and the complete runtime campaigns inside 6 GiB.
@@ -199,6 +206,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
@@ -306,15 +315,8 @@ jobs:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: ${{ steps.native_tools.outputs.cache-primary-key }}
       - run: build-out/bin/xtask configure-tofu
-      - name: Create the single-job Rust codegen jobserver
-        if: ${{ matrix.part == 'tests' }}
-        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
         id: native_preparation
-        env:
-          # One implicit rustc token, with no extra tokens in the private FIFO.
-          # Keep every codegen unit and optimization; only serialize backend work.
-          CARGO_MAKEFLAGS: ${{ matrix.part == 'tests' && '--jobserver-auth=fifo:/tmp/day2-rustc-jobserver' || '' }}
       - name: Retain current compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -619,10 +621,15 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
+    env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
@@ -817,11 +824,15 @@ jobs:
       matrix:
         shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]
     env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
@@ -1016,10 +1027,15 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
+    env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools
@@ -1248,12 +1264,16 @@ jobs:
         shell: bash
     timeout-minutes: 360
     env:
+      # Keep compiler resource inputs identical on Linux producers and consumers.
+      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/tmp/day2-rustc-jobserver
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Create the single-job Rust codegen jobserver
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - name: Download the pinned Linux Bazel executable
         if: ${{ runner.os == 'Linux' }}
         run: gh release download 9.3.0 --repo bazelbuild/bazel --pattern bazel-9.3.0-linux-x86_64 --dir /tmp/day2-bazel-tools

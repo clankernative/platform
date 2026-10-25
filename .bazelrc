@@ -27,7 +27,7 @@ build:ci-linux --jobs=1
 build:ci-linux --define=DAY2_PLATFORM_JOBS=1
 build:ci-linux --define=DAY2_PLATFORM_CODEGEN_UNITS=256
 build:ci-linux --local_resources=cpu=2
-# The test-preparation job supplies a one-token GNU jobserver. Bazel's action
+# Linux CI supplies a one-token GNU jobserver. Bazel's action
 # limit alone does not constrain rustc's otherwise 32-token LLVM backend pool.
 build:ci-linux --action_env=CARGO_MAKEFLAGS
 build:ci-mac --jobs=3
