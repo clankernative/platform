@@ -637,7 +637,7 @@ impl PendingWriter<'_, '_> {
         }
     }
 
-    fn refuse(&mut self) {
+    pub(super) fn refuse(&mut self) {
         match &mut self.source {
             PendingSource::Native {
                 original, current, ..
@@ -1813,7 +1813,7 @@ impl Consumer<'_, '_, '_> {
         self.check()
     }
 
-    fn refuse(&mut self) {
+    pub(super) fn refuse(&mut self) {
         self.original.refuse();
         match &mut self.source {
             ConsumerSource::Native { current, .. } => current.refuse(),
