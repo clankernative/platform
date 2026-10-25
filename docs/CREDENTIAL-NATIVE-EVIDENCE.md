@@ -329,7 +329,9 @@ evidence that every future request has the same counts or per-scan cost.
 The message-acceptance fix verifies the signed DATA before its one full native
 observation; it never reuses a prior successful observation. Invalid signatures
 and native refusal remain terminal. Its regression uses the production ordering
-helper with signed DATA and controlled observations; it supplies no native owner.
+helper with signed DATA and controlled observations; a separate AST guard binds
+that ordering to the actual native caller and rejects restoring the earlier
+full check. Neither test supplies a native owner or claims kernel qualification.
 The separate physical-factory candidate above needs its own closed-composition
 change and regression. Newer native26/27 evidence must be joined to the same
 prefix before updating these estimates: a whole-operation count can also include
