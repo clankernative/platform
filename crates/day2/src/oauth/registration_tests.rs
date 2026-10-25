@@ -905,6 +905,7 @@ impl OutboundReadiness for Facts {
         _: &OutboundConnectionBinding,
         _: &ConnectionSlotKey,
         _: i64,
+        _: &mut admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Some(self.evidence.clone()))
@@ -913,6 +914,8 @@ impl OutboundReadiness for Facts {
 
 #[test]
 fn readiness_requires_live_receipt_exact_selection_freshness_and_independent_facts() -> Result<()> {
+    let mut subjects =
+        admission::SubjectReader::fixture(std::path::Path::new("/fixture/unused.sqlite"));
     let fixture = fixture()?;
     let facts = Arc::new(Facts {
         evidence: fixture.evidence.clone(),
@@ -926,13 +929,13 @@ fn readiness_requires_live_receipt_exact_selection_freshness_and_independent_fac
     let now = receipt.checked_at;
     assert!(
         readiness
-            .current(&fixture.binding, &fixture.slot, now)?
+            .current(&fixture.binding, &fixture.slot, now, &mut subjects)?
             .is_none()
     );
     assert_eq!(facts.calls.load(Ordering::SeqCst), 0);
     readiness.publish(receipt)?;
     assert_eq!(
-        readiness.current(&fixture.binding, &fixture.slot, now)?,
+        readiness.current(&fixture.binding, &fixture.slot, now, &mut subjects)?,
         Some(fixture.evidence.clone())
     );
     let count = facts.calls.load(Ordering::SeqCst);
@@ -968,18 +971,22 @@ fn readiness_requires_live_receipt_exact_selection_freshness_and_independent_fac
             }
             _ => unreachable!(),
         };
-        assert!(readiness.current(&binding, &slot, time)?.is_none());
+        assert!(
+            readiness
+                .current(&binding, &slot, time, &mut subjects)?
+                .is_none()
+        );
     }
     assert_eq!(facts.calls.load(Ordering::SeqCst), count);
     readiness.retire(&fixture.binding.registration.id)?;
     assert!(
         readiness
-            .current(&fixture.binding, &fixture.slot, now)?
+            .current(&fixture.binding, &fixture.slot, now, &mut subjects)?
             .is_none()
     );
     assert!(
         ProviderReadiness::new(facts.clone())
-            .current(&fixture.binding, &fixture.slot, now)?
+            .current(&fixture.binding, &fixture.slot, now, &mut subjects)?
             .is_none()
     );
     crate::oauth::host::Providers::reviewed(Arc::new(readiness))?;

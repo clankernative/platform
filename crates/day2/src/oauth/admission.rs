@@ -1087,6 +1087,8 @@ pub(crate) fn binding_namespace(binding: &OutboundConnectionBinding) -> Result<S
     ))
 }
 
+pub(crate) use super::subject_read::SubjectReader;
+
 /// Readiness is resolved privately at request time, separately from desired
 /// instance configuration. Its implementation must check current external
 /// qualification; an operator-authored digest alone is not readiness.
@@ -1095,7 +1097,12 @@ pub(crate) trait OutboundReadiness: Send + Sync {
         Ok(None)
     }
 
-    fn observe_identity(&self, _identity: &crate::iap::Verified, _now: i64) -> Result<()> {
+    fn observe_identity(
+        &self,
+        _identity: &crate::iap::Verified,
+        _now: i64,
+        _subjects: &mut SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -1104,6 +1111,7 @@ pub(crate) trait OutboundReadiness: Send + Sync {
         binding: &OutboundConnectionBinding,
         slot: &ConnectionSlotKey,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>>;
 }
 
@@ -3938,6 +3946,7 @@ pub(super) mod tests {
             _: &OutboundConnectionBinding,
             _: &ConnectionSlotKey,
             _: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.current.read().unwrap().clone())
@@ -3964,6 +3973,7 @@ pub(super) mod tests {
                 _: &OutboundConnectionBinding,
                 _: &ConnectionSlotKey,
                 _: i64,
+                _: &mut SubjectReader<'_, '_, '_, '_>,
             ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 anyhow::bail!("retired source must not run")

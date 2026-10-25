@@ -33,6 +33,7 @@ pub(crate) mod security_shell;
 pub(crate) mod shell_oidc;
 pub(crate) mod shell_transport;
 pub mod store;
+mod subject_read;
 pub(crate) mod usage;
 pub(crate) mod workload;
 

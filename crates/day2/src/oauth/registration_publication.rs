@@ -461,6 +461,7 @@ pub(in crate::oauth) mod tests {
             _: &day2_capabilities::oauth::OutboundConnectionBinding,
             _: &day2_capabilities::oauth::ConnectionSlotKey,
             _: i64,
+            _: &mut admission::SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
             Ok(self
                 .available
@@ -472,6 +473,8 @@ pub(in crate::oauth) mod tests {
     #[test]
     fn imported_registration_still_requires_independent_facts_and_replay_cannot_renew_it()
     -> Result<()> {
+        let mut subjects =
+            admission::SubjectReader::fixture(std::path::Path::new("/fixture/unused.sqlite"));
         let (selected, receipt) = fixture()?;
         let now = receipt.checked_at;
         let proof = attest(&receipt, &selected, &Keys::default(), now)?;
@@ -495,9 +498,17 @@ pub(in crate::oauth) mod tests {
             &Keys::default(),
             now,
         )?)?;
-        assert!(readiness.current(binding, &fixture.slot, now)?.is_none());
+        assert!(
+            readiness
+                .current(binding, &fixture.slot, now, &mut subjects)?
+                .is_none()
+        );
         facts.available.store(true, Ordering::SeqCst);
-        assert!(readiness.current(binding, &fixture.slot, now)?.is_some());
+        assert!(
+            readiness
+                .current(binding, &fixture.slot, now, &mut subjects)?
+                .is_some()
+        );
         let id = binding.registration.id.as_str();
         readiness
             .receipts
@@ -514,10 +525,14 @@ pub(in crate::oauth) mod tests {
             &Keys::default(),
             now,
         )?)?;
-        assert!(readiness.current(binding, &fixture.slot, now)?.is_none());
+        assert!(
+            readiness
+                .current(binding, &fixture.slot, now, &mut subjects)?
+                .is_none()
+        );
         assert!(
             ProviderReadiness::new(facts)
-                .current(binding, &fixture.slot, now)?
+                .current(binding, &fixture.slot, now, &mut subjects)?
                 .is_none()
         );
         Ok(())

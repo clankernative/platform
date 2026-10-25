@@ -892,6 +892,7 @@ impl crate::oauth::admission::OutboundReadiness for NoLiveFacts {
         _: &day2_capabilities::oauth::OutboundConnectionBinding,
         _: &day2_capabilities::oauth::ConnectionSlotKey,
         _: i64,
+        _: &mut crate::oauth::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<crate::oauth::profiles::OutboundInstanceEvidence>> {
         Ok(None)
     }

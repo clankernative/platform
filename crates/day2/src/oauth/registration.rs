@@ -1224,8 +1224,13 @@ impl admission::OutboundReadiness for ProviderReadiness {
         self.facts.selected_runtime()
     }
 
-    fn observe_identity(&self, identity: &crate::iap::Verified, now: i64) -> Result<()> {
-        self.facts.observe_identity(identity, now)
+    fn observe_identity(
+        &self,
+        identity: &crate::iap::Verified,
+        now: i64,
+        subjects: &mut admission::SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<()> {
+        self.facts.observe_identity(identity, now, subjects)
     }
 
     fn current(
@@ -1233,6 +1238,7 @@ impl admission::OutboundReadiness for ProviderReadiness {
         binding: &OutboundConnectionBinding,
         slot: &ConnectionSlotKey,
         now: i64,
+        subjects: &mut admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
         let receipts = self
             .receipts
@@ -1255,7 +1261,7 @@ impl admission::OutboundReadiness for ProviderReadiness {
         {
             return Ok(None);
         }
-        let Some(evidence) = self.facts.current(binding, slot, now)? else {
+        let Some(evidence) = self.facts.current(binding, slot, now, subjects)? else {
             return Ok(None);
         };
         if !receipt.fresh(now) {
