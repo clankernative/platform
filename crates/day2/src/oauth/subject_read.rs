@@ -376,16 +376,19 @@ mod tests {
                         .contains("native_runtime_sql_owner_required")
                 })
         );
+        let mut subjects = SubjectReader::fixture(path);
         assert!(
             subjects
                 .with_pending::<()>(|_| panic!("fixture Pending owner"))
                 .is_err()
         );
+        let mut subjects = SubjectReader::fixture(path);
         assert!(
             subjects
                 .with_human::<()>(|_| panic!("fixture human owner"))
                 .is_err()
         );
+        let mut subjects = SubjectReader::fixture(path);
         assert!(
             subjects
                 .with_runtime::<()>(|_| panic!("fixture runtime owner"))
