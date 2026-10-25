@@ -602,11 +602,13 @@ mod lease_tests {
         }
     }
 
-    fn fixture() -> (
-        Rc<RefCell<Registry<Material>>>,
-        Rc<Cell<bool>>,
-        Rc<Cell<u32>>,
-    ) {
+    struct Fixture {
+        registry: Rc<RefCell<Registry<Material>>>,
+        refused: Rc<Cell<bool>>,
+        dropped: Rc<Cell<u32>>,
+    }
+
+    fn fixture() -> Fixture {
         let registry = Rc::new(RefCell::new(Registry::default()));
         let refused = Rc::new(Cell::new(false));
         let dropped = Rc::new(Cell::new(0));
@@ -618,7 +620,11 @@ mod lease_tests {
                 dropped: dropped.clone(),
             },
         );
-        (registry, refused, dropped)
+        Fixture {
+            registry,
+            refused,
+            dropped,
+        }
     }
 
     #[test]
@@ -640,7 +646,9 @@ mod lease_tests {
     fn suspension_holds_actual_role_without_a_refcell_borrow_and_cancel_stays_unknown() {
         let role = Role::new(7_u32);
         let captured = role.clone();
-        let (registry, refused, _) = fixture();
+        let Fixture {
+            registry, refused, ..
+        } = fixture();
         let identity = ResponseIdentity::new();
         let mut future = Box::pin(async move {
             let _lease = Lease::acquire(registry, "calendar", &identity, None).unwrap();
@@ -710,7 +718,11 @@ mod lease_tests {
 
     #[test]
     fn actual_lease_core_moves_once_and_pending_loser_cannot_touch_the_winner() {
-        let (registry, refused, dropped) = fixture();
+        let Fixture {
+            registry,
+            refused,
+            dropped,
+        } = fixture();
         let winner = ResponseIdentity::new();
         let loser = ResponseIdentity::new();
         let lease = Lease::acquire(registry.clone(), "calendar", &winner, None).unwrap();
@@ -733,7 +745,9 @@ mod lease_tests {
 
     #[test]
     fn double_abort_and_recorded_scope_without_published_completion_stay_terminal() {
-        let (registry, refused, _) = fixture();
+        let Fixture {
+            registry, refused, ..
+        } = fixture();
         let winner = ResponseIdentity::new();
         let lease =
             Lease::acquire(registry.clone(), "calendar", &winner, Some("original")).unwrap();
@@ -743,7 +757,9 @@ mod lease_tests {
         drop(lease);
         assert!(refused.get());
 
-        let (registry, refused, _) = fixture();
+        let Fixture {
+            registry, refused, ..
+        } = fixture();
         let lease = Lease::acquire(registry.clone(), "calendar", &winner, None).unwrap();
         let scope_recorded = true; // Historical native-scope DATA is not publication.
         assert!(scope_recorded && !lease.known);
@@ -753,7 +769,11 @@ mod lease_tests {
 
     #[test]
     fn settled_drop_retains_same_material_and_retired_identity_cannot_abort_replacement() {
-        let (registry, refused, dropped) = fixture();
+        let Fixture {
+            registry,
+            refused,
+            dropped,
+        } = fixture();
         let old = ResponseIdentity::new();
         let mut lease = Lease::acquire(registry.clone(), "calendar", &old, None).unwrap();
         // Test the state AFTER the production matching publication succeeds.
@@ -774,7 +794,11 @@ mod lease_tests {
     #[test]
     fn clear_and_replacement_never_restore_old_material_or_burn_new_incarnation() {
         for clear in [false, true] {
-            let (registry, old_refused, old_dropped) = fixture();
+            let Fixture {
+                registry,
+                refused: old_refused,
+                dropped: old_dropped,
+            } = fixture();
             let winner = ResponseIdentity::new();
             let lease = Lease::acquire(registry.clone(), "calendar", &winner, None).unwrap();
             if clear {
@@ -799,7 +823,11 @@ mod lease_tests {
 
     #[test]
     fn reservation_incarnation_and_borrowed_registry_fail_closed_without_panicking() {
-        let (registry, refused, dropped) = fixture();
+        let Fixture {
+            registry,
+            refused,
+            dropped,
+        } = fixture();
         let identity = ResponseIdentity::new();
         let lease = Lease::acquire(registry.clone(), "calendar", &identity, None).unwrap();
         let marker = Rc::new(Cell::new(false));
@@ -819,7 +847,11 @@ mod lease_tests {
             "old Drop cannot act on a different reservation incarnation"
         );
 
-        let (registry, refused, dropped) = fixture();
+        let Fixture {
+            registry,
+            refused,
+            dropped,
+        } = fixture();
         let lease = Lease::acquire(registry.clone(), "calendar", &identity, None).unwrap();
         let busy = registry.borrow();
         drop(lease);
