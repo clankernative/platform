@@ -508,7 +508,6 @@ fn activate(runtime: &Runtime, fixture: &profiles::tests::QualificationFixture) 
                 now: 2
             },
             &key,
-            None,
         )?,
         outbound::CallbackOutcome::CodeAccepted { .. }
     ));

@@ -223,6 +223,26 @@ pub struct ExchangeDispatchPermit {
     started_at: i64,
 }
 
+// Checked SQL facts are not a send permit. This private value becomes the
+// permit only after its owning transaction and native postchecks return.
+struct CheckedExchangeDispatch {
+    intent: ConnectIntent,
+    binding: ExchangeBinding,
+    code_ref: String,
+    started_at: i64,
+}
+
+impl CheckedExchangeDispatch {
+    fn committed(self) -> ExchangeDispatchPermit {
+        ExchangeDispatchPermit {
+            intent: self.intent,
+            binding: self.binding,
+            code_ref: self.code_ref,
+            started_at: self.started_at,
+        }
+    }
+}
+
 pub struct ExchangeRequest<'a> {
     permit: &'a ExchangeDispatchPermit,
 }
@@ -330,11 +350,11 @@ pub fn authorize_and_commit_qualified_exchange(
     input: OutboundQualification<'_>,
     now: i64,
 ) -> Result<Option<ExchangeDispatchPermit>> {
-    authorize_checked(db, input, now, None)
+    authorize_checked(db, input, now)
 }
 
 pub(in crate::oauth) fn authorize_managed_exchange(
-    db: &mut Connection,
+    runtime: &crate::store::Runtime,
     input: OutboundQualification<'_>,
     now: i64,
     guard: &super::management::app::FinishGuard<'_>,
@@ -342,29 +362,46 @@ pub(in crate::oauth) fn authorize_managed_exchange(
 ) -> Result<Option<ExchangeDispatchPermit>> {
     guard.require_intent(input.intent)?;
     guard.require_consumer(current, super::native_management::Phase::DispatchCommit)?;
-    authorize_checked(db, input, now, Some((guard, current)))
+    let qualified = qualify_input(&input)?;
+    let checked = current.sql_commit(runtime, |tx| {
+        authorize_in(tx, &input, &qualified, now, Some(guard))
+    })?;
+    Ok(checked.map(CheckedExchangeDispatch::committed))
 }
 
 fn authorize_checked(
     db: &mut Connection,
     input: OutboundQualification<'_>,
     now: i64,
-    mut guard: Option<(
-        &super::management::app::FinishGuard<'_>,
-        &mut super::native_management::Consumer<'_, '_, '_>,
-    )>,
 ) -> Result<Option<ExchangeDispatchPermit>> {
-    let qualified = super::profiles::qualify_outbound_connect(
+    let qualified = qualify_input(&input)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let checked = authorize_in(&tx, &input, &qualified, now, None)?;
+    tx.commit()?;
+    Ok(checked.map(CheckedExchangeDispatch::committed))
+}
+
+fn qualify_input(
+    input: &OutboundQualification<'_>,
+) -> Result<super::profiles::QualifiedOutboundConnect> {
+    super::profiles::qualify_outbound_connect(
         input.intent,
         input.binding,
         input.requirement,
         input.permission,
         input.reviewed,
         input.instance,
-    )?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some((guard, current)) = &mut guard {
-        current.check()?;
+    )
+}
+
+fn authorize_in(
+    tx: &rusqlite::Transaction<'_>,
+    input: &OutboundQualification<'_>,
+    qualified: &super::profiles::QualifiedOutboundConnect,
+    now: i64,
+    guard: Option<&super::management::app::FinishGuard<'_>>,
+) -> Result<Option<CheckedExchangeDispatch>> {
+    if let Some(guard) = guard {
         guard.check(&tx, now)?;
     }
     let row: Option<(ConnectIntent, String, String, String)> = tx
@@ -422,16 +459,10 @@ fn authorize_checked(
         params![input.intent.attempt, now],
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
-    if let Some((guard, current)) = &mut guard {
-        current.check()?;
+    if let Some(guard) = guard {
         guard.commit_dispatch(&tx)?;
     }
-    if let Some((_, current)) = guard {
-        current.commit(tx)?;
-    } else {
-        tx.commit()?;
-    }
-    Ok(Some(ExchangeDispatchPermit {
+    Ok(Some(CheckedExchangeDispatch {
         intent: stored_intent,
         binding: stored_exchange,
         code_ref,
@@ -462,36 +493,60 @@ pub(crate) fn handle_qualified_callback(
     input: OutboundQualification<'_>,
     ingress: super::outbound::CallbackIngress<'_>,
     key: &crate::managed_credentials::crypto::KeyLease,
-    current: Option<&mut super::native_management::Consumer<'_, '_, '_>>,
 ) -> Result<super::outbound::CallbackOutcome> {
-    let qualified = super::profiles::qualify_outbound_connect(
-        input.intent,
-        input.binding,
-        input.requirement,
-        input.permission,
-        input.reviewed,
-        input.instance,
-    )?;
+    let qualified = qualify_input(&input)?;
     ensure!(
         ingress.attempt == qualified.intent().attempt,
         "callback attempt mismatch"
     );
     let callback_code_ref = ingress.code_ref;
     let parameters = callback_parameters(input.reviewed);
-    super::outbound::handle_callback_profile(db, ingress, &parameters, current, |tx, code| {
-        let binding = load_binding(tx, &qualified.intent().attempt)?
-            .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
-        ensure!(
-            binding.matches_current(&input)?,
-            "callback exchange binding changed"
-        );
-        ensure!(
-            callback_code_ref == binding.code_ref,
-            "callback code reference mismatch"
-        );
-        let prepared = custody::prepare_code(key, qualified.intent(), &binding, code)?;
-        custody::publish_code(tx, prepared)
+    super::outbound::handle_callback_profile(db, ingress, &parameters, |tx, code| {
+        publish_callback_code(tx, &input, &qualified, callback_code_ref, key, code)
     })
+}
+
+pub(in crate::oauth) fn handle_managed_callback(
+    runtime: &crate::store::Runtime,
+    input: OutboundQualification<'_>,
+    ingress: super::outbound::CallbackIngress<'_>,
+    key: &crate::managed_credentials::crypto::KeyLease,
+    current: &mut super::native_management::Consumer<'_, '_, '_>,
+) -> Result<super::outbound::CallbackOutcome> {
+    let qualified = qualify_input(&input)?;
+    ensure!(
+        ingress.attempt == qualified.intent().attempt,
+        "callback attempt mismatch"
+    );
+    let callback_code_ref = ingress.code_ref;
+    let parameters = callback_parameters(input.reviewed);
+    current.sql_commit(runtime, |tx| {
+        super::outbound::handle_callback_in(tx, ingress, &parameters, |tx, code| {
+            publish_callback_code(tx, &input, &qualified, callback_code_ref, key, code)
+        })
+    })
+}
+
+fn publish_callback_code(
+    tx: &rusqlite::Transaction<'_>,
+    input: &OutboundQualification<'_>,
+    qualified: &super::profiles::QualifiedOutboundConnect,
+    callback_code_ref: &str,
+    key: &crate::managed_credentials::crypto::KeyLease,
+    code: &str,
+) -> Result<()> {
+    let binding = load_binding(tx, &qualified.intent().attempt)?
+        .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
+    ensure!(
+        binding.matches_current(&input)?,
+        "callback exchange binding changed"
+    );
+    ensure!(
+        callback_code_ref == binding.code_ref,
+        "callback code reference mismatch"
+    );
+    let prepared = custody::prepare_code(key, qualified.intent(), &binding, code)?;
+    custody::publish_code(tx, prepared)
 }
 
 pub struct VerifiedMappedExchange {
@@ -600,13 +655,12 @@ pub fn settle_mapped(
         &prepared.binding,
         current_mapping_revision,
         now,
-        None,
         |tx| custody::publish_tokens(tx, prepared.material),
     )
 }
 
 pub(in crate::oauth) fn settle_managed(
-    db: &mut Connection,
+    runtime: &crate::store::Runtime,
     prepared: PreparedMappedSettlement,
     current: OutboundQualification<'_>,
     revision: &Digest,
@@ -629,17 +683,18 @@ pub(in crate::oauth) fn settle_managed(
     {
         return Ok(false);
     }
-    connect::activate_mapped_bound(
-        db,
-        &prepared.verified,
-        &prepared.binding,
-        revision,
-        now,
-        Some(consumer),
-        |tx| {
-            guard.check(tx, now)?;
-            custody::publish_tokens(tx, prepared.material)?;
-            guard.complete(tx)
-        },
-    )
+    consumer.sql_commit(runtime, |tx| {
+        connect::activate_mapped_in(
+            tx,
+            &prepared.verified,
+            Some(&prepared.binding),
+            revision,
+            now,
+            |tx| {
+                guard.check(tx, now)?;
+                custody::publish_tokens(tx, prepared.material)?;
+                guard.complete(tx)
+            },
+        )
+    })
 }

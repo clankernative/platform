@@ -879,15 +879,15 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
         !native_storage::is_native_database(path),
         "native_runtime_sql_owner_required"
     );
-    let connection = Connection::open(path)?;
+    let mut connection = Connection::open(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    configure_connection(&connection)?;
+    configure_connection(&mut connection)?;
     Ok(connection)
 }
 
 /// The same bounded SQLite execution settings apply to an owned fresh memory
 /// database. Configuring a connection supplies no storage or epoch authority.
-pub(crate) fn configure_connection(connection: &Connection) -> Result<()> {
+pub(crate) fn configure_connection(connection: &mut Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(2))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "synchronous", "FULL")?;
@@ -1004,7 +1004,7 @@ impl Runtime {
     /// known settlement. The callback cannot commit or return its transaction.
     pub(crate) fn sql_write<T>(
         &self,
-        operation: impl for<'sql> FnOnce(&'sql Transaction<'sql>) -> Result<T>,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
         crate::oauth::native_management::with_runtime_sql(
             self,
@@ -1015,7 +1015,7 @@ impl Runtime {
 
     pub(crate) fn sql_decide<T>(
         &self,
-        operation: impl for<'sql> FnOnce(&'sql Transaction<'sql>) -> Result<SqlDecision<T>>,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<SqlDecision<T>>,
     ) -> Result<T> {
         crate::oauth::native_management::with_runtime_sql(
             self,

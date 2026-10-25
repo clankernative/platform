@@ -970,6 +970,42 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn ordinary_sql_units_keep_one_snapshot_and_confirm_explicit_rollback() -> Result<()> {
+        // Adapter conformance only. This ordinary fixture supplies no native
+        // participant, Current phase or enrolled role.
+        let fixture = Fixture::new()?;
+        let writer = store::open(fixture.runtime.db())?;
+        writer.execute_batch(
+            "CREATE TABLE unit_probe(value INTEGER NOT NULL) STRICT;
+            INSERT INTO unit_probe VALUES(1)",
+        )?;
+        let read_value = |db: &Connection| -> Result<i64> {
+            Ok(db.query_row("SELECT value FROM unit_probe", [], |row| row.get(0))?)
+        };
+        let values = fixture.runtime.sql_read(|snapshot| {
+            let before = read_value(snapshot)?;
+            // A distinct real SQLite writer advances the file while this
+            // unit retains its original WAL read snapshot.
+            writer.execute("UPDATE unit_probe SET value=2", [])?;
+            Ok((before, read_value(snapshot)?))
+        })?;
+        assert_eq!(values, (1, 1));
+        assert_eq!(read_value(&writer)?, 2);
+        let result = fixture.runtime.sql_decide(|tx| {
+            tx.execute("UPDATE unit_probe SET value=3", [])?;
+            Ok(store::SqlDecision::Rollback("rejected"))
+        })?;
+        assert_eq!(result, "rejected");
+        assert_eq!(read_value(&writer)?, 2);
+        fixture.runtime.sql_write(|tx| {
+            tx.execute("UPDATE unit_probe SET value=4", [])?;
+            Ok(())
+        })?;
+        assert_eq!(read_value(&writer)?, 4);
+        Ok(())
+    }
+
     impl Fixture {
         fn new() -> Result<Self> {
             let directory = tempfile::tempdir()?;
@@ -1712,7 +1748,6 @@ mod tests {
                             now: 2
                         },
                         &key,
-                        None,
                     )?,
                     CallbackOutcome::CodeAccepted { .. }
                 ));

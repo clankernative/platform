@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use day2_capabilities::{Digest, oauth::AccountBindingPolicy};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use usage::Authority as _;
@@ -305,17 +305,18 @@ impl Manager {
             crate::oauth::native_management::capture_app(&start, self.runtime.app())?;
         crate::oauth::connect::identifier(registration)?;
         let view = original.with_pending(|current| {
-            let mut db = store::open(self.runtime.db())?;
-            current.check()?;
-            iap::bind_subject(&db, identity, now)?;
-            self.authority_in(&db, identity)?;
+            current.sql_write(&self.runtime, |db| {
+                iap::bind_subject(db, identity, now)?;
+                self.authority_in(db, identity)?;
+                Ok(store::SqlDecision::Commit(()))
+            })?;
             let selection = self.selection(registration, identity, now)?;
             let suffix = effects::random()?;
             let challenge = Digest::new(effects::random()?.as_bytes());
             let captured_at = effects::wall_time()?;
             ensure!(captured_at >= now, "OAuth management clock moved backwards");
             current.check()?;
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            current.sql_commit(&self.runtime, |tx| {
             if action == Action::Connect {
                 Self::unclaimed(&tx, &selection.slot, None)?;
             }
@@ -370,8 +371,8 @@ impl Manager {
             ensure!(json.len() <= 16384, "OAuth management context budget");
             tx.execute("INSERT INTO oauth_management_intents(id,view,expires_at,state) VALUES(?1,?2,?3,'pending')",
                 params![view.id, json, view.expires_at])?;
-            current.commit(tx)?;
             Ok(view)
+            })
         })?;
         original.bind(
             CommittedCapture {
@@ -391,17 +392,21 @@ impl Manager {
             crate::oauth::native_management::Phase::Pending,
             now,
             |current| {
-                current.arm()?;
-                let db = store::open(self.runtime.db())?;
-                let (view, state, _) = self.load(&db, id, identity, now)?;
-                ensure!(
-                    crate::oauth::fresh_auth::FreshIntent::management(&view, identity)? == intent,
-                    "OAuth Pending differs from retained original"
-                );
+                let (view, state) = current.sql_read(&self.runtime, |db| {
+                    let (view, state, _) = self.load(&db, id, identity, now)?;
+                    ensure!(
+                        crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
+                            == intent,
+                        "OAuth Pending differs from retained original"
+                    );
+                    if state == "pending" {
+                        self.check_in(&db, &view, identity)?;
+                    }
+                    Ok((view, state))
+                })?;
                 if state != "pending" {
                     return Ok(None);
                 }
-                self.check_in(&db, &view, identity)?;
                 let selection = self.selection(&view.registration, identity, now)?;
                 ensure!(
                     selection.identity()? == view.selection,
@@ -451,24 +456,22 @@ impl Manager {
             |current| {
                 // Open/recovery, writer, mutation and known COMMIT all remain under
                 // the same original/role/physical scope. No RPC occurs inside it.
-                current.arm()?;
-                let mut db = store::open(self.runtime.db())?;
-                let tx = crate::write_queue::immediate(&mut db)?;
-                let (view, state, _) =
-                    self.load(&tx, &call.attempt, identity, effects::wall_time()?)?;
-                ensure!(
-                    state == "pending" && view == expected,
-                    "OAuth management pending changed"
-                );
-                self.check_in(&tx, &view, identity)?;
-                let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(
-                    &tx,
-                    &intent,
-                    call,
-                    effects::wall_time()?,
-                )?;
-                current.commit_write(tx)?;
-                Ok(reply)
+                current.sql_commit(&self.runtime, |tx| {
+                    let (view, state, _) =
+                        self.load(&tx, &call.attempt, identity, effects::wall_time()?)?;
+                    ensure!(
+                        state == "pending" && view == expected,
+                        "OAuth management pending changed"
+                    );
+                    self.check_in(&tx, &view, identity)?;
+                    let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(
+                        &tx,
+                        &intent,
+                        call,
+                        effects::wall_time()?,
+                    )?;
+                    Ok(reply)
+                })
             },
         )
     }
@@ -591,7 +594,6 @@ impl Manager {
                 ("include_granted_scopes", "false"),
                 ("login_hint", identity.email.as_str()),
             ]);
-            let mut db = store::open(self.runtime.db())?;
             let mut prepared = Some(prepared);
             let checking = effects::wall_time()?;
             ensure!(checking >= at, "OAuth connect clock moved backwards");
@@ -611,7 +613,7 @@ impl Manager {
                     ensure!(finished >= checking, "OAuth connect clock moved backwards");
                     view.validate(identity, finished)?;
                     crate::oauth::connect::begin_managed(
-                        &mut db,
+                        &self.runtime,
                         prepared.take().context("OAuth connect permit consumed")?,
                         finished,
                         &guard,
@@ -664,27 +666,32 @@ impl Manager {
                 crate::oauth::native_management::Phase::Callback,
                 now,
                 |current| {
-                    current.arm()?;
-                    let db = store::open(self.runtime.db())?;
-                    let (view, state, stored_session) = self.load(&db, id, identity, now)?;
-                    ensure!(
-                        crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
-                            == original,
-                        "OAuth callback differs from retained original"
-                    );
-                    if state != "authorized" || stored_session.as_deref() != Some(session.as_str())
-                    {
+                    let local = current.sql_read(&self.runtime, |db| {
+                        let (view, state, stored_session) = self.load(&db, id, identity, now)?;
+                        ensure!(
+                            crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
+                                == original,
+                            "OAuth callback differs from retained original"
+                        );
+                        if state != "authorized"
+                            || stored_session.as_deref() != Some(session.as_str())
+                        {
+                            return Ok(None);
+                        }
+                        self.check_in(&db, &view, identity)?;
+                        let (intent, binding) = self.context(&db, id)?;
+                        let private = crate::oauth::exchange::load_binding(&db, id)?
+                            .context("OAuth exchange missing")?;
+                        Ok(Some((view, intent, binding, private)))
+                    })?;
+                    let Some((view, intent, binding, private)) = local else {
                         return Ok(None);
-                    }
-                    self.check_in(&db, &view, identity)?;
+                    };
                     let selection = self.selection(&view.registration, identity, now)?;
                     ensure!(
                         selection.identity()? == view.selection,
                         "OAuth callback selection changed"
                     );
-                    let (intent, binding) = self.context(&db, id)?;
-                    let private = crate::oauth::exchange::load_binding(&db, id)?
-                        .context("OAuth exchange missing")?;
                     Ok(Some((view, selection, intent, binding, private)))
                 },
             )?
@@ -746,9 +753,8 @@ impl Manager {
             at,
             |current| {
                 current.arm()?;
-                let mut db = store::open(self.runtime.db())?;
-                crate::oauth::exchange::handle_qualified_callback(
-                    &mut db,
+                crate::oauth::exchange::handle_managed_callback(
+                    &self.runtime,
                     input(),
                     crate::oauth::outbound::CallbackIngress {
                         attempt: id,
@@ -760,7 +766,7 @@ impl Manager {
                         now: at,
                     },
                     &key,
-                    Some(current),
+                    current,
                 )
             },
         )?;
@@ -771,9 +777,7 @@ impl Manager {
                     crate::oauth::native_management::Phase::Callback,
                     at,
                     |current| {
-                        current.arm()?;
-                        let mut db = store::open(self.runtime.db())?;
-                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        current.sql_commit(&self.runtime, |tx| {
                         let (stored, state, stored_session) =
                             self.load(&tx, id, identity, effects::wall_time()?)?;
                         ensure!(
@@ -784,7 +788,8 @@ impl Manager {
                         );
                         self.check_in(&tx, &view, identity)?;
                         ensure!(tx.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])? == 1, "OAuth denied callback consumed");
-                        current.commit(tx)
+                        Ok(())
+                        })
                     },
                 )?;
                 return Ok(Reply::Completed {
@@ -808,7 +813,6 @@ impl Manager {
             at,
             |consumer| {
                 consumer.arm()?;
-                let mut db = store::open(self.runtime.db())?;
                 usage::Authority::with_current(
                     self.authority.as_ref(),
                     self.runtime.app(),
@@ -823,7 +827,7 @@ impl Manager {
                         let checked = effects::wall_time()?;
                         ensure!(checked >= at, "OAuth exchange clock moved backwards");
                         permit = crate::oauth::exchange::authorize_managed_exchange(
-                            &mut db,
+                            &self.runtime,
                             input(),
                             checked,
                             &guard,
@@ -913,9 +917,8 @@ impl Manager {
                             .context("OAuth settlement consumed")?
                             .validate_mapped(input(), &mapped, &account)?
                             .prepare_tokens(&key)?;
-                        let mut db = store::open(self.runtime.db())?;
                         crate::oauth::exchange::settle_managed(
-                            &mut db,
+                            &self.runtime,
                             prepared,
                             input(),
                             &mapping.revision,
@@ -976,8 +979,7 @@ impl Manager {
                             finished >= checking,
                             "OAuth disconnect clock moved backwards"
                         );
-                        let mut db = store::open(self.runtime.db())?;
-                        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                        consumer.sql_commit(&self.runtime, |tx| {
                         let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
                         ensure!(
                             state == "pending" && stored == *view,
@@ -1004,8 +1006,8 @@ impl Manager {
                         )?;
                         tx.execute("UPDATE oauth_management_intents SET state='intervention_required',session=?2 WHERE id=?1 AND state='pending'",
                 params![view.id, proof.session.as_str()])?;
-                        consumer.commit(tx)?;
                         Ok(true)
+                        })
                     },
                 )
             },
@@ -1154,19 +1156,24 @@ impl FinishGuard<'_> {
         )
     }
 
-    pub(in crate::oauth) fn send<T>(
+    pub(in crate::oauth) fn send<P, T>(
         &self,
         entry: i64,
-        operation: impl FnOnce(&Connection) -> Result<T>,
+        prepare: impl for<'db> FnOnce(&'db Connection) -> Result<P>,
+        operation: impl FnOnce(P) -> Result<T>,
     ) -> Result<T> {
         self.with_current(
             crate::oauth::native_management::Phase::ProviderSend,
             entry,
             |current| {
-                current.arm()?;
-                let db = store::open(self.manager.runtime.db())?;
-                self.require_send(&db, entry)?;
-                operation(&db)
+                let prepared = current.sql_read(&self.manager.runtime, |db| {
+                    self.require_send(db, entry)?;
+                    prepare(db)
+                })?;
+                // The actual same original/role remains held through dispatch,
+                // but its SQL snapshot/connection has already closed.
+                current.check()?;
+                operation(prepared)
             },
         )
     }

@@ -845,7 +845,6 @@ pub(super) mod tests {
                 now: 2,
             },
             key,
-            None,
         )
         .unwrap();
         assert!(matches!(outcome, CallbackOutcome::CodeAccepted { .. }));

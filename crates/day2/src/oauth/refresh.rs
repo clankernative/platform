@@ -143,33 +143,39 @@ impl ClientCredential {
                     && request.registration() == &selection.instance.registration.registration,
                 "OAuth initial credential binding changed"
             );
-            let raw = guard.send(now, |db| {
-                let code = request.load_code(db, key)?;
-                let verifier = request.load_verifier(db, key)?;
-                let response = wire
-                    .client
-                    .post(google::TOKEN)
-                    .timeout(
-                        BUDGET
-                            .checked_sub(started.elapsed())
-                            .context("OAuth initial deadline reached")?,
-                    )
-                    .form(&[
-                        ("grant_type", "authorization_code"),
-                        ("client_id", self.client.as_str()),
-                        ("client_secret", self.secret.as_str()),
-                        ("code", code.as_str()),
-                        ("code_verifier", verifier.as_str()),
-                        ("redirect_uri", request.callback_url()),
-                    ])
-                    .send()
-                    .map_err(|_| anyhow::anyhow!("OAuth initial exchange outcome unknown"))?;
-                ensure!(
-                    response.status().as_u16() == 200,
-                    "OAuth initial exchange refused"
-                );
-                body(response)
-            })?;
+            let raw = guard.send(
+                now,
+                |db| {
+                    let code = request.load_code(db, key)?;
+                    let verifier = request.load_verifier(db, key)?;
+                    Ok((code, verifier))
+                },
+                |(code, verifier)| {
+                    let response = wire
+                        .client
+                        .post(google::TOKEN)
+                        .timeout(
+                            BUDGET
+                                .checked_sub(started.elapsed())
+                                .context("OAuth initial deadline reached")?,
+                        )
+                        .form(&[
+                            ("grant_type", "authorization_code"),
+                            ("client_id", self.client.as_str()),
+                            ("client_secret", self.secret.as_str()),
+                            ("code", code.as_str()),
+                            ("code_verifier", verifier.as_str()),
+                            ("redirect_uri", request.callback_url()),
+                        ])
+                        .send()
+                        .map_err(|_| anyhow::anyhow!("OAuth initial exchange outcome unknown"))?;
+                    ensure!(
+                        response.status().as_u16() == 200,
+                        "OAuth initial exchange refused"
+                    );
+                    body(response)
+                },
+            )?;
             let (normalized, tokens) = google::normalized_tokens(
                 &raw,
                 super::catalog::TokenContext {
@@ -183,24 +189,28 @@ impl ClientCredential {
             let mut authorization =
                 reqwest::header::HeaderValue::from_str(&format!("Bearer {}", tokens.access))?;
             authorization.set_sensitive(true);
-            let observed_account = guard.send(now, |_db| {
-                let response = wire
-                    .client
-                    .get(google::USERINFO)
-                    .header(reqwest::header::AUTHORIZATION, authorization)
-                    .timeout(
-                        BUDGET
-                            .checked_sub(started.elapsed())
-                            .context("OAuth initial deadline reached")?,
-                    )
-                    .send()
-                    .map_err(|_| anyhow::anyhow!("OAuth initial account outcome unknown"))?;
-                ensure!(
-                    response.status().as_u16() == 200,
-                    "OAuth initial account refused"
-                );
-                google::observe_account(&body(response)?)
-            })?;
+            let observed_account = guard.send(
+                now,
+                |_| Ok(()),
+                |()| {
+                    let response = wire
+                        .client
+                        .get(google::USERINFO)
+                        .header(reqwest::header::AUTHORIZATION, authorization)
+                        .timeout(
+                            BUDGET
+                                .checked_sub(started.elapsed())
+                                .context("OAuth initial deadline reached")?,
+                        )
+                        .send()
+                        .map_err(|_| anyhow::anyhow!("OAuth initial account outcome unknown"))?;
+                    ensure!(
+                        response.status().as_u16() == 200,
+                        "OAuth initial account refused"
+                    );
+                    google::observe_account(&body(response)?)
+                },
+            )?;
             account = Some(observed_account);
             Ok(super::exchange::TokenHttpResponse {
                 status: 200,
@@ -276,6 +286,28 @@ fn clock_refusal(db: &Connection, context: &usage::RefreshContext) -> Result<()>
     )
 }
 
+fn current_clock_refusal(
+    runtime: &crate::store::Runtime,
+    serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
+    context: &usage::RefreshContext,
+) -> Result<()> {
+    serving.sql_write(runtime, |tx| {
+        clock_refusal(tx, context)?;
+        Ok(crate::store::SqlDecision::Commit(()))
+    })
+}
+
+fn current_uncertain(
+    runtime: &crate::store::Runtime,
+    serving: &mut super::native_management::RuntimeConsumer<'_, '_>,
+    attempt: &str,
+) -> Result<()> {
+    serving.sql_write(runtime, |tx| {
+        store::mark_uncertain(tx, attempt)?;
+        Ok(crate::store::SqlDecision::Commit(()))
+    })
+}
+
 /// Called before resolve publishes its immutable invocation-affine Use. An
 /// already committed expiry/clock refusal is never cleared by refresh.
 pub(super) fn ensure_current(
@@ -292,18 +324,17 @@ pub(super) fn ensure_current(
         .connections
         .as_deref()
         .context("OAuth refresh authority missing")?;
-    let mut db = crate::store::open(runtime.db())?;
-    let snapshot = db.transaction()?;
-    let context = usage::refresh_context(
-        &snapshot,
-        runtime,
-        request,
-        registration,
-        subject,
-        selection,
-        started_at,
-    );
-    serving.commit(snapshot)?;
+    let context = serving.sql_read(runtime, |snapshot| {
+        Ok(usage::refresh_context(
+            &snapshot,
+            runtime,
+            request,
+            registration,
+            subject,
+            selection,
+            started_at,
+        ))
+    })?;
     let context = match context {
         Ok(Some(context)) => context,
         Ok(None) => {
@@ -315,13 +346,12 @@ pub(super) fn ensure_current(
         }
         Err(_) => return Ok(Resolution::unavailable("ReauthRequired")),
     };
-    let local_matches =
-        |db: &rusqlite::Transaction<'_>, current: &usage::Selection, at: i64| -> Result<bool> {
-            Ok(
-                usage::refresh_context(db, runtime, request, registration, subject, current, at)?
-                    .is_some_and(|current| current.pin() == context.pin()),
-            )
-        };
+    let local_matches = |db: &Connection, current: &usage::Selection, at: i64| -> Result<bool> {
+        Ok(
+            usage::refresh_context(db, runtime, request, registration, subject, current, at)?
+                .is_some_and(|current| current.pin() == context.pin()),
+        )
+    };
     let selected = selection.identity()?;
     serving.check()?;
     let Some(key) = authority.custody(
@@ -336,34 +366,34 @@ pub(super) fn ensure_current(
     };
     let now = effects::wall_time()?;
     if now < started_at {
-        clock_refusal(&db, &context)?;
+        current_clock_refusal(runtime, serving, &context)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
-    let snapshot = crate::write_queue::immediate(&mut db)?;
-    ensure!(
-        local_matches(&snapshot, selection, now)?,
-        "refresh authority changed during key retrieval"
-    );
     let expected = context.eligibility();
-    serving.check()?;
-    let source = custody::load_refresh(
-        &snapshot,
-        &key,
-        context.intent(),
-        context.binding(),
-        &expected.account,
-        expected.base_version,
-        now,
-    )?;
-    serving.commit_write(snapshot)?;
+    let source = serving.sql_write(runtime, |snapshot| {
+        ensure!(
+            local_matches(&snapshot, selection, now)?,
+            "refresh authority changed during key retrieval"
+        );
+        let source = custody::load_refresh(
+            &snapshot,
+            &key,
+            context.intent(),
+            context.binding(),
+            &expected.account,
+            expected.base_version,
+            now,
+        )?;
+        Ok(crate::store::SqlDecision::Commit(source))
+    })?;
     let Some(source) = source else {
         return Ok(Resolution::unavailable("ReauthRequired"));
     };
-    let unresolved: bool = db.query_row(
+    let unresolved: bool = serving.sql_read(runtime, |db| Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM oauth_refresh_attempts WHERE slot=?1 AND generation=?2 AND base_version=?3
          AND state IN ('may_have_been_sent','uncertain'))",
         rusqlite::params![expected.slot, expected.generation, expected.base_version], |row| row.get(0),
-    )?;
+    )?))?;
     if unresolved {
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
@@ -386,7 +416,7 @@ pub(super) fn ensure_current(
     );
     let client = match client {
         Err(error) if error.downcast_ref::<ClockRefusal>().is_some() => {
-            clock_refusal(&db, &context)?;
+            current_clock_refusal(runtime, serving, &context)?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
         Err(error) => return Err(error),
@@ -399,7 +429,7 @@ pub(super) fn ensure_current(
     );
     let dispatch_at = effects::wall_time()?;
     if dispatch_at < now || dispatch_at < source.issued_at || dispatch_at < client.checked_at {
-        clock_refusal(&db, &context)?;
+        current_clock_refusal(runtime, serving, &context)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     let next = expected
@@ -420,18 +450,17 @@ pub(super) fn ensure_current(
             if current.identity()? != selected {
                 return Ok(false);
             }
-            let snapshot = db.transaction()?;
-            let eligible = local_matches(&snapshot, current, dispatch_at)?;
-            serving.commit(snapshot)?;
+            let eligible = serving.sql_read(runtime, |snapshot| {
+                local_matches(snapshot, current, dispatch_at)
+            })?;
             if !eligible {
                 return Ok(false);
             }
             // Reclaiming an unsent Ready attempt is safe; the durable CAS still
             // returns at most one process-local permit across processes/restarts.
             serving.check()?;
-            store::claim_refresh(&mut db, &attempt, expected)?;
-            permit = store::authorize_checked_dispatch(&mut db, &attempt, |tx| {
-                serving.check()?;
+            store::claim_current_refresh(runtime, serving, &attempt, expected)?;
+            permit = store::authorize_checked_dispatch(runtime, serving, &attempt, |tx| {
                 let at = effects::wall_time()?;
                 if at < dispatch_at {
                     return Err(ClockRefusal.into());
@@ -448,7 +477,7 @@ pub(super) fn ensure_current(
             if error.downcast_ref::<ClockRefusal>().is_some()
                 || effects::wall_time()? < checked_dispatch
             {
-                clock_refusal(&db, &context)?;
+                current_clock_refusal(runtime, serving, &context)?;
                 return Ok(Resolution::unavailable("ReauthRequired"));
             }
             return Err(error);
@@ -456,8 +485,8 @@ pub(super) fn ensure_current(
     };
     let sent_at = effects::wall_time()?;
     if sent_at < checked_dispatch {
-        clock_refusal(&db, &context)?;
-        store::mark_uncertain(&db, &attempt)?;
+        current_clock_refusal(runtime, serving, &context)?;
+        current_uncertain(runtime, serving, &attempt)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     if !admitted {
@@ -535,12 +564,13 @@ pub(super) fn ensure_current(
                 anyhow::bail!("OAuth refresh account dispatch clock fence changed");
             }
             last_clock = at;
-            let snapshot = db.transaction()?;
-            ensure!(
-                local_matches(&snapshot, &current, at)?,
-                "OAuth refresh authority changed before account read"
-            );
-            serving.commit(snapshot)?;
+            serving.sql_read(runtime, |snapshot| {
+                ensure!(
+                    local_matches(&snapshot, &current, at)?,
+                    "OAuth refresh authority changed before account read"
+                );
+                Ok(())
+            })?;
             ensure!(
                 monotonic.elapsed() <= BUDGET,
                 "OAuth refresh account dispatch elapsed budget exceeded"
@@ -580,16 +610,16 @@ pub(super) fn ensure_current(
         Ok(Some(tokens)) => tokens,
         Ok(None) => {
             serving.check()?;
-            store::mark_definitive_rejection(&mut db, &attempt)?;
+            store::reject_current_refresh(runtime, serving, &attempt)?;
             serving.check()?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
         Err(_) => {
             serving.refuse();
             if clock_failed {
-                clock_refusal(&db, &context)?;
+                current_clock_refusal(runtime, serving, &context)?;
             }
-            store::mark_uncertain(&db, &attempt)?;
+            current_uncertain(runtime, serving, &attempt)?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
     };
@@ -599,8 +629,8 @@ pub(super) fn ensure_current(
         .context("OAuth refresh expiry overflow")?;
     let observed_at = effects::wall_time()?;
     if observed_at < last_clock || observed_at >= expires_at || monotonic.elapsed() > BUDGET {
-        clock_refusal(&db, &context)?;
-        store::mark_uncertain(&db, &attempt)?;
+        current_clock_refusal(runtime, serving, &context)?;
+        current_uncertain(runtime, serving, &attempt)?;
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     let material = custody::prepare_replacement_tokens(
@@ -644,12 +674,12 @@ pub(super) fn ensure_current(
                 return Ok(false);
             }
             Ok(store::publish_replacement(
-                &mut db,
+                runtime,
+                serving,
                 prepared
                     .take()
                     .context("refresh settlement already consumed")?,
                 |tx| {
-                    serving.check()?;
                     let at = effects::wall_time()?;
                     if at < observed_at || at >= expires_at {
                         publication_clock_refused = true;
@@ -671,13 +701,13 @@ pub(super) fn ensure_current(
         Ok(true) => Resolution::ready(&context, next, freshest),
         _ => {
             if publication_clock_refused {
-                clock_refusal(&db, &context)?;
-                store::mark_uncertain(&db, &attempt)?;
+                current_clock_refusal(runtime, serving, &context)?;
+                current_uncertain(runtime, serving, &attempt)?;
             } else {
-                store::mark_uncertain(&db, &attempt)?;
+                current_uncertain(runtime, serving, &attempt)?;
                 let at = effects::wall_time()?;
                 if at < freshest || at >= expires_at {
-                    clock_refusal(&db, &context)?;
+                    current_clock_refusal(runtime, serving, &context)?;
                 }
             }
             Ok(Resolution::unavailable("ReauthRequired"))

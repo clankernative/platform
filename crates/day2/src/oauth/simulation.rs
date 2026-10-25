@@ -399,7 +399,7 @@ fn run(program: &Program) -> Result<Trace> {
                         route: &fixture.instance.registration.callback,
                         session: if matches!(step, Step::WrongSession) { &wrong } else { fixture.binding.session() },
                         issuer_binding: &fixture.reviewed.issuer, code_ref: &code_ref, now,
-                    }, &key, None)?;
+                    }, &key)?;
                     matches!(result, outbound::CallbackOutcome::CodeAccepted { .. })
                 }
                 Step::Exchange | Step::LostExchange => {
