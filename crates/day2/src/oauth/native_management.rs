@@ -1154,6 +1154,7 @@ impl RuntimeConsumer<'_, '_> {
 
 impl PendingWriter<'_, '_> {
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(!self.committed, "native Pending commit already attempted");
         match &mut self.source {
             PendingSource::Native { stage, .. } => {
                 ensure!(
@@ -1182,6 +1183,10 @@ impl PendingWriter<'_, '_> {
 
 impl Consumer<'_, '_, '_> {
     fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(
+            !self.finalized,
+            "native consumer finalization already attempted"
+        );
         ensure!(
             self.original.intent.app() == runtime.app(),
             "native human SQL app changed"
@@ -4242,5 +4247,178 @@ pub(crate) mod fixtures {
             }
             use_current(&mut stage, &mut original)
         })
+    }
+
+    mod sql_terminal_tests {
+        use super::*;
+
+        fn database() -> Result<(tempfile::TempDir, crate::store::Runtime)> {
+            let directory = tempfile::tempdir()?;
+            let (runtime, _, _) =
+                super::super::super::admission::tests::management_fixture(directory.path())?;
+            let db = crate::store::open(runtime.db())?;
+            db.execute_batch("CREATE TABLE terminal_sql_probe(value INTEGER)")?;
+            drop(db);
+            Ok((directory, runtime))
+        }
+
+        // Rename the actual closed database after COMMIT. A wrongly admitted
+        // new ordinary open would create a replacement even before binding
+        // validation or the callback. A callback-only assertion misses that.
+        fn remove_selection(runtime: &crate::store::Runtime) -> Result<std::path::PathBuf> {
+            let preserved = runtime.db().with_extension("committed.sqlite");
+            std::fs::rename(runtime.db(), &preserved)?;
+            assert!(!runtime.db().exists());
+            Ok(preserved)
+        }
+
+        fn committed_once(
+            runtime: &crate::store::Runtime,
+            preserved: &std::path::Path,
+        ) -> Result<()> {
+            assert!(
+                !runtime.db().exists(),
+                "a consumed SQL owner must refuse BEFORE open"
+            );
+            let db = rusqlite::Connection::open_with_flags(
+                preserved,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            assert_eq!(
+                db.query_row("SELECT sum(value) FROM terminal_sql_probe", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))?,
+                1
+            );
+            db.close().map_err(|(_, error)| error)?;
+            Ok(())
+        }
+
+        #[test]
+        fn runtime_sql_final_commit_closes_pending_before_new_read_or_write_open() -> Result<()> {
+            for write in [false, true] {
+                let (_directory, runtime) = database()?;
+                let world =
+                    super::super::super::simulation::World::new(if write { 619 } else { 618 });
+                super::super::super::effects::scope(world, || -> Result<()> {
+                    select_app_scope(&sql_runtime_scope(&runtime)?)?;
+                    let mut original = FIXTURE.with(|slot| {
+                        capture(
+                            slot.borrow_mut().as_mut().context("SQL fixture missing")?,
+                            NativeRole::AppHost,
+                            runtime.app(),
+                        )
+                    })?;
+                    let mut preserved = None;
+                    let entered = Cell::new(false);
+                    let result = with_pending(&mut original, |current| {
+                        current.sql_commit(&runtime, |tx| {
+                            tx.execute("INSERT INTO terminal_sql_probe VALUES(1)", [])?;
+                            Ok(())
+                        })?;
+                        preserved = Some(remove_selection(&runtime)?);
+                        let refused = if write {
+                            current.sql_write(&runtime, |_| {
+                                entered.set(true);
+                                Ok(crate::store::SqlDecision::Commit(()))
+                            })
+                        } else {
+                            current.sql_read(&runtime, |_| {
+                                entered.set(true);
+                                Ok(())
+                            })
+                        };
+                        assert!(
+                            refused
+                                .unwrap_err()
+                                .to_string()
+                                .contains("commit already attempted")
+                        );
+                        Ok(()) // Swallowing the refused unit cannot settle it.
+                    });
+                    assert!(result.is_err());
+                    assert!(!entered.get());
+                    assert!(
+                        original.clock.sample().is_err(),
+                        "the same original stays refused"
+                    );
+                    committed_once(&runtime, preserved.as_ref().unwrap())
+                })?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn runtime_sql_final_commit_closes_human_before_new_read_or_write_open() -> Result<()> {
+            use super::super::super::management::app::{Call, Manager, Reply};
+            for write in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let (runtime, authority, _) =
+                    super::super::super::admission::tests::management_fixture(directory.path())?;
+                let db = crate::store::open(runtime.db())?;
+                db.execute_batch("CREATE TABLE terminal_sql_probe(value INTEGER)")?;
+                drop(db);
+                let world =
+                    super::super::super::simulation::World::new(if write { 621 } else { 620 });
+                world.advance(95);
+                super::super::super::effects::scope(world, || -> Result<()> {
+                    select_app_scope(&sql_runtime_scope(&runtime)?)?;
+                    let identity = crate::iap::Verified {
+                        email: "alice@example.com".into(),
+                        subject: "accounts.google.com:alice".into(),
+                    };
+                    let Reply::Pending { view } = Manager::new(runtime.clone(), authority)
+                        .dispatch(
+                            Call::Capture {
+                                registration: "calendar".into(),
+                                operation: super::super::super::management::Action::Connect,
+                            },
+                            &identity,
+                            100,
+                        )?
+                    else {
+                        anyhow::bail!("SQL fixture capture missing");
+                    };
+                    let intent = FreshIntent::management(&view, &identity)?;
+                    let mut preserved = None;
+                    let entered = Cell::new(false);
+                    let result =
+                        super::super::with_consumer(&intent, Phase::Pending, 100, |current| {
+                            current.sql_commit(&runtime, |tx| {
+                                tx.execute("INSERT INTO terminal_sql_probe VALUES(1)", [])?;
+                                Ok(())
+                            })?;
+                            preserved = Some(remove_selection(&runtime)?);
+                            let refused = if write {
+                                current.sql_write(&runtime, |_| {
+                                    entered.set(true);
+                                    Ok(crate::store::SqlDecision::Commit(()))
+                                })
+                            } else {
+                                current.sql_read(&runtime, |_| {
+                                    entered.set(true);
+                                    Ok(())
+                                })
+                            };
+                            assert!(
+                                refused
+                                    .unwrap_err()
+                                    .to_string()
+                                    .contains("finalization already attempted")
+                            );
+                            Ok(())
+                        });
+                    assert!(result.is_err());
+                    assert!(!entered.get());
+                    assert!(
+                        super::super::with_consumer(&intent, Phase::Pending, 100, |_| Ok(()))
+                            .is_err()
+                    );
+                    committed_once(&runtime, preserved.as_ref().unwrap())
+                })?;
+            }
+            Ok(())
+        }
     }
 }
