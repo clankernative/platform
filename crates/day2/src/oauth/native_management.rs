@@ -2908,6 +2908,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sql_raw_schema_refusal_preserves_the_lifetime_progress_hook() -> Result<()> {
+        let (_directory, runtime) = sql_fixture()?;
+        let result = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+            sql.read(|db| {
+                // Raw admission must fail at its first foreign_keys update,
+                // before entering nested admission or touching its raw hook.
+                assert!(crate::oauth::schema::admit(db, |_| Ok(())).is_err());
+                // Catching that denial cannot clear the original connection's
+                // cumulative work budget. Exercise the real SQLite VM, without
+                // installing/replacing a test hook on the shared callback.
+                let error = db.query_row(
+                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap_err();
+                assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::OperationInterrupted));
+                Ok(())
+            })
+        });
+        assert!(
+            result.is_err(),
+            "swallowing both errors must still refuse the owner"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn runtime_sql_error_and_caught_panic_rollback_and_latch_the_same_facade() -> Result<()> {
         use crate::store::SqlDecision::Commit;
         let (_directory, runtime) = sql_fixture()?;

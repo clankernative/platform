@@ -164,6 +164,7 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     // graph cannot make it disappear from the ratchet.
     let test_only = test_only_sources(&parsed);
     require_canonical_html_crate(&parsed, &test_only)?;
+    require_sql_callback_controls(root, &parsed, &test_only)?;
     let ambient_names = ambient_import_names(&parsed, &test_only)?;
     let mut findings = BTreeMap::new();
     for (source, syntax) in &parsed {
@@ -183,6 +184,207 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
         sources: paths,
         findings: findings.into_values().collect(),
     })
+}
+
+/// Shared SQLite borrows cannot expose connection-control authority. SQLite's
+/// authorizer fences SQL, but safe hook setters would replace that fence or its
+/// lifetime progress hook without executing SQL. Reserve their explicit Rust
+/// spellings, including function references and macro tokens, in the runtime
+/// crate. This is a finite source boundary, not general Rust type resolution.
+fn require_sql_callback_controls(
+    root: &Path,
+    parsed: &BTreeMap<String, syn::File>,
+    test_only: &BTreeSet<String>,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    for (source, syntax) in parsed {
+        if !source.starts_with("crates/day2/src/")
+            || test_only.contains(source)
+            || definitely_test_only(&syntax.attrs)
+        {
+            continue;
+        }
+        if let Some(expected) = sql_control_core_pin(source) {
+            let bytes = read_regular(&root.join(source), MAX_SOURCE_BYTES)?;
+            ensure!(
+                day2::digest(&bytes) == expected,
+                "SQL callback control core requires exact source review: {source}"
+            );
+            continue;
+        }
+        let mut controls = SqlCallbackControls {
+            source,
+            admitted_function: false,
+            function: None,
+            errors: BTreeSet::new(),
+        };
+        controls.visit_file(syntax);
+        if !controls.errors.is_empty() {
+            errors.push(format!(
+                "{source}: {}",
+                controls.errors.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    ensure!(
+        errors.is_empty(),
+        "SQL callback connection control refused: {}",
+        errors.join("; ")
+    );
+    Ok(())
+}
+
+fn sql_control_core_pin(source: &str) -> Option<&'static str> {
+    match source {
+        // The only authorizer owner, and the raw schema installer's private
+        // hooks. The latter first executes foreign_keys=true before touching
+        // the progress hook; a guarded callback denies/latches that entry.
+        // No module-name exemption: any byte change requires explicit review.
+        "crates/day2/src/store/native_storage.rs" => {
+            Some("sha256:97788706f53f2bec5530991aeb7ced3b2bfedbf47afde56e061ed168910bb809")
+        }
+        "crates/day2/src/oauth/schema.rs" => {
+            Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
+        }
+        _ => None,
+    }
+}
+
+fn sql_control_name(name: &str) -> bool {
+    matches!(
+        name,
+        "authorizer"
+            | "progress_handler"
+            | "wal_hook"
+            | "commit_hook"
+            | "rollback_hook"
+            | "update_hook"
+            | "preupdate_hook"
+            | "set_limit"
+            | "set_db_config"
+            | "busy_handler"
+            | "busy_timeout"
+            | "cache_flush"
+            | "release_memory"
+            | "blob_open"
+            | "serialize"
+            | "backup"
+            | "create_scalar_function"
+            | "create_aggregate_function"
+            | "create_window_function"
+            | "remove_function"
+            | "create_collation"
+            | "remove_collation"
+            | "collation_needed"
+            | "load_extension"
+            | "load_extension_enable"
+            | "load_extension_disable"
+    )
+}
+
+// Exact preexisting functions whose connection-control operations act only on
+// their own fresh/raw connection, or are Serde's unrelated serialize method.
+// Pin the entire function, not the call: moving an identical setter into a
+// borrowed callback is not admitted. New/changed sites have no allowance path.
+fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
+    const REVIEWED: &[(&str, &str)] = &[];
+    REVIEWED.contains(&(source, digest))
+}
+
+struct SqlCallbackControls<'a> {
+    source: &'a str,
+    admitted_function: bool,
+    function: Option<String>,
+    errors: BTreeSet<String>,
+}
+
+impl SqlCallbackControls<'_> {
+    fn reference(&mut self, name: &str) {
+        if !self.admitted_function && sql_control_name(name) {
+            self.errors.insert(format!(
+                "{name} ({})",
+                self.function.as_deref().unwrap_or("outside function")
+            ));
+        }
+    }
+
+    fn macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(name) => self.reference(&identifier_name(&name)),
+                proc_macro2::TokenTree::Group(group) => self.macro_tokens(group.stream()),
+                _ => {}
+            }
+        }
+    }
+
+    fn enter_function(
+        &mut self,
+        function: impl ToTokens,
+        name: &syn::Ident,
+    ) -> (bool, Option<String>) {
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        let previous = (self.admitted_function, self.function.take());
+        self.admitted_function = sql_control_function_reviewed(self.source, &digest);
+        self.function = Some(format!("{} {digest}", identifier_name(name)));
+        previous
+    }
+}
+
+impl<'ast> Visit<'ast> for SqlCallbackControls<'_> {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !definitely_test_only(item_attributes(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &'ast Expr) {
+        if !definitely_test_only(expression_attributes(expression)) {
+            visit::visit_expr(self, expression);
+        }
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        let previous = self.enter_function(function, &function.sig.ident);
+        visit::visit_item_fn(self, function);
+        (self.admitted_function, self.function) = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        if definitely_test_only(&function.attrs) {
+            return;
+        }
+        let previous = self.enter_function(function, &function.sig.ident);
+        visit::visit_impl_item_fn(self, function);
+        (self.admitted_function, self.function) = previous;
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.reference(&identifier_name(&call.method));
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        for segment in &expression.path.segments {
+            self.reference(&identifier_name(&segment.ident));
+        }
+        visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_use_tree(&mut self, tree: &'ast UseTree) {
+        match tree {
+            UseTree::Name(name) => self.reference(&identifier_name(&name.ident)),
+            UseTree::Rename(name) => self.reference(&identifier_name(&name.ident)),
+            UseTree::Path(path) => self.reference(&identifier_name(&path.ident)),
+            _ => {}
+        }
+        visit::visit_use_tree(self, tree);
+    }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        self.macro_tokens(invocation.tokens.clone());
+        visit::visit_macro(self, invocation);
+    }
 }
 
 pub fn check(root: &Path) -> Result<()> {
@@ -8287,6 +8489,104 @@ mod tests {
         scanner.visit_file(&parsed["crates/fixture/src/lib.rs"]);
         scanner.require_resolved_parent_effects().unwrap();
         findings.into_values().collect()
+    }
+
+    fn sql_callback_source(source: &str) -> Result<()> {
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/callback_fixture.rs".to_owned(),
+            syn::parse_file(source).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+    }
+
+    #[test]
+    fn sql_callback_controls_reject_hooks_aliases_ufcs_macros_and_raw_names() {
+        for source in [
+            "fn f(db: &Connection) { db.authorizer(None); }",
+            "fn f(db: &Connection) { db.r#progress_handler(0, None); }",
+            "fn f(db: &Connection) { Connection::wal_hook(db, None); }",
+            "fn f(db: &Connection) { let clear = Connection::authorizer; clear(db, None); }",
+            "use Connection::progress_handler as clear; fn f(db: &Connection) { clear(db, 0, None); }",
+            "macro_rules! clear { ($db:expr) => { $db.progress_handler(0, None) }; }",
+            "fn f(db: &Connection) { wrapper!(db.authorizer(None)); }",
+            "fn configure_connection(db: &mut Connection) { db.progress_handler(0, None); }",
+        ] {
+            let error = sql_callback_source(source).unwrap_err().to_string();
+            assert!(
+                error.contains("SQL callback connection control refused"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_reserve_every_declared_connection_escape() {
+        for name in [
+            "authorizer",
+            "progress_handler",
+            "wal_hook",
+            "commit_hook",
+            "rollback_hook",
+            "update_hook",
+            "preupdate_hook",
+            "set_limit",
+            "set_db_config",
+            "busy_handler",
+            "busy_timeout",
+            "cache_flush",
+            "release_memory",
+            "blob_open",
+            "serialize",
+            "backup",
+            "create_scalar_function",
+            "create_aggregate_function",
+            "create_window_function",
+            "remove_function",
+            "create_collation",
+            "remove_collation",
+            "collation_needed",
+            "load_extension",
+            "load_extension_enable",
+            "load_extension_disable",
+        ] {
+            let source = format!("fn f(db: &Connection) {{ db.{name}(); }}");
+            assert!(sql_callback_source(&source).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_allow_queries_and_skip_actual_test_only_code() {
+        sql_callback_source(
+            "fn read(db: &Connection) { db.query_row(\"SELECT 1\", [], |row| row.get(0)); }
+             #[cfg(test)] fn control(db: &Connection) { db.progress_handler(0, None); }
+             #[cfg(test)] mod controls { fn clear(db: &Connection) { db.authorizer(None); } }",
+        )
+        .unwrap();
+        // An exact old function fingerprint does not admit a copied setter in
+        // another file, a newly appended branch, or a same-named helper.
+        assert!(!sql_control_function_reviewed(
+            "crates/day2/src/callback_fixture.rs",
+            "sha256:foreign"
+        ));
+    }
+
+    #[test]
+    fn sql_callback_controls_require_exact_core_bytes_even_without_hook_calls() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = "crates/day2/src/store/native_storage.rs";
+        fs::create_dir_all(directory.path().join("crates/day2/src/store")).unwrap();
+        fs::write(directory.path().join(source), "pub fn replacement() {}\n").unwrap();
+        let parsed = BTreeMap::from([(
+            source.to_owned(),
+            syn::parse_file("pub fn replacement() {}").unwrap(),
+        )]);
+        let error = require_sql_callback_controls(directory.path(), &parsed, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("SQL callback control core requires exact source review"),
+            "{error}"
+        );
     }
 
     fn fixture(source: &str) -> tempfile::TempDir {

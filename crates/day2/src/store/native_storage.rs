@@ -166,7 +166,10 @@ impl<'owner> RuntimeSql<'owner> {
     ) -> Result<T> {
         // Runtime/Pending are already armed. A human adapter arms only its
         // first actual SQL attempt. The actual same borrow remains held below.
-        owner.prepare(runtime)?;
+        if let Err(error) = owner.prepare(runtime) {
+            owner.refuse();
+            return Err(error);
+        }
         let opened = if runtime.uses_native_storage() {
             (|| {
                 let mut connection = open_existing(Path::new(DATABASE))?;
