@@ -130,6 +130,14 @@ impl CurrentServingPhase for ShellBorrow<'_, '_> {
         self.owner.check(stage)
     }
 
+    fn reobserve(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        // A peer-liveness check is NOT a fresh Controller counter read. Never
+        // silently admit the App-only retained-response entry through Shell.
+        let _ = stage;
+        self.owner.refuse();
+        anyhow::bail!("native_shell_response_requires_Controller_reobservation")
+    }
+
     fn arm(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.owner.check(stage)?;
         if self.owner.disposition != ServingDisposition::Unarmed {

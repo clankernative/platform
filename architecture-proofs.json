@@ -93,7 +93,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "AppCreator",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn bind (self , committed : super :: management :: app :: CommittedCapture < '_ > , wall : i64) -> Result < () >",
         "pub (super) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < '_ , '_ >) -> Result < T >) -> Result < T >"
@@ -123,7 +131,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "PendingWriter",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
@@ -165,7 +181,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "Consumer",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn arm (& mut self) -> Result < () >",
         "pub (crate) fn check (& mut self) -> Result < () >",
@@ -241,7 +265,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "OriginalPhase",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "pub (crate) fn check (& mut self , stage : & mut RoleStage < '_ >) -> Result < () >",
         "fn check_at (& mut self , mut stage : BorrowedRoleStage < '_ , '_ > , entry_wall : i64) -> Result < () >",
@@ -254,6 +286,10 @@
         {
           "owner": null,
           "signature": "fn with_current_for_role < T > (intent : & FreshIntent , phase : Phase , wall : i64 , expected : Option < NativeRole > , response : Option < & ResponseIdentity > , use_current : impl FnOnce (& mut RoleStage < '_ > , & mut OriginalPhase < '_ > , Option < & mut ServingParticipant > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "pub (in crate :: oauth) async fn drive_response < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T >) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -297,7 +333,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "RoleStage",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "fn borrowed (& mut self) -> BorrowedRoleStage < '_ , 'role >",
         "pub (crate) fn check (& mut self) -> Result < () >",
@@ -3176,7 +3220,8 @@
         "fn begin_serving < 'storage > (& 'storage mut self , stage : & mut EnrolledRoleStage < '_ > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose) -> Result < CurrentAppServingPhase < 'storage > >",
         "pub (in crate :: security_epoch) fn prepare_current (& mut self) -> Result < () >",
         "pub (crate) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
+        "pub (in crate :: security_epoch) async fn with_serving_async < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
       ],
       "factories": [
         {
@@ -3200,6 +3245,10 @@
         {
           "owner": "ActiveAppStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn with_serving < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        },
+        {
+          "owner": "ActiveAppStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) async fn with_serving_async < 'role , T > (& mut self , stage : & mut EnrolledRoleStage < 'role > , binding : Digest , purpose : crate :: security_epoch :: serving :: ScopePurpose , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
         }
       ],
       "proof_uses": [],
@@ -3444,7 +3493,10 @@
         "pub (in crate :: security_epoch) fn finish_known (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "fn finish_scope (mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
+        "fn finish_result < T > (mut self , stage : & mut EnrolledRoleStage < '_ > , result : std :: thread :: Result < Result < T > >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >",
+        "pub (in crate :: security_epoch) fn reobserve (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
+        "pub (super) async fn run_async < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
       ],
       "factories": [
         {
@@ -3488,6 +3540,18 @@
         {
           "owner": "CurrentAppServingPhase < 'storage >",
           "signature": "pub (super) fn run < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl FnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role >) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "fn finish_result < T > (mut self , stage : & mut EnrolledRoleStage < '_ > , result : std :: thread :: Result < Result < T > >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (in crate :: security_epoch) fn reobserve (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "CurrentAppServingPhase < 'storage >",
+          "signature": "pub (super) async fn run_async < 'role , T > (mut self , stage : & mut EnrolledRoleStage < 'role > , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> crate :: security_epoch :: serving :: ScopeOutcome < T >"
         }
       ],
       "proof_uses": [],
@@ -3566,6 +3630,14 @@
         {
           "owner": "ServingParticipant",
           "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) async fn with_app_response < 'role , T > (participant : & mut ServingParticipant , stage : & mut EnrolledRoleStage < 'role > , scope : & day2_capabilities :: security_epoch :: AuthorityScope , intent : Option < & FreshIntent > , identity : & ResponseIdentity , operation : impl AsyncFnOnce (& mut dyn CurrentServingPhase , & mut EnrolledRoleStage < 'role > ,) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (crate) fn require_app_response (participant : & mut ServingParticipant , scope : & day2_capabilities :: security_epoch :: AuthorityScope , intent : Option < & FreshIntent > , identity : & ResponseIdentity) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -3926,7 +3998,15 @@
     {
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "RuntimeConsumer",
-      "owning_children": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ],
       "methods": [
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",

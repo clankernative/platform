@@ -24,7 +24,9 @@ use std::{
     time::Duration,
 };
 
-type Role = Rc<RefCell<EnrolledProcessRoleOwner>>;
+mod response;
+
+type Role = response::Role<EnrolledProcessRoleOwner>;
 
 /// Checked desired selection DATA. This cannot enroll, open storage, create a
 /// serving participant or replace any missing native supplier.
@@ -142,7 +144,7 @@ impl AppStorage {
 }
 
 thread_local! {
-    static OWNERS: RefCell<BTreeMap<String, Owners>> = const { RefCell::new(BTreeMap::new()) };
+    static OWNERS: Rc<RefCell<response::Registry<Owners>>> = Rc::new(RefCell::new(response::Registry::default()));
     static ACTIVE_SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
 }
 
@@ -151,6 +153,10 @@ thread_local! {
 /// cannot capture/consume an original. Errors never become empty selection.
 /// No role, origin, FD or clock comes from the HTTP request.
 pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Result<()> {
+    ensure!(
+        response::is_empty(),
+        "native executor has a retained response"
+    );
     ensure!(selections.len() <= 128, "native enrollment scope capacity");
     let mut selected = BTreeMap::new();
     for selection in selections {
@@ -200,7 +206,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                 .insert(
                     selection.scope().app.as_str().into(),
                     Owners {
-                        role: Rc::new(RefCell::new(role)),
+                        role: Role::new(role),
                         kind,
                         selection: selection.clone(),
                         originals: BTreeMap::new(),
@@ -214,7 +220,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
     OWNERS.with(|owners| {
         let mut owners = owners.try_borrow_mut()?;
         ensure!(owners.is_empty(), "native executor already enrolled");
-        *owners = selected;
+        owners.extend(selected);
         Ok(())
     })
 }
@@ -1747,6 +1753,8 @@ pub(super) struct Sink {
     bindings: Rc<RefCell<BTreeMap<(NativeRole, String), SinkBinding>>>,
     state: Rc<std::cell::Cell<SinkState>>,
     runtime: Rc<RefCell<Option<RuntimeBinding>>>,
+    prepared: Rc<std::cell::Cell<bool>>,
+    finite_app_io: Rc<std::cell::Cell<bool>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1783,12 +1791,30 @@ impl Sink {
             bindings: Rc::new(RefCell::new(BTreeMap::new())),
             state: Rc::new(std::cell::Cell::new(SinkState::Open)),
             runtime: Rc::new(RefCell::new(None)),
+            prepared: Rc::new(std::cell::Cell::new(false)),
+            finite_app_io: Rc::new(std::cell::Cell::new(false)),
         }
     }
 
     /// Called at response creation before Hyper can poll its headers/body.
     /// Human precedence selects the ACTUAL human helper, never an early bypass.
-    pub(super) fn prepare_response(&self, scope: Option<AuthorityScope>) -> Result<()> {
+    pub(super) fn prepare_response(
+        &self,
+        scope: Option<AuthorityScope>,
+        finite_app_candidate: bool,
+    ) -> Result<()> {
+        let result = self.prepare_response_inner(scope, finite_app_candidate);
+        if result.is_ok() {
+            self.prepared.set(true);
+        }
+        result
+    }
+
+    fn prepare_response_inner(
+        &self,
+        scope: Option<AuthorityScope>,
+        finite_app_candidate: bool,
+    ) -> Result<()> {
         ensure!(
             self.state.get() == SinkState::Open,
             "native response sink closed"
@@ -1798,6 +1824,18 @@ impl Sink {
                 self.runtime.try_borrow()?.is_none(),
                 "native response ownership cannot be reclassified"
             );
+            if finite_app_candidate
+                && self
+                    .bindings
+                    .try_borrow()?
+                    .keys()
+                    .all(|(role, _)| *role == NativeRole::AppHost)
+            {
+                // Classification/binding only. Fully preparing this bounded
+                // body performs no transport I/O; the actual native scope is
+                // acquired once by the driver immediately before disclosure.
+                return response::require_finite_binding(self);
+            }
             return self.with_current_result(Phase::Response, || Ok(()));
         }
         let Some(scope) = scope else { return Ok(()) };
@@ -1833,6 +1871,65 @@ impl Sink {
             });
         }
         Ok(())
+    }
+
+    pub(super) fn is_open(&self) -> bool {
+        self.state.get() == SinkState::Open
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.state.get() == SinkState::Complete
+    }
+
+    /// Classification DATA only. Acquisition still resolves the same actual
+    /// owner and exact response hold before any buffered byte reaches a socket.
+    pub(super) fn can_retain_app_response(&self) -> Result<bool> {
+        ensure!(
+            self.is_open() && self.prepared.get(),
+            "native response not prepared"
+        );
+        // Binding preparation above remains pure, including foreign-identity
+        // refusal before touching the winner's clock. Scripted originals are
+        // DATA: only delivery selection keeps their guarded model poll path.
+        #[cfg(test)]
+        if fixtures::active() {
+            return Ok(false);
+        }
+        let bindings = self.bindings.try_borrow()?;
+        ensure!(
+            bindings.is_empty() || self.runtime.try_borrow()?.is_none(),
+            "native response ownership conflict"
+        );
+        Ok(match bindings.keys().next() {
+            Some((role, _)) => bindings.len() == 1 && *role == NativeRole::AppHost,
+            None => self.runtime.try_borrow()?.is_some(),
+        })
+    }
+
+    pub(super) fn retain_finite_app_io(&self) -> Result<()> {
+        ensure!(
+            self.can_retain_app_response()?,
+            "native finite response requires App owner"
+        );
+        self.finite_app_io.set(true);
+        Ok(())
+    }
+
+    pub(super) fn uses_retained_app_io(&self) -> bool {
+        self.finite_app_io.get()
+    }
+
+    /// Metadata fixture only. There is NO native registry owner or response
+    /// hold behind this value; the actual driver must refuse before socket I/O.
+    #[cfg(test)]
+    pub(super) fn fixture_unowned_app_response(scope: AuthorityScope) -> Self {
+        let sink = Self::new();
+        *sink.runtime.borrow_mut() = Some(RuntimeBinding {
+            scope,
+            effects: crate::managed_credentials::effects::capture(),
+        });
+        sink.prepared.set(true);
+        sink
     }
 
     /// A synchronous fixture RPC still has its own response scope. It must not
@@ -1919,6 +2016,7 @@ impl Sink {
             return;
         }
         self.state.set(SinkState::Refused);
+        response::refuse_leased(self);
         let Ok(bindings) = self.bindings.try_borrow() else {
             return;
         };
@@ -2268,7 +2366,7 @@ mod tests {
             }
             assert!(runtime_response_scope(&metadata_only).is_err());
             let sink = Sink::new();
-            assert!(sink.prepare_response(Some(scope.clone())).is_err());
+            assert!(sink.prepare_response(Some(scope.clone()), false).is_err());
             assert!(sink.runtime.borrow().is_none());
             assert!(sink.bindings.borrow().is_empty());
             with_runtime_consumer(&ordinary, RuntimePhase::Read, |current| {
@@ -2325,6 +2423,46 @@ mod tests {
             anyhow::bail!("management fixture did not commit Pending")
         };
         Ok((directory, FreshIntent::management(&view, &identity)?))
+    }
+
+    #[test]
+    fn finite_human_app_preparation_is_pure_and_foreign_sink_cannot_burn_its_original() -> Result<()>
+    {
+        for finite in [false, true] {
+            let world = super::super::simulation::World::new(if finite { 490 } else { 491 });
+            world.advance(95);
+            super::super::effects::scope(world, || -> Result<()> {
+                let winner = Sink::new();
+                let (_directory, intent) = winner.run(committed_management_intent)?;
+                let before = fixtures::stage_entries();
+                winner.prepare_response(None, finite)?;
+                assert_eq!(
+                    fixtures::stage_entries() - before,
+                    u64::from(!finite),
+                    "finite preparation does not create a second serving stage"
+                );
+                let loser = Sink::new();
+                *loser.bindings.borrow_mut() = winner.bindings.borrow().clone();
+                let before = fixtures::stage_entries();
+                assert!(loser.prepare_response(None, true).is_err());
+                assert_eq!(
+                    fixtures::stage_entries(),
+                    before,
+                    "foreign identity fails before touching the winner's clock"
+                );
+                loser.abort();
+                with_consumer_for_role(
+                    &intent,
+                    Phase::Response,
+                    100,
+                    NativeRole::AppHost,
+                    Some(&winner.identity),
+                    |consumer| consumer.arm(),
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -2949,11 +3087,36 @@ pub(crate) mod fixtures {
     use std::cell::Cell;
 
     thread_local! {
+        static STAGE_ENTRIES: Cell<u64> = const { Cell::new(0) };
         static FIXTURE: RefCell<Option<Fixture>> = const { RefCell::new(None) };
         // Scope switches/polls do not recreate a simulated process. Retained
         // entries use weak suppliers, are pruned when a world ends, and cannot
         // move across OS threads. Explicit restart discards native ownership.
         static RETAINED: RefCell<BTreeMap<u64, Fixture>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(super) fn stage_entries() -> u64 {
+        STAGE_ENTRIES.with(Cell::get)
+    }
+
+    /// Exact response matching DATA only; never a native/current-stage factory.
+    pub(super) fn require_response(
+        intent: &FreshIntent,
+        role: NativeRole,
+        identity: &ResponseIdentity,
+    ) -> Result<()> {
+        FIXTURE.with(|slot| {
+            let slot = slot.try_borrow()?;
+            let fixture = slot
+                .as_ref()
+                .context("native simulation supplier missing")?;
+            fixture
+                .originals
+                .get(&(role, intent.attempt().into()))
+                .context("fixture original absent")?
+                .response
+                .require_bound(intent, identity)
+        })
     }
     struct Fixture {
         hooks: std::sync::Weak<dyn Hooks>,
@@ -3449,6 +3612,14 @@ pub(crate) mod fixtures {
         response: Option<&ResponseIdentity>,
         use_current: impl FnOnce(&mut RoleStage<'_>, &mut OriginalPhase<'_>) -> Result<T>,
     ) -> Result<T> {
+        STAGE_ENTRIES.with(|entries| {
+            entries.set(
+                entries
+                    .get()
+                    .checked_add(1)
+                    .expect("fixture stage counter overflow"),
+            )
+        });
         FIXTURE.with(|slot| {
             let mut slot = slot.try_borrow_mut()?;
             let fixture = slot

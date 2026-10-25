@@ -44,6 +44,11 @@ mod sealed {
 pub(crate) trait CurrentServingPhase: sealed::NativeServingOwner {
     fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()>;
 
+    /// A response spanning socket polls retains its original authentication,
+    /// but still needs the fresh counter observations supplied by the former
+    /// per-poll scopes. Checking a retained observation is not another read.
+    fn reobserve(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()>;
+
     fn check_runtime_selection(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -607,6 +612,86 @@ pub(crate) fn with_current_runtime_response<'role, T>(
     }
 }
 
+/// One actual App response, including all Pending waits, retains one stage,
+/// physical peer, authentication and original five-second interval. This is
+/// not the Shell supplier: Shell needs its own Controller observation protocol.
+pub(crate) async fn with_app_response<'role, T>(
+    participant: &mut ServingParticipant,
+    stage: &mut EnrolledRoleStage<'role>,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    intent: Option<&FreshIntent>,
+    identity: &ResponseIdentity,
+    operation: impl AsyncFnOnce(
+        &mut dyn CurrentServingPhase,
+        &mut EnrolledRoleStage<'role>,
+    ) -> Result<T>,
+) -> Result<T> {
+    let (context, purpose, binding) = match intent {
+        Some(intent) => {
+            intent.require_oauth_management()?;
+            let commitment = intent.commitment()?;
+            (
+                HoldContext::Human(commitment.clone()),
+                ScopePurpose::Human(ServingUse::Response),
+                Digest::of(&(
+                    "day2-native-human-serving-v1",
+                    &commitment,
+                    ServingUse::Response,
+                ))?,
+            )
+        }
+        None => (
+            runtime_response_context(scope)?,
+            ScopePurpose::Runtime(RuntimeServingUse::Response),
+            Digest::of(&(
+                "day2-native-runtime-response-scope-v1",
+                scope,
+                RuntimeServingUse::Response,
+            ))?,
+        ),
+    };
+    participant
+        .response
+        .require_bound(&context, ServingUse::Response, Some(identity))?;
+    stage.check_for(scope, super::native_enrollment::NativeRole::AppHost)?;
+    let ParticipantOwner::App(app) = &mut participant.native else {
+        anyhow::bail!("native_response_requires_App_participant")
+    };
+    match app
+        .with_serving_async(stage, binding, purpose, operation)
+        .await
+    {
+        ScopeOutcome::Known(value) => {
+            participant.response.current = None;
+            Ok(value)
+        }
+        ScopeOutcome::Excluded(error) => Err(error),
+        ScopeOutcome::Refused(error) => {
+            participant.refuse();
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn require_app_response(
+    participant: &mut ServingParticipant,
+    scope: &day2_capabilities::security_epoch::AuthorityScope,
+    intent: Option<&FreshIntent>,
+    identity: &ResponseIdentity,
+) -> Result<()> {
+    ensure!(
+        matches!(participant.native, ParticipantOwner::App(_)),
+        "native_response_requires_App_participant"
+    );
+    let context = match intent {
+        Some(intent) => HoldContext::Human(intent.commitment()?),
+        None => runtime_response_context(scope)?,
+    };
+    participant
+        .response
+        .require_bound(&context, ServingUse::Response, Some(identity))
+}
+
 /// Stage-free terminal disposition of only the existing exact runtime hold.
 /// A human/retired/losing context never changes the rightful native owner.
 pub(crate) fn refuse_runtime_response(
@@ -697,6 +782,9 @@ impl CurrentServingPhase for ServingBorrow<'_, '_> {
 
     fn check(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.owner.check(stage)
+    }
+    fn reobserve(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
+        self.owner.reobserve(stage)
     }
     fn arm(&mut self, stage: &mut EnrolledRoleStage<'_>) -> Result<()> {
         self.owner.arm(stage)
