@@ -23,6 +23,7 @@ const MAX_RECORDS: u8 = 12;
 const SELF_CHECK_PREFIX: &str = "day2-native-controller-self-check ";
 const MAX_SELF_CHECK_BYTES: usize = 1024;
 const MAX_CURRENT_SELF_CHECK_BYTES: usize = 1536;
+const MAX_CURRENT_SELF_CHECK_RECORDS: u16 = 256;
 
 pub(in crate::security_epoch) type Evidence = Recorder<StderrOutput>;
 
@@ -50,6 +51,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     serving: [bool; 2],
     records: u8,
     self_check_exported: u8,
+    current_self_check_records: u16,
     at: FailurePhase,
     refused: bool,
     export_failed: bool,
@@ -537,6 +539,7 @@ impl<W: RecordOutput> Recorder<W> {
             serving: [false; 2],
             records: 0,
             self_check_exported: 0,
+            current_self_check_records: 0,
             at: FailurePhase::Selection,
             refused: false,
             export_failed: false,
@@ -718,6 +721,10 @@ impl<W: RecordOutput> Recorder<W> {
                 },
             })?;
             self.serving[index] = true;
+        } else if matches!(role, ServingRole::App) {
+            // Later actual Current operations still return historical DATA.
+            // Do not fabricate another first-release lifecycle observation.
+            self.emit_current_self_check(true)?;
         }
         Ok(())
     }
@@ -793,8 +800,8 @@ impl<W: RecordOutput> Recorder<W> {
             !self.refused && !self.export_failed && self.records < MAX_RECORDS,
             "native_evidence_closed"
         );
-        // At most one numeric profile for each fixed bootstrap action and the
-        // first actual Current App-serving operation, under distinct formats.
+        // One profile per fixed bootstrap action, and separately bounded
+        // profiles for actual Current App-serving operations.
         // All permission borrows have unwound before diagnostic output.
         self.emit_self_check(&observation)?;
         let record = Record {
@@ -831,7 +838,10 @@ impl<W: RecordOutput> Recorder<W> {
                 ..
             }
         ) {
-            return self.emit_current_self_check();
+            return self.emit_current_self_check(matches!(
+                observation,
+                Observation::FirstServingRelease { .. }
+            ));
         }
         let (step, profile) = match observation {
             Observation::BootstrapCompleted {
@@ -895,35 +905,40 @@ impl<W: RecordOutput> Recorder<W> {
         Ok(())
     }
 
-    fn emit_current_self_check(&mut self) -> Result<()> {
-        const BIT: u8 = 64;
-        if self.self_check_exported & BIT != 0 {
-            return Ok(());
-        }
-        let Some(profile) = self.current_serving_profile else {
+    fn emit_current_self_check(&mut self, completed: bool) -> Result<()> {
+        // Consume even at the cap so a historical profile cannot be emitted
+        // again as a later operation or refusal. Missing DATA is not zero work.
+        let Some(profile) = self.current_serving_profile.take() else {
             return Ok(());
         };
+        if self.current_self_check_records == MAX_CURRENT_SELF_CHECK_RECORDS {
+            return Ok(());
+        }
         #[derive(Serialize)]
         struct CurrentRecord<'a> {
             format: &'static str,
             scope: &'static str,
-            sequence: u8,
+            sequence: u16,
+            lifecycle_sequence: u8,
+            completed: bool,
             selection: &'a Option<Digest>,
             controller_incarnation: &'a Option<Digest>,
             #[serde(flatten)]
             costs: super::super::self_check_profile::CurrentProfile,
         }
         let record = CurrentRecord {
-            format: "controller_current_app_serving_exclusive_ns_v2",
+            format: "controller_current_app_serving_exclusive_ns_v3",
             scope: "whole_current_app_serving_operation",
-            sequence: self.records + 1,
+            sequence: self.current_self_check_records + 1,
+            lifecycle_sequence: self.records,
+            completed,
             selection: &self.selection,
             controller_incarnation: &self.incarnation,
             costs: profile,
         };
         let json = serde_json::to_string(&record)?;
         self.append_self_check(&json, MAX_CURRENT_SELF_CHECK_BYTES)?;
-        self.self_check_exported |= BIT;
+        self.current_self_check_records += 1;
         Ok(())
     }
 
@@ -1077,10 +1092,12 @@ mod tests {
                 let profile: Value = serde_json::from_str(profiles[0]).unwrap();
                 assert_eq!(
                     profile["format"],
-                    "controller_current_app_serving_exclusive_ns_v2"
+                    "controller_current_app_serving_exclusive_ns_v3"
                 );
                 assert_eq!(profile["scope"], "whole_current_app_serving_operation");
-                assert_eq!(profile["sequence"], 2);
+                assert_eq!(profile["sequence"], 1);
+                assert_eq!(profile["lifecycle_sequence"], 1);
+                assert_eq!(profile["completed"], false);
                 assert_eq!(
                     profile["selection"],
                     serde_json::to_value(&recorder.selection).unwrap()
@@ -1095,10 +1112,7 @@ mod tests {
                     profile.get("step").is_none(),
                     "Current is not a bootstrap action"
                 );
-                assert_eq!(
-                    records(&recorder.output)[1]["sequence"],
-                    profile["sequence"]
-                );
+                assert_eq!(records(&recorder.output)[1]["sequence"], 2);
                 assert!(
                     records(&recorder.output)[1]["observation"]
                         .get("timing")
@@ -1144,7 +1158,10 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(numeric.len(), 1);
-        assert_eq!(numeric[0]["sequence"], ordinary[1]["sequence"]);
+        assert_eq!(numeric[0]["sequence"], 1);
+        assert_eq!(numeric[0]["lifecycle_sequence"], ordinary[0]["sequence"]);
+        assert_eq!(ordinary[1]["sequence"], 2);
+        assert_eq!(numeric[0]["completed"], false);
         assert!(recorder.refused && !recorder.activated && recorder.serving == [false; 2]);
         // Phase reset clears both independently retained DATA slots.
         recorder.enter(FailurePhase::ShellServing);
@@ -1197,6 +1214,39 @@ mod tests {
         let error = super::super::preserve_native_failure(native, recorded).unwrap_err();
         assert!(error.downcast_ref::<MustNotDisplay>().is_some());
         assert!(!recorder.activated && recorder.serving == [false; 2]);
+    }
+
+    #[test]
+    fn current_profiles_consume_each_sample_once_and_stop_at_the_fixed_data_cap() {
+        let (mut recorder, ..) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        for sequence in 1..=MAX_CURRENT_SELF_CHECK_RECORDS + 2 {
+            recorder.enter(FailurePhase::AppServing);
+            recorder.current_serving_profile(Some(
+                crate::security_epoch::self_check_profile::CurrentProfile::maximal_fixture(),
+            ));
+            recorder.emit_current_self_check(sequence % 2 == 0).unwrap();
+            assert!(recorder.current_serving_profile.is_none());
+            let length = recorder.output.len();
+            recorder.emit_current_self_check(false).unwrap();
+            assert_eq!(recorder.output.len(), length);
+        }
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let rows = text
+            .lines()
+            .filter_map(|line| line.strip_prefix(SELF_CHECK_PREFIX));
+        let mut count = 0;
+        for row in rows {
+            assert!(row.len() + SELF_CHECK_PREFIX.len() < MAX_CURRENT_SELF_CHECK_BYTES);
+            let row: Value = serde_json::from_str(row).unwrap();
+            count += 1;
+            assert_eq!(row["sequence"], count);
+            assert_eq!(row["lifecycle_sequence"], 1);
+            assert_eq!(row["completed"], count % 2 == 0);
+        }
+        assert_eq!(count, MAX_CURRENT_SELF_CHECK_RECORDS);
+        assert_eq!(records(&recorder.output).len(), 1);
+        assert!(!recorder.refused && !recorder.export_failed && !recorder.activated);
     }
 
     #[test]
@@ -1254,6 +1304,15 @@ mod tests {
         recorder.activated(&complete, &snapshot_digest).unwrap();
         for _ in 0..100 {
             for role in [ServingRole::App, ServingRole::Shell] {
+                recorder.enter(match role {
+                    ServingRole::App => FailurePhase::AppServing,
+                    ServingRole::Shell => FailurePhase::ShellServing,
+                });
+                if matches!(role, ServingRole::App) {
+                    let (_, profile) =
+                        crate::security_epoch::self_check_profile::sample_current(|| ());
+                    recorder.current_serving_profile(profile);
+                }
                 recorder
                     .serving(
                         role,
@@ -1270,7 +1329,35 @@ mod tests {
         recorder.refuse(None).unwrap();
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), usize::from(MAX_RECORDS));
-        assert!(recorder.output.len() <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES);
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let profiles: Vec<Value> = text
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix(SELF_CHECK_PREFIX)
+                    .map(|row| serde_json::from_str::<Value>(row).unwrap())
+            })
+            .filter(|profile| profile["format"] == "controller_current_app_serving_exclusive_ns_v3")
+            .collect();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with(SELF_CHECK_PREFIX))
+                .count(),
+            106
+        );
+        assert_eq!(profiles.len(), 100);
+        for (index, profile) in profiles.iter().enumerate() {
+            assert_eq!(profile["sequence"], index + 1);
+            assert_eq!(profile["completed"], true);
+            assert_eq!(
+                profile["lifecycle_sequence"],
+                if index == 0 { 9 } else { 11 }
+            );
+            assert_eq!(profile["controller_incarnation"], incarnation.as_str());
+        }
+        assert!(
+            recorder.output.len()
+                <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES + 100 * MAX_CURRENT_SELF_CHECK_BYTES
+        );
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row["sequence"], index + 1);
             assert_eq!(row["controller_incarnation"], incarnation.as_str());
