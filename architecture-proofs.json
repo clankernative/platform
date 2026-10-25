@@ -936,32 +936,33 @@
       "type_name": "NativeAcquisition",
       "owning_children": [],
       "methods": [
-        "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
         "fn begin_bounded (scope : AcquisitionScope , limit : Duration) -> Result < Self >",
+        "fn exchange_views (& mut self , other : & mut Self , scope : AcquisitionScope) -> Result < () >",
+        "fn join_view (& mut self , mut current : Self , scope : AcquisitionScope) -> Result < () >",
+        "fn observe (& mut self , now : Duration) -> Result < Sample >",
+        "fn require_scope (& mut self , scope : AcquisitionScope) -> Result < () >",
+        "pub (super) fn begin (max_lease_seconds : u32) -> Result < Self >",
         "pub (super) fn begin_initial_first_holder () -> Result < Self >",
         "pub (super) fn begin_storage_bootstrap () -> Result < Self >",
         "pub (super) fn begin_storage_metadata_observation () -> Result < Self >",
         "pub (super) fn bootstrap_context_budget (& mut self) -> Result < (Sample , Budget , Duration) >",
         "pub (super) fn budget (& mut self) -> Result < Budget >",
         "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >",
+        "pub (super) fn diagnostic_progress (& self) -> AcquisitionProgress",
         "pub (super) fn exchange_current_views (& mut self , other : & mut Self) -> Result < () >",
         "pub (super) fn exchange_storage_bootstrap_views (& mut self , other : & mut Self) -> Result < () >",
         "pub (super) fn exchange_storage_metadata_observation_views (& mut self , other : & mut Self) -> Result < () >",
-        "fn exchange_views (& mut self , other : & mut Self , scope : AcquisitionScope) -> Result < () >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
         "pub (super) fn historical_interval_observation (& self) -> (Digest , Duration , Duration , Duration)",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",
         "pub (super) fn join_current_view (& mut self , current : Self) -> Result < () >",
         "pub (super) fn join_storage_bootstrap_view (& mut self , current : Self) -> Result < () >",
         "pub (super) fn join_storage_metadata_observation_view (& mut self , current : Self) -> Result < () >",
-        "fn join_view (& mut self , mut current : Self , scope : AcquisitionScope) -> Result < () >",
         "pub (super) fn last_checked_elapsed_micros (& self) -> Option < u32 >",
         "pub (super) fn narrow (& mut self , max_lease_seconds : u32 , ceiling : Duration) -> Result < Self >",
         "pub (super) fn narrow_authentication (& mut self) -> Result < Self >",
-        "fn observe (& mut self , now : Duration) -> Result < Sample >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn remaining (& mut self) -> Result < Duration >",
-        "fn require_scope (& mut self , scope : AcquisitionScope) -> Result < () >",
         "pub (super) fn require_storage_bootstrap (& mut self) -> Result < () >",
         "pub (super) fn require_storage_metadata_observation (& mut self) -> Result < () >",
         "pub (super) fn sample (& mut self) -> Result < Sample >"
@@ -1024,6 +1025,10 @@
         {
           "owner": "NativeAcquisition",
           "signature": "pub (super) fn complete_authentication (& mut self , mut child : Self) -> Result < () >"
+        },
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn diagnostic_progress (& self) -> AcquisitionProgress"
         },
         {
           "owner": "NativeAcquisition",
@@ -1862,29 +1867,30 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >",
+        "fn require_role_data (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
+        "fn require_selection_data (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (crate) fn capture_same_owner (& mut self) -> Result < SameEnrolledOwner >",
         "pub (crate) fn check (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn check_current_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (crate) fn require_current_role (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_controller_statement (& mut self , statement : & Statement , pid : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_shell_statement (& mut self , statement : & Statement , observed : & ProcessData , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_statement (& mut self , statement : & Statement , kernel_process : u32 , observed : Option < & ProcessData > , acquisition : & mut NativeAcquisition) -> Result < () >",
-        "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
-        "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
-        "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse_serving (& mut self)",
-        "pub (crate) fn require_current_role (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
-        "fn require_role_data (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
-        "fn require_selection_data (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_peer_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn serving_statement (& mut self) -> Result < Statement >",
         "pub (in crate :: security_epoch :: native_enrollment) fn sign_serving_message (& mut self , body : Body) -> Result < Message >",
+        "pub (in crate :: security_epoch) fn check_current_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
+        "pub (in crate :: security_epoch) fn diagnostic_progress (& self) -> crate :: security_epoch :: native_clock :: AcquisitionProgress",
+        "pub (in crate :: security_epoch) fn incarnation_data (& mut self) -> Result < Digest >",
+        "pub (in crate :: security_epoch) fn initial_first_holder_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
         "pub (in crate :: security_epoch) fn storage (& mut self) -> Result < EnrolledStorageStage < '_ , 'role > >"
       ],
       "factories": [
@@ -2001,6 +2007,10 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (in crate :: security_epoch) fn check_current_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >"
+        },
+        {
+          "owner": "EnrolledRoleStage < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn diagnostic_progress (& self) -> crate :: security_epoch :: native_clock :: AcquisitionProgress"
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
@@ -2941,14 +2951,14 @@
       "type_name": "InitialStorageContinuity",
       "owning_children": [],
       "methods": [
+        "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request , trace : & BootstrapTiming) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >",
-        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , mut stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome",
-        "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >",
-        "pub (crate) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch) fn first_holder_data (& self) -> Result < Holder >"
       ],
       "factories": [
         {
@@ -2971,7 +2981,7 @@
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         },
         {
           "owner": "InitialStorageContinuity",
@@ -3216,9 +3226,9 @@
         }
       ],
       "methods": [
-        "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (crate) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < ServingObservation >",
+        "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
+        "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >",
         "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , mut stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
       ],
       "factories": [
@@ -3238,7 +3248,7 @@
         },
         {
           "owner": "ActiveControllerStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ >) -> Result < ServingObservation >"
+          "signature": "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
@@ -3617,7 +3627,7 @@
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
         },
         {
           "owner": "PendingControllerStoragePhase < 'storage >",

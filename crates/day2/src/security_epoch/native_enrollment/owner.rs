@@ -361,6 +361,13 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    /// Historical sample DATA only; no clock read or new check/permission.
+    pub(in crate::security_epoch) fn diagnostic_progress(
+        &self,
+    ) -> crate::security_epoch::native_clock::AcquisitionProgress {
+        self.acquisition.diagnostic_progress()
+    }
+
     /// Closed ordinary-consumer gate. No caller-selected purpose or timeout.
     pub(crate) fn require_current_role(&mut self) -> Result<()> {
         self.require_purpose(StagePurpose::CurrentRole)
