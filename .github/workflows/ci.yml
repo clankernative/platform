@@ -73,7 +73,7 @@ jobs:
       with:
         persist-credentials: false
     - name: Compile the std-only numeric observer
-      run: rustc --edition=2024 --opt-level=0 .github/diagnostics/compile_memory.rs
+      run: rustc --edition=2024 -Copt-level=0 .github/diagnostics/compile_memory.rs
         -o /tmp/day2-compile-memory
     - name: Check out the exact source under observation
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
