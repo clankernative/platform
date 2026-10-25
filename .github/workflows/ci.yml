@@ -306,8 +306,15 @@ jobs:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: ${{ steps.native_tools.outputs.cache-primary-key }}
       - run: build-out/bin/xtask configure-tofu
+      - name: Create the single-job Rust codegen jobserver
+        if: ${{ matrix.part == 'tests' }}
+        run: mkfifo --mode=600 /tmp/day2-rustc-jobserver
       - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}
         id: native_preparation
+        env:
+          # One implicit rustc token, with no extra tokens in the private FIFO.
+          # Keep every codegen unit and optimization; only serialize backend work.
+          CARGO_MAKEFLAGS: ${{ matrix.part == 'tests' && '--jobserver-auth=fifo:/tmp/day2-rustc-jobserver' || '' }}
       - name: Retain current compiler failure metadata without private stdout
         if: ${{ failure() && steps.native_preparation.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
