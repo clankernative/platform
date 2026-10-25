@@ -26,7 +26,7 @@ use std::{
 
 mod response;
 
-type Role = Rc<RefCell<EnrolledProcessRoleOwner>>;
+type Role = response::Role<EnrolledProcessRoleOwner>;
 
 /// Checked desired selection DATA. This cannot enroll, open storage, create a
 /// serving participant or replace any missing native supplier.
@@ -206,7 +206,7 @@ pub(super) fn install(selections: &[NativeSelection], kind: NativeRole) -> Resul
                 .insert(
                     selection.scope().app.as_str().into(),
                     Owners {
-                        role: Rc::new(RefCell::new(role)),
+                        role: Role::new(role),
                         kind,
                         selection: selection.clone(),
                         originals: BTreeMap::new(),

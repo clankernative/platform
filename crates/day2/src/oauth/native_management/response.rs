@@ -14,10 +14,108 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, RefCell, RefMut},
     collections::BTreeMap,
     rc::Rc,
 };
+
+/// A shared routing handle to one actual value, not a clone of that value.
+/// Synchronous callers borrow it; response delivery moves it into a lease so
+/// no RefCell borrow guard survives an async suspension. Only an existing T
+/// can initialize this slot; the native instantiation requires a real owner.
+pub(super) struct Role<T> {
+    slot: Rc<RefCell<RoleSlot<T>>>,
+}
+
+struct RoleSlot<T> {
+    owner: Option<T>,
+    reservation: Option<Rc<()>>,
+}
+
+impl<T> Clone for Role<T> {
+    fn clone(&self) -> Self {
+        Self {
+            slot: self.slot.clone(),
+        }
+    }
+}
+
+impl<T> Role<T> {
+    pub(super) fn new(owner: T) -> Self {
+        Self {
+            slot: Rc::new(RefCell::new(RoleSlot {
+                owner: Some(owner),
+                reservation: None,
+            })),
+        }
+    }
+
+    pub(super) fn try_borrow_mut(&self) -> Result<RefMut<'_, T>> {
+        let slot = self.slot.try_borrow_mut()?;
+        ensure!(slot.reservation.is_none(), "native role already leased");
+        RefMut::filter_map(slot, |slot| slot.owner.as_mut())
+            .map_err(|_| anyhow::anyhow!("native role already leased"))
+    }
+
+    fn take(&self) -> Result<HeldRole<T>> {
+        let mut held = HeldRole {
+            slot: self.slot.clone(),
+            owner: None,
+            reservation: Rc::new(()),
+            known: false,
+        };
+        {
+            let mut slot = self.slot.try_borrow_mut()?;
+            ensure!(
+                slot.owner.is_some() && slot.reservation.is_none(),
+                "native role already leased"
+            );
+            slot.reservation = Some(held.reservation.clone());
+            held.owner = slot.owner.take();
+        }
+        Ok(held)
+    }
+}
+
+struct HeldRole<T> {
+    slot: Rc<RefCell<RoleSlot<T>>>,
+    owner: Option<T>,
+    reservation: Rc<()>,
+    known: bool,
+}
+
+impl<T> HeldRole<T> {
+    fn owner(&mut self) -> &mut T {
+        self.owner.as_mut().expect("actual retained role")
+    }
+}
+
+impl<T> Drop for HeldRole<T> {
+    fn drop(&mut self) {
+        let Some(owner) = self.owner.take() else {
+            return;
+        };
+        if !self.known {
+            // Unknown delivery retires this actual owner. Original clock
+            // handles retain the empty slot and cannot reacquire it.
+            return;
+        }
+        let Ok(mut slot) = self.slot.try_borrow_mut() else {
+            // Never panic, overwrite a replacement or synthesize a role.
+            // Dropping the actual value leaves the old slot unavailable.
+            return;
+        };
+        if slot.owner.is_none()
+            && slot
+                .reservation
+                .as_ref()
+                .is_some_and(|same| Rc::ptr_eq(same, &self.reservation))
+        {
+            slot.reservation = None;
+            slot.owner = Some(owner);
+        }
+    }
+}
 
 pub(super) struct Registry<T> {
     available: BTreeMap<String, T>,
@@ -380,10 +478,10 @@ impl Sink {
         let scope = owners.selection.scope().clone();
         let policy = owners.selection.policy.clone();
         let store = owners.selection.store.clone();
-        let role = owners.role.clone();
+        let mut role = owners.role.take()?;
         let result = effects
             .run_async(async {
-                let mut role = role.try_borrow_mut()?;
+                let role = role.owner();
                 let AppStorage::Participant(participant) = &mut owners.storage else {
                     anyhow::bail!("native response participant unavailable")
                 };
@@ -473,6 +571,7 @@ impl Sink {
         // A rejected/lost result publication remains terminally unknown.
         // No await or fallible operation follows the positive disposition.
         transport.complete(sequence)?;
+        role.known = true;
         lease.known = true;
         self.state.set(SinkState::Complete);
         Ok(())
@@ -482,6 +581,7 @@ impl Sink {
 #[cfg(test)]
 mod lease_tests {
     use super::*;
+    use std::future::Future;
 
     // Non-authority material exercises the SAME move/reservation/Drop code.
     // It has no conversion to Owners, a native stage, peer or serving phase.
@@ -519,6 +619,93 @@ mod lease_tests {
             },
         );
         (registry, refused, dropped)
+    }
+
+    #[test]
+    fn actual_role_slot_moves_once_and_returns_the_same_value_to_original_handles() {
+        let role = Role::new(7_u32);
+        let original = role.clone();
+        let mut held = role.take().unwrap();
+        assert!(original.try_borrow_mut().is_err());
+        assert!(original.take().is_err());
+        *held.owner() = 11;
+        held.known = true;
+        drop(held);
+        assert_eq!(*original.try_borrow_mut().unwrap(), 11);
+        assert!(Rc::ptr_eq(&role.slot, &original.slot));
+        assert!(role.slot.borrow().reservation.is_none());
+    }
+
+    #[test]
+    fn suspension_holds_actual_role_without_a_refcell_borrow_and_cancel_stays_unknown() {
+        let role = Role::new(7_u32);
+        let captured = role.clone();
+        let (registry, refused, _) = fixture();
+        let identity = ResponseIdentity::new();
+        let mut future = Box::pin(async move {
+            let _lease = Lease::acquire(registry, "calendar", &identity, None).unwrap();
+            let mut held = captured.take().unwrap();
+            assert_eq!(*held.owner(), 7);
+            std::future::pending::<()>().await;
+        });
+        let mut cx = std::task::Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(future.as_mut().poll(&mut cx).is_pending());
+        // The slot itself is freely borrowable while the ACTUAL value is
+        // retained. It supplies no second owner or renewed native stage.
+        assert!(role.slot.try_borrow_mut().is_ok());
+        assert!(role.try_borrow_mut().is_err());
+        drop(future);
+        assert!(role.try_borrow_mut().is_err());
+        assert!(role.take().is_err());
+        assert!(refused.get(), "cancelled delivery never settles storage");
+    }
+
+    #[test]
+    fn role_slot_drop_never_overwrites_replacement_or_recovers_from_a_borrow_collision() {
+        for replacement in [false, true] {
+            let dropped = Rc::new(Cell::new(0));
+            let role = Role::new(Material {
+                incarnation: 1,
+                refused: Rc::new(Cell::new(false)),
+                dropped: dropped.clone(),
+            });
+            let mut held = role.take().unwrap();
+            held.known = true;
+            if replacement {
+                *role.slot.borrow_mut() = RoleSlot {
+                    owner: Some(Material {
+                        incarnation: 2,
+                        refused: Rc::new(Cell::new(false)),
+                        dropped: Rc::new(Cell::new(0)),
+                    }),
+                    reservation: None,
+                };
+            } else {
+                role.slot.borrow_mut().reservation = Some(Rc::new(()));
+            }
+            drop(held);
+            assert_eq!(dropped.get(), 1);
+            if replacement {
+                assert_eq!(role.try_borrow_mut().unwrap().incarnation, 2);
+            } else {
+                assert!(role.try_borrow_mut().is_err());
+                assert!(role.take().is_err());
+            }
+        }
+        let dropped = Rc::new(Cell::new(0));
+        let role = Role::new(Material {
+            incarnation: 1,
+            refused: Rc::new(Cell::new(false)),
+            dropped: dropped.clone(),
+        });
+        let mut held = role.take().unwrap();
+        held.known = true;
+        let busy = role.slot.borrow();
+        drop(held);
+        assert_eq!(dropped.get(), 1);
+        drop(busy);
+        assert!(role.try_borrow_mut().is_err());
+        assert!(role.take().is_err());
     }
 
     #[test]
