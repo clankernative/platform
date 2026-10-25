@@ -15,7 +15,6 @@ use crate::security_epoch::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{io::Read, os::unix::net::UnixStream};
-use tonic::{client::Grpc, transport::Channel};
 use zeroize::Zeroizing;
 
 pub(super) use crate::security_epoch::native_enrollment::protocol::RuntimeBinding;
@@ -68,103 +67,13 @@ pub(super) fn current(
                 }
             }));
             let channel = tokio::time::timeout(acquisition.remaining()?, connection).await??;
-            let mut grpc = Grpc::new(channel)
-                .max_decoding_message_size(1_048_576)
-                .max_encoding_message_size(8192);
-            let version: wire::Version = request(
-                &mut grpc,
-                wire::Empty {},
-                "/containerd.services.version.v1.Version/Version",
-                acquisition,
-            )
-            .await?;
-            ensure!(
-                version.version == policy.runtime.containerd_version
-                    && version.revision == policy.runtime.containerd_revision,
-                "native_enrollment_containerd_version"
-            );
-            let cri: wire::CriVersion = request(
-                &mut grpc,
-                wire::CriVersionRequest {
-                    version: "0.1.0".to_owned(),
-                },
-                "/runtime.v1.RuntimeService/Version",
-                acquisition,
-            )
-            .await?;
-            ensure!(
-                cri.runtime_name == "containerd"
-                    && cri.runtime_version == policy.runtime.containerd_version
-                    && cri.runtime_api_version == policy.runtime.cri_version,
-                "native_enrollment_cri_version"
-            );
-            let tasks: wire::Tasks = request(
-                &mut grpc,
-                wire::Empty {},
-                "/containerd.services.tasks.v1.Tasks/List",
-                acquisition,
-            )
-            .await?;
-            let id = task_id(&tasks, peer.data().process)?;
-            let first: wire::TaskReply = request(
-                &mut grpc,
-                wire::GetTask {
-                    container_id: id.clone(),
-                    exec_id: String::new(),
-                },
-                "/containerd.services.tasks.v1.Tasks/Get",
-                acquisition,
-            )
-            .await?;
-            require_task(
-                first
-                    .process
-                    .as_ref()
-                    .context("native_enrollment_runtime_task_missing")?,
+            super::runtime_reads::observe(
+                channel,
+                &policy.runtime,
                 peer.data().process,
-                &id,
-            )?;
-            let response: wire::ContainerReply = request(
-                &mut grpc,
-                wire::GetContainer { id: id.clone() },
-                "/containerd.services.containers.v1.Containers/Get",
                 acquisition,
             )
-            .await?;
-            let container = response
-                .container
-                .context("native_enrollment_container_missing")?;
-            ensure!(
-                container.id == id
-                    && container
-                        .runtime
-                        .as_ref()
-                        .is_some_and(|r| r.name == "io.containerd.runc.v2"),
-                "native_enrollment_runtime_kind"
-            );
-            let cri: wire::CriStatusReply = request(
-                &mut grpc,
-                wire::CriStatusRequest {
-                    container_id: id.clone(),
-                    verbose: false,
-                },
-                "/runtime.v1.RuntimeService/ContainerStatus",
-                acquisition,
-            )
-            .await?;
-            let cri = cri.status.context("native_enrollment_cri_status_missing")?;
-            let last: wire::TaskReply = request(
-                &mut grpc,
-                wire::GetTask {
-                    container_id: id.clone(),
-                    exec_id: String::new(),
-                },
-                "/containerd.services.tasks.v1.Tasks/Get",
-                acquisition,
-            )
-            .await?;
-            ensure!(first == last, "native_enrollment_task_changed");
-            Ok::<_, anyhow::Error>((container, cri))
+            .await
         })
     })?;
     runtime.check_identity(acquisition, &costs.hashes(Subject::Containerd))?;
@@ -184,35 +93,6 @@ pub(super) fn current(
     Ok(binding)
 }
 
-async fn request<
-    I: prost::Message + Send + Sync + 'static,
-    O: prost::Message + Default + Send + Sync + 'static,
->(
-    grpc: &mut Grpc<Channel>,
-    input: I,
-    path: &'static str,
-    acquisition: &mut NativeAcquisition,
-) -> Result<O> {
-    let timeout = acquisition.remaining()?;
-    tokio::time::timeout(timeout, grpc.ready()).await??;
-    let mut request = tonic::Request::new(input);
-    request
-        .metadata_mut()
-        .insert("containerd-namespace", "k8s.io".parse()?);
-    request.set_timeout(acquisition.remaining()?);
-    let response = tokio::time::timeout(
-        acquisition.remaining()?,
-        grpc.unary(
-            request,
-            tonic::codegen::http::uri::PathAndQuery::from_static(path),
-            tonic_prost::ProstCodec::default(),
-        ),
-    )
-    .await??;
-    acquisition.remaining()?;
-    Ok(response.into_inner())
-}
-
 pub(super) fn require_common(
     a: &super::protocol::ProcessData,
     b: &super::protocol::ProcessData,
@@ -224,41 +104,6 @@ pub(super) fn require_common(
             "native_enrollment_common_namespace"
         );
     }
-    Ok(())
-}
-
-fn task_id(tasks: &wire::Tasks, pid: u32) -> Result<String> {
-    ensure!(
-        tasks.tasks.len() <= 128 && tasks.encoded_len() <= 1_048_576,
-        "native_enrollment_task_bound"
-    );
-    let matching = tasks
-        .tasks
-        .iter()
-        .filter(|t| t.pid == pid)
-        .collect::<Vec<_>>();
-    ensure!(matching.len() == 1, "native_enrollment_task_ambiguous");
-    let id = matching[0].id.clone();
-    ensure!(
-        id.len() == 64
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "native_enrollment_task_id"
-    );
-    require_task(matching[0], pid, &id)?;
-    Ok(id)
-}
-
-use prost::Message;
-
-fn require_task(task: &wire::Task, pid: u32, id: &str) -> Result<()> {
-    // Tasks.Get/List report init ID in Process.id. ContainerID is omitted by
-    // containerd's task state adapter; do not mistake an exec ID for init.
-    ensure!(
-        task.pid == pid && task.id == id && task.container_id.is_empty() && task.status == 2,
-        "native_enrollment_task_init_mismatch"
-    );
     Ok(())
 }
 
@@ -490,39 +335,4 @@ fn kubernetes(
         node_uid: policy.runtime.node_uid.clone(),
         boot: process.boot.clone(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn task_join_requires_exact_live_init_and_complete_bounded_list() {
-        let task = wire::Task {
-            container_id: String::new(),
-            id: "7".repeat(64),
-            pid: 91,
-            status: 2,
-        };
-        let mut tasks = wire::Tasks {
-            tasks: vec![task.clone()],
-        };
-        assert_eq!(task_id(&tasks, 91).unwrap(), task.id);
-        assert!(task_id(&tasks, 92).is_err());
-        tasks.tasks.push(task.clone());
-        assert!(task_id(&tasks, 91).is_err());
-        tasks.tasks = vec![task.clone(); 129];
-        assert!(task_id(&tasks, 91).is_err());
-        for status in [0, 1, 3, 4, 5] {
-            let mut bad = task.clone();
-            bad.status = status;
-            assert!(require_task(&bad, 91, &task.id).is_err());
-        }
-        let mut exec = task.clone();
-        exec.id = "exec-debug".into();
-        assert!(require_task(&exec, 91, &task.id).is_err());
-        let mut misleading = task.clone();
-        misleading.container_id = task.id.clone();
-        assert!(require_task(&misleading, 91, &task.id).is_err());
-    }
 }
