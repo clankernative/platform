@@ -887,7 +887,7 @@ pub(crate) fn open(path: &Path) -> Result<Connection> {
 
 /// The same bounded SQLite execution settings apply to an owned fresh memory
 /// database. Configuring a connection supplies no storage or epoch authority.
-pub(crate) fn configure_connection(connection: &mut Connection) -> Result<()> {
+pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(2))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "synchronous", "FULL")?;
