@@ -2998,7 +2998,7 @@
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn app_pending (& mut self) -> Result < bool >",
         "pub (in crate :: security_epoch) fn begin_bootstrap < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , request : & Request , trace : & BootstrapTiming) -> Result < (CurrentStorageBootstrapPhase < 'storage , 'role > , ControllerEpochReads ,) >",
-        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >",
+        "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < (CurrentControllerStoragePhase < 'storage , 'role > , RetainedEpochReads ,) >",
         "pub (in crate :: security_epoch) fn begin_pending_current_controller (& mut self) -> Result < PendingControllerStoragePhase < '_ > >",
         "pub (in crate :: security_epoch) fn bootstrap_core (& self) -> Result < crate :: security_epoch :: seed_core :: OriginalSeedCore >",
         "pub (in crate :: security_epoch) fn establish (mut file : PreparedFileContinuity , listener : InitialHolderListener , mut stage : EnrolledRoleStage < '_ > , timings : & Timings) -> InitialStorageOutcome",
@@ -3025,7 +3025,7 @@
         },
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < (CurrentControllerStoragePhase < 'storage , 'role > , RetainedEpochReads ,) >"
         },
         {
           "owner": "InitialStorageContinuity",
@@ -3699,7 +3699,7 @@
       "factories": [
         {
           "owner": "InitialStorageContinuity",
-          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < CurrentControllerStoragePhase < 'storage , 'role > >"
+          "signature": "pub (in crate :: security_epoch) fn begin_current_app < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role > , policy : & InitialBootstrapPolicy , selection : & EpochStore , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < (CurrentControllerStoragePhase < 'storage , 'role > , RetainedEpochReads ,) >"
         },
         {
           "owner": "PendingControllerStoragePhase < 'storage >",

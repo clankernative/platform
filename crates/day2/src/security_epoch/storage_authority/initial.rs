@@ -6,7 +6,7 @@ use super::{
     AppFileContinuity, CurrentPhysicalFilePhase, CurrentPreparedFilePhase, PreparedFileContinuity,
 };
 use crate::security_epoch::{
-    authenticated_reads::{AuthenticatedReads, ControllerEpochReads},
+    authenticated_reads::{AuthenticatedReads, ControllerEpochReads, RetainedEpochReads},
     controller::{
         bootstrap_timing::BootstrapTiming,
         evidence::{PreparationFailure, PreparationStep},
@@ -312,8 +312,13 @@ impl InitialStorageContinuity {
     pub(in crate::security_epoch) fn begin_current_app<'storage, 'role>(
         &'storage mut self,
         mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        selection: &EpochStore,
         trace: &crate::security_epoch::controller::serving_timing::ServingTiming,
-    ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
+    ) -> Result<(
+        CurrentControllerStoragePhase<'storage, 'role>,
+        RetainedEpochReads,
+    )> {
         ensure!(self.ready, "controller_storage_continuation_refused");
         self.ready = false;
         use crate::security_epoch::controller::serving_timing::ServingStep;
@@ -329,13 +334,32 @@ impl InitialStorageContinuity {
         let peer = trace.measure(ServingStep::PeerAccept, || {
             rendezvous.accept_current(file.controller_stage_after_check()?, None)
         })?;
-        let mut phase = CurrentControllerStoragePhase {
+        let phase = CurrentControllerStoragePhase {
             file,
             peer: PeerFence::Current(Box::new(peer)),
             continuation: &mut self.ready,
         };
-        trace.measure(ServingStep::PhysicalCheck, || phase.check())?;
-        Ok(phase)
+        // A closed, immediate handoff: authentication borrows the actual
+        // stage just checked below, without re-entering the full composite.
+        // The stage borrow cannot escape in the returned retained material.
+        acquire_initial_current_stage(
+            phase,
+            |phase| {
+                trace.measure(ServingStep::PhysicalCheck, || phase.check())?;
+                phase.file.controller_stage_after_check()
+            },
+            |stage| {
+                trace.measure(ServingStep::ProviderAcquire, || {
+                    AuthenticatedReads::acquire(
+                        policy,
+                        selection,
+                        NativeRole::EpochController,
+                        stage,
+                    )?
+                    .retain_current()
+                })
+            },
+        )
     }
 
     /// Historical first-App identity is not a fresh App role/file permission.
@@ -368,6 +392,149 @@ impl InitialStorageContinuity {
     pub(crate) fn refuse(&mut self) {
         self.ready = false;
         self.peer.refuse();
+    }
+}
+
+/// Own the physical phase across one check and its immediate stage consumer.
+/// The consumer receives only that lexical stage borrow, not the physical
+/// phase or an unchecked getter. Its result cannot borrow from the local owner.
+/// Both closures are one-use; no positive checked token or clock is retained.
+fn acquire_initial_current_stage<Physical, Stage, Reads>(
+    mut physical: Physical,
+    check: impl FnOnce(&mut Physical) -> Result<&mut Stage>,
+    acquire: impl FnOnce(&mut Stage) -> Result<Reads>,
+) -> Result<(Physical, Reads)> {
+    let stage = check(&mut physical)?;
+    let reads = acquire(stage)?;
+    Ok((physical, reads))
+}
+
+#[cfg(test)]
+mod current_acquisition_tests {
+    use super::acquire_initial_current_stage;
+    use crate::security_epoch::native_clock::NativeAcquisition;
+    use anyhow::Result;
+    use day2_capabilities::Digest;
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    // Only controlled DATA and the existing test clock. There is no conversion
+    // to a native role, file, peer, physical phase or authenticated reader.
+    struct Stage {
+        owner: Rc<()>,
+        clock: NativeAcquisition,
+    }
+
+    struct Physical {
+        stage: Stage,
+        checks: Rc<Cell<u32>>,
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl Physical {
+        fn check_and_borrow(&mut self) -> Result<&mut Stage> {
+            self.checks.set(self.checks.get() + 1);
+            self.stage.clock.remaining()?;
+            Ok(&mut self.stage)
+        }
+    }
+
+    impl Drop for Physical {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    fn fixture() -> Physical {
+        Physical {
+            stage: Stage {
+                owner: Rc::new(()),
+                clock: NativeAcquisition::fixture(
+                    Digest::new(b"same-initial-current-stage"),
+                    std::process::id(),
+                    Duration::from_secs(100),
+                    Duration::from_secs(5),
+                ),
+            },
+            checks: Rc::new(Cell::new(0)),
+            dropped: Rc::new(Cell::new(false)),
+        }
+    }
+
+    #[test]
+    fn initial_acquire_uses_the_same_stage_after_exactly_one_full_physical_check() {
+        let mut physical = fixture();
+        let owner = physical.stage.owner.clone();
+        let checks = physical.checks.clone();
+        let interval = physical.stage.clock.interval_data().unwrap();
+        let (mut physical, reads) =
+            acquire_initial_current_stage(physical, Physical::check_and_borrow, |stage| {
+                assert_eq!(checks.get(), 1, "acquire must not re-enter the full check");
+                assert!(Rc::ptr_eq(&owner, &stage.owner));
+                assert_eq!(stage.clock.interval_data()?, interval);
+                stage.clock.remaining()?;
+                Ok(17)
+            })
+            .unwrap();
+        assert_eq!(reads, 17);
+        assert_eq!(checks.get(), 1);
+        assert_eq!(physical.stage.clock.interval_data().unwrap(), interval);
+        // The later real boundary still performs its own check and cannot use
+        // the earlier handoff as cached authority after refusal.
+        physical.stage.clock.refuse();
+        assert!(physical.check_and_borrow().is_err());
+        assert_eq!(checks.get(), 2);
+        assert!(physical.check_and_borrow().is_err());
+    }
+
+    #[test]
+    fn refused_full_check_never_enters_acquire_or_returns_the_physical_owner() {
+        let mut physical = fixture();
+        let checks = physical.checks.clone();
+        let dropped = physical.dropped.clone();
+        physical.stage.clock.refuse();
+        let mut acquired = false;
+        let result = acquire_initial_current_stage(physical, Physical::check_and_borrow, |_| {
+            acquired = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!acquired);
+        assert_eq!(checks.get(), 1);
+        assert!(dropped.get());
+    }
+
+    #[test]
+    fn failed_or_unwound_acquire_drops_the_same_owner_and_preserves_original_refusal() {
+        for unwind in [false, true] {
+            let mut physical = fixture();
+            let (_, deadline) = physical.stage.clock.interval_data().unwrap();
+            let mut original = physical.stage.clock.narrow(5, deadline).unwrap();
+            let checks = physical.checks.clone();
+            let dropped = physical.dropped.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                acquire_initial_current_stage(
+                    physical,
+                    Physical::check_and_borrow,
+                    |stage| -> Result<()> {
+                        stage.clock.refuse();
+                        if unwind {
+                            panic!("controlled acquire unwind");
+                        }
+                        Err(anyhow::anyhow!("original acquisition refusal"))
+                    },
+                )
+            }));
+            if unwind {
+                assert!(result.is_err());
+            } else {
+                let error = result.unwrap().err().unwrap();
+                assert_eq!(error.to_string(), "original acquisition refusal");
+            }
+            assert_eq!(checks.get(), 1);
+            assert!(dropped.get());
+            assert!(original.remaining().is_err());
+            assert!(original.remaining().is_err());
+        }
     }
 }
 
