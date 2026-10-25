@@ -1815,11 +1815,6 @@ impl Sink {
         scope: Option<AuthorityScope>,
         finite_app_candidate: bool,
     ) -> Result<()> {
-        // Scripted originals are DATA, never enrolled native role/storage
-        // owners. Keep their existing per-poll model checks; they cannot enter
-        // the driver that leases actual production owners.
-        #[cfg(test)]
-        let finite_app_candidate = finite_app_candidate && !fixtures::active();
         ensure!(
             self.state.get() == SinkState::Open,
             "native response sink closed"
@@ -1893,6 +1888,9 @@ impl Sink {
             self.is_open() && self.prepared.get(),
             "native response not prepared"
         );
+        // Binding preparation above remains pure, including foreign-identity
+        // refusal before touching the winner's clock. Scripted originals are
+        // DATA: only delivery selection keeps their guarded model poll path.
         #[cfg(test)]
         if fixtures::active() {
             return Ok(false);
