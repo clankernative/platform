@@ -1522,7 +1522,6 @@ impl Runtime {
                 }
             };
             reason = AttemptReason::StorageRejected;
-            crate::audit::upgrade(&tx)?;
             let canonical = serde_json::to_string(input)?;
             let existing = tx
                 .query_row(
@@ -1763,7 +1762,6 @@ impl Runtime {
         }
         let decision = self.sql_decide(|tx| {
         self.check_binding(&tx)?;
-        crate::audit::upgrade(&tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
             tx.query_row("SELECT operation,actor,input,artifact,status,outcome FROM day2_invocations WHERE id=?1", [id],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;

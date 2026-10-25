@@ -891,6 +891,85 @@ mod tests {
         reference: String,
     }
 
+    #[test]
+    fn native_sql_callers_require_the_real_owner_before_open_or_dispatch() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let mut contract = fixture.runtime.artifact().contract().clone();
+        contract.operations[0].kind = "command".into();
+        let runtime = Runtime::from_artifact_for_tests(
+            fixture.runtime.instance_path().to_owned(),
+            fixture.runtime.app().into(),
+            "/state/day2-native/day2-initial.sqlite".into(),
+            LoadedArtifact::from_contract_for_tests(
+                fixture.runtime.artifact().id().into(),
+                fixture.runtime.artifact().directory().to_owned(),
+                contract,
+            ),
+        )?;
+        let entered = std::cell::Cell::new(false);
+        assert!(
+            runtime
+                .sql_read(|_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(
+            runtime
+                .sql_write(|_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!entered.get());
+        let schedule = crate::schedules::Schedule {
+            app: runtime.app().into(),
+            name: "guarded".into(),
+            interval_ms: 60_000,
+            anchor_hour: None,
+            missed: crate::schedules::Missed::Coalesce,
+        };
+        for result in [
+            crate::invocations::drain(&runtime, 8).map(|_| ()),
+            crate::invocations::children(&runtime, "absent").map(|_| ()),
+            crate::invocations::status(&runtime, "absent", "alice").map(|_| ()),
+            crate::journal::compact(&runtime, 100, 500).map(|_| ()),
+            runtime.execute("absent", store::Fault::None).map(|_| ()),
+            runtime.verification_snapshot().map(|_| ()),
+            crate::schedules::advance(&runtime, &schedule, "alice", "read", &json!({}), 100_000)
+                .map(|_| ()),
+        ] {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "native runtime executor missing"
+            );
+        }
+        assert_eq!(
+            store::open(runtime.db()).unwrap_err().to_string(),
+            "native_runtime_sql_owner_required"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_query_only_declarations_exclude_command_pump_without_storage() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let runtime = Runtime::from_artifact_for_tests(
+            fixture.runtime.instance_path().to_owned(),
+            fixture.runtime.app().into(),
+            "/state/day2-native/day2-initial.sqlite".into(),
+            fixture.runtime.artifact().clone(),
+        )?;
+        assert!(crate::invocations::drain(&runtime, 8)?.is_empty());
+        // A declaration can exclude command work; it cannot authorize any
+        // other native read, including an empty journal or invocation lookup.
+        assert!(crate::journal::compact(&runtime, 100, 500).is_err());
+        assert!(crate::invocations::children(&runtime, "absent").is_err());
+        Ok(())
+    }
+
     impl Fixture {
         fn new() -> Result<Self> {
             let directory = tempfile::tempdir()?;

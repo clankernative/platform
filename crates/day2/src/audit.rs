@@ -1372,7 +1372,6 @@ fn history_page(
     entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<String> {
     use crate::error::Failure::InvalidCursor;
-    crate::store::upgrade_selection_cursors(db)?;
     let before = if read.after.is_empty() {
         0
     } else {
@@ -1520,6 +1519,7 @@ mod history_tests {
 
     fn database() -> Result<Connection> {
         let db = Connection::open_in_memory()?;
+        crate::store::upgrade_selection_cursors(&db)?;
         db.execute_batch("CREATE TABLE day2_invocations(id TEXT PRIMARY KEY, authenticated TEXT, trigger TEXT, status TEXT);
             CREATE TABLE day2_audit(invocation TEXT PRIMARY KEY, operation TEXT, actor TEXT, status TEXT, at INTEGER);
             CREATE TABLE day2_audit_changes(invocation TEXT, ordinal INTEGER, model TEXT, record_id TEXT,

@@ -307,6 +307,7 @@ async fn drive_mode(
     let mut journal = crate::oauth::native_http::timer(|| ticks.start(JOURNAL_TICK));
     let mut jobs = tokio::task::JoinSet::new();
     let mut running = std::collections::HashMap::new();
+    let mut owner_failure = false;
     loop {
         if execution == Execution::OwnerThread {
             crate::oauth::native_http::cooperate().await;
@@ -318,6 +319,7 @@ async fn drive_mode(
             work.observe(Event::Stop, &state);
         }
         if state.drained() {
+            anyhow::ensure!(!owner_failure, "native_owner_pump_failed");
             return Ok(());
         }
         // Stable preference for stop, settlement, commands, schedules, journal.
@@ -367,10 +369,20 @@ async fn drive_mode(
                 } else {
                     Completion::Refused
                 };
-                let completion = Event::Complete(pump, completion);
-                state.apply(completion).map_err(anyhow::Error::msg)?;
+                let event = Event::Complete(pump, completion);
+                state.apply(event).map_err(anyhow::Error::msg)?;
                 #[cfg(test)]
-                work.observe(completion, &state);
+                work.observe(event, &state);
+                if completion == Completion::Failed {
+                    // A failed SQL unit can have permanently refused its
+                    // actual native owner. A later timer is not a new grant.
+                    owner_failure = true;
+                    admitting.store(false, Ordering::Release);
+                    state.apply(Event::Stop).map_err(anyhow::Error::msg)?;
+                    #[cfg(test)]
+                    work.observe(Event::Stop, &state);
+                    break;
+                }
                 continue;
             }
             let work = work.clone();
