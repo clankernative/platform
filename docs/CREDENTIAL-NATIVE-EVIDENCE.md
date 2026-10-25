@@ -28,9 +28,10 @@ The closed `observation.event` values are:
 
 The bootstrap `step` order is exactly `create_reserve`, `create_dispatch`,
 `create_settle`, `activate_reserve`, `activate_dispatch`, `activate_settle`.
-Each record is at most 2,048 bytes including prefix and newline; the exporter
-writes at most twelve records (24 KiB) per process. Repeated serving operations
-do not grow the transcript. A partial/failed export stops the executor and cannot
+Each ordinary lifecycle record is at most 2,048 bytes including prefix and
+newline; at most twelve such records (24 KiB) are written per process. Repeated
+serving operations do not grow this lifecycle transcript. The separately bounded
+timing DATA below can include later Current operations. A partial/failed export stops the executor and cannot
 be followed by another purported complete evidence record. OS logging can block
 or perturb another executor's existing deadline; neither an elapsed-time bound
 nor a deadline extension is implied.
@@ -214,11 +215,15 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 ## Preparation timing diagnosis
 
 Ordinary Current App-serving has a distinct diagnostic root around its actual
-operation, including role acquisition. After the role/file/peer borrows unwind,
+Controller operation, including its role acquisition. App-side work before its
+request becomes pending at the Controller is outside this sample. After the role/file/peer borrows unwind,
 the Controller can emit `day2-native-controller-self-check` with format
-`controller_current_app_serving_exclusive_ns_v2`, scope
-`whole_current_app_serving_operation`, and the following main record's sequence,
-selection and Controller incarnation. It is historical DATA, not readiness,
+`controller_current_app_serving_exclusive_ns_v3`, scope
+`whole_current_app_serving_operation`, its own consecutive `sequence`, the count
+of already emitted ordinary lifecycle records in `lifecycle_sequence`, selection
+and Controller incarnation. `completed` reports only whether this actual Current
+operation returned successfully; a later log or consumer can still fail.
+It is historical DATA, not readiness,
 permission, current validity or a sampled remaining budget. It has no bootstrap
 action field and cannot be interpreted as a bootstrap full-check sample.
 
@@ -263,8 +268,14 @@ These rows overlap the exclusive profile and must not be added to it. A subcall
 can contain several guards; the marker does not establish a failed statement or
 cause. If role acquisition fails first, no physical row is fabricated.
 
-The Current record is capped separately at 1536 bytes and emitted at most once
-for the first actual App-serving result/refusal. The existing 1024-byte
+The Current record is capped separately at 1536 bytes and at 256 records per
+Controller. Each available sample is consumed once, including later successful
+Current operations and a terminal refusal; startup does not consume the entire
+capture. Ordinary lifecycle records still contain only the first release per
+role. Reaching the diagnostic cap neither starts another native operation nor
+changes its result. A capture reaching 256 records is potentially truncated;
+missing samples, records or null timings are not zero exchanges or zero cost.
+The existing 1024-byte
 bootstrap profile and 2048-byte authority-record bounds stay unchanged. Missing,
 rewound, nested-root or overflowed metric samples are inconclusive, never zero
 cost. The collector does not replace native clocks, reset an original, cache a
@@ -272,6 +283,29 @@ check, suppress an error, skip I/O or change any five-second guard. Leaf spans
 still finish before terminal native checks. Diagnostic clocks and output can
 perturb elapsed time; no measured saving or complete serving margin follows
 from enabling them. Bootstrap counts/costs do not transfer to Current.
+
+For one isolated browser query, first retain private Controller and App stderr
+with their actual process incarnations and note the last Current sequence after
+startup and sign-in. In the authenticated same-origin browser, GET
+`/api/oauthcalendar.inspect` once with no input or query string. The admitted
+canary's `InspectIntent` handler has no provider effects and returns only its
+declared connection and purpose. Do not reload `/docs`, fetch the schema, poll
+health, or run other product actions inside that observation interval. Retain
+the browser status/body and wall elapsed time privately, then collect the
+subsequent Controller records from the same original. Count these whole Current
+records and sum their sixteen exclusive ns rows once per record; inclusive
+physical rows overlap and are never added. Report any refusal or missing/capped
+interval rather than inferring a complete count. This is an observed isolated
+interval, not an invocation-ID join: unrelated concurrent native work would
+invalidate per-query attribution. Caller issuer spans are not remote RPC counts.
+
+When the finite App response driver is included, join the App's private
+`day2-native-response-delivery` record from that same isolated interval. Its own
+sequence, attempts/entries, actual socket/Pending polls, written/postchecked
+bytes and elapsed DATA cover delivery only, not handler scopes. Browser wall
+latency, whole Current totals and response-driver elapsed time are different
+measurements and must not be added. Completion is local transport completion,
+not human exposure, Calendar qualification or a connected product account.
 
 ### ProviderAcquire argument: duplicate composition, not another S1 boundary
 
