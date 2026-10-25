@@ -384,3 +384,45 @@ was 5.002 seconds from enrollment to refusal. Its role exchange, image preparati
 and nested native validation costs still require the source-bound Controller
 diagnostic; neither a passing scratch run nor original I/O batching proves a
 cause, a complete latency budget, or successful native preparation.
+
+## Finite App response delivery measurements
+
+A fully prepared App response with an exact body length at most 64 KiB uses one
+actual App serving scope for all socket writes, flushes, shutdown and final
+local HTTP completion. The same enrolled stage, signed grant, original clocks,
+peer and authenticated reads remain owned across Pending and partial progress.
+Each actual socket poll still performs fresh counter/physical/original checks
+before and afterwards. Pending never marks the scope Known or releases its
+peer. Only actual connection completion can request the independent final
+strong post-read, native postchecks and peer acknowledgement/release.
+
+Body preparation preserves headers and trailers and retains at most 64 frames,
+64 KiB of body bytes and 64 KiB of trailer names/values. These checks bound what
+this layer retains, not allocations already performed by a body producer.
+Deferred/live, larger and Shell responses keep their existing scope composition;
+this App-only change does not silently remove their guards or extend a stage
+into the thirty-second HTTP connection lifetime. A retained response that
+exhausts its original five-second or any shorter deadline refuses permanently.
+
+The private `day2-native-response-delivery ` prefix carries
+`finite_app_response_delivery_v1` DATA: one process-local sequence, completed or
+refused outcome, scope attempts/entries, actual socket and Pending polls, raw
+written bytes and postchecked written bytes. Actual successful byte counts are
+charged even when the following guard refuses; a lost or malformed completion
+publication cannot mark the Sink complete or restore a usable original.
+
+`elapsed_us` is a checked `std_instant_data` stopwatch covering the inline
+driver, including readiness/acquisition, Pending waits and final checks. It is
+NOT admission's original native clock and cannot demonstrate a five-second fit.
+Headers, body contents, URLs, tokens, certificates and process handles are not
+exported. Records are at most 768 bytes and capped at 4,096 per process. Missing
+records or null/overflowed counts are missing evidence, not zero work.
+
+Collect the original App process's private stderr around an isolated user action.
+For a completed eligible response, attempts and entries should both be one;
+compare its actual poll count and elapsed time against the prior per-poll scope
+composition. Handler/credential/read scopes outside delivery and Shell scopes
+remain separate. A list query's two handler scopes are not folded into its one
+delivery scope. Local protocol-model counts do not qualify native exchange cost;
+that requires the joined native run. These records prove neither browser receipt
+nor human acknowledgement, continued readiness, or a durable product connection.

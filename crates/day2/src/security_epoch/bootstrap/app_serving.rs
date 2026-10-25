@@ -11,6 +11,22 @@ use crate::security_epoch::{
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 impl ActiveAppStorageContinuity {
+    pub(in crate::security_epoch) async fn with_serving_async<'role, T>(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'role>,
+        binding: Digest,
+        purpose: crate::security_epoch::serving::ScopePurpose,
+        operation: impl AsyncFnOnce(
+            &mut dyn CurrentServingPhase,
+            &mut EnrolledRoleStage<'role>,
+        ) -> Result<T>,
+    ) -> crate::security_epoch::serving::ScopeOutcome<T> {
+        match self.begin_serving(stage, binding, purpose) {
+            Ok(scope) => scope.run_async(stage, operation).await,
+            Err(error) => crate::security_epoch::serving::ScopeOutcome::Refused(error),
+        }
+    }
+
     fn begin_serving<'storage>(
         &'storage mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -86,6 +102,31 @@ impl ActiveAppStorageContinuity {
     }
 }
 impl<'storage> CurrentAppServingPhase<'storage> {
+    pub(in crate::security_epoch) fn reobserve(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            // Check the old observation BEFORE replacing DATA: an expired
+            // read/authentication origin cannot be renewed by a fresh reply.
+            self.check(stage)?;
+            let names = request_names(&self.selection, &self.completion)?;
+            let observed = self.reads.read(stage, &self.selection, &names)?;
+            check_active_snapshot(
+                &self.selection,
+                &self.completion,
+                &self.activation,
+                observed.snapshot(),
+            )?;
+            self.observed = observed;
+            self.check(stage)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -268,6 +309,36 @@ impl<'storage> CurrentAppServingPhase<'storage> {
                 stage,
             )
         }));
+        self.finish_result(stage, result)
+    }
+
+    pub(super) async fn run_async<'role, T>(
+        mut self,
+        stage: &mut EnrolledRoleStage<'role>,
+        operation: impl AsyncFnOnce(
+            &mut dyn CurrentServingPhase,
+            &mut EnrolledRoleStage<'role>,
+        ) -> Result<T>,
+    ) -> crate::security_epoch::serving::ScopeOutcome<T> {
+        use futures_util::FutureExt;
+        let result = std::panic::AssertUnwindSafe(async {
+            self.check(stage)?;
+            operation(
+                &mut crate::security_epoch::serving::borrow_current(&mut self),
+                stage,
+            )
+            .await
+        })
+        .catch_unwind()
+        .await;
+        self.finish_result(stage, result)
+    }
+
+    fn finish_result<T>(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        result: std::thread::Result<Result<T>>,
+    ) -> crate::security_epoch::serving::ScopeOutcome<T> {
         match result {
             Ok(Ok(value)) if self.disposition == ServingDisposition::Known => {
                 let evidence = self.evidence.clone();

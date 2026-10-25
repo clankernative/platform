@@ -26,6 +26,8 @@ use std::{
 };
 use tokio::{net::TcpListener, runtime::Handle};
 
+pub(super) mod response_io;
+
 #[cfg(test)]
 use std::convert::Infallible;
 
@@ -166,7 +168,7 @@ impl Endpoint {
         }
     }
 
-    fn prepare_response(&self, sink: &super::native_management::Sink) -> Result<()> {
+    fn prepare_response(&self, sink: &super::native_management::Sink, finite: bool) -> Result<()> {
         let scope = match self {
             Self::App(host) => crate::web::native_runtime_response_scope(host)?,
             Self::Receiver(receiver) => receiver.native_runtime_response_scope()?,
@@ -176,7 +178,7 @@ impl Endpoint {
             #[cfg(test)]
             Self::Prepared(_, _) => anyhow::bail!("native fixture preparation not complete"),
         };
-        sink.prepare_response(scope)
+        sink.prepare_response(scope, finite)
     }
 }
 
@@ -360,7 +362,8 @@ async fn run(
             accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && connections.len() < capacity => {
                 let (stream, _) = accepted?;
                 let sink = super::native_management::Sink::new();
-                let connection_io = OwnerIo { inner: TokioIo::new(stream), owner, sink: sink.clone(),
+                let driver = std::rc::Rc::new(RefCell::new(None));
+                let connection_io = OwnerIo { inner: std::rc::Rc::new(RefCell::new(TokioIo::new(stream))), owner, sink: sink.clone(), driver: driver.clone(),
                     #[cfg(test)]
                     exchange: match endpoint { Endpoint::Test(exchange) => Some(exchange.clone()), _ => None },
                 };
@@ -381,11 +384,18 @@ async fn run(
                         let sink = sink.clone();
                         async move {
                             let response = sink.scope(endpoint.handle(request.map(Body::new), admitted)).await;
-                            if endpoint.prepare_response(&sink).is_err() {
+                            let finite = finite_app_body_candidate(&response);
+                            if endpoint.prepare_response(&sink, finite).is_err() {
                                 sink.abort();
                                 return Err(io::Error::other("native response authority unavailable"));
                             }
-                            Ok::<_, io::Error>(response)
+                            match sink.scope(prepare_finite_app_body(response, &sink)).await {
+                                Ok(response) => Ok::<_, io::Error>(response),
+                                Err(_) => {
+                                    sink.abort();
+                                    Err(io::Error::other("native finite response preparation unavailable"))
+                                }
+                            }
                         }
                     });
                     // A failed write means delivery is unknown/failed. Never
@@ -397,7 +407,20 @@ async fn run(
                     if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
                         // Known local transport completion only. This is not
                         // evidence that a browser/human received the bytes.
-                        completion.known = completion.sink.finish().is_ok();
+                        // Hyper may already have dropped OwnerIo. The retained
+                        // handle finishes THIS driver, never a replacement.
+                        let held = driver.borrow().clone();
+                        completion.known = match held {
+                            Some(driver) => driver.finish().await.is_ok(),
+                            None => completion.sink.finish().is_ok(),
+                        };
+                    }
+                    let held = driver.borrow().clone();
+                    if let Some(driver) = held {
+                        if !completion.known { driver.abort(); }
+                        // No native owner remains borrowed during DATA export.
+                        // Missing output is never a known delivery receipt.
+                        driver.report();
                     }
                 });
             }
@@ -408,9 +431,10 @@ async fn run(
 /// This wraps the socket, not just Body::poll_frame: response headers, buffered
 /// body writes, flush and shutdown all run on the native owning OS thread.
 struct OwnerIo<T> {
-    inner: T,
+    inner: std::rc::Rc<RefCell<T>>,
     owner: ThreadId,
     sink: super::native_management::Sink,
+    driver: std::rc::Rc<RefCell<Option<response_io::Driver>>>,
     #[cfg(test)]
     exchange: Option<Arc<tests::Exchange>>,
 }
@@ -437,18 +461,34 @@ impl<T> OwnerIo<T> {
     }
 }
 
+impl<T: rt::Write + Unpin + 'static> OwnerIo<T> {
+    fn response_driver(&self) -> Option<response_io::Driver> {
+        if !self.sink.uses_retained_app_io() {
+            return None;
+        }
+        Some(
+            self.driver
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    response_io::Driver::new(self.inner.clone(), self.sink.clone())
+                })
+                .clone(),
+        )
+    }
+}
+
 impl<T: rt::Read + Unpin> rt::Read for OwnerIo<T> {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
         buf: rt::ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
         self.check()?;
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        Pin::new(&mut *self.inner.borrow_mut()).poll_read(cx, buf)
     }
 }
 
-impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
+impl<T: rt::Write + Unpin + 'static> rt::Write for OwnerIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
@@ -464,20 +504,346 @@ impl<T: rt::Write + Unpin> rt::Write for OwnerIo<T> {
                 .push(std::thread::current().id());
         }
         let this = self.get_mut();
+        if let Some(driver) = this.response_driver() {
+            return driver.poll_write(cx, bytes);
+        }
         this.sink
-            .poll_io(|| Pin::new(&mut this.inner).poll_write(cx, bytes))
+            .poll_io(|| Pin::new(&mut *this.inner.borrow_mut()).poll_write(cx, bytes))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
+        if let Some(driver) = this.response_driver() {
+            return driver.poll_flush(cx);
+        }
         this.sink
-            .poll_io(|| Pin::new(&mut this.inner).poll_flush(cx))
+            .poll_io(|| Pin::new(&mut *this.inner.borrow_mut()).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         self.check()?;
         let this = self.get_mut();
+        if let Some(driver) = this.response_driver() {
+            return driver.poll_shutdown(cx);
+        }
         this.sink
-            .poll_io(|| Pin::new(&mut this.inner).poll_shutdown(cx))
+            .poll_io(|| Pin::new(&mut *this.inner.borrow_mut()).poll_shutdown(cx))
+    }
+}
+
+/// Only a bounded, fully prepared App body enters a retained delivery scope.
+/// Deferred/live bodies retain their own existing admission choreography: do
+/// not lease an owner that their producer still needs to render the next frame.
+async fn prepare_finite_app_body(
+    response: Response,
+    sink: &super::native_management::Sink,
+) -> Result<Response> {
+    use hyper::body::Body as _;
+    const MAX_BODY: usize = 64 * 1024;
+    const MAX_FRAMES: usize = 64;
+    if !sink.can_retain_app_response()? {
+        return Ok(response);
+    }
+    let Some(exact) = response
+        .body()
+        .size_hint()
+        .exact()
+        .filter(|size| *size <= MAX_BODY as u64)
+    else {
+        return Ok(response);
+    };
+    let (parts, body) = response.into_parts();
+    let mut body = std::pin::pin!(body);
+    let mut frames = std::collections::VecDeque::new();
+    let mut bytes = 0usize;
+    let mut metadata = 0usize;
+    while let Some(frame) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+        let frame = frame?;
+        ensure!(
+            frames.len() < MAX_FRAMES,
+            "native finite response frame budget"
+        );
+        if let Some(data) = frame.data_ref() {
+            bytes = bytes
+                .checked_add(data.len())
+                .context("native finite response byte overflow")?;
+            ensure!(
+                bytes <= MAX_BODY && bytes as u64 <= exact,
+                "native finite response byte budget"
+            );
+        }
+        if let Some(trailers) = frame.trailers_ref() {
+            for (name, value) in trailers {
+                metadata = metadata
+                    .checked_add(name.as_str().len())
+                    .and_then(|total| total.checked_add(value.len()))
+                    .context("native finite response trailer overflow")?;
+                ensure!(
+                    metadata <= MAX_BODY,
+                    "native finite response trailer budget"
+                );
+            }
+        }
+        frames.push_back(frame);
+    }
+    ensure!(
+        bytes as u64 == exact,
+        "native finite response length changed"
+    );
+    sink.retain_finite_app_io()?;
+    Ok(Response::from_parts(
+        parts,
+        Body::new(PreparedBody {
+            frames,
+            remaining: exact,
+        }),
+    ))
+}
+
+fn finite_app_body_candidate(response: &Response) -> bool {
+    use hyper::body::Body as _;
+    response
+        .body()
+        .size_hint()
+        .exact()
+        .is_some_and(|size| size <= 64 * 1024)
+}
+
+struct PreparedBody {
+    frames: std::collections::VecDeque<hyper::body::Frame<axum::body::Bytes>>,
+    remaining: u64,
+}
+
+impl hyper::body::Body for PreparedBody {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut TaskContext<'_>,
+    ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let frame = self.frames.pop_front();
+        if let Some(data) = frame.as_ref().and_then(|frame| frame.data_ref()) {
+            self.remaining -= data.len() as u64;
+        }
+        Poll::Ready(frame.map(Ok))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::SizeHint::with_exact(self.remaining)
+    }
+}
+
+#[cfg(test)]
+mod finite_response_tests {
+    use super::*;
+    use axum::body::Bytes;
+    use hyper::body::Body as _;
+    use std::{cell::Cell, rc::Rc};
+
+    fn metadata_sink() -> super::super::native_management::Sink {
+        super::super::native_management::Sink::fixture_unowned_app_response(
+            day2_capabilities::security_epoch::AuthorityScope {
+                installation: "testco".to_owned().try_into().unwrap(),
+                environment: "test".to_owned().try_into().unwrap(),
+                app: "calendar".to_owned().try_into().unwrap(),
+            },
+        )
+    }
+
+    struct Deferred {
+        produced: bool,
+    }
+
+    impl hyper::body::Body for Deferred {
+        type Data = Bytes;
+        type Error = io::Error;
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<Option<io::Result<hyper::body::Frame<Bytes>>>> {
+            let sink = super::super::native_management::current_sink().unwrap();
+            assert!(
+                !sink.uses_retained_app_io(),
+                "body production precedes the native lease"
+            );
+            assert!(sink.can_retain_app_response().unwrap());
+            if std::mem::replace(&mut self.produced, true) {
+                Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_static(
+                    b"abc",
+                )))))
+            }
+        }
+        fn size_hint(&self) -> hyper::body::SizeHint {
+            hyper::body::SizeHint::with_exact(if self.produced { 0 } else { 3 })
+        }
+    }
+
+    #[test]
+    fn deferred_finite_body_finishes_before_lease_and_preserves_headers_and_trailers() {
+        futures_executor::block_on(async {
+            let sink = metadata_sink();
+            let response = Response::new(Body::new(Deferred { produced: false }));
+            let response = sink
+                .scope(prepare_finite_app_body(response, &sink))
+                .await
+                .unwrap();
+            assert!(sink.uses_retained_app_io());
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 10)
+                    .await
+                    .unwrap(),
+                b"abc"[..]
+            );
+
+            let sink = metadata_sink();
+            let mut trailers = axum::http::HeaderMap::new();
+            trailers.insert("x-delivery", "same".parse().unwrap());
+            let mut response = Response::new(Body::new(PreparedBody {
+                frames: [
+                    hyper::body::Frame::data(Bytes::from_static(b"abc")),
+                    hyper::body::Frame::trailers(trailers.clone()),
+                ]
+                .into(),
+                remaining: 3,
+            }));
+            response
+                .headers_mut()
+                .insert("x-owner", "original".parse().unwrap());
+            let response = prepare_finite_app_body(response, &sink).await.unwrap();
+            assert_eq!(response.headers()["x-owner"], "original");
+            let mut body = Box::pin(response.into_body());
+            let first = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.data_ref().unwrap(), &Bytes::from_static(b"abc"));
+            let second = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.trailers_ref().unwrap(), &trailers);
+            assert!(
+                std::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+                    .await
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn finite_preparation_rejects_size_lies_and_frame_overflow_without_selecting_io() {
+        futures_executor::block_on(async {
+            for (frames, remaining) in [
+                (
+                    [hyper::body::Frame::data(Bytes::from_static(b"abc"))]
+                        .into_iter()
+                        .collect(),
+                    4,
+                ),
+                (
+                    (0..65)
+                        .map(|_| hyper::body::Frame::data(Bytes::new()))
+                        .collect(),
+                    0,
+                ),
+            ] {
+                let sink = metadata_sink();
+                let response = Response::new(Body::new(PreparedBody { frames, remaining }));
+                assert!(prepare_finite_app_body(response, &sink).await.is_err());
+                assert!(!sink.uses_retained_app_io());
+            }
+        });
+    }
+
+    #[test]
+    fn live_and_large_bodies_keep_their_existing_scope_choreography() {
+        futures_executor::block_on(async {
+            let sink = metadata_sink();
+            let polled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let captured = polled.clone();
+            let body = Body::from_stream(futures_util::stream::once(async move {
+                captured.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, io::Error>(Bytes::from_static(b"live"))
+            }));
+            let response = prepare_finite_app_body(Response::new(body), &sink)
+                .await
+                .unwrap();
+            assert!(!sink.uses_retained_app_io());
+            assert_eq!(polled.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 10)
+                    .await
+                    .unwrap(),
+                b"live"[..]
+            );
+            assert_eq!(polled.load(Ordering::Relaxed), 1);
+
+            let sink = metadata_sink();
+            let response =
+                prepare_finite_app_body(Response::new(Body::from(vec![b'x'; 65537])), &sink)
+                    .await
+                    .unwrap();
+            assert!(!sink.uses_retained_app_io());
+            assert_eq!(response.body().size_hint().exact(), Some(65537));
+        });
+    }
+
+    #[test]
+    fn classification_data_cannot_create_native_owner_or_write_socket_bytes() {
+        struct Socket(Rc<Cell<u32>>);
+        impl rt::Write for Socket {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut TaskContext<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.0.set(self.0.get() + 1);
+                Poll::Ready(Ok(bytes.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+                self.0.set(self.0.get() + 1);
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut TaskContext<'_>,
+            ) -> Poll<io::Result<()>> {
+                self.0.set(self.0.get() + 1);
+                Poll::Ready(Ok(()))
+            }
+        }
+        let sink = metadata_sink();
+        let _ = futures_executor::block_on(prepare_finite_app_body(
+            Response::new(Body::from("abc")),
+            &sink,
+        ))
+        .unwrap();
+        let polls = Rc::new(Cell::new(0));
+        let mut io = OwnerIo {
+            inner: Rc::new(RefCell::new(Socket(polls.clone()))),
+            owner: std::thread::current().id(),
+            sink: sink.clone(),
+            driver: Rc::new(RefCell::new(None)),
+            exchange: None,
+        };
+        let mut cx = TaskContext::from_waker(futures_util::task::noop_waker_ref());
+        assert!(matches!(
+            rt::Write::poll_write(Pin::new(&mut io), &mut cx, b"abc"),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!(polls.get(), 0);
+        assert!(!sink.is_open());
+        assert!(matches!(
+            rt::Write::poll_shutdown(Pin::new(&mut io), &mut cx),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!(polls.get(), 0);
     }
 }
 
@@ -805,9 +1171,10 @@ mod tests {
                 sink.scope(async { super::super::native_management::reserve_shell(&intent, 5) }),
             )?;
             let mut io = OwnerIo {
-                inner: Blocked(0),
+                inner: std::rc::Rc::new(RefCell::new(Blocked(0))),
                 owner: thread::current().id(),
                 sink,
+                driver: std::rc::Rc::new(RefCell::new(None)),
                 exchange: None,
             };
             let waker = futures_util::task::noop_waker();
@@ -815,13 +1182,13 @@ mod tests {
             assert!(
                 rt::Write::poll_write(Pin::new(&mut io), &mut cx, b"private response").is_pending()
             );
-            assert_eq!(io.inner.0, 1);
+            assert_eq!(io.inner.borrow().0, 1);
             world.advance(300);
             assert!(matches!(
                 rt::Write::poll_write(Pin::new(&mut io), &mut cx, b"private response"),
                 Poll::Ready(Err(_))
             ));
-            assert_eq!(io.inner.0, 1);
+            assert_eq!(io.inner.borrow().0, 1);
             Ok(())
         })
     }
