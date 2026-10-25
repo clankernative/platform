@@ -241,7 +241,7 @@ fn storage_stage_purposes_are_closed_and_role_restricted_independent_of_duration
 #[test]
 fn validly_signed_short_bootstrap_and_metadata_grants_fail_the_ordinary_current_purpose_gate() {
     // Cryptographic DATA only. This is the exact comparison used by the real
-    // EnrolledRoleStage::require_current_role gate, not a native-stage fixture.
+    // Actual stage's exact CurrentRole purpose gate, not a native-stage fixture.
     use super::{
         NativeRole,
         protocol::{RuntimeBinding, SignedStage, StageData, StagePurpose},

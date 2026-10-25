@@ -1,7 +1,7 @@
 //! Purpose-closed statements from the actual retained key and ORIGINAL stage.
 //! Parsed DATA cannot replace a stage clock, process handle or key owner.
 
-use super::EnrolledStorageStage;
+use super::{EnrolledStorageStage, StagePurpose};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
@@ -18,7 +18,7 @@ impl EnrolledStorageStage<'_, '_> {
         &mut self,
     ) -> Result<()> {
         let result = (|| {
-            self.stage.require_current_role()?;
+            self.stage.require_purpose(StagePurpose::CurrentRole)?;
             ensure!(
                 self.stage.owner.role == NativeRole::AppHost,
                 "storage_peer_app_role_required"
@@ -32,7 +32,7 @@ impl EnrolledStorageStage<'_, '_> {
             Ok(())
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -48,7 +48,7 @@ impl EnrolledStorageStage<'_, '_> {
             Ok(statement)
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -111,7 +111,7 @@ impl EnrolledStorageStage<'_, '_> {
             })
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -139,7 +139,7 @@ impl EnrolledStorageStage<'_, '_> {
             self.stage.check()
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
             acquisition.refuse();
         }
@@ -199,7 +199,7 @@ impl EnrolledStorageStage<'_, '_> {
             }
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
             acquisition.refuse();
         }
@@ -239,7 +239,7 @@ impl EnrolledStorageStage<'_, '_> {
             }
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
             acquisition.refuse();
         }
@@ -279,7 +279,7 @@ impl EnrolledStorageStage<'_, '_> {
             self.stage.check()
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result

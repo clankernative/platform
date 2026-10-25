@@ -37,7 +37,13 @@
     {
       "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
       "scope": "const",
-      "fingerprint": "sha256:7ea5123652aae04ef3d23c7b8127566e5665c8be5811e35ae89e1239f47d1eb3",
+      "fingerprint": "sha256:76bae82fb34bb44d7dc9ec1ad6cfa28b742c974700cc69dd558f2a2569061274",
+      "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_clock.rs",
+      "scope": "const",
+      "fingerprint": "sha256:1794385049492d76a68eb83987dab93ab1b86509157af4bf0d190894ab99b97f",
       "registration": null
     }
   ],
@@ -1020,8 +1026,8 @@
         "pub (super) fn require_storage_metadata_observation (& mut self) -> Result < () >",
         "pub (super) fn sample (& mut self) -> Result < Sample >",
         "pub (super) fn join_current_view (& mut self , mut current : Self) -> Result < () >",
-        "pub (super) fn narrow_app_serving_authentication (& mut self , ceiling : Duration) -> Result < Self >",
-        "pub (super) fn require_app_serving (& mut self) -> Result < () >"
+        "pub (super) fn require_app_serving (& mut self) -> Result < () >",
+        "pub (super) fn begin_app_authentication (& mut self , max_lease_seconds : u32 , signed_ceiling : Duration , owner_refusal : Rc < Cell < bool > >) -> Result < AppAuthentication >"
       ],
       "factories": [
         {
@@ -1053,8 +1059,12 @@
           "signature": "pub (super) fn narrow_authentication (& mut self) -> Result < Self >"
         },
         {
+          "owner": "AppAuthentication",
+          "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
+        },
+        {
           "owner": "NativeAcquisition",
-          "signature": "pub (super) fn narrow_app_serving_authentication (& mut self , ceiling : Duration) -> Result < Self >"
+          "signature": "pub (super) fn begin_app_authentication (& mut self , max_lease_seconds : u32 , signed_ceiling : Duration , owner_refusal : Rc < Cell < bool > >) -> Result < AppAuthentication >"
         }
       ],
       "material_uses": [
@@ -1156,11 +1166,15 @@
         },
         {
           "owner": "NativeAcquisition",
-          "signature": "pub (super) fn narrow_app_serving_authentication (& mut self , ceiling : Duration) -> Result < Self >"
+          "signature": "pub (super) fn require_app_serving (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "AppAuthentication",
+          "signature": "pub (super) fn complete (mut self , parent : & mut NativeAcquisition , signed_ceiling : Duration , max_lease_seconds : u32 , owner_refusal : & Rc < Cell < bool > >) -> Result < () >"
         },
         {
           "owner": "NativeAcquisition",
-          "signature": "pub (super) fn require_app_serving (& mut self) -> Result < () >"
+          "signature": "pub (super) fn begin_app_authentication (& mut self , max_lease_seconds : u32 , signed_ceiling : Duration , owner_refusal : Rc < Cell < bool > >) -> Result < AppAuthentication >"
         }
       ],
       "proof_uses": [],
@@ -1947,7 +1961,6 @@
         "pub (crate) fn check_for (& mut self , scope : & AuthorityScope , role : NativeRole) -> Result < () >",
         "pub (crate) fn check_selection (& mut self , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole) -> Result < () >",
         "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
-        "pub (crate) fn require_current_role (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn begin_serving_attempt (& mut self , role : NativeRole) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_acquisition (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn check_serving_controller_statement (& mut self , statement : & Statement , pid : u32 , acquisition : & mut NativeAcquisition) -> Result < () >",
@@ -1966,7 +1979,8 @@
         "pub (in crate :: security_epoch) fn require_purpose (& mut self , purpose : StagePurpose) -> Result < () >",
         "pub (in crate :: security_epoch) fn storage (& mut self) -> Result < EnrolledStorageStage < '_ , 'role > >",
         "pub (in crate :: security_epoch) fn current_storage_purpose (& mut self) -> Result < StagePurpose >",
-        "pub (crate) fn require_current_consumer (& mut self) -> Result < () >"
+        "pub (crate) fn require_current_consumer (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn begin_app_authentication (& mut self , max_lease_seconds : u32) -> Result < AppAuthentication >"
       ],
       "factories": [
         {
@@ -2034,10 +2048,6 @@
         {
           "owner": "EnrolledRoleStage < '_ >",
           "signature": "pub (crate) fn narrow_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
-        },
-        {
-          "owner": "EnrolledRoleStage < '_ >",
-          "signature": "pub (crate) fn require_current_role (& mut self) -> Result < () >"
         },
         {
           "owner": "EnrolledRoleStage < '_ >",
@@ -2122,6 +2132,10 @@
         {
           "owner": "SameEnrolledOwner",
           "signature": "pub (in crate :: security_epoch) fn current_read_view (& mut self , stage : & mut EnrolledRoleStage < '_ > , policy : & day2_capabilities :: security_epoch :: bootstrap :: InitialBootstrapPolicy , store : & day2_capabilities :: security_epoch :: EpochStore , role : NativeRole , purpose : StagePurpose) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledRoleStage < 'role >",
+          "signature": "pub (in crate :: security_epoch) fn begin_app_authentication (& mut self , max_lease_seconds : u32) -> Result < AppAuthentication >"
         }
       ],
       "proof_uses": [],
@@ -4565,7 +4579,9 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_statement (& mut self) -> Result < StageStatement >",
         "fn storage_statement_data (& mut self) -> Result < StageStatement >",
-        "pub (in crate :: security_epoch) fn narrow_app_serving_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        "pub (in crate :: security_epoch) fn narrow_app_serving_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch) fn complete_app_authentication (& mut self , mut work : AppAuthentication , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (in crate :: security_epoch) fn refuse_app_authentication (& mut self)"
       ],
       "factories": [
         {
@@ -4641,6 +4657,14 @@
         {
           "owner": "EnrolledStorageStage < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn narrow_app_serving_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn complete_app_authentication (& mut self , mut work : AppAuthentication , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn refuse_app_authentication (& mut self)"
         }
       ],
       "proof_uses": [],
@@ -4697,6 +4721,101 @@
       "kind": "private_material",
       "consuming_methods": [
         "rollback"
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_clock.rs",
+      "type_name": "AppAuthentication",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn complete (mut self , parent : & mut NativeAcquisition , signed_ceiling : Duration , max_lease_seconds : u32 , owner_refusal : & Rc < Cell < bool > >) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "NativeAcquisition",
+          "signature": "pub (super) fn begin_app_authentication (& mut self , max_lease_seconds : u32 , signed_ceiling : Duration , owner_refusal : Rc < Cell < bool > >) -> Result < AppAuthentication >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AppAuthentication",
+          "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "AppAuthentication",
+          "signature": "pub (super) fn complete (mut self , parent : & mut NativeAcquisition , signed_ceiling : Duration , max_lease_seconds : u32 , owner_refusal : & Rc < Cell < bool > >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "complete"
+      ],
+      "destructor": "sha256:ac590ea8f91066390e379939aa694a6e2060bd8dd9d3f868e1c2b3fa2c68087d"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
+      "type_name": "ProviderAcquisition",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads.rs",
+            "module": "retained"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained/provider.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+            "module": "provider"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/authenticated_reads/retained/writer.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
+            "module": "writer"
+          }
+        }
+      ],
+      "methods": [
+        "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn app (authentication : AppAuthentication) -> Self",
+        "pub (super) fn complete_app (self , mut stage : EnrolledStorageStage < '_ , '_ > , max_lease_seconds : u32) -> Result < NativeAcquisition >",
+        "pub (super) fn into_native (self) -> Result < NativeAcquisition >",
+        "pub (super) fn native (acquisition : NativeAcquisition) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "ProviderAcquisition",
+          "signature": "pub (super) fn app (authentication : AppAuthentication) -> Self"
+        },
+        {
+          "owner": "ProviderAcquisition",
+          "signature": "pub (super) fn native (acquisition : NativeAcquisition) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProviderAcquisition",
+          "signature": "pub (super) fn acquisition (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "ProviderAcquisition",
+          "signature": "pub (super) fn complete_app (self , mut stage : EnrolledStorageStage < '_ , '_ > , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "ProviderAcquisition",
+          "signature": "pub (super) fn into_native (self) -> Result < NativeAcquisition >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "complete_app",
+        "into_native"
       ]
     }
   ],

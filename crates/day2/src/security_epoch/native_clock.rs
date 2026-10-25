@@ -5,13 +5,19 @@
 use super::firestore::{Budget, Sample};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
-use std::{cell::Cell, marker::PhantomData, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, OnceCell},
+    marker::PhantomData,
+    rc::Rc,
+    time::Duration,
+};
 
 const MAX_ACQUISITION: Duration = Duration::from_secs(5);
 
 /// temporary, user decision 2026-10-25, revert after 3 measurement runs.
-/// App/Controller Current serving only; authentication remains the first five
-/// seconds of the SAME origin. Shell and generic Current remain five seconds.
+/// App/Controller Current serving only. Role authentication retains the first
+/// five seconds; each new App provider authentication has its own bounded work
+/// phase inside this SAME original. Shell and generic Current remain five seconds.
 pub(in crate::security_epoch) const APP_SERVING_LIMIT: Duration = Duration::from_secs(30);
 
 /// Only the initial first-holder rendezvous/exchange may spend this original
@@ -67,6 +73,10 @@ pub(crate) struct NativeAcquisition {
     process: u32,
     origin: Duration,
     observation: Rc<Cell<OriginalObservation>>,
+    // Shared from the original's creation, even before an App provider phase
+    // binds its actual owner. Older peer/I/O views must see that later binding
+    // immediately; copying an unbound Option would lose permanent refusal.
+    owner_refusal: Rc<OnceCell<Rc<Cell<bool>>>>,
     deadline: Duration,
     valid: bool,
     local: PhantomData<Rc<()>>,
@@ -83,6 +93,7 @@ pub(crate) struct NativeAcquisition {
 struct OriginalObservation {
     latest: Duration,
     refused: bool,
+    app_authentication_active: bool,
 }
 
 /// Read-only historical DATA from the same original's existing samples. This
@@ -91,6 +102,119 @@ struct OriginalObservation {
 pub(super) struct AcquisitionProgress {
     origin: Duration,
     observation: Rc<Cell<OriginalObservation>>,
+}
+
+/// One newly started App provider-authentication operation, never a grant or a
+/// replacement original. Its private start and owner binding cannot be supplied
+/// by a caller, reconstructed from DATA, or extracted as an owned I/O clock.
+pub(super) struct AppAuthentication {
+    acquisition: NativeAcquisition,
+    started: Duration,
+    signed_ceiling: Duration,
+    max_lease_seconds: u32,
+    owner_refusal: Rc<Cell<bool>>,
+    completed: bool,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <$owner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(AppAuthentication, Clone);
+    assert_not_impl!(AppAuthentication, Copy);
+    assert_not_impl!(AppAuthentication, Default);
+    assert_not_impl!(AppAuthentication, Send);
+    assert_not_impl!(AppAuthentication, Sync);
+    assert_not_impl!(AppAuthentication, serde::Serialize);
+    assert_not_impl!(AppAuthentication, serde::Deserialize<'static>);
+};
+
+impl AppAuthentication {
+    pub(super) fn acquisition(&mut self) -> &mut NativeAcquisition {
+        &mut self.acquisition
+    }
+
+    pub(super) fn complete(
+        mut self,
+        parent: &mut NativeAcquisition,
+        signed_ceiling: Duration,
+        max_lease_seconds: u32,
+        owner_refusal: &Rc<Cell<bool>>,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                !self.completed
+                    && !self.owner_refusal.get()
+                    && parent.observation.get().app_authentication_active
+                    && Rc::ptr_eq(&self.owner_refusal, owner_refusal)
+                    && parent
+                        .owner_refusal
+                        .get()
+                        .is_some_and(|actual| Rc::ptr_eq(actual, owner_refusal))
+                    && self
+                        .acquisition
+                        .owner_refusal
+                        .get()
+                        .is_some_and(|actual| Rc::ptr_eq(actual, owner_refusal))
+                    && parent.valid
+                    && self.acquisition.valid
+                    && parent.scope == AcquisitionScope::AppServing
+                    && self.acquisition.scope == parent.scope
+                    && Rc::ptr_eq(&parent.observation, &self.acquisition.observation)
+                    && Rc::ptr_eq(&parent.owner_refusal, &self.acquisition.owner_refusal)
+                    && parent.domain == self.acquisition.domain
+                    && parent.process == self.acquisition.process
+                    && parent.origin == self.acquisition.origin
+                    && parent.origin <= self.started
+                    && parent.deadline > parent.origin
+                    && parent.deadline - parent.origin <= APP_SERVING_LIMIT
+                    && self.signed_ceiling == signed_ceiling
+                    && self.max_lease_seconds == max_lease_seconds
+                    && (1..=60).contains(&max_lease_seconds)
+                    && self.acquisition.deadline <= parent.deadline
+                    && self.acquisition.deadline <= signed_ceiling
+                    && self.acquisition.deadline
+                        <= parent
+                            .origin
+                            .checked_add(Duration::from_secs(u64::from(max_lease_seconds)))
+                            .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?
+                    && self.acquisition.deadline > self.started
+                    && self.acquisition.deadline - self.started <= MAX_ACQUISITION,
+                "epoch_native_app_authentication_changed"
+            );
+            let sample = self.acquisition.sample()?;
+            parent.observe(sample.elapsed)?;
+            parent.sample()?;
+            self.acquisition.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            parent.refuse();
+        } else {
+            parent.observation.set(OriginalObservation {
+                app_authentication_active: false,
+                ..parent.observation.get()
+            });
+            self.completed = true;
+        }
+        result
+    }
+}
+
+impl Drop for AppAuthentication {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.owner_refusal.set(true);
+            self.acquisition.refuse();
+        }
+    }
 }
 
 impl AcquisitionProgress {
@@ -187,7 +311,9 @@ impl NativeAcquisition {
             observation: Rc::new(Cell::new(OriginalObservation {
                 latest: origin,
                 refused: false,
+                app_authentication_active: false,
             })),
+            owner_refusal: Rc::new(OnceCell::new()),
             deadline,
             valid: true,
             local: PhantomData,
@@ -199,11 +325,16 @@ impl NativeAcquisition {
     }
 
     pub(super) fn sample(&mut self) -> Result<Sample> {
-        ensure!(
-            self.valid && !self.observation.get().refused,
-            "epoch_native_acquisition_refused"
-        );
         let result = (|| {
+            ensure!(
+                self.valid
+                    && !self.observation.get().refused
+                    && self
+                        .owner_refusal
+                        .get()
+                        .is_none_or(|refused| !refused.get()),
+                "epoch_native_acquisition_refused"
+            );
             ensure!(
                 std::process::id() == self.process,
                 "epoch_native_process_changed"
@@ -232,7 +363,7 @@ impl NativeAcquisition {
         }
         self.observation.set(OriginalObservation {
             latest: now,
-            refused: false,
+            ..original
         });
         Ok(Sample {
             domain: self.domain.clone(),
@@ -280,6 +411,9 @@ impl NativeAcquisition {
 
     pub(super) fn refuse(&mut self) {
         self.valid = false;
+        if let Some(refused) = self.owner_refusal.get() {
+            refused.set(true);
+        }
         self.observation.set(OriginalObservation {
             refused: true,
             ..self.observation.get()
@@ -506,6 +640,7 @@ impl NativeAcquisition {
                 process: self.process,
                 origin: self.origin,
                 observation: Rc::clone(&self.observation),
+                owner_refusal: self.owner_refusal.clone(),
                 deadline,
                 valid: true,
                 local: PhantomData,
@@ -521,16 +656,81 @@ impl NativeAcquisition {
         result
     }
 
-    /// Authentication always consumes the first five seconds of THIS origin;
-    /// starting a second authentication child cannot restart that interval.
+    /// Role and non-App provider authentication consume the first five seconds
+    /// of THIS origin. Another raw child cannot restart that interval; new App
+    /// provider work instead requires the distinct opaque factory below.
     pub(super) fn narrow_authentication(&mut self) -> Result<Self> {
         self.narrow(5, self.deadline)
     }
 
-    /// App provider authentication also retains the actual signed stage cap.
-    pub(super) fn narrow_app_serving_authentication(&mut self, ceiling: Duration) -> Result<Self> {
-        self.require_app_serving()?;
-        self.narrow(5, ceiling)
+    /// Capture a new operation's work interval BEFORE any authentication guard,
+    /// retaining this actual original and every shorter signed/configured cap.
+    pub(super) fn begin_app_authentication(
+        &mut self,
+        max_lease_seconds: u32,
+        signed_ceiling: Duration,
+        owner_refusal: Rc<Cell<bool>>,
+    ) -> Result<AppAuthentication> {
+        let result = (|| {
+            let started = self.sample()?.elapsed;
+            ensure!(
+                self.scope == AcquisitionScope::AppServing
+                    && !owner_refusal.get()
+                    && !self.observation.get().app_authentication_active
+                    && (1..=60).contains(&max_lease_seconds),
+                "epoch_native_app_authentication_purpose"
+            );
+            let actual_owner = self.owner_refusal.get_or_init(|| Rc::clone(&owner_refusal));
+            ensure!(
+                Rc::ptr_eq(actual_owner, &owner_refusal),
+                "epoch_native_app_authentication_owner_changed"
+            );
+            self.observation.set(OriginalObservation {
+                app_authentication_active: true,
+                ..self.observation.get()
+            });
+            let configured = self
+                .origin
+                .checked_add(Duration::from_secs(u64::from(max_lease_seconds)))
+                .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?;
+            let deadline = started
+                .checked_add(MAX_ACQUISITION)
+                .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?
+                .min(self.deadline)
+                .min(signed_ceiling)
+                .min(configured);
+            ensure!(
+                started < deadline,
+                "epoch_native_app_authentication_expired"
+            );
+            let mut acquisition = Self {
+                scope: self.scope,
+                domain: self.domain.clone(),
+                process: self.process,
+                origin: self.origin,
+                observation: Rc::clone(&self.observation),
+                owner_refusal: Rc::clone(&self.owner_refusal),
+                deadline,
+                valid: true,
+                local: PhantomData,
+                #[cfg(test)]
+                fixture_time: self.fixture_time,
+            };
+            acquisition.sample()?;
+            Ok(AppAuthentication {
+                acquisition,
+                started,
+                signed_ceiling,
+                max_lease_seconds,
+                owner_refusal: Rc::clone(&owner_refusal),
+                completed: false,
+            })
+        })();
+        if result.is_err() {
+            owner_refusal.set(true);
+            self.refuse();
+        }
+        result
     }
 
     #[cfg(test)]
@@ -543,7 +743,9 @@ impl NativeAcquisition {
             observation: Rc::new(Cell::new(OriginalObservation {
                 latest: origin,
                 refused: false,
+                app_authentication_active: false,
             })),
+            owner_refusal: Rc::new(OnceCell::new()),
             deadline: origin + limit,
             valid: true,
             local: PhantomData,
@@ -598,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn app_serving_keeps_original_thirty_seconds_and_authentication_first_five() {
+    fn app_serving_keeps_original_thirty_seconds_and_role_authentication_first_five() {
         assert_eq!(APP_SERVING_LIMIT, Duration::from_secs(30));
         assert_eq!(MAX_ACQUISITION, Duration::from_secs(5));
         assert_eq!(STORAGE_BOOTSTRAP_LIMIT, Duration::from_secs(60));
@@ -629,7 +831,7 @@ mod tests {
         assert!(retained.sample().is_err());
         parent.fixture_time = Some(Duration::from_secs(101));
         assert!(parent.sample().is_err());
-        // A late provider-authentication attempt cannot restart its window.
+        // A late ROLE-authentication attempt cannot restart its window.
         let mut late = storage_fixture(AcquisitionScope::AppServing);
         late.fixture_time = Some(Duration::from_secs(105));
         assert!(late.narrow_authentication().is_err());
@@ -638,25 +840,313 @@ mod tests {
     }
 
     #[test]
-    fn app_provider_authentication_preserves_shorter_signed_ceilings() {
-        for seconds in [1, 3, 5, 30] {
-            let mut parent = storage_fixture(AcquisitionScope::AppServing);
-            let mut child = parent
-                .narrow_app_serving_authentication(Duration::from_secs(100 + seconds))
-                .unwrap();
-            assert_eq!(child.origin, Duration::from_secs(100));
-            assert_eq!(child.deadline, Duration::from_secs(100 + seconds.min(5)));
-            child.fixture_time = Some(child.deadline);
-            assert!(child.sample().is_err());
-            assert!(parent.sample().is_err());
-        }
-        let mut wrong = storage_fixture(AcquisitionScope::Current);
+    fn app_provider_authentication_has_a_new_work_bound_inside_the_original() {
+        let mut parent = storage_fixture(AcquisitionScope::AppServing);
+        let owner = Rc::new(Cell::new(false));
+        parent.fixture_time = Some(Duration::from_secs(106));
+        let mut work = parent
+            .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+            .unwrap();
+        assert_eq!(work.started, Duration::from_secs(106));
+        assert_eq!(work.acquisition.origin, Duration::from_secs(100));
+        assert_eq!(work.acquisition.deadline, Duration::from_secs(111));
+        assert_eq!(parent.deadline, Duration::from_secs(130));
+        work.acquisition.fixture_time = Some(Duration::from_secs(108));
+        parent.fixture_time = work.acquisition.fixture_time;
+        work.complete(&mut parent, Duration::from_secs(130), 60, &owner)
+            .unwrap();
+        assert!(!owner.get());
+        assert_eq!(parent.origin, Duration::from_secs(100));
+        assert_eq!(parent.observation.get().latest, Duration::from_secs(108));
+        let io = parent.narrow(60, Duration::from_secs(130)).unwrap();
+        assert_eq!(io.origin, Duration::from_secs(100));
+        assert_eq!(io.deadline, Duration::from_secs(130));
+    }
+
+    #[test]
+    fn app_provider_authentication_cannot_replace_an_inflight_phase() {
+        let mut parent = storage_fixture(AcquisitionScope::AppServing);
+        let owner = Rc::new(Cell::new(false));
+        parent.fixture_time = Some(Duration::from_secs(106));
+        let mut first = parent
+            .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+            .unwrap();
+        parent.fixture_time = Some(Duration::from_secs(107));
         assert!(
-            wrong
-                .narrow_app_serving_authentication(Duration::from_secs(105))
+            parent
+                .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
                 .is_err()
         );
-        assert!(wrong.sample().is_err());
+        assert!(owner.get());
+        first.acquisition.fixture_time = Some(Duration::from_secs(107));
+        assert!(first.acquisition.sample().is_err());
+        assert!(
+            first
+                .complete(&mut parent, Duration::from_secs(130), 60, &owner)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn app_provider_work_cannot_be_extracted_as_owned_native_io() {
+        // Controlled clock/refusal DATA only; this constructs no enrolled role,
+        // provider credential, storage facade or successful authentication.
+        let mut parent = storage_fixture(AcquisitionScope::AppServing);
+        let owner = Rc::new(Cell::new(false));
+        parent.fixture_time = Some(Duration::from_secs(106));
+        let work = parent
+            .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+            .unwrap();
+        let carrier = crate::security_epoch::authenticated_reads::ProviderAcquisition::app(work);
+        assert!(carrier.into_native().is_err());
+        assert!(owner.get());
+        assert!(parent.sample().is_err());
+        assert!(
+            parent
+                .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn app_authentication_binds_refusal_of_views_created_before_authentication() {
+        for completed in [false, true] {
+            for failure in ["explicit", "expiry", "rewind"] {
+                let mut parent = storage_fixture(AcquisitionScope::AppServing);
+                let owner = Rc::new(Cell::new(false));
+                // The real peer-preparation path can derive an I/O view before
+                // the later volume/provider authentication binds its owner.
+                let mut older = parent.narrow(60, Duration::from_secs(130)).unwrap();
+                parent.fixture_time = Some(Duration::from_secs(106));
+                let mut work = Some(
+                    parent
+                        .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                        .unwrap(),
+                );
+                if completed {
+                    work.as_mut().unwrap().acquisition.fixture_time =
+                        Some(Duration::from_secs(108));
+                    parent.fixture_time = Some(Duration::from_secs(108));
+                    work.take()
+                        .unwrap()
+                        .complete(&mut parent, Duration::from_secs(130), 60, &owner)
+                        .unwrap();
+                }
+                match failure {
+                    "explicit" => older.refuse(),
+                    "expiry" => {
+                        older.fixture_time = Some(Duration::from_secs(130));
+                        assert!(older.sample().is_err());
+                    }
+                    "rewind" => {
+                        older.fixture_time = Some(Duration::from_secs(105));
+                        assert!(older.sample().is_err());
+                    }
+                    _ => unreachable!(),
+                }
+                // Check BEFORE sampling the parent or dropping unfinished work:
+                // either would mask a missing immediate owner-refusal binding.
+                assert!(owner.get(), "completed={completed}, failure={failure}");
+                assert!(parent.sample().is_err());
+                drop(work);
+            }
+        }
+    }
+
+    #[test]
+    fn app_provider_authentication_separate_completed_work_keeps_same_parent() {
+        let mut parent = storage_fixture(AcquisitionScope::AppServing);
+        let owner = Rc::new(Cell::new(false));
+        for (start, finish, deadline) in [(106, 108, 111), (109, 110, 114)] {
+            parent.fixture_time = Some(Duration::from_secs(start));
+            let mut work = parent
+                .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                .unwrap();
+            assert_eq!(work.acquisition.deadline, Duration::from_secs(deadline));
+            work.acquisition.fixture_time = Some(Duration::from_secs(finish));
+            parent.fixture_time = work.acquisition.fixture_time;
+            work.complete(&mut parent, Duration::from_secs(130), 60, &owner)
+                .unwrap();
+            assert_eq!(parent.origin, Duration::from_secs(100));
+            assert_eq!(parent.deadline, Duration::from_secs(130));
+            assert!(!parent.observation.get().app_authentication_active);
+            assert!(!owner.get());
+        }
+    }
+
+    #[test]
+    fn app_provider_authentication_preserves_shorter_original_caps() {
+        // Expected absolute deadlines are independent scenario DATA, not a
+        // second copy of the production min/start arithmetic.
+        for (start, lease, signed, expected) in [
+            (106, 60, 130, 111),
+            (128, 60, 130, 130),
+            (106, 60, 109, 109),
+            (106, 9, 130, 109),
+            (106, 60, 160, 111),
+        ] {
+            let mut parent = storage_fixture(AcquisitionScope::AppServing);
+            let owner = Rc::new(Cell::new(false));
+            parent.fixture_time = Some(Duration::from_secs(start));
+            let mut work = parent
+                .begin_app_authentication(lease, Duration::from_secs(signed), Rc::clone(&owner))
+                .unwrap();
+            assert_eq!(work.acquisition.deadline, Duration::from_secs(expected));
+            assert_eq!(work.acquisition.origin, Duration::from_secs(100));
+            work.acquisition.fixture_time = Some(Duration::from_secs(expected));
+            assert!(work.acquisition.sample().is_err());
+            // Refusal reaches the actual owner's latch before completion/drop.
+            assert!(owner.get());
+            parent.fixture_time = Some(Duration::from_secs(start));
+            assert!(parent.sample().is_err());
+            drop(work);
+            assert!(
+                parent
+                    .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn app_provider_authentication_rejects_non_app_purposes_and_expired_caps() {
+        for scope in [
+            AcquisitionScope::Current,
+            AcquisitionScope::InitialFirstHolder,
+            AcquisitionScope::StorageBootstrap,
+            AcquisitionScope::StorageMetadataObservation,
+        ] {
+            let mut parent = storage_fixture(scope);
+            let owner = Rc::new(Cell::new(false));
+            assert!(
+                parent
+                    .begin_app_authentication(60, Duration::from_secs(160), Rc::clone(&owner))
+                    .is_err()
+            );
+            assert!(owner.get());
+            assert!(parent.sample().is_err());
+        }
+        for (lease, signed) in [(5, 130), (60, 106), (0, 130), (61, 130)] {
+            let mut parent = storage_fixture(AcquisitionScope::AppServing);
+            let owner = Rc::new(Cell::new(false));
+            parent.fixture_time = Some(Duration::from_secs(106));
+            assert!(
+                parent
+                    .begin_app_authentication(lease, Duration::from_secs(signed), Rc::clone(&owner))
+                    .is_err()
+            );
+            assert!(owner.get());
+            assert!(parent.sample().is_err());
+        }
+    }
+
+    #[test]
+    fn app_provider_authentication_drop_and_nested_refusal_are_permanent() {
+        for failure in [
+            "abandon",
+            "nested-expiry",
+            "rewind",
+            "process",
+            "parent-expiry",
+        ] {
+            let mut parent = storage_fixture(AcquisitionScope::AppServing);
+            let owner = Rc::new(Cell::new(false));
+            parent.fixture_time = Some(Duration::from_secs(106));
+            let mut work = parent
+                .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                .unwrap();
+            match failure {
+                "abandon" => {}
+                "nested-expiry" => {
+                    let mut nested = work
+                        .acquisition()
+                        .narrow(60, Duration::from_secs(130))
+                        .unwrap();
+                    assert_eq!(nested.deadline, Duration::from_secs(111));
+                    nested.fixture_time = Some(Duration::from_secs(111));
+                    assert!(nested.sample().is_err());
+                    assert!(owner.get());
+                }
+                "rewind" => {
+                    work.acquisition.fixture_time = Some(Duration::from_secs(105));
+                    assert!(work.acquisition.sample().is_err());
+                    assert!(owner.get());
+                }
+                "process" => {
+                    work.acquisition.process = std::process::id().wrapping_add(1);
+                    assert!(work.acquisition.sample().is_err());
+                    assert!(owner.get());
+                }
+                "parent-expiry" => {
+                    parent.fixture_time = Some(Duration::from_secs(130));
+                    assert!(parent.sample().is_err());
+                    assert!(owner.get());
+                }
+                _ => unreachable!(),
+            }
+            drop(work);
+            assert!(owner.get());
+            parent.fixture_time = Some(Duration::from_secs(106));
+            assert!(parent.sample().is_err());
+            assert!(
+                parent
+                    .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn app_provider_authentication_completion_rejects_wrong_owner_and_provenance() {
+        for fault in [
+            "owner",
+            "original",
+            "domain",
+            "origin",
+            "purpose",
+            "signed",
+            "lease",
+            "expiry",
+            "parent-refusal",
+        ] {
+            let mut parent = storage_fixture(AcquisitionScope::AppServing);
+            let owner = Rc::new(Cell::new(false));
+            parent.fixture_time = Some(Duration::from_secs(106));
+            let mut work = parent
+                .begin_app_authentication(60, Duration::from_secs(130), Rc::clone(&owner))
+                .unwrap();
+            let mut completion_owner = Rc::clone(&owner);
+            let mut signed = Duration::from_secs(130);
+            let mut lease = 60;
+            match fault {
+                "owner" => completion_owner = Rc::new(Cell::new(false)),
+                "original" => {
+                    parent.observation = Rc::new(Cell::new(OriginalObservation {
+                        latest: Duration::from_secs(106),
+                        refused: false,
+                        app_authentication_active: true,
+                    }))
+                }
+                "domain" => parent.domain = Digest::new(b"foreign-auth-domain"),
+                "origin" => parent.origin = Duration::from_secs(101),
+                "purpose" => parent.scope = AcquisitionScope::StorageBootstrap,
+                "signed" => signed = Duration::from_secs(131),
+                "lease" => lease = 59,
+                "expiry" => {
+                    work.acquisition.fixture_time = Some(Duration::from_secs(111));
+                    parent.fixture_time = work.acquisition.fixture_time;
+                }
+                "parent-refusal" => parent.refuse(),
+                _ => unreachable!(),
+            }
+            assert!(
+                work.complete(&mut parent, signed, lease, &completion_owner)
+                    .is_err(),
+                "{fault}"
+            );
+            assert!(owner.get(), "{fault}");
+            assert!(parent.sample().is_err(), "{fault}");
+        }
     }
 
     #[test]

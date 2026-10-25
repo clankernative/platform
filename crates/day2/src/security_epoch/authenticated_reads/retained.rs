@@ -3,7 +3,7 @@
 //! No parsed identity, renewed role, token alone or mutable caller callback can
 //! construct this owner. Its short I/O borrow remains read-only.
 
-use super::{AuthenticatedReads, ReadScope};
+use super::{AuthenticatedReads, ProviderAcquisition, ReadScope};
 use crate::security_epoch::{
     controller::preparation_timing::{Operation, Timings},
     credential_material::CredentialMaterial,
@@ -13,7 +13,7 @@ use crate::security_epoch::{
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
     security_epoch::{
@@ -167,6 +167,7 @@ const _: () = {
             assert_not_impl!($type, Sync);
         };
     }
+    assert_local_material!(ProviderAcquisition);
     assert_local_material!(ControllerEpochReads);
     assert_local_material!(ProviderEpochReads);
     assert_local_material!(RefusalGuard);
@@ -235,7 +236,7 @@ impl AuthenticatedReads<'_, '_> {
 
     fn retain_scoped(mut self, expected: ReadScope) -> Result<RetainedEpochReads> {
         if self.scope != expected {
-            self.acquisition.refuse();
+            self.acquisition.acquisition().refuse();
             anyhow::bail!("epoch_native_retained_purpose_changed");
         }
         self.sample()?;
@@ -257,12 +258,16 @@ impl AuthenticatedReads<'_, '_> {
             ..
         } = self;
         let acquisition = match scope {
-            ReadScope::Current => acquisition,
-            ReadScope::AppServing
-            | ReadScope::StorageBootstrap
-            | ReadScope::StorageMetadataObservation => stage
-                .storage()?
-                .complete_storage_authentication(acquisition, store.max_lease_seconds)?,
+            ReadScope::Current => acquisition.into_native()?,
+            ReadScope::AppServing => acquisition
+                .complete_app(stage.storage()?, store.max_lease_seconds)
+                .context("epoch_app_provider_authentication_complete")?,
+            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
+                stage.storage()?.complete_storage_authentication(
+                    acquisition.into_native()?,
+                    store.max_lease_seconds,
+                )?
+            }
         };
         Ok(RetainedEpochReads {
             scope,
@@ -674,6 +679,211 @@ mod shared_gate_tests {
             );
             assert!(gate.enter().is_err());
             assert!(gate.guard().is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod app_authentication_boundary_tests {
+    use syn::visit::Visit;
+
+    fn method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                let syn::Type::Path(kind) = &*item.self_ty else {
+                    return None;
+                };
+                if kind.path.segments.last()?.ident != owner {
+                    return None;
+                }
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+                    _ => None,
+                })
+            })
+            .unwrap()
+    }
+
+    #[derive(Default)]
+    struct Calls(Vec<syn::ExprMethodCall>);
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0.push(call.clone());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    fn field(expr: &syn::Expr, owner: &str, member: &str) -> bool {
+        matches!(expr, syn::Expr::Field(value)
+            if matches!(&*value.base, syn::Expr::Path(path) if path.path.is_ident(owner))
+            && matches!(&value.member, syn::Member::Named(name) if name == member))
+    }
+
+    // A finite caller-wiring guard: the clock's behavioral tests exercise the
+    // actual interval/refusal rules. This checks these two native entrypoints
+    // capture that opaque interval before their first policy/native operation.
+    fn begins_at_entry(method: &syn::ImplItemFn, selection: &str) -> bool {
+        let Some(syn::Stmt::Local(local)) = method.block.stmts.first() else {
+            return false;
+        };
+        if !matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "app_authentication") {
+            return false;
+        }
+        let Some(initializer) = &local.init else {
+            return false;
+        };
+        let mut initial = Calls::default();
+        initial.visit_expr(&initializer.expr);
+        let mut all = Calls::default();
+        all.visit_block(&method.block);
+        let named = |call: &&syn::ExprMethodCall| call.method == "begin_app_authentication";
+        let calls: Vec<_> = initial.0.iter().filter(named).collect();
+        calls.len() == 1
+            && all.0.iter().filter(named).count() == 1
+            && matches!(&*calls[0].receiver, syn::Expr::Path(path) if path.path.is_ident("stage"))
+            && calls[0].args.len() == 1
+            && field(&calls[0].args[0], selection, "max_lease_seconds")
+    }
+
+    fn app_arm_consumes_work(method: &syn::ImplItemFn) -> bool {
+        struct Arms(bool);
+        impl<'ast> Visit<'ast> for Arms {
+            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+                let app = matches!(&arm.pat, syn::Pat::Path(path)
+                    if path.path.segments.last().is_some_and(|s| s.ident == "AppServing"));
+                if app {
+                    let mut calls = Calls::default();
+                    calls.visit_expr(&arm.body);
+                    let complete: Vec<_> = calls
+                        .0
+                        .iter()
+                        .filter(|c| c.method == "complete_app")
+                        .collect();
+                    self.0 = complete.len() == 1
+                        && complete[0].args.len() == 2
+                        && matches!(&*complete[0].receiver, syn::Expr::Path(path) if path.path.is_ident("acquisition"))
+                        && field(&complete[0].args[1], "store", "max_lease_seconds")
+                        && !calls
+                            .0
+                            .iter()
+                            .any(|c| c.method == "complete_storage_authentication");
+                }
+                syn::visit::visit_arm(self, arm);
+            }
+        }
+        let mut arms = Arms(false);
+        arms.visit_block(&method.block);
+        arms.0
+    }
+
+    fn adapter_consumes_work(method: &syn::ImplItemFn) -> bool {
+        struct Arms(bool);
+        impl<'ast> Visit<'ast> for Arms {
+            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+                let app = matches!(&arm.pat, syn::Pat::TupleStruct(value)
+                    if value.path.segments.last().is_some_and(|s| s.ident == "App"));
+                if app {
+                    let mut calls = Calls::default();
+                    calls.visit_expr(&arm.body);
+                    self.0 = calls.0.len() == 1
+                        && calls.0[0].method == "complete_app_authentication"
+                        && matches!(&*calls.0[0].receiver, syn::Expr::Path(path) if path.path.is_ident("stage"))
+                        && calls.0[0].args.len() == 2
+                        && matches!(&calls.0[0].args[0], syn::Expr::Path(path) if path.path.is_ident("authentication"))
+                        && matches!(&calls.0[0].args[1], syn::Expr::Path(path) if path.path.is_ident("max_lease_seconds"));
+                }
+                syn::visit::visit_arm(self, arm);
+            }
+        }
+        let mut arms = Arms(false);
+        arms.visit_block(&method.block);
+        arms.0
+    }
+
+    #[test]
+    fn actual_app_provider_entrypoints_capture_before_native_work() {
+        for (source, owner, name, selection) in [
+            (
+                include_str!("../authenticated_reads.rs"),
+                "AuthenticatedReads",
+                "acquire_scoped",
+                "selection",
+            ),
+            (
+                include_str!("../storage_authority/native_volume.rs"),
+                "ProviderReader",
+                "acquire",
+                "store",
+            ),
+        ] {
+            let actual = method(source, owner, name);
+            assert!(begins_at_entry(&actual, selection));
+            let mut late = actual.clone();
+            late.block.stmts.swap(0, 1);
+            assert!(
+                !begins_at_entry(&late, selection),
+                "late work-window capture must be rejected"
+            );
+            let mut foreign = actual;
+            let syn::Stmt::Local(local) = &mut foreign.block.stmts[0] else {
+                unreachable!()
+            };
+            local.init.as_mut().unwrap().expr =
+                Box::new(syn::parse_str("stage.begin_app_authentication(30)?").unwrap());
+            assert!(
+                !begins_at_entry(&foreign, selection),
+                "selected original lease cannot be replaced with a scalar"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_app_provider_completion_consumes_the_opaque_work_owner() {
+        let source = include_str!("../authenticated_reads.rs");
+        assert!(adapter_consumes_work(&method(
+            source,
+            "ProviderAcquisition",
+            "complete_app"
+        )));
+        let restored = source.replace(
+            "stage.complete_app_authentication(authentication, max_lease_seconds)",
+            "stage.complete_storage_authentication(authentication, max_lease_seconds)",
+        );
+        assert_ne!(source, restored);
+        assert!(!adapter_consumes_work(&method(
+            &restored,
+            "ProviderAcquisition",
+            "complete_app"
+        )));
+        for (source, owner, name) in [
+            (
+                include_str!("retained.rs"),
+                "AuthenticatedReads",
+                "retain_scoped",
+            ),
+            (
+                include_str!("../storage_authority/native_volume.rs"),
+                "ProviderReader",
+                "acquire",
+            ),
+        ] {
+            assert!(app_arm_consumes_work(&method(source, owner, name)));
+            let restored = source.replace(
+                ".complete_app(stage.storage()?, store.max_lease_seconds)",
+                ".complete_storage_authentication(stage.storage()?, store.max_lease_seconds)",
+            );
+            assert_ne!(source, restored);
+            assert!(
+                !app_arm_consumes_work(&method(&restored, owner, name)),
+                "old first-prefix completion cannot replace the opaque work completion"
+            );
         }
     }
 }

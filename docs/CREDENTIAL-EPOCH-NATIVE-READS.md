@@ -27,9 +27,21 @@ renew an existing request, human original or signed grant.
 App-serving reads require the separate signed `AppServing` purpose and its
 same-origin thirty-second ceiling: **temporary, user decision 2026-10-25, revert
 after 3 measurement runs**. Generic Current and Shell retain their five-second
-bounds. Shorter leases, signed ceilings and individual HTTP timeouts still
-narrow the caller's original interval. See the
-[scope and rollback rules](NATIVE-HANDSHAKE-SIMULATION.md).
+bounds.
+Role authentication still finishes within the first five seconds of that
+original. Each distinct App provider-authentication operation captures one
+opaque, at-most-five-second work window immediately before its first native
+check. Its deadline is also bounded by the original App parent, signed purpose
+and selected lease; it retains that parent's origin, domain, process and sticky
+refusal. An expired or dropped work owner cannot be reopened or replaced, and
+only the same actual enrolled owner can consume it before deriving the retained
+I/O view from the original parent.
+This does not renew the App grant. Generic Current, Shell, storage-bootstrap and
+metadata-observation authentication keep their existing first-prefix bounds.
+Shorter leases, signed ceilings and individual HTTP timeouts still narrow the
+caller's original interval. See the
+[scope and rollback rules](NATIVE-HANDSHAKE-SIMULATION.md). A failed request, clock rewind, process change or selected
+resource mismatch refuses the owning acquisition. There is no renewal.
 
 The process observer retains `/proc/self/exe`, hashes its actual bytes and
 checks the original descriptor and current executable identity at full admission.

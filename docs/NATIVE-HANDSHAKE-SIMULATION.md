@@ -90,10 +90,16 @@ sixty-second ceilings only strictly before expiry and rejects sixty-one- and
 generic Current and Shell serving keep their five-second limit. App-serving
 controls independently admit at most thirty seconds, refuse equality and
 cross-purpose substitution, and preserve shorter configured/signed ceilings.
-Authentication remains the first five seconds of the same App-serving origin:
-late role/provider authentication refuses instead of starting a new window.
-Successful authentication is consumed before deriving the longer retained I/O
-view; the authentication child itself is never widened. These are controlled
+Role authentication remains within the first five seconds of the same original;
+late role authentication refuses. Each distinct App provider-authentication
+operation instead captures an opaque work phase before its first native guard.
+Its own work lasts at most five seconds, also capped by the original App parent,
+signed deadline and configured lease measured from that original origin. An
+in-flight phase cannot be replaced, and expiry or abandonment permanently refuses
+the owning acquisition. The actual same owner must consume successful work before
+deriving retained I/O from its unchanged parent; the authentication clock itself
+is never widened. Generic Current, Shell, storage-bootstrap and metadata
+authentication retain their existing first-prefix bounds. These are controlled
 DATA observations, not evidence of native completion or the required live margin.
 
 The independent oracle records the accepted prefix of a separately specified

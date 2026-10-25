@@ -669,7 +669,7 @@ impl AppCreator<'_> {
                 };
                 participant.prepare_current()?;
                 let mut role = owners.role.try_borrow_mut()?;
-                let mut stage = role.begin_current_stage()?;
+                let mut stage = role.begin_app_serving_stage()?;
                 stage.check_selection(
                     &owners.selection.policy,
                     &owners.selection.store,
@@ -2264,6 +2264,82 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_and_autonomous_stage_calls(source: &str) -> [usize; 4] {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            app: usize,
+            current: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                self.app += usize::from(node.method == "begin_app_serving_stage");
+                self.current += usize::from(node.method == "begin_current_stage");
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+
+        let source = syn::parse_file(source).unwrap();
+        let mut pending = Vec::new();
+        let mut autonomous = Vec::new();
+        for item in &source.items {
+            match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                        if path.path.segments.last().is_some_and(|part| part.ident == "AppCreator")) =>
+                {
+                    for method in &item.items {
+                        if let syn::ImplItem::Fn(method) = method
+                            && method.sig.ident == "with_pending"
+                        {
+                            pending.push(&method.block);
+                        }
+                    }
+                }
+                syn::Item::Fn(item) if item.sig.ident == "with_current_app_role" => {
+                    autonomous.push(item.block.as_ref());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(pending.len(), 1);
+        assert_eq!(autonomous.len(), 1);
+        let mut pending_calls = Calls::default();
+        pending_calls.visit_block(pending[0]);
+        let mut autonomous_calls = Calls::default();
+        autonomous_calls.visit_block(autonomous[0]);
+        [
+            pending_calls.app,
+            pending_calls.current,
+            autonomous_calls.app,
+            autonomous_calls.current,
+        ]
+    }
+
+    #[test]
+    fn pending_capture_selects_app_serving_without_widening_autonomous_role() {
+        assert_eq!(
+            pending_and_autonomous_stage_calls(include_str!("native_management.rs")),
+            [1, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn pending_capture_stage_guard_rejects_the_original_purpose_mismatch() {
+        let source = include_str!("native_management.rs");
+        let marker = "impl AppCreator<'_> {";
+        let (before, creator) = source.split_once(marker).unwrap();
+        let (pending, after) = creator.split_once("    /// Called once AFTER").unwrap();
+        let original = "role.begin_app_serving_stage()";
+        assert_eq!(pending.matches(original).count(), 1);
+        let restored = format!(
+            "{before}{marker}{}    /// Called once AFTER{after}",
+            pending.replacen(original, "role.begin_current_stage()", 1)
+        );
+        assert_ne!(pending_and_autonomous_stage_calls(&restored), [1, 0, 0, 1]);
+    }
 
     #[test]
     fn prerequisite_only_selection_cannot_capture_or_consume_an_original() -> Result<()> {

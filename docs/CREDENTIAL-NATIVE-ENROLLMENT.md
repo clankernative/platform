@@ -547,8 +547,13 @@ Neither this setup nor the current-operation wakeup renews an old acquisition,
 human original, failed operation or permission. Generic Current and Shell stage
 limits remain five seconds. App/Controller serving instead requires the exact
 signed `AppServing` purpose: **temporary, user decision 2026-10-25, revert after
-3 measurement runs**. Its original ceiling is thirty seconds; role and provider
-authentication still consume the first five seconds of that same original.
+3 measurement runs**. Its original ceiling is thirty seconds; role authentication
+still consumes the first five seconds of that same original. A distinct App
+provider-authentication operation captures a private work phase before its first
+native guard, bounded to five seconds of its own work and every shorter original
+parent, signed and selected-lease ceiling. It retains the actual parent's clock
+domain, origin and permanent refusal; it cannot replace an unfinished or failed
+phase, renew the grant or widen an authentication clock into an I/O clock.
 See [the bound and rollback rules](NATIVE-HANDSHAKE-SIMULATION.md).
 All provider/consumer checks remain in force. These are source and
 protocol properties; real-node timing and the complete OAuth lifecycle still

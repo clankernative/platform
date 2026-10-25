@@ -6,8 +6,8 @@ use super::{
     credential_material::CredentialMaterial,
     firestore::Sample,
     identity_protocol,
-    native_clock::NativeAcquisition,
-    native_enrollment::{EnrolledRoleStage, StagePurpose},
+    native_clock::{AppAuthentication, NativeAcquisition},
+    native_enrollment::{EnrolledRoleStage, EnrolledStorageStage, StagePurpose},
     native_identity::NativeProcessObservation,
     transport::{NativeHttp, Route},
 };
@@ -41,10 +41,69 @@ pub(crate) struct AuthenticatedReads<'stage, 'role> {
     credential: CredentialMaterial,
     source: CredentialMaterial,
     kubernetes: CredentialMaterial,
-    acquisition: NativeAcquisition,
+    acquisition: ProviderAcquisition,
     process: NativeProcessObservation,
     selection: Digest,
     valid: bool,
+}
+
+// Internal clock carrier only. An App work window cannot be converted into an
+// owned I/O clock here: only its actual stage may consume its opaque marker.
+pub(super) struct ProviderAcquisition {
+    clock: ProviderClock,
+}
+
+enum ProviderClock {
+    Native(NativeAcquisition),
+    App(AppAuthentication),
+}
+
+impl ProviderAcquisition {
+    pub(super) fn native(acquisition: NativeAcquisition) -> Self {
+        Self {
+            clock: ProviderClock::Native(acquisition),
+        }
+    }
+
+    pub(super) fn app(authentication: AppAuthentication) -> Self {
+        Self {
+            clock: ProviderClock::App(authentication),
+        }
+    }
+
+    pub(super) fn acquisition(&mut self) -> &mut NativeAcquisition {
+        match &mut self.clock {
+            ProviderClock::Native(acquisition) => acquisition,
+            ProviderClock::App(authentication) => authentication.acquisition(),
+        }
+    }
+
+    pub(super) fn complete_app(
+        self,
+        mut stage: EnrolledStorageStage<'_, '_>,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        match self.clock {
+            ProviderClock::App(authentication) => {
+                stage.complete_app_authentication(authentication, max_lease_seconds)
+            }
+            ProviderClock::Native(mut acquisition) => {
+                acquisition.refuse();
+                stage.refuse_app_authentication();
+                anyhow::bail!("epoch_native_app_authentication_provenance_changed")
+            }
+        }
+    }
+
+    pub(super) fn into_native(self) -> Result<NativeAcquisition> {
+        match self.clock {
+            ProviderClock::Native(acquisition) => Ok(acquisition),
+            ProviderClock::App(mut authentication) => {
+                authentication.acquisition().refuse();
+                anyhow::bail!("epoch_native_authentication_provenance_changed")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,7 +153,10 @@ impl ReadScope {
         self.require(stage)?;
         match self {
             Self::Current => stage.narrow_io_acquisition(max_lease_seconds),
-            Self::AppServing | Self::StorageBootstrap | Self::StorageMetadataObservation => {
+            Self::AppServing => {
+                anyhow::bail!("epoch_app_authentication_must_start_at_entry")
+            }
+            Self::StorageBootstrap | Self::StorageMetadataObservation => {
                 let mut child = stage.storage()?.narrow_storage_authentication()?;
                 let (_, ceiling) = child.interval_data()?;
                 child.narrow(max_lease_seconds, ceiling)
@@ -209,6 +271,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         stage: &'stage mut EnrolledRoleStage<'role>,
     ) -> Result<Self> {
         Self::acquire_scoped(policy, selection, purpose, stage, ReadScope::AppServing)
+            .context("epoch_app_provider_authentication")
     }
 
     pub(super) fn acquire_storage_bootstrap(
@@ -247,6 +310,18 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         stage: &'stage mut EnrolledRoleStage<'role>,
         scope: ReadScope,
     ) -> Result<Self> {
+        // Capture before policy validation, the first native guard, or any
+        // credential/provider work. The opaque window keeps the original App
+        // parent and selected ceilings; starting it cannot renew an old grant.
+        let app_authentication = if scope == ReadScope::AppServing {
+            Some(
+                stage
+                    .begin_app_authentication(selection.max_lease_seconds)
+                    .context("epoch_app_provider_authentication_begin")?,
+            )
+        } else {
+            None
+        };
         policy.validate(&BTreeMap::from([(
             policy.epoch_store.id.clone(),
             selection.clone(),
@@ -263,15 +338,20 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         let role = selected.workload;
         // The native executable pin must come from the selected admitted profile;
         // matching it alone does not qualify the full deployment/profile/image.
-        let mut acquisition = scope.authentication(guard.stage, selection.max_lease_seconds)?;
+        let mut acquisition = match app_authentication {
+            Some(authentication) => ProviderAcquisition::app(authentication),
+            None => ProviderAcquisition::native(
+                scope.authentication(guard.stage, selection.max_lease_seconds)?,
+            ),
+        };
         let process = NativeProcessObservation::acquire(
             selected.code,
-            &mut acquisition,
+            acquisition.acquisition(),
             &HashCosts::disabled(),
         )?;
         guard.check()?;
         let mut ca = Vec::new();
-        acquisition.remaining()?;
+        acquisition.acquisition().remaining()?;
         let ca_file = std::fs::File::from(rustix::fs::open(
             "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
@@ -283,11 +363,11 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
         );
         ca_file.take(65_537).read_to_end(&mut ca)?;
         guard.check()?;
-        acquisition.remaining()?;
+        acquisition.acquisition().remaining()?;
         let mut http = NativeHttp::new(selection, &policy.cluster, &ca)?;
-        acquisition.remaining()?;
+        acquisition.acquisition().remaining()?;
         guard.check()?;
-        let source = CredentialMaterial::metadata_source(&mut acquisition)?;
+        let source = CredentialMaterial::metadata_source(acquisition.acquisition())?;
         guard.check()?;
         identity_protocol::project(
             selection,
@@ -296,16 +376,16 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 Route::Project,
                 &source.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?;
         // Establish the authenticated current recipient before reading or
         // sending either Kubernetes projection. Transport enforces this order.
-        http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)?;
+        http.verify_cluster(&ca, &source.authorization()?, acquisition.acquisition())?;
         guard.check()?;
-        let api = CredentialMaterial::kubernetes_api(&mut acquisition)?;
+        let api = CredentialMaterial::kubernetes_api(acquisition.acquisition())?;
         guard.check()?;
-        let subject = CredentialMaterial::subject(&mut acquisition)?;
+        let subject = CredentialMaterial::subject(acquisition.acquisition())?;
         guard.check()?;
         let request = Zeroizing::new(serde_json::to_vec(&serde_json::json!({
             "apiVersion":"authentication.k8s.io/v1","kind":"TokenReview",
@@ -316,7 +396,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             Route::TokenReview,
             &api.authorization()?,
             Some(&request),
-            &mut acquisition,
+            acquisition.acquisition(),
         )?);
         let reviewed = identity_protocol::token_review(role, &response)?;
         let ns = &role.namespace.name;
@@ -327,7 +407,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 Route::Namespace(ns),
                 &api.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?;
         identity_protocol::service_account(
@@ -340,7 +420,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 },
                 &api.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?;
         let (_, owner) = identity_protocol::pod(
@@ -354,7 +434,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 },
                 &api.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?
         .into_parts();
@@ -371,7 +451,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                     },
                     &api.authorization()?,
                     None,
-                    &mut acquisition,
+                    acquisition.acquisition(),
                 )?,
             ),
             WorkloadKind::StatefulSetV1 => None,
@@ -390,7 +470,13 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             role,
             &owner,
             replica.as_deref(),
-            &guard.request(&http, route, &api.authorization()?, None, &mut acquisition)?,
+            &guard.request(
+                &http,
+                route,
+                &api.authorization()?,
+                None,
+                acquisition.acquisition(),
+            )?,
         )?;
         identity_protocol::google_service_account(
             &role.google_service_account,
@@ -400,14 +486,14 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 Route::GoogleAccount(&role.google_service_account),
                 &source.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?;
         let credential = CredentialMaterial::mint_target(
             &source,
             &role.google_service_account,
             &http,
-            &mut acquisition,
+            acquisition.acquisition(),
         )?;
         guard.check()?;
         identity_protocol::database(
@@ -417,7 +503,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
                 Route::Database,
                 &credential.authorization()?,
                 None,
-                &mut acquisition,
+                acquisition.acquisition(),
             )?,
         )?;
         let mut reads = Self {
@@ -435,7 +521,7 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             selection: Digest::of(selection)?,
             valid: true,
         };
-        reads.process.check(&mut reads.acquisition)?;
+        reads.process.check(reads.acquisition.acquisition())?;
         reads
             .scope
             .check_selection(reads.stage, policy, selection, purpose)?;
@@ -447,15 +533,15 @@ impl<'stage, 'role> AuthenticatedReads<'stage, 'role> {
             ensure!(self.valid, "epoch_native_read_refused");
             self.scope
                 .check_selection(self.stage, &self.policy, &self.store, self.purpose)?;
-            self.process.check(&mut self.acquisition)?;
-            let sample = self.acquisition.sample()?;
+            self.process.check(self.acquisition.acquisition())?;
+            let sample = self.acquisition.acquisition().sample()?;
             self.scope
                 .check_selection(self.stage, &self.policy, &self.store, self.purpose)?;
             Ok(sample)
         })();
         if result.is_err() {
             self.valid = false;
-            self.acquisition.refuse();
+            self.acquisition.acquisition().refuse();
         }
         result
     }

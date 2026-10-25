@@ -8,7 +8,8 @@ use crate::security_epoch::controller::evidence::{PreparationFailure, Preparatio
 use crate::security_epoch::controller::preparation_timing::{Operation, Timings};
 use crate::security_epoch::{
     authenticated_reads::{
-        ControllerEpochReads, ProviderEpochReads, RefusalGuard, StorageMetadataRead,
+        ControllerEpochReads, ProviderAcquisition, ProviderEpochReads, RefusalGuard,
+        StorageMetadataRead,
     },
     credential_material::CredentialMaterial,
     identity_protocol,
@@ -142,36 +143,48 @@ impl<'role> ProviderReader<'role> {
         timings: Timings,
         purpose: StagePurpose,
     ) -> Result<Self> {
+        // This is a distinct bounded authentication operation. Capture its
+        // opaque App work window before the first native guard, while keeping
+        // the actual parent origin, signed purpose and original lease cap.
+        let app_authentication = if purpose == StagePurpose::AppServing {
+            Some(
+                stage
+                    .begin_app_authentication(store.max_lease_seconds)
+                    .context("storage_app_provider_authentication_begin")?,
+            )
+        } else {
+            None
+        };
         stage.require_purpose(purpose)?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let mut acquisition = match purpose {
-            StagePurpose::CurrentRole => stage.narrow_io_acquisition(store.max_lease_seconds)?,
-            StagePurpose::AppServing => {
-                let mut child = stage.storage()?.narrow_storage_authentication()?;
-                let (_, ceiling) = child.interval_data()?;
-                child.narrow(store.max_lease_seconds, ceiling)?
+            StagePurpose::CurrentRole => {
+                ProviderAcquisition::native(stage.narrow_io_acquisition(store.max_lease_seconds)?)
             }
-            StagePurpose::InitialFirstHolder => {
-                stage.initial_first_holder_acquisition(store.max_lease_seconds)?
-            }
+            StagePurpose::AppServing => ProviderAcquisition::app(
+                app_authentication.context("storage_app_authentication_not_started")?,
+            ),
+            StagePurpose::InitialFirstHolder => ProviderAcquisition::native(
+                stage.initial_first_holder_acquisition(store.max_lease_seconds)?,
+            ),
             StagePurpose::StorageBootstrap | StagePurpose::StorageMetadataObservation => {
                 anyhow::bail!("storage_provider_authenticated_purpose_required")
             }
         };
-        let selected = profile(&mut acquisition)
+        let selected = profile(acquisition.acquisition())
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         selected
             .validate(policy)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let ca = cluster_ca(&mut acquisition)
+        let ca = cluster_ca(acquisition.acquisition())
             .map_err(|error| PreparationFailure::at(PreparationStep::ClusterCa, error))?;
         let mut http = NativeHttp::new(store, &policy.cluster, &ca)
             .map_err(|error| PreparationFailure::at(PreparationStep::TransportSetup, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         let source = timings
             .measure(Operation::MetadataToken, || {
-                CredentialMaterial::metadata_source(&mut acquisition)
+                CredentialMaterial::metadata_source(acquisition.acquisition())
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::MetadataCredential, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
@@ -184,7 +197,7 @@ impl<'role> ProviderReader<'role> {
                             Route::Project,
                             &source.authorization()?,
                             None,
-                            &mut acquisition,
+                            acquisition.acquisition(),
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::ProjectIdentity, error)
@@ -195,7 +208,7 @@ impl<'role> ProviderReader<'role> {
         stage.check_selection(policy, store, NativeRole::EpochController)?;
         timings
             .measure(Operation::Cluster, || {
-                http.verify_cluster(&ca, &source.authorization()?, &mut acquisition)
+                http.verify_cluster(&ca, &source.authorization()?, acquisition.acquisition())
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::ClusterIdentity, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
@@ -209,7 +222,7 @@ impl<'role> ProviderReader<'role> {
                             Route::GoogleAccount(&policy.controller.google_service_account),
                             &source.authorization()?,
                             None,
-                            &mut acquisition,
+                            acquisition.acquisition(),
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::ControllerIdentity, error)
@@ -224,7 +237,7 @@ impl<'role> ProviderReader<'role> {
                     &source,
                     &policy.controller.google_service_account,
                     &http,
-                    &mut acquisition,
+                    acquisition.acquisition(),
                 )
             })
             .map_err(|error| {
@@ -240,7 +253,7 @@ impl<'role> ProviderReader<'role> {
                             Route::Database,
                             &controller.authorization()?,
                             None,
-                            &mut acquisition,
+                            acquisition.acquisition(),
                         )
                         .map_err(|error| {
                             PreparationFailure::at(PreparationStep::EpochDatabase, error)
@@ -249,16 +262,22 @@ impl<'role> ProviderReader<'role> {
             })
             .map_err(|error| PreparationFailure::at(PreparationStep::EpochDatabase, error))?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let kubernetes = CredentialMaterial::kubernetes_api(&mut acquisition).map_err(|error| {
-            PreparationFailure::at(PreparationStep::KubernetesCredential, error)
-        })?;
+        let kubernetes =
+            CredentialMaterial::kubernetes_api(acquisition.acquisition()).map_err(|error| {
+                PreparationFailure::at(PreparationStep::KubernetesCredential, error)
+            })?;
         stage.check_selection(policy, store, NativeRole::EpochController)?;
-        let acquisition = if purpose == StagePurpose::AppServing {
-            stage
-                .storage()?
-                .complete_storage_authentication(acquisition, store.max_lease_seconds)?
-        } else {
-            acquisition
+        let acquisition = match purpose {
+            StagePurpose::AppServing => acquisition
+                .complete_app(stage.storage()?, store.max_lease_seconds)
+                .context("storage_app_provider_authentication_complete")?,
+            StagePurpose::CurrentRole | StagePurpose::InitialFirstHolder => {
+                acquisition.into_native()?
+            }
+            StagePurpose::StorageBootstrap | StagePurpose::StorageMetadataObservation => {
+                acquisition.acquisition().refuse();
+                anyhow::bail!("storage_provider_authenticated_purpose_required")
+            }
         };
         Ok(Self {
             stage,

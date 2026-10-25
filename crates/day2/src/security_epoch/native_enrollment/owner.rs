@@ -3,7 +3,7 @@
 
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_clock::AcquisitionScope;
-use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
+use crate::security_epoch::native_clock::{AppAuthentication, NativeAcquisition, boottime};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 #[cfg(target_os = "linux")]
@@ -24,6 +24,7 @@ use crate::security_epoch::native_enrollment::{
 use anyhow::{Result, ensure};
 use day2_capabilities::{Digest, security_epoch::AuthorityScope};
 use std::{
+    cell::Cell,
     marker::PhantomData,
     rc::{Rc, Weak},
     thread::ThreadId,
@@ -44,7 +45,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
     identity: Rc<OwnerIdentity>,
     process: u32,
     thread: ThreadId,
-    refused: bool,
+    refused: Rc<Cell<bool>>,
     // One-way refusal gate, never a holder permission or restored DATA flag.
     // Even a later fresh stage cannot restart an unknown initial exchange.
     initial_holder_attempted: bool,
@@ -156,7 +157,7 @@ impl EnrolledProcessRoleOwner {
                 identity: Rc::new(OwnerIdentity),
                 process: std::process::id(),
                 thread: std::thread::current().id(),
-                refused: false,
+                refused: Rc::new(Cell::new(false)),
                 initial_holder_attempted: false,
                 initial_handshake_attempted: false,
                 serving_attempted: false,
@@ -206,7 +207,7 @@ impl EnrolledProcessRoleOwner {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = purpose;
-            self.refused = true;
+            self.refused.set(true);
             anyhow::bail!("native_enrollment_platform_unsupported")
         }
         #[cfg(target_os = "linux")]
@@ -282,7 +283,7 @@ impl EnrolledProcessRoleOwner {
                 }
             })();
             if result.is_err() {
-                self.refused = true;
+                self.refused.set(true);
             }
             #[cfg(target_os = "linux")]
             {
@@ -313,7 +314,7 @@ impl EnrolledProcessRoleOwner {
                 // A longer peer interval never gives role authentication
                 // more than its original five-second acquisition. No reset.
                 if let Err(error) = stage.acquisition.complete_authentication(authentication) {
-                    stage.owner.refused = true;
+                    stage.owner.refused.set(true);
                     stage.acquisition.refuse();
                     return Err(error);
                 }
@@ -327,7 +328,7 @@ impl EnrolledProcessRoleOwner {
         expected: NativeRole,
     ) -> Result<EnrolledOriginalClock> {
         // Must remain the first operation, including before role/owner checks.
-        let origin = boottime().inspect_err(|_| self.refused = true)?;
+        let origin = boottime().inspect_err(|_| self.refused.set(true))?;
         let result = (|| {
             self.check_local()?;
             ensure!(self.role == expected, "native_enrollment_clock_role");
@@ -357,13 +358,13 @@ impl EnrolledProcessRoleOwner {
             }
         })();
         if result.is_err() {
-            self.refused = true;
+            self.refused.set(true);
         }
         result
     }
 
     fn check_local(&mut self) -> Result<()> {
-        ensure!(!self.refused, "native_enrollment_owner_refused");
+        ensure!(!self.refused.get(), "native_enrollment_owner_refused");
         ensure!(
             self.process == std::process::id() && self.thread == std::thread::current().id(),
             "native_enrollment_owner_changed"
@@ -380,11 +381,6 @@ impl EnrolledRoleStage<'_> {
         self.acquisition.diagnostic_progress()
     }
 
-    /// Closed ordinary-consumer gate. No caller-selected purpose or timeout.
-    pub(crate) fn require_current_role(&mut self) -> Result<()> {
-        self.require_purpose(StagePurpose::CurrentRole)
-    }
-
     /// Current consumer gate. App serving is distinct signed authority; this
     /// does not admit bootstrap/metadata purposes or extend generic Current.
     pub(crate) fn require_current_consumer(&mut self) -> Result<()> {
@@ -397,7 +393,7 @@ impl EnrolledRoleStage<'_> {
             self.purpose,
             StagePurpose::CurrentRole | StagePurpose::AppServing
         ) {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
             anyhow::bail!("native_enrollment_current_consumer_purpose");
         }
@@ -429,7 +425,7 @@ impl EnrolledRoleStage<'_> {
             Ok(child)
         })();
         if result.is_err() {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
         }
         result
@@ -437,6 +433,30 @@ impl EnrolledRoleStage<'_> {
 }
 
 impl<'role> EnrolledRoleStage<'role> {
+    /// A NEW provider operation only. Capture its work bound before any full
+    /// native/authentication guard. This checks purpose/local ownership DATA,
+    /// never admission: the producer retains its existing first full guard
+    /// inside the captured work bound. No caller supplies a start or deadline.
+    pub(in crate::security_epoch) fn begin_app_authentication(
+        &mut self,
+        max_lease_seconds: u32,
+    ) -> Result<AppAuthentication> {
+        let mut work = self.acquisition.begin_app_authentication(
+            max_lease_seconds,
+            self.deadline,
+            Rc::clone(&self.owner.refused),
+        )?;
+        ensure!(
+            max_lease_seconds == self.owner.policy.store.max_lease_seconds,
+            "native_enrollment_app_authentication_selection_changed"
+        );
+        self.owner.check_local()?;
+        self.purpose.require_exact(StagePurpose::AppServing)?;
+        self.purpose.require_role(self.owner.role)?;
+        work.acquisition().remaining()?;
+        Ok(work)
+    }
+
     pub(in crate::security_epoch) fn storage(&mut self) -> Result<EnrolledStorageStage<'_, 'role>> {
         self.check()?;
         Ok(EnrolledStorageStage { stage: self })
@@ -444,6 +464,50 @@ impl<'role> EnrolledRoleStage<'role> {
 }
 
 impl EnrolledStorageStage<'_, '_> {
+    /// Terminal failure only. Even a wrong carrier must refuse the actual
+    /// borrowed owner, not merely discard an unrelated local clock. This
+    /// cannot construct, check, widen or renew any permission or acquisition.
+    pub(in crate::security_epoch) fn refuse_app_authentication(&mut self) {
+        self.stage.owner.refused.set(true);
+        self.stage.acquisition.refuse();
+    }
+
+    /// Only the original opaque phase can complete. Failed completion/drop
+    /// poisons the real owner before another stage can begin. The consumed
+    /// authentication clock is never widened into the subsequent I/O view.
+    pub(in crate::security_epoch) fn complete_app_authentication(
+        &mut self,
+        mut work: AppAuthentication,
+        max_lease_seconds: u32,
+    ) -> Result<NativeAcquisition> {
+        let result = (|| {
+            work.acquisition().remaining()?;
+            ensure!(
+                max_lease_seconds == self.stage.owner.policy.store.max_lease_seconds,
+                "native_enrollment_app_authentication_selection_changed"
+            );
+            // storage() performed the actual full guard immediately before
+            // lending this facade. Charge that work before consuming the phase;
+            // the I/O transfer below retains its existing full native checks.
+            self.stage.owner.check_local()?;
+            self.stage.purpose.require_exact(StagePurpose::AppServing)?;
+            self.stage.purpose.require_role(self.stage.owner.role)?;
+            work.acquisition().remaining()?;
+            work.complete(
+                &mut self.stage.acquisition,
+                self.stage.deadline,
+                max_lease_seconds,
+                &self.stage.owner.refused,
+            )?;
+            self.narrow_app_serving_io_acquisition(max_lease_seconds)
+        })();
+        if result.is_err() {
+            self.stage.owner.refused.set(true);
+            self.stage.acquisition.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn narrow_app_serving_io_acquisition(
         &mut self,
         max_lease_seconds: u32,
@@ -459,7 +523,7 @@ impl EnrolledStorageStage<'_, '_> {
             Ok(child)
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -472,18 +536,12 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.require_storage_authentication_purpose()?;
-            let child = if self.stage.purpose == StagePurpose::AppServing {
-                self.stage
-                    .acquisition
-                    .narrow_app_serving_authentication(self.stage.deadline)?
-            } else {
-                self.stage.acquisition.narrow_authentication()?
-            };
+            let child = self.stage.acquisition.narrow_authentication()?;
             self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -498,16 +556,13 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<NativeAcquisition> {
         if let Err(error) = self.require_storage_authentication_purpose() {
             child.refuse();
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
             return Err(error);
         }
         let result = (|| {
             self.stage.acquisition.complete_authentication(child)?;
             match self.stage.purpose {
-                StagePurpose::AppServing => {
-                    self.narrow_app_serving_io_acquisition(max_lease_seconds)
-                }
                 StagePurpose::StorageBootstrap => {
                     self.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
                 }
@@ -518,7 +573,7 @@ impl EnrolledStorageStage<'_, '_> {
             }
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -539,7 +594,7 @@ impl EnrolledStorageStage<'_, '_> {
             Ok(child)
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -563,7 +618,7 @@ impl EnrolledStorageStage<'_, '_> {
             Ok(child)
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -573,7 +628,6 @@ impl EnrolledStorageStage<'_, '_> {
         let result = (|| {
             self.stage.check()?;
             match self.stage.purpose {
-                StagePurpose::AppServing => self.stage.acquisition.require_app_serving(),
                 StagePurpose::StorageBootstrap => {
                     self.stage.acquisition.require_storage_bootstrap()
                 }
@@ -585,7 +639,7 @@ impl EnrolledStorageStage<'_, '_> {
             }
         })();
         if result.is_err() {
-            self.stage.owner.refused = true;
+            self.stage.owner.refused.set(true);
             self.stage.acquisition.refuse();
         }
         result
@@ -598,7 +652,7 @@ impl EnrolledRoleStage<'_> {
         purpose: StagePurpose,
     ) -> Result<()> {
         if let Err(error) = self.purpose.require_exact(purpose) {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
             return Err(error);
         }
@@ -619,7 +673,7 @@ impl EnrolledRoleStage<'_> {
             Ok(child)
         })();
         if result.is_err() {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
         }
         result
@@ -656,7 +710,7 @@ impl EnrolledRoleStage<'_> {
         role: NativeRole,
     ) -> Result<()> {
         if self.owner.policy.bootstrap != *policy || self.owner.policy.store != *store {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
@@ -677,7 +731,7 @@ impl EnrolledRoleStage<'_> {
     fn require_role_data(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
         let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
             anyhow::bail!("native_enrollment_stage_selection_changed");
         }
@@ -717,7 +771,7 @@ impl EnrolledRoleStage<'_> {
             anyhow::bail!("native_enrollment_platform_unsupported")
         })();
         if result.is_err() {
-            self.owner.refused = true;
+            self.owner.refused.set(true);
             self.acquisition.refuse();
         }
         result
@@ -755,7 +809,7 @@ impl SameEnrolledOwner {
         })();
         if result.is_err() {
             self.refused = true;
-            stage.owner.refused = true;
+            stage.owner.refused.set(true);
             stage.acquisition.refuse();
         }
         result
@@ -777,7 +831,7 @@ impl SameEnrolledOwner {
         })();
         if result.is_err() {
             self.refused = true;
-            stage.owner.refused = true;
+            stage.owner.refused.set(true);
             stage.acquisition.refuse();
         }
         result
@@ -813,7 +867,7 @@ impl EnrolledOriginalClock {
         })();
         if result.is_err() {
             self.refused = true;
-            stage.owner.refused = true;
+            stage.owner.refused.set(true);
             stage.acquisition.refuse();
         }
         result
