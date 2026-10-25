@@ -92,6 +92,25 @@ fn service_exit(
     }
 }
 
+fn main() {
+    match run() {
+        Ok(ServiceExit::Stopped) => {}
+        Ok(ServiceExit::NativeRefused(terminal)) => {
+            // Inner native diagnostics already retain their allowlisted facts.
+            // Neither provider errors nor private paths enter this log/hold.
+            eprintln!("day2-serve refused or stopped; terminal hold at most 300 seconds");
+            if terminal.and_then(|hold| hold.wait()).is_err() {
+                eprintln!("day2-serve terminal stop unavailable");
+            }
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("day2-serve refused or stopped: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,24 +153,5 @@ mod tests {
             panic!("wrong disposition")
         };
         assert!(hold.is_err());
-    }
-}
-
-fn main() {
-    match run() {
-        Ok(ServiceExit::Stopped) => {}
-        Ok(ServiceExit::NativeRefused(terminal)) => {
-            // Inner native diagnostics already retain their allowlisted facts.
-            // Neither provider errors nor private paths enter this log/hold.
-            eprintln!("day2-serve refused or stopped; terminal hold at most 300 seconds");
-            if terminal.and_then(|hold| hold.wait()).is_err() {
-                eprintln!("day2-serve terminal stop unavailable");
-            }
-            std::process::exit(1);
-        }
-        Err(error) => {
-            eprintln!("day2-serve refused or stopped: {error:#}");
-            std::process::exit(1);
-        }
     }
 }
