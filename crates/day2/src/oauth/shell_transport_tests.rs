@@ -309,13 +309,12 @@ fn authenticated_credential_fresh_route_refuses_before_instance_or_sql_open() ->
     std::fs::rename(&database, &saved_database)?;
     std::fs::rename(&instance, &saved_instance)?;
     let assertions = Assertions::new();
-    let receiver = assertions
-        .receiver(Arc::new(
-            crate::oauth::approval_registry::UnavailableAppApprovals::new(runtime.app().into())?,
-        ))
-        .with_management(Arc::new(crate::oauth::management::app::Manager::new(
-            runtime, authority,
-        )))?;
+    let receiver = Arc::new(assertions.receiver(Arc::new(
+        crate::oauth::approval_registry::UnavailableAppApprovals::new(runtime.app().into())?,
+    )))
+    .with_management(Arc::new(crate::oauth::management::app::Manager::new(
+        runtime, authority,
+    )))?;
     let request = RequestBody::FreshOwner {
         version: VERSION,
         human_assertion: assertions.assertion(SHELL_AUDIENCE, HUMAN, SUBJECT),
