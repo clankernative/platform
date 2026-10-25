@@ -75,6 +75,7 @@ disabled. Native non-incremental builds leave codegen partitioning at the
 compiler default; Linux CI applies its existing explicit256 and disabled-LTO
 test settings to target units while build tools retain their own defaults.
 Each Linux platform-CI job supplies an empty private GNU jobserver FIFO
+at `/var/tmp/day2-rustc-jobserver`, outside Bazel's private action `/tmp`,
 through `CARGO_MAKEFLAGS`, which the CI configuration forwards to compiler
 actions. Each compiler keeps its one implicit slot; no extra backend jobs can
 acquire a token. This constrains LLVM concurrency inside one rustc process,
