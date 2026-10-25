@@ -245,6 +245,58 @@ fn copy_proof(proof: &external::FreshExternalApproval) -> external::FreshExterna
 }
 
 #[test]
+fn production_approval_backend_refuses_authenticated_unsupported_routes_without_changing_rows()
+-> Result<()> {
+    let fixture = Fixture::new();
+    let view = fixture.view();
+    let assertions = Assertions::new();
+    let receiver = assertions.receiver(Arc::new(
+        crate::oauth::approval_registry::UnavailableAppApprovals::new("app".into())?,
+    ));
+    let original = crate::oauth::fresh_auth::FreshIntent::approval(&view, &human())?;
+    let call = crate::oauth::fresh_owner::CallData::claim(&original, Digest::of(&"owner")?)?;
+    let human_assertion = assertions.assertion(SHELL_AUDIENCE, HUMAN, SUBJECT);
+    let before = crate::oauth::simulation::snapshot(&crate::store::open(&fixture.path)?)?;
+    for request in [
+        RequestBody::Lookup {
+            version: VERSION,
+            attempt: view.attempt().into(),
+            human_assertion: human_assertion.clone(),
+        },
+        RequestBody::Confirm {
+            version: VERSION,
+            attempt: view.attempt().into(),
+            human_assertion: human_assertion.clone(),
+            view: view.digest()?,
+            evidence: Box::new(fixture.proof(&view)),
+        },
+        RequestBody::FreshOwner {
+            version: VERSION,
+            human_assertion,
+            call: Box::new(call),
+        },
+    ] {
+        let refused = receiver
+            .dispatch(
+                &Method::POST,
+                PATH,
+                None,
+                &assertions.headers(),
+                &serde_json::to_vec(&request)?,
+                6,
+            )
+            .err()
+            .context("unsupported approval route unexpectedly succeeded")?;
+        assert_eq!(refused.to_string(), "OAuth approval purpose unavailable");
+        assert_eq!(
+            crate::oauth::simulation::snapshot(&crate::store::open(&fixture.path)?)?,
+            before,
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn receiver_requires_independent_machine_and_human_assertions_before_sqlite() {
     struct Spy(AtomicUsize);
     impl AppApprovals for Spy {
@@ -865,26 +917,6 @@ fn server(
     (endpoint, task)
 }
 
-struct RegistrationOnly;
-impl AppApprovals for RegistrationOnly {
-    fn app(&self) -> &str {
-        "workspace"
-    }
-    fn lookup(&self, _: &str, _: &iap::Verified, _: i64) -> Result<HostLookup> {
-        anyhow::bail!("registration must not resolve an app attempt")
-    }
-    fn confirm(
-        &self,
-        _: &str,
-        _: &Digest,
-        _: &iap::Verified,
-        _: external::FreshExternalApproval,
-        _: i64,
-    ) -> Result<bool> {
-        anyhow::bail!("registration must not settle an app attempt")
-    }
-}
-
 struct NoLiveFacts;
 impl crate::oauth::admission::OutboundReadiness for NoLiveFacts {
     fn current(
@@ -947,7 +979,9 @@ fn native_registration_crosses_authenticated_http_once_even_when_response_is_los
             readiness.clone(),
             Arc::new(native::Keys::default()),
         );
-        let mut receiver = assertions.receiver(Arc::new(RegistrationOnly));
+        let mut receiver = assertions.receiver(Arc::new(
+            crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
+        ));
         receiver.registrations = Some(Arc::new(NativeRegistrationSink {
             authority,
             readiness,
@@ -1076,7 +1110,9 @@ fn mounted_management_authenticates_both_callers_and_lost_confirmation_is_not_re
         .sign(&SystemRandom::new(), signed.as_bytes())
         .unwrap();
     let human_assertion = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
-    let mut receiver = assertions.receiver(Arc::new(RegistrationOnly));
+    let mut receiver = assertions.receiver(Arc::new(
+        crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
+    ));
     receiver.route = route;
     let receiver = Arc::new(receiver).with_management(manager)?;
     let port = Arc::new(Port {
@@ -1362,7 +1398,9 @@ fn registration_receiver_refuses_human_workload_substitution_and_wrong_app_befor
     let (selected, receipt) = native::fixture()?;
     let proof = publication::attest(&receipt, &selected, &native::Keys::default(), now()?)?;
     let assertions = Assertions::new();
-    let receiver = assertions.receiver(Arc::new(RegistrationOnly));
+    let receiver = assertions.receiver(Arc::new(
+        crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
+    ));
     let at = now()?;
     let request = RequestBody::Registration {
         version: VERSION,
@@ -2560,7 +2598,9 @@ mod owned_google {
         let runtime = setup.runtime(0)?;
         let database = runtime.db().to_path_buf();
         let manager = Arc::new(Manager::new(runtime, setup.authority.clone()));
-        let mut receiver = setup.assertions.receiver(Arc::new(RegistrationOnly));
+        let mut receiver = setup.assertions.receiver(Arc::new(
+            crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
+        ));
         receiver.authority = "app.example.com".into();
         receiver.route = route_prefix(&instance.installation, &instance.environment, "workspace")?;
         let receiver = Arc::new(receiver).with_management(manager)?;
@@ -3097,7 +3137,9 @@ mod owned_google {
         let runtime = setup.runtime(ordinal)?;
         let database = runtime.db().to_path_buf();
         let manager = Arc::new(Manager::new(runtime, setup.authority.clone()));
-        let mut receiver = setup.assertions.receiver(Arc::new(RegistrationOnly));
+        let mut receiver = setup.assertions.receiver(Arc::new(
+            crate::oauth::approval_registry::UnavailableAppApprovals::new("workspace".into())?,
+        ));
         receiver.authority = "app.example.com".into();
         receiver.route = route_prefix(&instance.installation, &instance.environment, "workspace")?;
         let receiver = Arc::new(receiver).with_management(manager)?;
