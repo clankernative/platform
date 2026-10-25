@@ -306,14 +306,15 @@ impl PreparedFileContinuity {
 }
 
 impl<'file> PendingPhysicalFilePhase<'file> {
-    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+    pub(in crate::security_epoch::storage_authority) fn acquire_durable<'role>(
         self,
         stage: EnrolledRoleStage<'role>,
+        trace: Option<&crate::security_epoch::controller::serving_timing::ServingTiming>,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
         let inputs = self.inputs;
         inputs.disposition.check()?;
         let phase = inputs.volume.begin_current(stage)?;
-        let mut current = CurrentPhysicalFilePhase {
+        let current = CurrentPhysicalFilePhase {
             inner: CurrentPreparedFilePhase {
                 phase,
                 selection: inputs.selection,
@@ -327,8 +328,24 @@ impl<'file> PendingPhysicalFilePhase<'file> {
                 disposition: inputs.disposition,
             },
         };
-        current.check()?;
-        Ok(current)
+        // Publish only after the fixed durability operation. Its first check
+        // is also this new phase's initial file check; no earlier checked
+        // phase escapes and no immediate duplicate is needed by the caller.
+        let durable = || {
+            finish_current_durability(
+                current,
+                |current| current.check(),
+                |current| current.inner.phase.check_durability_profile(),
+                |current| current.refuse(),
+            )
+        };
+        match trace {
+            Some(trace) => trace.measure(
+                crate::security_epoch::controller::serving_timing::ServingStep::Durability,
+                durable,
+            ),
+            None => durable(),
+        }
     }
 }
 
@@ -562,15 +579,13 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
     pub(in crate::security_epoch) fn check_current_durability(&mut self) -> Result<()> {
-        let result = (|| {
-            self.check()?;
-            self.inner.phase.check_durability_profile()?;
-            self.check()
-        })();
-        if result.is_err() {
-            self.inner.disposition.refuse();
-        }
-        result
+        finish_current_durability(
+            self,
+            |current| current.check(),
+            |current| current.inner.phase.check_durability_profile(),
+            |current| current.refuse(),
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {
@@ -631,6 +646,139 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
 
     pub(crate) fn refuse(&mut self) {
         self.inner.disposition.refuse();
+    }
+}
+
+/// One fixed precheck/observation/postcheck before publishing the actual owner.
+/// The same sequence also checks an already-owned phase. Refusal precedes its
+/// error return; no positive witness, interval or permission is cached here.
+fn finish_current_durability<Physical>(
+    mut physical: Physical,
+    mut check: impl FnMut(&mut Physical) -> Result<()>,
+    observe: impl FnOnce(&mut Physical) -> Result<()>,
+    refuse: impl FnOnce(&mut Physical),
+) -> Result<Physical> {
+    let result = (|| {
+        check(&mut physical)?;
+        observe(&mut physical)?;
+        check(&mut physical)
+    })();
+    if let Err(error) = result {
+        refuse(&mut physical);
+        return Err(error);
+    }
+    Ok(physical)
+}
+
+#[cfg(test)]
+mod durable_acquisition_tests {
+    use super::finish_current_durability;
+    use anyhow::Result;
+    use std::{cell::Cell, rc::Rc};
+
+    struct Physical {
+        checks: u32,
+        observations: u32,
+        fail_check: Option<u32>,
+        refused: Rc<Cell<bool>>,
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl Physical {
+        fn check(&mut self) -> Result<()> {
+            self.checks += 1;
+            anyhow::ensure!(
+                self.fail_check != Some(self.checks),
+                "actual file check refused"
+            );
+            Ok(())
+        }
+    }
+
+    impl Drop for Physical {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    fn fixture(fail_check: Option<u32>) -> Physical {
+        Physical {
+            checks: 0,
+            observations: 0,
+            fail_check,
+            refused: Rc::new(Cell::new(false)),
+            dropped: Rc::new(Cell::new(false)),
+        }
+    }
+
+    #[test]
+    fn durable_acquisition_publishes_after_two_file_checks_and_one_observation() {
+        let physical = finish_current_durability(
+            fixture(None),
+            Physical::check,
+            |physical| {
+                assert_eq!(
+                    physical.checks, 1,
+                    "no separate acquisition check is repeated"
+                );
+                physical.observations += 1;
+                Ok(())
+            },
+            |physical| physical.refused.set(true),
+        )
+        .unwrap();
+        assert_eq!(physical.checks, 2);
+        assert_eq!(physical.observations, 1);
+        assert!(!physical.refused.get() && !physical.dropped.get());
+    }
+
+    #[test]
+    fn failed_pre_or_postcheck_refuses_before_owner_drop_and_cannot_publish() {
+        for fail_check in [1, 2] {
+            let physical = fixture(Some(fail_check));
+            let refused = physical.refused.clone();
+            let dropped = physical.dropped.clone();
+            let observed = Cell::new(false);
+            let result = finish_current_durability(
+                physical,
+                Physical::check,
+                |_| {
+                    observed.set(true);
+                    Ok(())
+                },
+                |physical| {
+                    assert!(!physical.dropped.get());
+                    physical.refused.set(true);
+                },
+            );
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                "actual file check refused"
+            );
+            assert_eq!(observed.get(), fail_check == 2);
+            assert!(refused.get() && dropped.get());
+        }
+    }
+
+    #[test]
+    fn failed_durability_observation_preserves_error_and_refuses_the_owner() {
+        let physical = fixture(None);
+        let refused = physical.refused.clone();
+        let dropped = physical.dropped.clone();
+        let result = finish_current_durability(
+            physical,
+            Physical::check,
+            |physical| {
+                assert_eq!(physical.checks, 1);
+                Err(anyhow::anyhow!("actual provider observation refused"))
+            },
+            |physical| physical.refused.set(true),
+        );
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "actual provider observation refused"
+        );
+        assert!(refused.get() && dropped.get());
     }
 }
 
