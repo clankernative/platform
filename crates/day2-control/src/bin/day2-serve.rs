@@ -8,7 +8,12 @@
 use anyhow::{Context, Result, ensure};
 use std::{num::NonZeroU16, path::PathBuf, time::Duration};
 
-fn run() -> Result<()> {
+enum ServiceExit {
+    Stopped,
+    NativeRefused(Result<day2::deployment::NativeTerminalHold>),
+}
+
+fn run() -> Result<ServiceExit> {
     let mut arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let app_calls = if arguments.len() == 5 && arguments[3] == "--app-calls" {
         let path = PathBuf::from(arguments.pop().context("app call configuration")?);
@@ -59,13 +64,94 @@ fn run() -> Result<()> {
             None => Ok(runtime),
         },
     ));
+    // Capture stop receipts before Tokio's old driver disappears. The hold
+    // itself cannot begin until every actual native owner thread has joined.
+    let terminal = result
+        .as_ref()
+        .err()
+        .map(|_| day2::deployment::NativeTerminalHold::prepare());
     runtime.shutdown_timeout(Duration::from_secs(1));
-    result
+    let native_ran = day2::deployment::close_native_http_executors()?;
+    service_exit(result, native_ran, terminal)
+}
+
+fn service_exit(
+    result: Result<()>,
+    native_ran: bool,
+    terminal: Option<Result<day2::deployment::NativeTerminalHold>>,
+) -> Result<ServiceExit> {
+    match result {
+        Ok(()) => Ok(ServiceExit::Stopped),
+        Err(error) if native_ran => {
+            drop(error);
+            Ok(ServiceExit::NativeRefused(
+                terminal.context("native terminal listeners were not prepared")?,
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("day2-serve refused or stopped: {error:#}");
-        std::process::exit(1);
+    match run() {
+        Ok(ServiceExit::Stopped) => {}
+        Ok(ServiceExit::NativeRefused(terminal)) => {
+            // Inner native diagnostics already retain their allowlisted facts.
+            // Neither provider errors nor private paths enter this log/hold.
+            eprintln!("day2-serve refused or stopped; terminal hold at most 300 seconds");
+            if terminal.and_then(|hold| hold.wait()).is_err() {
+                eprintln!("day2-serve terminal stop unavailable");
+            }
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("day2-serve refused or stopped: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[derive(Debug)]
+    struct PrivateFailure(Arc<AtomicBool>);
+    impl std::fmt::Display for PrivateFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("private fixture error")
+        }
+    }
+    impl std::error::Error for PrivateFailure {}
+    impl Drop for PrivateFailure {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn only_closed_native_execution_selects_hold_and_drops_private_failure_first() {
+        assert!(matches!(
+            service_exit(Ok(()), true, None).unwrap(),
+            ServiceExit::Stopped
+        ));
+        assert!(service_exit(Err(anyhow::anyhow!("ordinary failure")), false, None).is_err());
+        assert!(service_exit(Err(anyhow::anyhow!("native failure")), true, None).is_err());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let result = service_exit(
+            Err(anyhow::Error::new(PrivateFailure(dropped.clone()))),
+            true,
+            Some(Err(anyhow::anyhow!("fixture stop unavailable"))),
+        )
+        .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        let ServiceExit::NativeRefused(hold) = result else {
+            panic!("wrong disposition")
+        };
+        assert!(hold.is_err());
     }
 }

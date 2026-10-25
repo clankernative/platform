@@ -18,15 +18,85 @@ use std::{
     io,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context as TaskContext, Poll},
-    thread::ThreadId,
+    thread::{JoinHandle, ThreadId},
 };
 use tokio::{net::TcpListener, runtime::Handle};
 
 pub(super) mod response_io;
+
+// Keep the actual thread handles through TLS teardown. A result sent by its
+// body is not proof that the owning thread and its thread-local roles exited.
+#[derive(Default)]
+struct OwnerThreads {
+    closed: bool,
+    started: bool,
+    threads: Vec<JoinHandle<()>>,
+}
+
+static OWNER_THREADS: Mutex<OwnerThreads> = Mutex::new(OwnerThreads {
+    closed: false,
+    started: false,
+    threads: Vec::new(),
+});
+
+impl OwnerThreads {
+    fn spawn(&mut self, run: impl FnOnce() + Send + 'static) -> Result<()> {
+        ensure!(!self.closed, "native HTTP executor launch closed");
+        let mut live = Vec::new();
+        for thread in self.threads.drain(..) {
+            if thread.is_finished() {
+                let _ = thread.join();
+            } else {
+                live.push(thread);
+            }
+        }
+        self.threads = live;
+        ensure!(self.threads.len() < 128, "native HTTP executor capacity");
+        self.threads.push(
+            std::thread::Builder::new()
+                .name("day2-oauth-owner".into())
+                .spawn(run)
+                .context("start native HTTP owner")?,
+        );
+        self.started = true;
+        Ok(())
+    }
+
+    fn close(&mut self) -> (bool, Vec<JoinHandle<()>>) {
+        self.closed = true;
+        (self.started, std::mem::take(&mut self.threads))
+    }
+}
+
+/// Entrypoint-only, after the readiness runtime has stopped. Permanently close
+/// launch admission and join the actual retained threads, including their TLS
+/// destructors. This creates no role, clock, replacement or retry.
+pub(crate) fn close_owner_threads() -> Result<bool> {
+    let (started, threads) = OWNER_THREADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .close();
+    join_owner_threads(threads)?;
+    Ok(started)
+}
+
+fn join_owner_threads(threads: Vec<JoinHandle<()>>) -> Result<()> {
+    let mut self_join = false;
+    for thread in threads {
+        if thread.thread().id() == std::thread::current().id() {
+            self_join = true;
+        } else {
+            // A panicked thread is still joined and all of its TLS has ended.
+            let _ = thread.join();
+        }
+    }
+    ensure!(!self_join, "native HTTP owner cannot close itself");
+    Ok(())
+}
 
 #[cfg(test)]
 use std::convert::Infallible;
@@ -279,15 +349,15 @@ async fn launch(launch: Launch, shutdown: impl Future<Output = ()> + Send + 'sta
     let (completed, completion) = tokio::sync::oneshot::channel();
     // Dropping the launcher's receiver cannot cancel native work or free its
     // capacity. The thread owns every live connection until drain completes.
-    std::thread::Builder::new()
-        .name("day2-oauth-owner".into())
+    OWNER_THREADS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native HTTP executor registry refused"))?
         .spawn(move || {
             REACTOR.with(|slot| *slot.borrow_mut() = Some(reactor));
             let result = effects.run(|| futures_executor::block_on(launch.run(shutdown)));
             REACTOR.with(|slot| slot.borrow_mut().take());
             let _ = completed.send(result);
-        })
-        .context("start native HTTP owner")?;
+        })?;
     completion.await.context("native HTTP owner terminated")?
 }
 
@@ -879,6 +949,60 @@ mod tests {
     use std::sync::{Condvar, Mutex};
     use std::thread;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn terminal_close_joins_tls_teardown_and_permanently_refuses_new_launches() -> Result<()> {
+        struct ExitGate {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Drop for ExitGate {
+            fn drop(&mut self) {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+            }
+        }
+        thread_local! {
+            static EXIT_GATE: RefCell<Option<ExitGate>> = const { RefCell::new(None) };
+        }
+        let (entered, at_exit) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let mut owners = OwnerThreads::default();
+        owners.spawn(move || {
+            EXIT_GATE.with(|slot| {
+                slot.replace(Some(ExitGate {
+                    entered,
+                    release: released,
+                }));
+            });
+        })?;
+        at_exit.recv_timeout(std::time::Duration::from_secs(2))?;
+        let (started, threads) = owners.close();
+        assert!(started && owners.closed);
+        let (finished, observed) = std::sync::mpsc::channel();
+        let joined = thread::spawn(move || {
+            let result = join_owner_threads(threads);
+            let _ = finished.send(result);
+        });
+        assert!(
+            observed
+                .recv_timeout(std::time::Duration::from_millis(20))
+                .is_err()
+        );
+        release.send(())?;
+        observed.recv_timeout(std::time::Duration::from_secs(2))??;
+        joined.join().unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let attempted = ran.clone();
+        assert!(
+            owners
+                .spawn(move || attempted.store(true, Ordering::Release))
+                .is_err()
+        );
+        assert!(!ran.load(Ordering::Acquire));
+        assert!(owners.close().1.is_empty());
+        Ok(())
+    }
 
     pub(crate) struct Exchange {
         calls: Mutex<Vec<ThreadId>>,

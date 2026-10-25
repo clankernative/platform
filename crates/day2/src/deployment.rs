@@ -15,6 +15,16 @@ use std::{
     time::Duration,
 };
 
+mod terminal;
+pub use terminal::NativeTerminalHold;
+
+/// Container-entrypoint cleanup, after its readiness runtime has stopped.
+/// Success means every retained native HTTP owner has actually exited. The
+/// result only reports whether one ran; it grants no native permission.
+pub fn close_native_http_executors() -> Result<bool> {
+    crate::oauth::native_http::close_owner_threads()
+}
+
 const PROC_BUDGET: u64 = 1_048_576;
 // Fixed S3 volume ABI, also enforced by the native file/provider join. This
 // pathname is selection DATA; it cannot supply a retained file or holder.
