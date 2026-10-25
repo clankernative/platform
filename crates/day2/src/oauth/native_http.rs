@@ -654,6 +654,31 @@ mod finite_response_tests {
         )
     }
 
+    #[test]
+    fn simulated_owners_cannot_select_the_actual_native_response_driver() {
+        let world = super::super::simulation::World::new(917);
+        super::super::effects::scope(world, || {
+            futures_executor::block_on(async {
+                let sink = metadata_sink();
+                assert!(!sink.can_retain_app_response().unwrap());
+                assert!(sink.retain_finite_app_io().is_err());
+                // This deferred body asserts that it is polled only for a
+                // genuine native candidate. Model selection leaves it alone.
+                let response = prepare_finite_app_body(
+                    Response::new(Body::new(Deferred { produced: false })),
+                    &sink,
+                )
+                .await
+                .unwrap();
+                assert!(!sink.uses_retained_app_io());
+                drop(response);
+            });
+        });
+        // Without a model hook, this DATA-only fixture still selects the real
+        // driver, which must refuse its missing enrolled owner before I/O.
+        assert!(metadata_sink().can_retain_app_response().unwrap());
+    }
+
     struct Deferred {
         produced: bool,
     }

@@ -39,8 +39,18 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ),
     ("management/shell.rs", include_str!("management/shell.rs")),
     ("mod.rs", include_str!("mod.rs")),
+    ("native_http", ""),
     ("native_http.rs", include_str!("native_http.rs")),
+    (
+        "native_http/response_io.rs",
+        include_str!("native_http/response_io.rs"),
+    ),
+    ("native_management", ""),
     ("native_management.rs", include_str!("native_management.rs")),
+    (
+        "native_management/response.rs",
+        include_str!("native_management/response.rs"),
+    ),
     ("native_original.rs", include_str!("native_original.rs")),
     ("outbound.rs", include_str!("outbound.rs")),
     ("profiles.rs", include_str!("profiles.rs")),
@@ -401,6 +411,8 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
             "management",
             &["app.rs", "app_native_lifecycle.rs", "shell.rs"][..],
         ),
+        ("native_http", &["response_io.rs"][..]),
+        ("native_management", &["response.rs"][..]),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {
@@ -439,7 +451,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
         let mut guard = Guard {
             native: match name {
                 "native_http.rs" => NativeBoundary::Http,
-                "native_original.rs" => NativeBoundary::Original,
+                "native_original.rs" | "native_http/response_io.rs" => NativeBoundary::Original,
                 _ => NativeBoundary::None,
             },
             ..Guard::default()

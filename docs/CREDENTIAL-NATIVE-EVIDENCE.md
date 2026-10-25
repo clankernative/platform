@@ -415,9 +415,11 @@ written bytes and postchecked written bytes. Actual successful byte counts are
 charged even when the following guard refuses; a lost or malformed completion
 publication cannot mark the Sink complete or restore a usable original.
 
-`elapsed_us` is a checked `std_instant_data` stopwatch covering the inline
+`elapsed_us` is a checked `controlled_monotonic_data` stopwatch covering the inline
 driver, including readiness/acquisition, Pending waits and final checks. It is
 NOT admission's original native clock and cannot demonstrate a five-second fit.
+It uses OAuth's existing clock port: the OS monotonic clock in production and
+the selected scripted clock in simulation; a changed clock domain yields null.
 Headers, body contents, URLs, tokens, certificates and process handles are not
 exported. Records are at most 768 bytes and capped at 4,096 per process. Missing
 records or null/overflowed counts are missing evidence, not zero work.

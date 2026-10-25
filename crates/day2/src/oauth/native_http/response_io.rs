@@ -2,6 +2,7 @@
 //! arguments/results only; the pinned future retains all genuine native borrows.
 //! There is no spawned task, cross-thread queue, permission DTO or lifetime cast.
 
+use super::super::effects;
 use anyhow::{Result, ensure};
 use hyper::rt;
 use std::{
@@ -65,7 +66,7 @@ fn record_line(
         format: "finite_app_response_delivery_v1",
         sequence,
         outcome: if completed { "completed" } else { "refused" },
-        clock: "std_instant_data",
+        clock: "controlled_monotonic_data",
         elapsed_us,
         counts,
     };
@@ -118,8 +119,8 @@ struct Shared {
     owner: ThreadId,
     sink: super::super::native_management::Sink,
     finished: Cell<bool>,
-    started: std::time::Instant,
-    ended: Cell<Option<std::time::Instant>>,
+    started: effects::Instant,
+    ended: Cell<Option<effects::Instant>>,
     reported: Cell<bool>,
 }
 
@@ -154,7 +155,7 @@ impl Driver {
             owner: std::thread::current().id(),
             sink,
             finished: Cell::new(false),
-            started: std::time::Instant::now(),
+            started: effects::Instant::now(),
             ended: Cell::new(None),
             reported: Cell::new(false),
         }))
@@ -230,7 +231,7 @@ impl Driver {
             }
         };
         if let Some(result) = completed {
-            self.0.ended.set(Some(std::time::Instant::now()));
+            self.0.ended.set(Some(effects::Instant::now()));
             if result.is_err() {
                 return Poll::Ready(Err(self.refuse()));
             }
@@ -300,7 +301,7 @@ impl Driver {
     }
 
     /// Historical bounded DATA only, after all native borrows unwind. The
-    /// monotonic stopwatch is distinct from admission's original native clock.
+    /// controlled stopwatch is distinct from admission's original native clock.
     /// It must never be used to extend a lease or assert five-second fitness.
     pub(super) fn report(&self) {
         use std::io::Write;
@@ -318,7 +319,7 @@ impl Driver {
         else {
             return;
         };
-        let ended = self.0.ended.get().unwrap_or_else(std::time::Instant::now);
+        let ended = self.0.ended.get().unwrap_or_else(effects::Instant::now);
         let elapsed = ended
             .checked_duration_since(self.0.started)
             .and_then(|elapsed| u64::try_from(elapsed.as_micros()).ok());
@@ -610,7 +611,7 @@ mod tests {
                 owner: std::thread::current().id(),
                 sink: super::super::super::native_management::Sink::new(),
                 finished: Cell::new(false),
-                started: std::time::Instant::now(),
+                started: effects::Instant::now(),
                 ended: Cell::new(None),
                 reported: Cell::new(false),
             })),
@@ -826,7 +827,7 @@ mod tests {
             let row: serde_json::Value =
                 serde_json::from_str(line.strip_prefix("day2-native-response-delivery ").unwrap())
                     .unwrap();
-            assert_eq!(row["clock"], "std_instant_data");
+            assert_eq!(row["clock"], "controlled_monotonic_data");
             assert!(row.get("permission").is_none() && row.get("token").is_none());
         }
         assert!(record_line(4097, true, None, counts).is_none());

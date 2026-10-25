@@ -1815,6 +1815,11 @@ impl Sink {
         scope: Option<AuthorityScope>,
         finite_app_candidate: bool,
     ) -> Result<()> {
+        // Scripted originals are DATA, never enrolled native role/storage
+        // owners. Keep their existing per-poll model checks; they cannot enter
+        // the driver that leases actual production owners.
+        #[cfg(test)]
+        let finite_app_candidate = finite_app_candidate && !fixtures::active();
         ensure!(
             self.state.get() == SinkState::Open,
             "native response sink closed"
@@ -1888,6 +1893,10 @@ impl Sink {
             self.is_open() && self.prepared.get(),
             "native response not prepared"
         );
+        #[cfg(test)]
+        if fixtures::active() {
+            return Ok(false);
+        }
         let bindings = self.bindings.try_borrow()?;
         ensure!(
             bindings.is_empty() || self.runtime.try_borrow()?.is_none(),
