@@ -83,9 +83,6 @@ jobs:
       reused: ${{ steps.admit.outputs.reused }}
       cache_run: ${{ steps.admit.outputs.run }}
       cache_attempt: ${{ steps.admit.outputs.attempt }}
-    env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -195,8 +192,6 @@ jobs:
       matrix:
         part: [inputs, tests]
     env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
       # Do not compile the largest test targets concurrently inside 6 GiB.
       # Partition optimized tests into smaller LLVM units without local LTO.
       # Keep debug assertions and the complete runtime campaigns inside 6 GiB.
@@ -621,9 +616,6 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
-    env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -824,8 +816,6 @@ jobs:
       matrix:
         shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]
     env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1027,9 +1017,6 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 20
-    env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1264,8 +1251,6 @@ jobs:
         shell: bash
     timeout-minutes: 360
     env:
-      # Keep compiler resource inputs identical on Linux producers and consumers.
-      CARGO_MAKEFLAGS: --jobserver-auth=fifo:/var/tmp/day2-rustc-jobserver
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
     steps:

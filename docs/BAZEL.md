@@ -74,16 +74,16 @@ tools use level 2, with assertions and overflow checks enabled and debug info
 disabled. Native non-incremental builds leave codegen partitioning at the
 compiler default; Linux CI applies its existing explicit256 and disabled-LTO
 test settings to target units while build tools retain their own defaults.
-Each Linux platform-CI job supplies an empty private GNU jobserver FIFO
-at `/var/tmp/day2-rustc-jobserver`, outside Bazel's private action `/tmp`,
-through `CARGO_MAKEFLAGS`, which the CI configuration forwards to compiler
-actions. Each compiler keeps its one implicit slot; no extra backend jobs can
-acquire a token. This constrains LLVM concurrency inside one rustc process,
-which Bazel's `--jobs=1` alone does not constrain. Codegen partitioning,
-optimization, assertions, overflow checks and the complete target set stay the
-same; the container memory allowance is not increased. Producers and consumers
-use the same declared environment, so strict compiler-cache identity remains
-unchanged across the hand-off.
+Each Linux platform-CI job creates an empty private GNU jobserver FIFO
+at `/var/tmp/day2-rustc-jobserver`, outside Bazel's private action `/tmp`.
+The CI configuration declares its fixed `CARGO_MAKEFLAGS` value in the
+Bazel action environment, which `rules_rust` copies into compiler actions.
+Each compiler keeps its one implicit slot; no extra backend jobs can acquire
+a token. This constrains LLVM concurrency inside one rustc process, which
+Bazel's `--jobs=1` alone does not constrain. Codegen partitioning, optimization,
+assertions, overflow checks and the complete target set stay the same; the
+container memory allowance is not increased. Producers and consumers use the
+same declared configuration, preserving strict compiler-cache admission.
 Debug-disabled compilation strips debug information as before. Linux selects the existing GNU binutils linker instead of Bazel's
 default deprecated gold selection. Release programs and native worker archives retain the previous release
 panic/profile policy; build tools keep their separate build-override profile.
