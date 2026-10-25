@@ -482,6 +482,44 @@ establishes serving completion, net saving or five-second fitness. Root captured
 the original records and closed its node window before this audit update; no
 new probe, timeout change or issuer work is part of the update.
 
+#### Later serving observation and settlement boundaries
+
+Native26/27 refused before the first Controller epoch read. The following are
+source findings for a later successful frontier, not measured request savings.
+One browser operation can cause several Current operations; these counts are
+per fixed native Controller operation, not per browser invocation.
+
+After the first epoch read, both `serve_app_current` and `serve_shell_current`
+called `physical.check()` immediately before
+`reads.check_observation(physical.controller_stage()?, ...)`. The stage getter
+itself performs the same complete physical check. No work I/O, wait, signing,
+effect or owner transfer intervened. Remove the separate first call, keeping
+the getter's full check immediately before observation consumption. This saves
+one composite: five storage metadata reads and two App scan attempts in the App
+path, or five reads and one retained-App scan in the Shell path. Each actual
+read and subsequent observation validation keeps its own original-clock and
+native guards. The caller regressions inspect both native methods, reject a
+restored duplicate and require each observation's full checked getter.
+
+The earlier native26 completed composite cost about 543 ms inclusive
+(durability 330.405 ms, peer 206.899 ms, final file 5.828 ms). That is only a
+proxy for the removed operation shape, not a measured later-read duration or
+net saving. The roughly 90.5-ms App scan mean is likewise not a guarantee.
+
+| Later call site | Audit decision | Removed work if consolidated |
+| --- | --- | --- |
+| First post-read `physical.check` then observation argument's full stage getter, App and Shell | Removed in this child; keep the getter's whole check before native observation validation. | One composite per fixed native operation, as counted above. |
+| Observation validation followed by physical admission | Keep a full check after validation: `RetainedEpochReads::check_observation` samples through real self-process/FD and stage observations. A preceding physical check cannot cover that intervening I/O. | No deletion of the required post-I/O boundary. |
+| App's last explicit `physical.check`, pure `snapshot_digest`, then `finish_app_known`'s entry check | Clear consecutive full-check candidate for a separate child. The digest is bounded public DATA and the closed finisher checks before any release operation; keep that entry check. | One composite. |
+| `announce_app_known` postcheck then immediately `await_app_consumed` entry check | Clear consecutive full-check candidate. Combine the fixed announcement/acknowledgement operation so one middle full check serves post-send and pre-wait; keep pre-announcement and post-wait checks. | One composite. |
+| Acknowledgement postcheck then next epoch-read stage getter | Closed-composition candidate. Retain the actual phase across the immediate checked-stage handoff into the fixed read, as with initial authentication; do not expose a cached checked token. | One composite if that handoff is implemented. |
+| Terminal composite's last file check then explicit durability's first file check | Local file-check fusion candidate. Keep the later provider round: peer executable/proc/namespace observations separated it from the prior durability round. | One local file check; no provider round or App scan. |
+| App scope physical checks around `reads.check_observation` in `CurrentAppServingPhase::check` | Keep: real self-process/FD/stage I/O intervenes. The physical App file/peer must be observed again afterward. | None from deleting a repeat. |
+
+No later candidate changes the frozen #268/#269 sources selected for native28.
+A temporary canary measurement ceiling, authentication limits and issuer work
+are owned separately; no such limit or purpose changes are part of these fixes.
+
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App
 paired reads request a token-free strong snapshot. Both decoded observations

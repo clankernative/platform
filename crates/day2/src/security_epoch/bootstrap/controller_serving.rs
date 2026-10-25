@@ -49,7 +49,8 @@ impl ActiveControllerStorageContinuity {
                     observed.snapshot(),
                 )
             })?;
-            trace.measure(ServingStep::PhysicalBefore, || physical.check())?;
+            // The checked stage getter performs the complete physical
+            // post-read check once, immediately before observation use.
             trace.measure(ServingStep::ProviderBefore, || {
                 reads.check_observation(physical.controller_stage()?, &mut observed)
             })?;
@@ -121,7 +122,8 @@ impl ActiveControllerStorageContinuity {
                 &self.activation,
                 observed.snapshot(),
             )?;
-            physical.check()?;
+            // The checked stage getter performs the complete physical
+            // post-read check once, immediately before observation use.
             reads.check_observation(physical.controller_stage()?, &mut observed)?;
             shell.check(physical.controller_stage()?)?;
             shell.announce_known(physical.controller_stage()?)?;
@@ -149,5 +151,117 @@ impl ActiveControllerStorageContinuity {
             peer.refuse();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod observation_boundary_tests {
+    use syn::visit::Visit;
+
+    // Inspect the actual fixed native callers. A helper fixture cannot catch
+    // a repeated full check added at one of these call sites. This supplies
+    // no native role, phase or permission and does not replace Linux tests.
+    fn native_observation_shape(source: &str, method_name: &str) -> (usize, usize, usize) {
+        #[derive(Default)]
+        struct Calls {
+            standalone_physical_checks: usize,
+            observation_checks: usize,
+            checked_observation_stages: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "check"
+                    && matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("physical"))
+                {
+                    self.standalone_physical_checks += 1;
+                }
+                if node.method == "check_observation" {
+                    self.observation_checks += 1;
+                    self.checked_observation_stages += usize::from(matches!(
+                        node.args.first(),
+                        Some(syn::Expr::Try(guard)) if matches!(&*guard.expr,
+                            syn::Expr::MethodCall(stage) if stage.method == "controller_stage"
+                            && matches!(&*stage.receiver, syn::Expr::Path(path) if path.path.is_ident("physical")))
+                    ));
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let method = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item)
+                    if matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.is_ident("ActiveControllerStorageContinuity")) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .flat_map(|item| &item.items)
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == method_name => Some(method),
+                _ => None,
+            })
+            .expect("actual fixed native serving method");
+        let mut calls = Calls::default();
+        calls.visit_block(&method.block);
+        (
+            calls.standalone_physical_checks,
+            calls.observation_checks,
+            calls.checked_observation_stages,
+        )
+    }
+
+    #[test]
+    fn app_and_shell_observation_consumers_keep_one_full_boundary_check() {
+        for method in ["serve_app_current", "serve_shell_current"] {
+            // Both observations keep their full checked getter. The separate
+            // later check after native observation-validation I/O also stays.
+            assert_eq!(
+                native_observation_shape(include_str!("controller_serving.rs"), method),
+                (1, 2, 2)
+            );
+        }
+    }
+
+    fn observation_consumer(source: &str, method: &str) -> usize {
+        let start = source.find(&format!("fn {method}(")).unwrap();
+        // Bound the mutation to THIS actual native method. The App's trace
+        // returns the check result directly; Shell uses an ordinary ? call.
+        // A missing App match must never fall through into the Shell body.
+        let end = start + source[start..].find("\n    }\n").unwrap();
+        let consumer = source[start..end]
+            .find("reads.check_observation(physical.controller_stage()?, &mut observed)")
+            .expect("checked observation consumer inside this native method");
+        start + consumer
+    }
+
+    #[test]
+    fn each_native_caller_rejects_restoring_the_immediate_physical_repeat() {
+        let source = include_str!("controller_serving.rs");
+        for method in ["serve_app_current", "serve_shell_current"] {
+            let consumer = observation_consumer(source, method);
+            let mut repeated = source.to_owned();
+            repeated.insert_str(consumer, "physical.check()?; ");
+            assert_eq!(native_observation_shape(&repeated, method), (2, 2, 2));
+        }
+    }
+
+    #[test]
+    fn each_observation_still_requires_the_full_checked_stage_getter() {
+        let source = include_str!("controller_serving.rs");
+        for method in ["serve_app_current", "serve_shell_current"] {
+            let consumer = observation_consumer(source, method);
+            let checked = "reads.check_observation(physical.controller_stage()?, &mut observed)";
+            let mut mutated = source.to_owned();
+            mutated.replace_range(
+                consumer..consumer + checked.len(),
+                "reads.check_observation(unchecked_stage, &mut observed)",
+            );
+            assert_ne!(native_observation_shape(&mutated, method), (1, 2, 2));
+        }
     }
 }
