@@ -8670,7 +8670,7 @@ mod tests {
         // Frozen positive fixture for the exact reviewed function. The normal
         // inventory independently compares actual production function tokens;
         // this fixture cannot approve a changed production implementation.
-        let function: syn::ItemFn = syn::parse_quote! {
+        let function: syn::ItemFn = syn::parse_str(r#"
             /// The same bounded SQLite execution settings apply to an owned fresh memory
             /// database. Configuring a connection supplies no storage or epoch authority.
             pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> Result<()> {
@@ -8688,10 +8688,14 @@ mod tests {
                 )?;
                 Ok(())
             }
-        };
+        "#).unwrap();
         let source = "crates/day2/src/store.rs";
         let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
-        assert!(sql_control_function_reviewed(source, &digest), "{digest}");
+        assert!(
+            sql_control_function_reviewed(source, &digest),
+            "{digest}: {}",
+            function.to_token_stream()
+        );
         let mut checker = SqlCallbackControls {
             source,
             admitted_function: false,
