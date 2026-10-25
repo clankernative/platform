@@ -1617,7 +1617,28 @@ pub(crate) mod tests {
             ambient: usize,
         }
 
+        impl Reads {
+            fn inspect_ensure(&mut self, mac: &syn::Macro) {
+                use syn::parse::Parser;
+                let expressions =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(mac.tokens.clone())
+                        .expect("actual Facts ensure arguments are Rust expressions");
+                // Default Visit treats macro tokens as opaque. Inspect
+                // the actual condition as well as its diagnostic arguments.
+                for expression in &expressions {
+                    self.visit_expr(expression);
+                }
+            }
+        }
+
         impl<'ast> Visit<'ast> for Reads {
+            fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+                if node.mac.path.is_ident("ensure") {
+                    self.inspect_ensure(&node.mac);
+                }
+            }
+
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 if node.method == "subject" {
                     if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("subjects"))
