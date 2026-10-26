@@ -443,6 +443,7 @@ mod tests {
         issuer_costs::{Outcome, Recorder, Subject},
         protocol::Packet,
     };
+    use anyhow::Context;
     use std::{
         process::{Command, Stdio},
         time::Duration,
@@ -600,6 +601,32 @@ mod tests {
             .find(|r| r[0] == "identity_requester_body")
             .unwrap();
         assert_eq!(body[1][0], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn substituted_actual_retained_executable_refuses_before_and_after_restoration() -> Result<()> {
+        let mut owners = self_receipts(1)?;
+        let owner = &mut owners[0];
+        let mut foreign = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(foreign.as_file_mut(), b"foreign actual descriptor")?;
+        let admitted = std::mem::replace(&mut owner.executable, foreign.reopen()?);
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let error = owner
+            .check_identity(&mut acquisition, &HashCosts::disabled())
+            .err()
+            .context("substituted actual descriptor must refuse")?;
+        assert_eq!(error.to_string(), "native_enrollment_executable_changed");
+        assert!(owner.refused);
+        assert!(acquisition.remaining().is_err());
+        owner.executable = admitted;
+        let mut later = NativeAcquisition::begin(5)?;
+        let error = owner
+            .check_identity(&mut later, &HashCosts::disabled())
+            .err()
+            .context("restoration cannot revive the actual process owner")?;
+        assert_eq!(error.to_string(), "native_enrollment_process_refused");
+        assert!(later.remaining().is_err());
         Ok(())
     }
 

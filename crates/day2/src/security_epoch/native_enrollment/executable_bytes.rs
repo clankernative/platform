@@ -251,6 +251,234 @@ mod tests {
         Ok(())
     }
 
+    fn native_result_body(function: &syn::ImplItemFn) -> Option<&syn::Block> {
+        let (_, expression) = native_local(&function.block, "result")?;
+        let syn::Expr::Call(call) = expression else {
+            return None;
+        };
+        let syn::Expr::Paren(parenthesized) = &*call.func else {
+            return None;
+        };
+        let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+            return None;
+        };
+        let syn::Expr::Block(body) = &*closure.body else {
+            return None;
+        };
+        Some(&body.block)
+    }
+
+    fn native_local<'a>(body: &'a syn::Block, name: &str) -> Option<(usize, &'a syn::Expr)> {
+        let mut found = None;
+        for (index, statement) in body.stmts.iter().enumerate() {
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding)
+                    if binding.ident == name && binding.mutability.is_none() && binding.by_ref.is_none())
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((index, local.init.as_ref()?.expr.as_ref()));
+            }
+        }
+        found
+    }
+
+    fn native_path(expression: &syn::Expr, name: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
+    }
+
+    fn native_reference(expression: &syn::Expr, name: &str) -> bool {
+        matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && native_path(&reference.expr, name))
+    }
+
+    fn native_field(expression: &syn::Expr, owner: &str, field: &str) -> bool {
+        matches!(expression, syn::Expr::Field(member)
+            if matches!(&member.member, syn::Member::Named(name) if name == field)
+            && native_path(&member.base, owner))
+    }
+
+    fn native_fallible_call<'a>(
+        expression: &'a syn::Expr,
+        names: &[&str],
+    ) -> Option<&'a syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>> {
+        let syn::Expr::Try(attempt) = expression else {
+            return None;
+        };
+        let syn::Expr::Call(call) = &*attempt.expr else {
+            return None;
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            return None;
+        };
+        (path.path.segments.len() == names.len()
+            && path
+                .path
+                .segments
+                .iter()
+                .zip(names)
+                .all(|(part, name)| part.ident == *name))
+        .then_some(&call.args)
+    }
+
+    fn native_current_executable(expression: &syn::Expr) -> bool {
+        let Some(args) = native_fallible_call(expression, &["executable"]) else {
+            return false;
+        };
+        args.len() == 2
+            && native_reference(&args[0], "current")
+            && native_path(&args[1], "acquisition")
+    }
+
+    fn native_held_executables(expression: &syn::Expr) -> bool {
+        let syn::Expr::MethodCall(collect) = expression else {
+            return false;
+        };
+        let syn::Expr::MethodCall(map) = &*collect.receiver else {
+            return false;
+        };
+        let syn::Expr::MethodCall(iter) = &*map.receiver else {
+            return false;
+        };
+        if collect.method != "collect"
+            || !collect.args.is_empty()
+            || map.method != "map"
+            || map.args.len() != 1
+            || iter.method != "iter"
+            || !iter.args.is_empty()
+            || !native_path(&iter.receiver, "processes")
+        {
+            return false;
+        }
+        let syn::Expr::Closure(mapper) = &map.args[0] else {
+            return false;
+        };
+        mapper.inputs.len() == 1
+            && matches!(&mapper.inputs[0], syn::Pat::Ident(binding) if binding.ident == "owner")
+            && matches!(&*mapper.body, syn::Expr::Reference(reference)
+                if reference.mutability.is_none() && native_field(&reference.expr, "owner", "executable"))
+    }
+
+    fn native_handle_check(statement: &syn::Stmt, final_path: &str) -> bool {
+        let syn::Stmt::Expr(expression, Some(_)) = statement else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["executable_bytes", "check_handles"])
+        else {
+            return false;
+        };
+        args.len() == 5
+            && native_reference(&args[0], "held_executables")
+            && native_reference(&args[1], "current_executable")
+            && native_reference(&args[2], final_path)
+            && native_path(&args[3], "executable_stamp")
+            && native_path(&args[4], "acquisition")
+    }
+
+    fn native_retained_check_flow(function: &syn::ImplItemFn) -> bool {
+        use syn::visit::Visit;
+        struct EarlyReturn(bool);
+        impl<'ast> Visit<'ast> for EarlyReturn {
+            fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+                self.0 = true;
+            }
+        }
+        let Some(body) = native_result_body(function) else {
+            return false;
+        };
+        let mut early = EarlyReturn(false);
+        early.visit_block(body);
+        if early.0 {
+            return false;
+        }
+        let Some((first, expression)) = native_local(body, "first") else {
+            return false;
+        };
+        if !matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none()
+            && matches!(&*reference.expr, syn::Expr::Unary(unary)
+                if matches!(unary.op, syn::UnOp::Deref(_))
+                && matches!(&*unary.expr, syn::Expr::Index(index)
+                    if native_path(&index.expr, "processes")
+                    && matches!(&*index.index, syn::Expr::Lit(literal)
+                        if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_digits() == "0")))))
+        {
+            return false;
+        }
+        let Some((proc, expression)) = native_local(body, "proc") else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["ns", "open_root"]) else {
+            return false;
+        };
+        if args.len() != 1 || !native_path(&args[0], "acquisition") {
+            return false;
+        }
+        let Some((process, expression)) = native_local(body, "current") else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["open_process"]) else {
+            return false;
+        };
+        if args.len() != 3
+            || !native_reference(&args[0], "proc")
+            || !matches!(&args[1], syn::Expr::Field(field)
+                if matches!(&field.member, syn::Member::Named(name) if name == "process")
+                && native_field(&field.base, "first", "data"))
+            || !native_path(&args[2], "acquisition")
+        {
+            return false;
+        }
+        let Some((current, expression)) = native_local(body, "current_executable") else {
+            return false;
+        };
+        if !native_current_executable(expression) {
+            return false;
+        }
+        let Some((held, expression)) = native_local(body, "held_executables") else {
+            return false;
+        };
+        if !native_held_executables(expression) {
+            return false;
+        }
+        let Some((stamp, expression)) = native_local(body, "executable_stamp") else {
+            return false;
+        };
+        if !matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && native_field(&reference.expr, "first", "executable_stamp"))
+        {
+            return false;
+        }
+        let Some((final_path, expression)) = native_local(body, "final_executable") else {
+            return false;
+        };
+        if !native_current_executable(expression) {
+            return false;
+        }
+        let checks = body
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                (native_handle_check(statement, "current_executable")
+                    || native_handle_check(statement, "final_executable"))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        checks.len() == 2
+            && first < proc
+            && proc < process
+            && process < current
+            && current < held
+            && held < stamp
+            && stamp < checks[0]
+            && checks[0] < final_path
+            && final_path < checks[1]
+            && native_handle_check(&body.stmts[checks[0]], "current_executable")
+            && native_handle_check(&body.stmts[checks[1]], "final_executable")
+    }
+
     fn actual_process_capture_and_check_shape(source: &str) -> bool {
         use syn::visit::Visit;
 
@@ -282,6 +510,7 @@ mod tests {
         let source = syn::parse_file(source).unwrap();
         let mut capture = None;
         let mut check = None;
+        let mut retained_flow = false;
         for item in source.items {
             let syn::Item::Impl(implementation) = item else {
                 continue;
@@ -299,6 +528,7 @@ mod tests {
                 if function.sig.ident == "observe" {
                     assert!(capture.replace(calls).is_none());
                 } else if function.sig.ident == "check_same_actor" {
+                    retained_flow = native_retained_check_flow(&function);
                     assert!(check.replace(calls).is_none());
                 }
             }
@@ -310,14 +540,15 @@ mod tests {
                 handle_checks: 0,
                 final_checks: 1
             })
-        ) && matches!(
-            check,
-            Some(Calls {
-                admits: 0,
-                handle_checks: 2,
-                final_checks: 0
-            })
-        )
+        ) && retained_flow
+            && matches!(
+                check,
+                Some(Calls {
+                    admits: 0,
+                    handle_checks: 2,
+                    final_checks: 0
+                })
+            )
     }
 
     #[test]
@@ -351,6 +582,42 @@ mod tests {
             let mutated = source.replacen(before, after, 1);
             assert_ne!(mutated, source);
             assert!(!actual_process_capture_and_check_shape(&mutated));
+        }
+    }
+
+    #[test]
+    fn actual_process_guard_rejects_conditional_checks_and_substituted_handle_dataflow() {
+        let source = include_str!("process.rs");
+        let close = "                acquisition,\n            )?;";
+        assert_eq!(source.matches(close).count(), 2);
+        let conditional = source
+            .replace(
+                "executable_bytes::check_handles(",
+                "if held_executables.is_empty() { executable_bytes::check_handles(",
+            )
+            .replace(close, "                acquisition,\n            )?; }");
+        assert_eq!(
+            conditional
+                .matches("executable_bytes::check_handles(")
+                .count(),
+            2
+        );
+        assert!(!actual_process_capture_and_check_shape(&conditional));
+        for (before, after) in [
+            ("&held_executables,", "&[],"),
+            ("&final_executable,", "&current_executable,"),
+            (
+                "let executable_stamp = &first.executable_stamp;",
+                "let executable_stamp = &other.executable_stamp;",
+            ),
+            (
+                ".map(|owner| &owner.executable)",
+                ".map(|owner| &other.executable)",
+            ),
+        ] {
+            let changed = source.replacen(before, after, 1);
+            assert_ne!(changed, source);
+            assert!(!actual_process_capture_and_check_shape(&changed));
         }
     }
 
