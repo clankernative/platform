@@ -893,6 +893,20 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: committed successor missing"
                     );
                 }
+                if case == Case::ReadinessRewind {
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        "reauth_required",
+                        "the observed readiness clock refusal must persist before recovery"
+                    );
+                    assert_eq!(port.accounts.load(SeqCst), 0);
+                    assert_eq!(
+                        db.query_row("SELECT count(*) FROM oauth_refresh_attempts WHERE state='may_have_been_sent' AND base_version=1", [], |r| r.get::<_, i64>(0))?,
+                        1,
+                        "clock refusal cannot clear the durable no-resend barrier"
+                    );
+                }
                 let before = port.posts.load(SeqCst);
                 port.fail_clock.store(false, SeqCst);
                 port.now.store(

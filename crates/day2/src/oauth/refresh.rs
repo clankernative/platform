@@ -551,7 +551,7 @@ pub(super) fn ensure_current(
                 .context("OAuth refresh expiry overflow")?;
             let at = effects::wall_time()?;
             if at < last_clock || at >= expiry {
-                anyhow::bail!("OAuth refresh response clock fence changed");
+                return Err(ClockRefusal.into());
             }
             last_clock = at;
             let current = authority
@@ -569,7 +569,7 @@ pub(super) fn ensure_current(
             );
             let at = effects::wall_time()?;
             if at < last_clock || at >= expiry {
-                anyhow::bail!("OAuth refresh account dispatch clock fence changed");
+                return Err(ClockRefusal.into());
             }
             last_clock = at;
             serving.sql_read(runtime, |snapshot| {
@@ -622,8 +622,17 @@ pub(super) fn ensure_current(
             serving.check()?;
             return Ok(Resolution::unavailable("ReauthRequired"));
         }
-        Err(_) => {
+        Err(error) => {
+            // Persist an observed clock refusal only while THIS actual owner
+            // still authorizes the exact base. No fresh owner or raw cleanup
+            // connection may repair a refusal after the native scope is lost.
+            let clock_refused = if error.downcast_ref::<ClockRefusal>().is_some() {
+                current_clock_refusal(runtime, serving, &context)
+            } else {
+                Ok(())
+            };
             serving.refuse();
+            clock_refused?;
             // Dispatch already durably fenced this exact attempt. Once its
             // owner is refused, even relabeling that row is new SQL authority.
             // Keep may_have_been_sent: it already blocks use and redispatch.
