@@ -32,10 +32,44 @@ pub(super) struct Channel {
     // None only for the private issuer birth socket and kernel DATA fixtures.
     // Every production enrollment/storage/serving channel installs a transcript.
     transcript: Option<Transcript>,
+    // Actual selected-code sender anchors, not role or request permission.
+    // Only storage/serving packets install this; enrollment keeps its own path.
+    unprivileged_sender: Option<Box<MessageProcess>>,
     local: PhantomData<Rc<()>>,
 }
 
 impl Channel {
+    fn receive_unprivileged_sender(
+        &mut self,
+        packet: net::ReceivedPidfdPacket,
+        expected_code: &Digest,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<MessageProcess> {
+        let costs = HashCosts::disabled();
+        let result = (|| {
+            ensure!(!self.refused, "native_enrollment_channel_refused");
+            if let Some(admitted) = &mut self.unprivileged_sender {
+                ensure!(
+                    admitted.data().code == *expected_code,
+                    "native_enrollment_channel_code_changed"
+                );
+                MessageProcess::receive_admitted(packet, admitted, acquisition, &costs)
+            } else {
+                let mut received =
+                    MessageProcess::receive(packet, expected_code, acquisition, &costs)?;
+                self.unprivileged_sender = Some(Box::new(
+                    received.retain_message_anchor(acquisition, &costs)?,
+                ));
+                Ok(received)
+            }
+        })();
+        if result.is_err() {
+            self.refuse();
+            acquisition.refuse();
+        }
+        result
+    }
+
     fn observation(acquisition: &NativeAcquisition) -> Observation {
         let (domain, origin, deadline, now) = acquisition.historical_interval_observation();
         Observation {
@@ -214,6 +248,7 @@ impl Channel {
         Ok(Self {
             socket: File::from(socket),
             refused: false,
+            unprivileged_sender: None,
             transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Client)),
             local: PhantomData,
         })
@@ -235,6 +270,7 @@ impl Channel {
             Self {
                 socket: File::from(parent),
                 refused: false,
+                unprivileged_sender: None,
                 transcript: None,
                 local: PhantomData,
             },
@@ -257,6 +293,7 @@ impl Channel {
         Ok(Self {
             socket: File::from(fd),
             refused: false,
+            unprivileged_sender: None,
             transcript: None,
             local: PhantomData,
         })
@@ -507,6 +544,7 @@ impl Listener {
                 Channel {
                     socket: File::from(socket),
                     refused: false,
+                    unprivileged_sender: None,
                     transcript: Some(Transcript::new(Protocol::Enrollment, Actor::Issuer)),
                     local: PhantomData,
                 },
@@ -563,10 +601,98 @@ mod tests {
             Channel {
                 socket: File::from(right),
                 refused: false,
+                unprivileged_sender: None,
                 transcript: None,
                 local: PhantomData,
             },
         )
+    }
+
+    fn sender_packet(
+        channel: &Channel,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<net::ReceivedPidfdPacket> {
+        // Actual packet/FD adapter only, never an enrolled role or peer owner.
+        wait(&channel.socket, PollFlags::IN, acquisition)?;
+        let mut bytes = [0_u8; MAX_PACKET];
+        Ok(net::recv_pidfd_packet(
+            &channel.socket,
+            &mut [IoSliceMut::new(&mut bytes)],
+        )?)
+    }
+
+    #[test]
+    fn admitted_channel_checks_two_later_packet_senders_without_another_scan() -> Result<()> {
+        use crate::security_epoch::self_check_profile;
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let mut setup = NativeAcquisition::begin(5)?;
+        let (mut channel, sender) = Channel::pair(&mut setup)?;
+        for index in 0..3 {
+            let mut request = NativeAcquisition::begin(5)?;
+            net::send(&sender, b"public sender fixture", SendFlags::NOSIGNAL)?;
+            let packet = sender_packet(&channel, &mut request)?;
+            let (received, profile) = self_check_profile::sample_current(|| {
+                channel.receive_unprivileged_sender(packet, &code, &mut request)
+            });
+            let mut received = received?;
+            assert_eq!(received.data().process, std::process::id());
+            assert_eq!(
+                profile.unwrap().profile.rows[1].0,
+                Some(u32::from(index == 0))
+            );
+            received.check_identity(&mut request, &HashCosts::disabled())?;
+        }
+        assert!(channel.unprivileged_sender.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn transferred_channel_cannot_borrow_its_original_senders_admission() -> Result<()> {
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let mut setup = NativeAcquisition::begin(5)?;
+        let (mut channel, sender) = Channel::pair(&mut setup)?;
+        net::send(&sender, b"first actual sender", SendFlags::NOSIGNAL)?;
+        let packet = sender_packet(&channel, &mut setup)?;
+        channel.receive_unprivileged_sender(packet, &code, &mut setup)?;
+        let _child = ChildOwner(
+            Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "security_epoch::native_enrollment::channel::tests::packet_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("DAY2_NATIVE_ENROLLMENT_TEST_CHILD", "1")
+                .stdin(Stdio::from(sender))
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()?,
+        );
+        let mut request = NativeAcquisition::begin(5)?;
+        let packet = sender_packet(&channel, &mut request)?;
+        let received = channel.receive_unprivileged_sender(packet, &code, &mut request);
+        assert!(
+            matches!(received, Err(ref error) if error.to_string() == "native_enrollment_packet_actor_changed")
+        );
+        assert!(channel.refused);
+        assert!(request.remaining().is_err());
+        // A valid packet from the original process and a fresh interval cannot
+        // revive this SAME refused channel after the caught transfer failure.
+        let mut later = NativeAcquisition::begin(5)?;
+        let (other, original_sender) = Channel::pair(&mut later)?;
+        net::send(
+            &original_sender,
+            b"original process again",
+            SendFlags::NOSIGNAL,
+        )?;
+        let packet = sender_packet(&other, &mut later)?;
+        assert!(
+            channel
+                .receive_unprivileged_sender(packet, &code, &mut later)
+                .is_err()
+        );
+        assert!(later.remaining().is_err());
+        Ok(())
     }
 
     #[test]
