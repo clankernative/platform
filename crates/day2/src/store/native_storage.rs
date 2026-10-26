@@ -273,7 +273,9 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
                 let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
                 let value = (|| {
                     super::check_database_scope(&tx, &sql.scope)?;
-                    crate::audit::require_current_schema(&tx)?;
+                    // Diagnostic model/state reads remain available after a
+                    // refusal. Protected history/outcome readers admit their
+                    // audit guards at the actual return boundary instead.
                     operation(&tx)
                 })();
                 let admitted = policy.finish();

@@ -2202,6 +2202,7 @@ impl Runtime {
     pub fn trace(&self, id: &str) -> Result<Trace> {
         self.sql_read(|connection| {
             self.check_binding(connection)?;
+            crate::audit::require_current_schema(connection)?;
             let raw: Option<String> = connection.query_row(
                 "SELECT trace FROM day2_invocations WHERE id=?1",
                 [id],
@@ -2437,6 +2438,7 @@ pub(crate) fn completed_outcome(
     outcome: Option<&str>,
     policy: &crate::authority::Policy,
 ) -> Result<Outcome> {
+    crate::audit::require_current_schema(connection)?;
     let (raw, receipt): (Option<String>, Option<String>) = connection.query_row(
         "SELECT trace,receipt FROM day2_invocations WHERE id=?1",
         [id],

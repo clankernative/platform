@@ -2696,6 +2696,48 @@ fn admission_refuses_when_common_audit_is_unavailable_and_receipts_fail_closed()
 }
 
 #[test]
+fn audit_corruption_keeps_model_inspection_but_refuses_history_and_outcomes() -> Result<()> {
+    let world = World::new()?;
+    let outcome = world.runtime.invoke(
+        "links.create",
+        "alice",
+        "completed-before-corruption",
+        &json!({"title":"Audited","destination":"https://example.com/"}),
+        100,
+        Fault::None,
+    )?;
+    assert_eq!(outcome.status, "success");
+    assert!(!world.runtime.audit_events("admin", 0)?.is_empty());
+    assert_eq!(
+        day2::invocations::status(&world.runtime, "completed-before-corruption", "alice")?.status,
+        "success"
+    );
+    let before = world.runtime.inspect()?;
+    world
+        .db()?
+        .execute_batch("DROP TRIGGER day2_receipt_event")?;
+    assert_eq!(world.runtime.inspect()?, before);
+    assert!(day2::invocations::children(&world.runtime, "completed-before-corruption")?.is_empty());
+    for result in [
+        world.runtime.audit_events("admin", 0).map(|_| ()),
+        world
+            .runtime
+            .trace("completed-before-corruption")
+            .map(|_| ()),
+        day2::invocations::status(&world.runtime, "completed-before-corruption", "alice")
+            .map(|_| ()),
+    ] {
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("audit_guard_missing_or_changed")
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn current_host_reopen_is_repeatable_and_does_not_invent_event_metadata() -> Result<()> {
     let world = World::new()?;
     world.seed("prior-receipt")?;

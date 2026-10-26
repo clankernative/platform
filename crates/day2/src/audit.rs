@@ -1204,7 +1204,8 @@ impl Runtime {
         if let Some(requirements) = &active.document.security {
             requirements.require_runtime()?;
         }
-        active.document.authorize_audit(actor)
+        active.document.authorize_audit(actor)?;
+        require_current_schema(db)
     }
     pub fn audit_entries(&self, actor: &str, filter: &Filter) -> Result<Vec<Entry>> {
         ensure!(filter.before >= 0, crate::error::Failure::InvalidCursor);
@@ -1352,6 +1353,7 @@ pub(crate) fn history(
     request: &Request,
     instruction: &crate::protocol::Instruction,
 ) -> Result<String> {
+    require_current_schema(db)?;
     use crate::error::Failure::InvalidInput;
     let read: HistoryRequest =
         crate::json::decode(instruction.data.as_bytes()).context(InvalidInput)?;
