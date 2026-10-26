@@ -505,3 +505,41 @@ pure processing of the same captured bytes: Kubernetes requests, actual process
 owners, fresh hash/check boundaries and original intervals are unchanged. It is
 not a cached workload observation or native permission; no node-latency saving
 is established by this parsing-only change.
+
+## Issuer work inside one Current exchange
+
+The Current profile's four issuer-transport spans are two sends and two
+receives on one role-enrollment connection: Hello, Nonce, Bind and Grant.
+They are not four server acquisitions or four equal-duration RPCs. The Nonce
+wait includes policy/self/parent admission and the Hello sender capture. The
+Grant wait includes Bind sender capture and signature verification, current
+runtime/workload joins, final sender/parent checks, signing and publication.
+Caller-side packet work and serial-issuer queueing can also contribute; the
+aggregate does not measure remote CPU or each span separately. The issuer's
+bounded first-sixteen-connection records may already be exhausted by startup.
+
+Within a successful runtime join, the three containerd executable observations
+protect different boundaries: capture of the newly connected fixed socket peer,
+after the containerd RPC group, and after authenticated Kubernetes/provider I/O.
+All three full reads remain. Requester and parent observations separated by
+packet I/O, runtime/provider reads, signatures or publication remain fresh too.
+No issuer-lifetime or cross-exchange digest, workload or permission cache is
+introduced.
+
+The fixed containerd group reads Version, CRI Version, Tasks.List,
+Containers.Get, ContainerStatus and a final Tasks.Get. Tasks.List supplies the
+actual unique PID-matched task, already checked for its exact live-init PID,
+lowercase 64-byte container ID, running status and empty exec/container-ID field.
+An immediate additional initial Tasks.Get checked precisely those same fields
+before any use or effect. The selected list row now serves as that initial
+observation. The final Get still compares the complete task after container/CRI
+reads, refusing missing, dead, replaced or changed tasks. The actual process,
+socket, original clock and surrounding kernel/workload guards are unchanged.
+
+This removes one read-only RPC per exchange, seven to six. Loopback protocol
+tests check the fixed order, namespace/request bindings, ambiguous/malformed
+lists, all final task-field changes and expired originals. They establish
+adapter behavior, not a current GKE role or measured node latency. The earlier
+16.695ms RPC-group observation is a different source-bound exchange; no share
+of the Current profile's issuer wait or historical hash cost is credited as a
+saving. A fresh native measurement must establish the actual effect.
