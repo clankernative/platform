@@ -347,6 +347,41 @@ The controlled handoff regressions cover one full check, the same stage and
 original interval, later-boundary refusal, and error/unwind ownership. Actual
 Linux/provider qualification and measured canary savings remain separate.
 
+### Current prefix duplicate audit
+
+The native25 whole-Current capture started eighteen App executable scans,
+totalling 1.681 seconds (93.4 ms per scan on average). The source path through
+the first composite check accounts for those eighteen: three in peer preparation,
+thirteen in peer acceptance, and two in the final composite peer check. Role
+acquisition scans the Controller itself; its cost is separate. Within acceptance,
+two scans capture newly received Hello/Ack senders and the others reobserve the
+retained/current sender sets. This is a source attribution of that prefix, not
+evidence that every future request has the same counts or per-scan cost.
+
+| Call site / repeat | S1 boundary decision | Expected gross saving |
+| --- | --- | --- |
+| `owner::begin_stage`: self capture, issuer exchange, final stage check | Keep: nonce/grant receive and role-bind signing intervene; self identity, namespaces and the final original clock stay fresh. | None from deleting a repeat. |
+| `RetainedPeer::start_phase` / `prepare_current`: three retained-App checks | Keep: idle packet receive, Ready signing, send and their postchecks intervene. | None. |
+| `PendingPhysicalFilePhase::acquire` final file check followed by `check_current_durability`'s first file check | Clear duplicate in both fixed Controller callers. Fuse acquisition and durability before publishing the physical phase; retain durability's pre/post checks around real provider/block reads. | One file check: roughly 6 ms as a proxy from native25's 5.9 ms FinalFile span; not an isolated measurement here. |
+| `CurrentPhysicalFilePhase::check_current_durability`: surrounding file checks | Keep: authenticated provider reads, sysfs/proc reads and block preads intervene. | None. |
+| `receive_storage` / `Peer::authenticate`: capture and publication observation | Keep: the kernel sender is received, bound to a signed grant and published as a new peer. Removing that scan requires a different closed constructor, not deleting a check. | None claimed. |
+| `Peer::accept_message`: full sender check, `Message::verify`, full sender check | Clear duplicate: verification is bounded public-key/DATA work, with no signing, I/O, wait, effect or outgoing owner publication. Retain the incoming handles first, valid/original-budget gates, signature validation and one final full check of every sender handle. | One App scan for the Controller's prefix Ack: about 93 ms using native25's average. Further accepted App messages can save one each; count them in a matched capture. |
+| `RetainedPeer::check_resources` followed by `Peer::check` in a current phase | Keep: these validate different old/current native handle sets and different grant/interval obligations. A joint observation could be a later separately qualified optimization; one set cannot simply be omitted. | None from deletion. |
+| `accept_current`'s final peer check followed by the composite peer check | Keep: the intervening composite durability operation performs provider and block/profile I/O. The post-durability peer must be current again. | None. |
+| `MessageProcess::check_same_actor`: byte scan followed by namespace/final-path/pidfd guards | Keep: one scan already joins every held/current/final descriptor. The later guards detect replacement, namespace change, death and expiry; they are not another byte scan. | None. |
+
+The message-acceptance fix verifies the signed DATA before its one full native
+observation; it never reuses a prior successful observation. Invalid signatures
+and native refusal remain terminal. Its regression uses the production ordering
+helper with signed DATA and controlled observations; a separate AST guard binds
+that ordering to the actual native caller and rejects restoring the earlier
+full check. Neither test supplies a native owner or claims kernel qualification.
+The separate physical-factory candidate above needs its own closed-composition
+change and regression. Newer native26/27 evidence must be joined to the same
+prefix before updating these estimates: a whole-operation count can also include
+later serving work. The estimates are gross removed work, not promised net
+latency, a five-second fit or a completed serving result.
+
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App
 paired reads request a token-free strong snapshot. Both decoded observations
