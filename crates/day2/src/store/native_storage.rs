@@ -747,7 +747,8 @@ mod tests {
         tx.execute("INSERT INTO control_probe VALUES(1)", [])?;
         // reserve_in calls sync_definitions_in, a genuinely nested atomic
         // operation. The later exhausted account must roll back both levels.
-        assert!(crate::budget::reserve_in(&tx, &budget_request(true)).is_err());
+        let excluded = crate::budget::reserve_in(&tx, &budget_request(true)).unwrap_err();
+        assert_eq!(excluded.to_string(), "budget_exhausted:z:calls");
         for table in [
             "day2_budget_accounts",
             "day2_budget_reservations",
