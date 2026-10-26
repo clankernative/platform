@@ -590,6 +590,7 @@ impl<'role> ProviderReader<'role> {
             .timings
             .measure(operation, || match &mut self.authentication {
                 ProviderAuthentication::ConnectionRequest => {
+                    self.acquisition.refuse();
                     anyhow::bail!("storage_request_has_no_provider_admission")
                 }
                 ProviderAuthentication::Acquired(material) => {
