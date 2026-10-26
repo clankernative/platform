@@ -1488,14 +1488,34 @@ mod tests {
     fn storage_request_profile_requires_initial_operator_ownership_and_read_only_mode() {
         // Metadata predicate DATA only: no descriptor or native owner is made.
         let selected = ProfileFileIdentity {
-            device_major: 1, device_minor: 2, inode: 3, mount: 4,
-            mode: 0o100444, uid: 0, gid: 10001, size: 10,
-            modified: (1, 0), changed: (1, 0),
+            device_major: 1,
+            device_minor: 2,
+            inode: 3,
+            mount: 4,
+            mode: 0o100444,
+            uid: 0,
+            gid: 10001,
+            size: 10,
+            modified: (1, 0),
+            changed: (1, 0),
         };
         selected.require_operator_file().unwrap();
-        for (uid, mode) in [(10001, 0o100444), (0, 0o100644), (0, 0o100664), (0, 0o100555), (0, 0o104444)] {
-            let changed = ProfileFileIdentity { uid, mode, ..selected.clone() };
-            assert!(changed.require_operator_file().is_err(), "uid={uid}, mode={mode:o}");
+        for (uid, mode) in [
+            (10001, 0o100444),
+            (0, 0o100644),
+            (0, 0o100664),
+            (0, 0o100555),
+            (0, 0o104444),
+        ] {
+            let changed = ProfileFileIdentity {
+                uid,
+                mode,
+                ..selected.clone()
+            };
+            assert!(
+                changed.require_operator_file().is_err(),
+                "uid={uid}, mode={mode:o}"
+            );
         }
     }
 
@@ -1617,10 +1637,14 @@ mod tests {
                     self.0.push("completed_admission_required".into());
                 }
                 if node.path.is_ident("ensure")
-                    && let Ok(arguments) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(node.tokens.clone())
+                    && let Ok(arguments) =
+                        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                            .parse2(node.tokens.clone())
                     && let Some(condition) = arguments.first()
                 {
-                    self.visit_expr(condition);
+                    let mut expression = Calls::default();
+                    expression.visit_expr(condition);
+                    self.0.extend(expression.0);
                 }
                 syn::visit::visit_macro(self, node);
             }
@@ -1716,7 +1740,11 @@ mod tests {
     fn storage_request_uses_only_retained_physical_owners_and_initial_keeps_admission() {
         let source = include_str!("native_volume.rs");
         assert!(storage_request_shape(source));
-        assert!(!storage_request_shape(&source.replacen("identity.require_operator_file()?;", "", 1)));
+        assert!(!storage_request_shape(&source.replacen(
+            "identity.require_operator_file()?;",
+            "",
+            1
+        )));
         assert!(!storage_request_shape(&source.replacen(
             "if !matches!(",
             "if matches!(",
