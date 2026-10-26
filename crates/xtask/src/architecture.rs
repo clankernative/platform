@@ -265,13 +265,15 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
         // the progress hook; a guarded callback denies/latches that entry.
         // No module-name exemption: any byte change requires explicit review.
         "crates/day2/src/store/native_storage.rs" => {
-            Some("sha256:3b0e7ce0dc0aac2f99f8cdcd932652105b9ee96cb76e600f72948c6740e39940")
+            Some("sha256:18781b8320c629022f0b0bccfdcbc2eb5298ee506002a3738fbecd92e88d7f46")
         }
         "crates/day2/src/oauth/schema.rs" => {
             Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
         }
         // Closed control construction only, not the large accounting module.
-        "crates/day2/src/budget/atomic_control.rs" => Some("sha256:1defd4e183f7aa6a91f27081145b89dc972b75be9f29dd42cad4d021ae83e478"),
+        "crates/day2/src/budget/atomic_control.rs" => {
+            Some("sha256:1defd4e183f7aa6a91f27081145b89dc972b75be9f29dd42cad4d021ae83e478")
+        }
         _ => None,
     }
 }
@@ -320,7 +322,7 @@ fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
         // it cannot choose SQL, a role, a connection factory or a ticket.
         (
             "crates/day2/src/budget.rs",
-            "REVIEWED_ATOMIC_WRAPPER_TOKENS_PENDING",
+            "sha256:a45b3501e871e84e2964f788c49dba285a4b0ca3994727d2f68e915e615a6019",
         ),
         // Existing synthetic/live provider and delegated-journal adapters set
         // the fixed two-second busy timeout on a connection they just opened.
@@ -8711,6 +8713,19 @@ mod tests {
 
     #[test]
     fn sql_callback_controls_require_the_fixed_accounting_wrapper_before_any_call() {
+        // Frozen independent fixture, not a digest computed from production.
+        let wrapper = r#"
+            /// Internal savepoints prevent partial multi-account mutation even if the caller
+            /// catches an admission failure and commits other work in its outer transaction.
+            fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
+                atomic_control::atomic(connection, body)
+            }
+        "#;
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/budget.rs".to_owned(),
+            syn::parse_file(wrapper).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new()).unwrap();
         for source in [
             "pub fn atomic() {}",
             "pub fn unrelated() {}",
@@ -8725,6 +8740,34 @@ mod tests {
                     .unwrap_err()
                     .to_string();
             assert!(error.contains("SQL accounting wrapper"), "{error}");
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_allow_only_the_exact_owned_store_reexport() {
+        let declaration =
+            "pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};";
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/store.rs".to_owned(),
+            syn::parse_file(declaration).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new()).unwrap();
+        assert!(
+            sql_callback_source(declaration).is_err(),
+            "copied exports grant nothing"
+        );
+        for declaration in [
+            "pub(crate) use native_storage::budget_atomic as bypass;",
+            "pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic as bypass};",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/store.rs".to_owned(),
+                syn::parse_file(declaration).unwrap(),
+            )]);
+            assert!(
+                require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+                    .is_err()
+            );
         }
     }
 

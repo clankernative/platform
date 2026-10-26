@@ -642,6 +642,11 @@ impl CallbackControl {
                     .compare_exchange(expected, 0, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok();
         }
+        // No second statement (including ordinary DML) belongs to the fixed
+        // command window. Business SQL runs only after BudgetStepGuard drops.
+        if self.active_step.load(Ordering::SeqCst) {
+            return false;
+        }
         if matches!(
             action,
             AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. }
@@ -892,6 +897,35 @@ mod tests {
             assert!(tx.execute_batch("SAVEPOINT day2_budget_atomic").is_err());
             assert!(policy.finish().is_err());
             tx.rollback()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn budget_sql_consumed_ticket_does_not_authorize_a_second_statement() -> Result<()> {
+        for sql in [
+            "SAVEPOINT day2_budget_atomic",
+            "RELEASE day2_budget_atomic",
+            "SAVEPOINT foreign",
+            "INSERT INTO control_probe VALUES(1)",
+        ] {
+            let mut db = budget_database()?;
+            let tx = db.transaction()?;
+            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            let guard = BudgetStepGuard::enter(&tx, BudgetStep::Begin)?;
+            tx.execute_batch("SAVEPOINT day2_budget_atomic")?;
+            assert_eq!(policy.control.ticket.load(Ordering::SeqCst), 0);
+            // No intervening reentry or denial can explain this refusal.
+            assert!(!policy.control.denied.load(Ordering::SeqCst));
+            assert!(tx.execute_batch(sql).is_err(), "{sql}");
+            drop(guard);
+            assert!(policy.finish().is_err());
+            tx.rollback()?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM control_probe", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
         }
         Ok(())
     }
