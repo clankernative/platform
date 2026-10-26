@@ -223,6 +223,8 @@ impl Peer {
             ensure!(self.processes.len() < 5, "storage_peer_message_count");
             // Retain the actual newly received handle before fallible checks.
             self.processes.push(process);
+            ensure!(self.valid, "storage_peer_retained_process_refused");
+            acquisition.remaining()?;
             let (received, originals) = self.processes.split_last_mut().unwrap();
             if let StorageSender::Controller(receipt) = received {
                 let original = originals
@@ -240,9 +242,15 @@ impl Peer {
                     acquisition,
                 )?;
             }
-            self.check(stage, acquisition)?;
-            message.verify(&self.statement)?;
-            self.check(stage, acquisition)
+            // Verification is bounded public DATA work, with no signing,
+            // I/O or publication. The one final retained observation joins ALL
+            // retained sender handles after verification before returning.
+            super::storage_peer_wire::verify_message_then_observe(
+                self,
+                message,
+                |owner| &owner.statement,
+                |owner| owner.check(stage, acquisition),
+            )
         })();
         if result.is_err() {
             self.valid = false;

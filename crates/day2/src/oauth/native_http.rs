@@ -226,21 +226,38 @@ impl Endpoint {
         super::native_management::install(&scopes, role)
     }
 
-    async fn handle(&self, request: Request, admission: Arc<AtomicBool>) -> Response {
+    async fn handle(
+        &self,
+        request: Request,
+        admission: Arc<AtomicBool>,
+    ) -> crate::web::NativeResponse {
         match self {
-            Self::Shell(shell) => shell.clone().handle_native(request, admission).await,
+            Self::Shell(shell) => crate::web::NativeResponse::application(
+                shell.clone().handle_native(request, admission).await,
+            ),
             Self::App(host) => crate::web::handle_native(host.clone(), request).await,
-            Self::Receiver(receiver) => receiver.clone().handle(request).await,
+            Self::Receiver(receiver) => {
+                crate::web::NativeResponse::application(receiver.clone().handle(request).await)
+            }
             #[cfg(test)]
-            Self::Test(exchange) => exchange.handle(request).await,
+            Self::Test(exchange) => {
+                crate::web::NativeResponse::application(exchange.handle(request).await)
+            }
             #[cfg(test)]
             Self::Prepared(_, _) => panic!("native fixture not prepared"),
         }
     }
 
-    fn prepare_response(&self, sink: &super::native_management::Sink, finite: bool) -> Result<()> {
+    fn prepare_response(
+        &self,
+        sink: &super::native_management::Sink,
+        response: &crate::web::NativeResponse,
+        finite: bool,
+    ) -> Result<()> {
         let scope = match self {
-            Self::App(host) => crate::web::native_runtime_response_scope(host)?,
+            Self::App(host) => {
+                response.app_scope(|| crate::web::native_runtime_response_scope(host))?
+            }
             Self::Receiver(receiver) => receiver.native_runtime_response_scope()?,
             Self::Shell(_) => None,
             #[cfg(test)]
@@ -454,12 +471,12 @@ async fn run(
                         let sink = sink.clone();
                         async move {
                             let response = sink.scope(endpoint.handle(request.map(Body::new), admitted)).await;
-                            let finite = finite_app_body_candidate(&response);
-                            if endpoint.prepare_response(&sink, finite).is_err() {
+                            let finite = finite_app_body_candidate(response.response());
+                            if endpoint.prepare_response(&sink, &response, finite).is_err() {
                                 sink.abort();
                                 return Err(io::Error::other("native response authority unavailable"));
                             }
-                            match sink.scope(prepare_finite_app_body(response, &sink)).await {
+                            match sink.scope(prepare_finite_app_body(response.into_response(), &sink)).await {
                                 Ok(response) => Ok::<_, io::Error>(response),
                                 Err(_) => {
                                     sink.abort();
@@ -713,6 +730,126 @@ mod finite_response_tests {
     use axum::body::Bytes;
     use hyper::body::Body as _;
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn literal_platform_health_never_resolves_or_acquires_current() -> Result<()> {
+        futures_executor::block_on(async {
+            for ready in [false, true] {
+                let response = crate::web::literal_health_fixture(&axum::http::Method::GET, ready);
+                let called = Cell::new(0);
+                let scope = response.app_scope(|| {
+                    called.set(called.get() + 1);
+                    anyhow::bail!("native supplier must not be entered by a literal probe")
+                })?;
+                assert!(scope.is_none());
+                assert_eq!(called.get(), 0);
+                let sink = super::super::native_management::Sink::new();
+                sink.prepare_response(scope, false)?;
+                let response = prepare_finite_app_body(response.into_response(), &sink).await?;
+                assert!(!sink.uses_retained_app_io());
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1)
+                        .await?
+                        .is_empty()
+                );
+                sink.finish()?;
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn ordinary_or_spoofed_empty_responses_still_require_the_real_app_scope() {
+        for body in [Body::empty(), Body::from("private app result")] {
+            let mut raw =
+                crate::web::literal_health_fixture(&axum::http::Method::GET, true).into_response();
+            *raw.body_mut() = body;
+            raw.headers_mut()
+                .insert("x-native-health", "true".parse().unwrap());
+            let response = crate::web::NativeResponse::application(raw);
+            let called = Cell::new(0);
+            assert!(
+                response
+                    .app_scope(|| {
+                        called.set(called.get() + 1);
+                        anyhow::bail!("actual current supplier absent")
+                    })
+                    .is_err()
+            );
+            assert_eq!(called.get(), 1);
+        }
+    }
+
+    fn app_scope_wiring_is_preserved(source: &str) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Calls {
+            scoped: usize,
+            direct: usize,
+            valid: bool,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "app_scope" {
+                    self.scoped += 1;
+                    self.valid = matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("response"))
+                        && node.args.len() == 1
+                        && matches!(&node.args[0], syn::Expr::Closure(closure)
+                            if matches!(&*closure.body, syn::Expr::Call(call)
+                                if matches!(&*call.func, syn::Expr::Path(path)
+                                    if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["crate", "web", "native_runtime_response_scope"])
+                                && call.args.len() == 1
+                                && matches!(&call.args[0], syn::Expr::Path(path) if path.path.is_ident("host"))));
+                    return;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                if matches!(&*node.func, syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|part| part.ident == "native_runtime_response_scope"))
+                {
+                    self.direct += 1;
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let mut selected = Vec::new();
+        for item in &file.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Endpoint"))
+            {
+                for method in &item.items {
+                    if let syn::ImplItem::Fn(method) = method
+                        && method.sig.ident == "prepare_response"
+                    {
+                        selected.push(&method.block);
+                    }
+                }
+            }
+        }
+        assert_eq!(selected.len(), 1);
+        let mut calls = Calls::default();
+        calls.visit_block(selected[0]);
+        calls.valid && calls.scoped == 1 && calls.direct == 0
+    }
+
+    #[test]
+    fn actual_app_response_boundary_uses_the_closed_health_classification() {
+        let source = include_str!("native_http.rs");
+        assert!(app_scope_wiring_is_preserved(source));
+        let selected = concat!(
+            "response.app_scope(|| crate::web::",
+            "native_runtime_response_scope(host))?"
+        );
+        assert_eq!(source.matches(selected).count(), 1);
+        let old = source.replacen(
+            selected,
+            "crate::web::native_runtime_response_scope(host)?",
+            1,
+        );
+        assert!(!app_scope_wiring_is_preserved(&old));
+    }
 
     fn metadata_sink() -> super::super::native_management::Sink {
         super::super::native_management::Sink::fixture_unowned_app_response(

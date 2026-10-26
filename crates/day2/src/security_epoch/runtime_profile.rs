@@ -1,6 +1,6 @@
 //! Closed selected-container/image DATA. Neither a Kubernetes response nor its
 //! joins below bind the calling PID to the Pod or mint current runtime authority.
-//! The actual native runtime witness/qualified issuer remains unavailable.
+//! Actual native ownership stays with the issuer/process/provider guards.
 
 use super::identity_protocol::{self, ReviewedSubject};
 use anyhow::{Context, Result, ensure};
@@ -70,8 +70,7 @@ pub(super) fn container(
     selected.validate()?;
     // Reuse actual response-shape/lifecycle/role/owner joins. This remains DATA:
     // authenticated transport and real runtime identity are separate owners.
-    let owner = identity_protocol::pod(role, reviewed, bytes)?;
-    let value: Value = crate::json::decode(bytes)?;
+    let (value, owner) = identity_protocol::pod(role, reviewed, bytes)?.into_parts();
     let containers = value
         .pointer("/spec/containers")
         .and_then(Value::as_array)
