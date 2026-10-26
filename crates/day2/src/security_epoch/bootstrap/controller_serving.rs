@@ -54,10 +54,7 @@ impl ActiveControllerStorageContinuity {
             trace.measure(ServingStep::ProviderBefore, || {
                 reads.check_observation(physical.controller_stage()?, &mut observed)
             })?;
-            trace.measure(ServingStep::Announcement, || physical.announce_app_known())?;
-            trace.measure(ServingStep::Acknowledgement, || {
-                physical.await_app_consumed()
-            })?;
+            physical.announce_and_await_app_consumed(trace)?;
             // The actual App has now recorded its consumer and original
             // postchecks. Reobserve the fixed counter before final release.
             observed = trace.measure(ServingStep::CounterAfter, || {
@@ -74,7 +71,8 @@ impl ActiveControllerStorageContinuity {
             trace.measure(ServingStep::ProviderAfter, || {
                 reads.check_observation(physical.controller_stage()?, &mut observed)
             })?;
-            trace.measure(ServingStep::PhysicalAfter, || physical.check())?;
+            // Snapshot commitment is bounded DATA work. The closed finisher
+            // performs the full post-validation check before release work.
             let snapshot = trace.measure(ServingStep::Snapshot, || {
                 super::super::journal::snapshot_digest(observed.snapshot())
             })?;
@@ -218,11 +216,12 @@ mod observation_boundary_tests {
     #[test]
     fn app_and_shell_observation_consumers_keep_one_full_boundary_check() {
         for method in ["serve_app_current", "serve_shell_current"] {
-            // Both observations keep their full checked getter. The separate
-            // later check after native observation-validation I/O also stays.
+            // Both observations keep their full checked getter. App's final
+            // post-validation check is the closed finisher's entry check;
+            // Shell keeps its separate check before its own peer operations.
             assert_eq!(
                 native_observation_shape(include_str!("controller_serving.rs"), method),
-                (1, 2, 2)
+                (usize::from(method == "serve_shell_current"), 2, 2)
             );
         }
     }
@@ -246,7 +245,10 @@ mod observation_boundary_tests {
             let consumer = observation_consumer(source, method);
             let mut repeated = source.to_owned();
             repeated.insert_str(consumer, "physical.check()?; ");
-            assert_eq!(native_observation_shape(&repeated, method), (2, 2, 2));
+            assert_eq!(
+                native_observation_shape(&repeated, method),
+                (usize::from(method == "serve_shell_current") + 1, 2, 2)
+            );
         }
     }
 
@@ -261,7 +263,10 @@ mod observation_boundary_tests {
                 consumer..consumer + checked.len(),
                 "reads.check_observation(unchecked_stage, &mut observed)",
             );
-            assert_ne!(native_observation_shape(&mutated, method), (1, 2, 2));
+            assert_ne!(
+                native_observation_shape(&mutated, method),
+                (usize::from(method == "serve_shell_current"), 2, 2)
+            );
         }
     }
 }

@@ -3687,9 +3687,8 @@
       "type_name": "CurrentControllerStoragePhase",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch) fn announce_app_known (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn announce_and_await_app_consumed (& mut self , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < () >",
         "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >",
-        "pub (in crate :: security_epoch) fn await_app_consumed (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >",
@@ -3709,15 +3708,11 @@
       "material_uses": [
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn announce_app_known (& mut self) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch) fn announce_and_await_app_consumed (& mut self , trace : & crate :: security_epoch :: controller :: serving_timing :: ServingTiming) -> Result < () >"
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn app_request (& self) -> Result < & StoragePeerRequest >"
-        },
-        {
-          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn await_app_consumed (& mut self) -> Result < () >"
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",

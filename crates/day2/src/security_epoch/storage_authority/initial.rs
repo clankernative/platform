@@ -1044,26 +1044,35 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         }
     }
 
-    pub(in crate::security_epoch) fn announce_app_known(&mut self) -> Result<()> {
-        self.check()?;
-        match &mut self.peer {
-            PeerFence::Current(peer) => {
-                peer.announce_known(self.file.controller_stage_after_check()?)?
+    /// One closed announcement/acknowledgement operation. The middle full
+    /// check is both post-send admission and the immediately following
+    /// pre-wait admission; no checked permission escapes between them.
+    pub(in crate::security_epoch) fn announce_and_await_app_consumed(
+        &mut self,
+        trace: &crate::security_epoch::controller::serving_timing::ServingTiming,
+    ) -> Result<()> {
+        use crate::security_epoch::controller::serving_timing::ServingStep;
+        trace.measure(ServingStep::Announcement, || {
+            self.check()?;
+            match &mut self.peer {
+                PeerFence::Current(peer) => {
+                    peer.announce_known(self.file.controller_stage_after_check()?)?
+                }
+                PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
             }
-            PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
-        }
-        self.check()
-    }
-
-    pub(in crate::security_epoch) fn await_app_consumed(&mut self) -> Result<()> {
-        self.check()?;
-        match &mut self.peer {
-            PeerFence::Current(peer) => {
-                peer.await_acknowledgement(self.file.controller_stage_after_check()?)?
+            // This one full check follows announcement I/O and precedes the
+            // acknowledgement wait without intervening work or publication.
+            self.check()
+        })?;
+        trace.measure(ServingStep::Acknowledgement, || {
+            match &mut self.peer {
+                PeerFence::Current(peer) => {
+                    peer.await_acknowledgement(self.file.controller_stage_after_check()?)?
+                }
+                PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
             }
-            PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
-        }
-        self.check()
+            self.check()
+        })
     }
 
     pub(in crate::security_epoch) fn finish_app_known(mut self) -> Result<()> {
@@ -1179,5 +1188,162 @@ mod tests {
         };
         *parent_receipt = Digest::new(b"unrelated receipt");
         assert!(request_binding(create.bootstrap(), &holder, &selection, &changed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod settlement_boundary_tests {
+    use syn::visit::Visit;
+
+    fn native_method(source: &str, name: &str) -> Option<syn::ImplItemFn> {
+        for item in syn::parse_file(source).unwrap().items {
+            let syn::Item::Impl(owner) = item else {
+                continue;
+            };
+            if !matches!(&*owner.self_ty, syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|part| part.ident == "CurrentControllerStoragePhase"))
+            {
+                continue;
+            }
+            for item in owner.items {
+                if let syn::ImplItem::Fn(method) = item
+                    && method.sig.ident == name
+                {
+                    return Some(method);
+                }
+            }
+        }
+        None
+    }
+
+    fn settlement_operations(source: &str) -> Vec<String> {
+        #[derive(Default)]
+        struct Operations(Vec<String>);
+        impl<'ast> Visit<'ast> for Operations {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if (node.method == "check"
+                    && matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("self")))
+                    || node.method == "announce_known"
+                    || node.method == "await_acknowledgement"
+                {
+                    self.0.push(node.method.to_string());
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let method = native_method(source, "announce_and_await_app_consumed")
+            .expect("actual closed native settlement");
+        let mut operations = Operations::default();
+        operations.visit_block(&method.block);
+        operations.0
+    }
+
+    fn terminal_entry_is_full_check(source: &str) -> bool {
+        let method = native_method(source, "finish_app_known").expect("actual native finisher");
+        matches!(method.block.stmts.first(), Some(syn::Stmt::Expr(syn::Expr::Try(guard), _))
+            if matches!(&*guard.expr, syn::Expr::MethodCall(call) if call.method == "check"
+                && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("self"))))
+    }
+
+    #[test]
+    fn native_send_and_ack_wait_share_only_the_middle_full_check() {
+        let source = include_str!("initial.rs");
+        assert_eq!(
+            settlement_operations(source),
+            [
+                "check",
+                "announce_known",
+                "check",
+                "await_acknowledgement",
+                "check"
+            ]
+        );
+        assert!(native_method(source, "announce_app_known").is_none());
+        assert!(native_method(source, "await_app_consumed").is_none());
+    }
+
+    #[test]
+    fn native_settlement_guard_rejects_an_extra_or_missing_full_check() {
+        let source = include_str!("initial.rs");
+        let start = source.find("fn announce_and_await_app_consumed(").unwrap();
+        let check = start + source[start..].find("self.check()?;").unwrap();
+        let mut repeated = source.to_owned();
+        repeated.insert_str(check, "self.check()?; ");
+        assert_ne!(
+            settlement_operations(&repeated),
+            settlement_operations(source)
+        );
+        let mut missing = source.to_owned();
+        missing.replace_range(check..check + "self.check()?;".len(), "");
+        assert_ne!(
+            settlement_operations(&missing),
+            settlement_operations(source)
+        );
+    }
+
+    #[test]
+    fn terminal_release_keeps_its_own_full_entry_check() {
+        let source = include_str!("initial.rs");
+        assert!(terminal_entry_is_full_check(source));
+        let start = source.find("fn finish_app_known(").unwrap();
+        let check = start + source[start..].find("self.check()?;").unwrap();
+        let mut missing = source.to_owned();
+        missing.replace_range(check..check + "self.check()?;".len(), "");
+        assert!(!terminal_entry_is_full_check(&missing));
+    }
+
+    #[test]
+    fn actual_controller_validates_then_settles_then_validates_and_finishes() {
+        #[derive(Default)]
+        struct Operations(Vec<String>);
+        impl<'ast> Visit<'ast> for Operations {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "check_observation"
+                    || node.method == "announce_and_await_app_consumed"
+                    || node.method == "finish_app_known"
+                    || node.method == "announce_app_known"
+                    || node.method == "await_app_consumed"
+                {
+                    self.0.push(node.method.to_string());
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                if matches!(&*node.func, syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|part| part.ident == "snapshot_digest"))
+                {
+                    self.0.push("snapshot_digest".to_owned());
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+        }
+        let file = syn::parse_file(include_str!("../bootstrap/controller_serving.rs")).unwrap();
+        let method = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(owner) => Some(owner),
+                _ => None,
+            })
+            .flat_map(|owner| &owner.items)
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "serve_app_current" => {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut operations = Operations::default();
+        operations.visit_block(&method.block);
+        assert_eq!(
+            operations.0,
+            [
+                "check_observation",
+                "announce_and_await_app_consumed",
+                "check_observation",
+                "snapshot_digest",
+                "finish_app_known"
+            ]
+        );
     }
 }
