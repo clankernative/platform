@@ -126,15 +126,15 @@ impl MessageProcess {
         let result = (|| {
             self.check_identity(acquisition, costs)?;
             let mut retained = Self {
-                pidfd: self.pidfd.try_clone()?,
-                proc: self.proc.try_clone()?,
-                process: self.process.try_clone()?,
-                executable: self.executable.try_clone()?,
+                pidfd: File::try_clone(&self.pidfd)?,
+                proc: File::try_clone(&self.proc)?,
+                process: File::try_clone(&self.process)?,
+                executable: File::try_clone(&self.executable)?,
                 executable_stamp: self.executable_stamp.clone(),
                 namespaces: self
                     .namespaces
                     .iter()
-                    .map(|(name, file)| file.try_clone().map(|file| (name.clone(), file)))
+                    .map(|(name, file)| File::try_clone(file).map(|file| (name.clone(), file)))
                     .collect::<std::io::Result<BTreeMap<_, _>>>()?,
                 data: self.data.clone(),
                 local_process: self.local_process,
@@ -142,7 +142,7 @@ impl MessageProcess {
                 refused: false,
                 local: PhantomData,
             };
-            Self::check_same_actor(&mut [self, &mut retained], acquisition, costs)?;
+            Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?;
             Ok(retained)
         })();
         if result.is_err() {
@@ -179,7 +179,7 @@ impl MessageProcess {
             // Drop the duplicate of the admission packet's pidfd and retain
             // THIS packet's actual kernel-installed descriptor instead.
             received.pidfd = pidfd;
-            Self::check_same_actor(&mut [admitted, &mut received], acquisition, costs)?;
+            Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?;
             Ok(received)
         })();
         if result.is_err() {
