@@ -103,7 +103,8 @@ jobs:
       - run: build-out/bin/xtask verify-fast
       - name: Run all five issuer protocol controls
         if: ${{ inputs.profile == 'pr276' }}
-        run: bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" test --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/day2:unit_lib --test_filter=security_epoch::native_enrollment::runtime_reads::tests:: --test_output=all --test_arg=--test-threads=1
+        run: |
+          bazel --batch --nosystem_rc --nohome_rc --output_base="$GITHUB_WORKSPACE/.cache/bazel-executor" test --config=ci-linux --disk_cache="$HOME/.cache/bazel-disk" --repository_cache="$HOME/.cache/bazel-repo" //crates/day2:unit_lib --test_filter=security_epoch::native_enrollment::runtime_reads::tests:: --test_output=all --test_arg=--test-threads=1
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: build-out/bin/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
@@ -122,4 +123,3 @@ jobs:
             bazel-testlogs/crates/day2/unit_lib/test.log
           if-no-files-found: error
           retention-days: 3
-
