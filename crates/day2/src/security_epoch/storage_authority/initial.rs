@@ -12,6 +12,7 @@ use crate::security_epoch::{
         evidence::{PreparationFailure, PreparationStep},
         preparation_timing::{Operation, Timings},
     },
+    firestore::{EpochObservation, Names},
     kernel::{Bootstrap, Holder, Request},
     native_enrollment::{
         AppHolderPeerContinuity, AuthenticatedAppFirstHolder, ControllerHolderPeerContinuity,
@@ -1044,35 +1045,52 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         }
     }
 
-    /// One closed announcement/acknowledgement operation. The middle full
-    /// check is both post-send admission and the immediately following
-    /// pre-wait admission; no checked permission escapes between them.
-    pub(in crate::security_epoch) fn announce_and_await_app_consumed(
+    /// Announce, await the actual App consumer and reobserve the fixed epoch
+    /// through the SAME phase. The last full check is both post-wait and
+    /// pre-read admission; no checked permission or stage escapes the join.
+    pub(in crate::security_epoch) fn announce_and_read_app_consumed(
         &mut self,
+        reads: &mut RetainedEpochReads,
+        selection: &EpochStore,
+        names: &Names,
         trace: &crate::security_epoch::controller::serving_timing::ServingTiming,
-    ) -> Result<()> {
+    ) -> Result<EpochObservation> {
         use crate::security_epoch::controller::serving_timing::ServingStep;
-        trace.measure(ServingStep::Announcement, || {
-            self.check()?;
-            match &mut self.peer {
-                PeerFence::Current(peer) => {
-                    peer.announce_known(self.file.controller_stage_after_check()?)?
+        let result = (|| {
+            trace.measure(ServingStep::Announcement, || {
+                self.check()?;
+                match &mut self.peer {
+                    PeerFence::Current(peer) => {
+                        peer.announce_known(self.file.controller_stage_after_check()?)?
+                    }
+                    PeerFence::Retained(_) => {
+                        anyhow::bail!("controller_storage_has_no_app_request")
+                    }
                 }
-                PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
-            }
-            // This one full check follows announcement I/O and precedes the
-            // acknowledgement wait without intervening work or publication.
-            self.check()
-        })?;
-        trace.measure(ServingStep::Acknowledgement, || {
-            match &mut self.peer {
-                PeerFence::Current(peer) => {
-                    peer.await_acknowledgement(self.file.controller_stage_after_check()?)?
+                // Post-send and immediately following pre-wait admission.
+                self.check()
+            })?;
+            trace.measure(ServingStep::Acknowledgement, || {
+                match &mut self.peer {
+                    PeerFence::Current(peer) => {
+                        peer.await_acknowledgement(self.file.controller_stage_after_check()?)?
+                    }
+                    PeerFence::Retained(_) => {
+                        anyhow::bail!("controller_storage_has_no_app_request")
+                    }
                 }
-                PeerFence::Retained(_) => anyhow::bail!("controller_storage_has_no_app_request"),
-            }
-            self.check()
-        })
+                // Post-wait and immediately following pre-read admission. The
+                // fixed retained reader keeps all its own native and I/O checks.
+                self.check()
+            })?;
+            trace.measure(ServingStep::CounterAfter, || {
+                reads.read(self.file.controller_stage_after_check()?, selection, names)
+            })
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
     }
 
     pub(in crate::security_epoch) fn finish_app_known(mut self) -> Result<()> {
@@ -1225,13 +1243,14 @@ mod settlement_boundary_tests {
                     && matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("self")))
                     || node.method == "announce_known"
                     || node.method == "await_acknowledgement"
+                    || node.method == "read"
                 {
                     self.0.push(node.method.to_string());
                 }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
-        let method = native_method(source, "announce_and_await_app_consumed")
+        let method = native_method(source, "announce_and_read_app_consumed")
             .expect("actual closed native settlement");
         let mut operations = Operations::default();
         operations.visit_block(&method.block);
@@ -1246,7 +1265,7 @@ mod settlement_boundary_tests {
     }
 
     #[test]
-    fn native_send_and_ack_wait_share_only_the_middle_full_check() {
+    fn native_send_ack_and_read_share_only_adjacent_full_checks() {
         let source = include_str!("initial.rs");
         assert_eq!(
             settlement_operations(source),
@@ -1255,17 +1274,19 @@ mod settlement_boundary_tests {
                 "announce_known",
                 "check",
                 "await_acknowledgement",
-                "check"
+                "check",
+                "read"
             ]
         );
         assert!(native_method(source, "announce_app_known").is_none());
         assert!(native_method(source, "await_app_consumed").is_none());
+        assert!(native_method(source, "announce_and_await_app_consumed").is_none());
     }
 
     #[test]
     fn native_settlement_guard_rejects_an_extra_or_missing_full_check() {
         let source = include_str!("initial.rs");
-        let start = source.find("fn announce_and_await_app_consumed(").unwrap();
+        let start = source.find("fn announce_and_read_app_consumed(").unwrap();
         let check = start + source[start..].find("self.check()?;").unwrap();
         let mut repeated = source.to_owned();
         repeated.insert_str(check, "self.check()?; ");
@@ -1279,6 +1300,75 @@ mod settlement_boundary_tests {
             settlement_operations(&missing),
             settlement_operations(source)
         );
+    }
+
+    fn ack_read_has_one_checked_stage_handoff(source: &str) -> bool {
+        #[derive(Default)]
+        struct Handoff {
+            reads: usize,
+            exact_stage: usize,
+            repeated_getter: usize,
+        }
+        impl<'ast> Visit<'ast> for Handoff {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                self.repeated_getter += usize::from(node.method == "controller_stage");
+                if node.method == "read" {
+                    self.reads += 1;
+                    self.exact_stage += usize::from(matches!(node.args.first(),
+                        Some(syn::Expr::Try(stage)) if matches!(&*stage.expr,
+                            syn::Expr::MethodCall(call) if call.method == "controller_stage_after_check"
+                            && matches!(&*call.receiver, syn::Expr::Field(field)
+                                if field.member == syn::Member::Named(syn::parse_quote!(file))
+                                && matches!(&*field.base, syn::Expr::Path(path) if path.path.is_ident("self"))))));
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let method = native_method(source, "announce_and_read_app_consumed").unwrap();
+        let mut handoff = Handoff::default();
+        handoff.visit_block(&method.block);
+        handoff.reads == 1 && handoff.exact_stage == 1 && handoff.repeated_getter == 0
+    }
+
+    #[test]
+    fn actual_ack_read_uses_the_same_stage_without_reentering_the_full_check() {
+        let source = include_str!("initial.rs");
+        assert!(ack_read_has_one_checked_stage_handoff(source));
+        let start = source.find("fn announce_and_read_app_consumed(").unwrap();
+        let original = "reads.read(self.file.controller_stage_after_check()?, selection, names)";
+        let offset = start + source[start..].find(original).unwrap();
+        let mut repeated = source.to_owned();
+        repeated.replace_range(
+            offset..offset + original.len(),
+            "reads.read(self.controller_stage()?, selection, names)",
+        );
+        assert!(!ack_read_has_one_checked_stage_handoff(&repeated));
+    }
+
+    fn ack_read_refuses_on_error(source: &str) -> bool {
+        let method = native_method(source, "announce_and_read_app_consumed").unwrap();
+        method.block.stmts.iter().any(|statement| {
+            let syn::Stmt::Expr(syn::Expr::If(branch), _) = statement else {
+                return false;
+            };
+            matches!(&*branch.cond, syn::Expr::MethodCall(call)
+                if call.method == "is_err"
+                && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("result")))
+                && matches!(branch.then_branch.stmts.first(), Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), _))
+                    if call.method == "refuse"
+                    && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("self")))
+        })
+    }
+
+    #[test]
+    fn actual_ack_read_failure_permanently_refuses_its_physical_owner() {
+        let source = include_str!("initial.rs");
+        assert!(ack_read_refuses_on_error(source));
+        let start = source.find("fn announce_and_read_app_consumed(").unwrap();
+        let offset = start + source[start..].find("self.refuse();").unwrap();
+        let mut missing = source.to_owned();
+        missing.replace_range(offset..offset + "self.refuse();".len(), "");
+        assert!(!ack_read_refuses_on_error(&missing));
     }
 
     #[test]
@@ -1299,10 +1389,11 @@ mod settlement_boundary_tests {
         impl<'ast> Visit<'ast> for Operations {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 if node.method == "check_observation"
-                    || node.method == "announce_and_await_app_consumed"
+                    || node.method == "announce_and_read_app_consumed"
                     || node.method == "finish_app_known"
                     || node.method == "announce_app_known"
                     || node.method == "await_app_consumed"
+                    || node.method == "read"
                 {
                     self.0.push(node.method.to_string());
                 }
@@ -1338,8 +1429,9 @@ mod settlement_boundary_tests {
         assert_eq!(
             operations.0,
             [
+                "read",
                 "check_observation",
-                "announce_and_await_app_consumed",
+                "announce_and_read_app_consumed",
                 "check_observation",
                 "snapshot_digest",
                 "finish_app_known"
