@@ -36,6 +36,8 @@ mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;
 #[cfg(target_os = "linux")]
+mod runtime_reads;
+#[cfg(target_os = "linux")]
 mod runtime_wire;
 #[cfg(target_os = "linux")]
 mod service;
