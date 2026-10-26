@@ -212,6 +212,30 @@ fn require_sql_callback_controls(
             );
             continue;
         }
+        if source == "crates/day2/src/budget.rs" {
+            let functions = syntax
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Fn(function)
+                        if function.sig.ident == "atomic"
+                            && !definitely_test_only(&function.attrs) =>
+                    {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                functions.len() == 1,
+                "SQL accounting wrapper requires one fixed function"
+            );
+            let actual = day2::digest(functions[0].to_token_stream().to_string().as_bytes());
+            ensure!(
+                sql_control_function_reviewed(source, &actual),
+                "SQL accounting wrapper requires exact source review: {actual}"
+            );
+        }
         let mut controls = SqlCallbackControls {
             source,
             admitted_function: false,
@@ -241,11 +265,13 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
         // the progress hook; a guarded callback denies/latches that entry.
         // No module-name exemption: any byte change requires explicit review.
         "crates/day2/src/store/native_storage.rs" => {
-            Some("sha256:cc0ed7a87129958113330a9d930d2274dd4c0efd05693f4e76c1b9b522bab02c")
+            Some("sha256:3b0e7ce0dc0aac2f99f8cdcd932652105b9ee96cb76e600f72948c6740e39940")
         }
         "crates/day2/src/oauth/schema.rs" => {
             Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
         }
+        // Closed control construction only, not the large accounting module.
+        "crates/day2/src/budget/atomic_control.rs" => Some("sha256:1defd4e183f7aa6a91f27081145b89dc972b75be9f29dd42cad4d021ae83e478"),
         _ => None,
     }
 }
@@ -279,6 +305,8 @@ fn sql_control_name(name: &str) -> bool {
             | "load_extension"
             | "load_extension_enable"
             | "load_extension_disable"
+            | "budget_atomic"
+            | "atomic_control"
     )
 }
 
@@ -288,6 +316,12 @@ fn sql_control_name(name: &str) -> bool {
 // borrowed callback is not admitted. New/changed sites have no allowance path.
 fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
     const REVIEWED: &[(&str, &str)] = &[
+        // The sole fixed accounting wrapper delegates to the closed module;
+        // it cannot choose SQL, a role, a connection factory or a ticket.
+        (
+            "crates/day2/src/budget.rs",
+            "REVIEWED_ATOMIC_WRAPPER_TOKENS_PENDING",
+        ),
         // Existing synthetic/live provider and delegated-journal adapters set
         // the fixed two-second busy timeout on a connection they just opened.
         // These pins do not establish native SQL ownership or admit a callback.
@@ -373,6 +407,23 @@ impl SqlCallbackControls<'_> {
 }
 
 impl<'ast> Visit<'ast> for SqlCallbackControls<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        // Only this nominal type reexport is admitted, not an alias for the
+        // constructor/delegate or an exemption for other accounting code.
+        if self.source == "crates/day2/src/budget.rs"
+            && item.to_token_stream().to_string()
+                == "pub (crate) use atomic_control :: AtomicControl ;"
+        {
+            return;
+        }
+        if self.source == "crates/day2/src/store.rs"
+            && item.to_token_stream().to_string()
+                == "pub (crate) use native_storage :: { RuntimeSql , SqlDecision , budget_atomic } ;"
+        {
+            return;
+        }
+        visit::visit_item_use(self, item);
+    }
     fn visit_item(&mut self, item: &'ast Item) {
         if !definitely_test_only(item_attributes(item)) {
             visit::visit_item(self, item);
@@ -8571,6 +8622,10 @@ mod tests {
             "macro_rules! clear { ($db:expr) => { $db.progress_handler(0, None) }; }",
             "fn f(db: &Connection) { wrapper!(db.authorizer(None)); }",
             "fn configure_connection(db: &mut Connection) { db.progress_handler(0, None); }",
+            "fn f(db: &Connection, control: Control) { crate::store::budget_atomic(db, control, || Ok(())); }",
+            "use crate::store::budget_atomic as bypass; fn f(db: &Connection, control: Control) { bypass(db, control, || Ok(())); }",
+            "use crate::budget::atomic_control as bypass; fn f(db: &Connection) { bypass::atomic(db, || Ok(())); }",
+            "fn f(db: &Connection) { wrapper!(atomic_control::atomic(db, || Ok(()))); }",
         ] {
             let error = sql_callback_source(source).unwrap_err().to_string();
             assert!(
@@ -8633,21 +8688,44 @@ mod tests {
 
     #[test]
     fn sql_callback_controls_require_exact_core_bytes_even_without_hook_calls() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = "crates/day2/src/store/native_storage.rs";
-        fs::create_dir_all(directory.path().join("crates/day2/src/store")).unwrap();
-        fs::write(directory.path().join(source), "pub fn replacement() {}\n").unwrap();
-        let parsed = BTreeMap::from([(
-            source.to_owned(),
-            syn::parse_file("pub fn replacement() {}").unwrap(),
-        )]);
-        let error = require_sql_callback_controls(directory.path(), &parsed, &BTreeSet::new())
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("SQL callback control core requires exact source review"),
-            "{error}"
-        );
+        for source in [
+            "crates/day2/src/store/native_storage.rs",
+            "crates/day2/src/budget/atomic_control.rs",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::create_dir_all(directory.path().join(source).parent().unwrap()).unwrap();
+            fs::write(directory.path().join(source), "pub fn replacement() {}\n").unwrap();
+            let parsed = BTreeMap::from([(
+                source.to_owned(),
+                syn::parse_file("pub fn replacement() {}").unwrap(),
+            )]);
+            let error = require_sql_callback_controls(directory.path(), &parsed, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("SQL callback control core requires exact source review"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_require_the_fixed_accounting_wrapper_before_any_call() {
+        for source in [
+            "pub fn atomic() {}",
+            "pub fn unrelated() {}",
+            "pub fn atomic() {} pub fn atomic() {}",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/budget.rs".to_owned(),
+                syn::parse_file(source).unwrap(),
+            )]);
+            let error =
+                require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("SQL accounting wrapper"), "{error}");
+        }
     }
 
     #[test]

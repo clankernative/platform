@@ -2915,15 +2915,19 @@ mod tests {
     fn runtime_sql_error_and_caught_panic_rollback_and_latch_the_same_facade() -> Result<()> {
         use crate::store::SqlDecision::Commit;
         let (_directory, runtime) = sql_fixture()?;
-        assert!(
-            with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
-                sql.write::<()>(|tx| {
-                    tx.execute("INSERT INTO sql_guard_probe VALUES(1)", [])?;
-                    anyhow::bail!("actual callback failure")
-                })
+        let error = with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+            sql.write::<()>(|tx| {
+                tx.execute("INSERT INTO sql_guard_probe VALUES(1)", [])?;
+                anyhow::bail!("actual callback failure")
             })
-            .is_err()
-        );
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "actual callback failure");
+        let error = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+            sql.read::<()>(|_| anyhow::bail!("actual read refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "actual read refusal");
         assert!(
             with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
                 let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
