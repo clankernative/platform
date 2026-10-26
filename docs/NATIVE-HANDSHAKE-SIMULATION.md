@@ -115,9 +115,54 @@ must preserve current authority/counters, actual-handle observations, original
 request/human clocks and permanent refusal across loss, duplicates, death,
 replacement, expiry/rewind, uncertain SQL/provider completion and restore/writer
 fencing. Full content/physical revalidation after admission is deliberately no
-longer an obligation. Neither this updated specification nor the existing
-transcript campaign claims that the new composed campaign or native port has
-already passed. Wrong full-admission inputs still require actual refusal tests.
+longer an obligation. The reference histories below do not qualify production
+request wiring or real native owners. Wrong full-admission inputs still require
+actual refusal tests.
+
+### Admitted-connection reference histories
+
+The test-only `handshake::simulation::connection_request` module specifies the
+approved admission-once/fresh-request contract independently of the production
+owner implementation. It starts with controlled cold-admission observations,
+then exercises two independently bounded requests on the same selected
+connection. Request identity, role, purpose, sequence, original clock, fresh
+authority/counters, retained-handle observations, SQL arm/open/commit/close and
+postcheck ordering, unknown sends and terminal refusal are ordinary model DATA.
+They cannot construct a native owner, request, writer or provider permit.
+
+The existing production DATA handshake reducer and its independent wire oracle
+still exercise a successful and a refused cold enrollment. Warm request ports
+are **not yet connected** to these new histories. The reference cases alone
+qualify neither production warm checks nor any Linux handle/provider behavior.
+They explicitly accept the new trusted-service assumption about unobserved
+post-admission content drift, while retaining observed path/FD/namespace,
+peer/issuer death, restart, counter, original-clock and refusal obligations.
+
+The campaign runs automatically in the existing day2 library harness, fast
+verification and workspace-day2 shard; no new runner, recipe or target is added.
+Its generated receipt lists executed reference case families and seeds and sets
+`production_request_wiring_executed` and `real_linux_owner_executed` to false.
+Zero full-work attempts in those synthetic histories are not measured production
+counter deltas. The actual production owner/counter hooks and composed
+consumer comparison are still required after the production ports land.
+
+Histories replay twice with complete bounded reference states. Unexpected
+decisions retain the original and deletion-reduced history, both observations
+through divergence, source identity and failure category. The limits are 512
+events, four MiB per bundle and 128 reduction attempts. Replay rejects another
+source, incomplete observations, changed seeds, non-deletion reductions,
+unknown/duplicate fields and positional descriptors. Existing evidence is never
+overwritten. The workspace-day2 shard retains receipts and failures as
+`day2-connection-request-reference-<run>-<attempt>`.
+
+```console
+bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::connection_request::
+DAY2_CONNECTION_REQUEST_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation::connection_request::tests::replay_saved_connection_request_history --exact
+```
+
+The standalone replay entry does no corpus work when its environment variable
+is absent. Separate controls exercise saved-file replay, bounds and malformed
+descriptors without relying on that optional entry as coverage.
 
 The [storage lifecycle campaign](STORAGE-LIFECYCLE-SIMULATION.md) composes at the DATA transcript boundary:
 actor and original clock domain/interval, protocol purpose, sequence, accepted

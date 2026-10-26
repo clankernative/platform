@@ -363,6 +363,8 @@
     "crates/day2/src/security_epoch/native_enrollment/executable_bytes.rs",
     "crates/day2/src/security_epoch/native_enrollment/handshake.rs",
     "crates/day2/src/security_epoch/native_enrollment/handshake/simulation.rs",
+    "crates/day2/src/security_epoch/native_enrollment/handshake/simulation/connection_request.rs",
+    "crates/day2/src/security_epoch/native_enrollment/handshake/simulation/connection_request/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/handshake/simulation/lifecycle.rs",
     "crates/day2/src/security_epoch/native_enrollment/handshake/simulation/model.rs",
     "crates/day2/src/security_epoch/native_enrollment/issuer_costs.rs",
