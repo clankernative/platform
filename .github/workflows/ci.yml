@@ -9,7 +9,7 @@ on:
       profile:
         description: Fixed focused test group
         type: choice
-        options: [pr276, pr273]
+        options: [pr276, pr273, option3]
         default: pr276
       compilation_cache:
         description: Admitted compiled action reuse
@@ -113,6 +113,10 @@ jobs:
         if: ${{ inputs.profile == 'pr273' }}
         run: |
           build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::self_check_profile:: --nocapture --test-threads=1
+      - name: Run shared handshake and connection request controls
+        if: ${{ inputs.profile == 'option3' }}
+        run: |
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation:: --nocapture --test-threads=1
       - run: build-out/bin/xtask verify-fast
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
@@ -128,7 +132,9 @@ jobs:
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
             artifacts/bazel-compiler-inputs.json
-            artifacts/verification.json
+            artifacts/fast-verification.json
+            artifacts/native-connection-request-simulation/**
+            artifacts/native-handshake-simulation/**
             artifacts/bazel/failures/*/outcome.json
             bazel-testlogs/crates/day2/unit_lib/test.log
           if-no-files-found: error
