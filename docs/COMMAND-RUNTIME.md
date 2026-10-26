@@ -144,6 +144,15 @@ approval and credential fresh-owner purposes remain unavailable at this OAuth
 receiver; only connect/disconnect and the existing registration handler are
 mounted. Standalone ordinary-database approval adapters exist only in tests.
 
+SQLite's authorizer gates statement preparation. A control denial blocks later
+preparation and latches failure of the whole unit. A statement prepared before
+that denial can still execute inside the trusted callback; the final barrier
+refuses its result and requires rollback. A failed rollback remains unknown and
+terminal. Callbacks retain query data until this barrier; applications receive
+no raw SQL callback API. Internal budget savepoints use fixed commands on the
+same connection, with a separate single-command guard that ends before the
+accounting body runs.
+
 Migration/activation requires pending invocations to drain, including commands
 whose local decision committed while external delivery remains incomplete.
 
