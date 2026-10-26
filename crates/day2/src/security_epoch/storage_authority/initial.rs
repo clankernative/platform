@@ -350,13 +350,13 @@ impl InitialStorageContinuity {
             },
             |stage| {
                 trace.measure(ServingStep::ProviderAcquire, || {
-                    AuthenticatedReads::acquire(
+                    AuthenticatedReads::acquire_app_serving(
                         policy,
                         selection,
                         NativeRole::EpochController,
                         stage,
                     )?
-                    .retain_current()
+                    .retain_app_serving()
                 })
             },
         )
@@ -421,7 +421,12 @@ mod current_acquisition_tests {
     // guard binds it to the actual native caller, which cannot be constructed
     // by a macOS test. It counts the full check and its checked field borrow,
     // rather than accepting a helper test whose caller might repeat the work.
-    fn native_handoff_shape(source: &str) -> (usize, usize, usize, usize) {
+    struct HandoffShape {
+        physical: (usize, usize, usize, usize),
+        authentication: (usize, usize, usize, usize),
+    }
+
+    fn native_handoff_shape(source: &str) -> HandoffShape {
         use syn::visit::Visit;
 
         #[derive(Default)]
@@ -430,6 +435,10 @@ mod current_acquisition_tests {
             checks: usize,
             full_getters: usize,
             checked_borrows: usize,
+            app_acquires: usize,
+            app_retains: usize,
+            generic_acquires: usize,
+            generic_retains: usize,
         }
         impl<'ast> Visit<'ast> for Calls {
             fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
@@ -438,10 +447,20 @@ mod current_acquisition_tests {
                 {
                     self.handoffs += 1;
                 }
+                if let syn::Expr::Path(path) = &*node.func {
+                    let segments: Vec<_> = path.path.segments.iter().collect();
+                    if segments.len() == 2 && segments[0].ident == "AuthenticatedReads" {
+                        self.app_acquires +=
+                            usize::from(segments[1].ident == "acquire_app_serving");
+                        self.generic_acquires += usize::from(segments[1].ident == "acquire");
+                    }
+                }
                 syn::visit::visit_expr_call(self, node);
             }
 
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                self.app_retains += usize::from(node.method == "retain_app_serving");
+                self.generic_retains += usize::from(node.method == "retain_current");
                 if matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("phase")) {
                     self.checks += usize::from(node.method == "check");
                     self.full_getters += usize::from(node.method == "controller_stage");
@@ -479,18 +498,26 @@ mod current_acquisition_tests {
             .expect("actual native Current constructor");
         let mut calls = Calls::default();
         calls.visit_block(&method.block);
-        (
-            calls.handoffs,
-            calls.checks,
-            calls.full_getters,
-            calls.checked_borrows,
-        )
+        HandoffShape {
+            physical: (
+                calls.handoffs,
+                calls.checks,
+                calls.full_getters,
+                calls.checked_borrows,
+            ),
+            authentication: (
+                calls.app_acquires,
+                calls.app_retains,
+                calls.generic_acquires,
+                calls.generic_retains,
+            ),
+        }
     }
 
     #[test]
     fn native_current_caller_has_one_full_check_and_borrows_its_checked_stage() {
         assert_eq!(
-            native_handoff_shape(include_str!("initial.rs")),
+            native_handoff_shape(include_str!("initial.rs")).physical,
             (1, 1, 0, 1)
         );
     }
@@ -504,7 +531,26 @@ mod current_acquisition_tests {
             1,
         );
         assert_ne!(source, repeated);
-        assert_ne!(native_handoff_shape(&repeated), (1, 1, 0, 1));
+        assert_ne!(native_handoff_shape(&repeated).physical, (1, 1, 0, 1));
+    }
+
+    #[test]
+    fn actual_app_current_handoff_keeps_its_app_authentication_scope() {
+        let source = include_str!("initial.rs");
+        assert_eq!(native_handoff_shape(source).authentication, (1, 1, 0, 0));
+        for (before, after) in [
+            (
+                "AuthenticatedReads::acquire_app_serving(",
+                "AuthenticatedReads::acquire(",
+            ),
+            (".retain_app_serving()", ".retain_current()"),
+        ] {
+            let generic = source.replacen(before, after, 1);
+            assert_ne!(generic, source);
+            let changed = native_handoff_shape(&generic);
+            assert_eq!(changed.physical, (1, 1, 0, 1));
+            assert_ne!(changed.authentication, (1, 1, 0, 0));
+        }
     }
 
     // Only controlled DATA and the existing test clock. There is no conversion
