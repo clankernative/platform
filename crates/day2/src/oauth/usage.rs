@@ -502,14 +502,14 @@ fn resolve(
         "unsupported connection owner"
     );
     let subject = serving.sql_read(runtime, |snapshot| {
-        runtime.check_binding(&snapshot)?;
+        runtime.check_binding(snapshot)?;
         require_action(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             crate::connection_codegen::RESOLVE,
         )?;
-        human(&snapshot, runtime, request)
+        human(snapshot, runtime, request)
     })?;
     let Some(subject) = subject else {
         return Ok(unavailable("PermissionDenied"));
@@ -554,12 +554,12 @@ fn resolve(
     );
     serving.sql_write(runtime, |tx| {
     let now = super::effects::wall_time()?;
-    if !refresh.validate(&tx, now)? {
+    if !refresh.validate(tx, now)? {
         return Ok(store::SqlDecision::Commit(unavailable("ReauthRequired")));
     }
-    runtime.check_binding(&tx)?;
+    runtime.check_binding(tx)?;
     ensure!(
-        human(&tx, runtime, request)?.as_deref() == Some(subject.as_str()),
+        human(tx, runtime, request)?.as_deref() == Some(subject.as_str()),
         "connection human changed during readiness"
     );
     let pending: bool = tx.query_row(
@@ -580,7 +580,7 @@ fn resolve(
         return Ok(store::SqlDecision::Rollback(unavailable("NeedsConnection")));
     }
     let claims = match capture(
-        &tx,
+        tx,
         &selection,
         request,
         runtime,
@@ -665,15 +665,15 @@ fn execute_current(
     let input: ReadInput = crate::json::decode(instruction.data.as_bytes())?;
     let started = super::effects::wall_time()?;
     let mut claims = serving.sql_read(runtime, |snapshot| {
-        runtime.check_binding(&snapshot)?;
+        runtime.check_binding(snapshot)?;
         require_action(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             crate::connection_codegen::LIST_EVENTS,
         )?;
         load(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             &input.registration,
@@ -733,7 +733,7 @@ fn execute_current(
     }
     let token = serving.sql_write(runtime, |snapshot| {
         let current = load(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             &input.registration,
@@ -744,9 +744,9 @@ fn execute_current(
             current == claims,
             "connection use changed during key retrieval"
         );
-        let (intent, binding) = activation(&snapshot, &claims, &selection)?;
+        let (intent, binding) = activation(snapshot, &claims, &selection)?;
         let token = super::custody::load_access(
-            &snapshot,
+            snapshot,
             &key,
             &intent,
             &binding,
@@ -803,7 +803,7 @@ fn execute_current(
     }
     serving.sql_read(runtime, |snapshot| {
         load(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             &input.registration,

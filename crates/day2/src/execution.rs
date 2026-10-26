@@ -132,14 +132,14 @@ fn save(
             .and_then(|guard| guard.authority.as_ref())
             .context("settlement_authority_missing")?;
         check_settlement_binding(
-            &tx,
+            tx,
             runtime,
             &previous.request.context.invocation_id,
             authority,
         )?;
     } else {
-        runtime.check_binding(&tx)?;
-        require_authority(&tx, runtime, previous)?;
+        runtime.check_binding(tx)?;
+        require_authority(tx, runtime, previous)?;
     }
     // A competing executor may already have advanced. The next iteration reloads
     // the winner's transcript; it never overwrites a more advanced execution.
@@ -287,16 +287,16 @@ fn claim_with_worker(
     worker: &mut crate::host::Session,
 ) -> Result<Option<Work>> {
     let Some((mut trace, response)) = runtime.sql_decide(|tx| {
-        if phase(&tx, id)?.context("execution_journal_missing")? == Phase::Complete {
+        if phase(tx, id)?.context("execution_journal_missing")? == Phase::Complete {
             return Ok(store::SqlDecision::Rollback(None));
         }
-        let (_, current) = load(&tx, id)?.context("execution_journal_missing")?;
+        let (_, current) = load(tx, id)?.context("execution_journal_missing")?;
         let trace = current;
         ensure!(
             trace.artifact == runtime.artifact().id() && trace.scope == runtime.scope(),
             "execution_binding_changed"
         );
-        require_authority(&tx, runtime, &trace)?;
+        require_authority(tx, runtime, &trace)?;
         let response: Response = worker.exchange(&trace.request)?;
         Ok(store::SqlDecision::Commit(Some((trace, response))))
     })?
@@ -377,10 +377,10 @@ fn claim_with_worker(
     );
     let encoded = serde_json::to_string(&instruction)?;
     runtime.sql_write(|tx| {
-        runtime.check_binding(&tx)?;
-        let active = require_authority(&tx, runtime, &trace)?;
+        runtime.check_binding(tx)?;
+        let active = require_authority(tx, runtime, &trace)?;
         crate::capabilities::authorized(
-            &tx,
+            tx,
             runtime,
             &trace.request,
             &instruction,
@@ -452,10 +452,10 @@ pub(crate) fn check_settlement_binding(
 pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchPermit> {
     check_work(runtime, work)?;
     runtime.sql_write(|tx| {
-    runtime.check_binding(&tx)?;
-    let active = require_authority(&tx, runtime, &work.trace)?;
+    runtime.check_binding(tx)?;
+    let active = require_authority(tx, runtime, &work.trace)?;
     let capability = crate::capabilities::authorized(
-        &tx,
+        tx,
         runtime,
         &work.trace.request,
         &work.instruction,
@@ -475,7 +475,7 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
         .map(|value| serde_json::from_str::<Observation>(&value))
         .transpose()?;
     let payload = if let Some(recorded) = recorded {
-        crate::resources::validate_cached(&tx, runtime, &work.trace.request, &recorded)?;
+        crate::resources::validate_cached(tx, runtime, &work.trace.request, &recorded)?;
         DispatchPayload::Recorded(Box::new(recorded))
     } else {
         if work.instruction.model == "app.send.v1" {
@@ -539,9 +539,9 @@ pub(crate) fn admit_dispatch(runtime: &Runtime, work: &Work) -> Result<DispatchP
             )?;
         }
         let attempt = format!("{}_attempt_{ordinal}", work.identity);
-        crate::resources::record_use(&tx, &attempt, capability.resource())?;
+        crate::resources::record_use(tx, &attempt, capability.resource())?;
         let reservation = crate::resources::reserve_in(
-            &tx,
+            tx,
             runtime,
             &work.trace.request,
             &work.instruction,
@@ -661,12 +661,12 @@ pub(crate) fn settle(runtime: &Runtime, work: &Work, result: Performed) -> Resul
         .as_ref()
         .and_then(|guard| guard.authority.as_ref())
         .context("settlement_authority_missing")?;
-    check_settlement_binding(&tx, runtime, id, authority)?;
+    check_settlement_binding(tx, runtime, id, authority)?;
     if let Some(reservation) = &result.reservation {
-        crate::resources::settle_in(&tx, reservation, result.usage)?;
+        crate::resources::settle_in(tx, reservation, result.usage)?;
     }
     if let Some(attempt) = result.attempt {
-        crate::resources::record_correlation_in(&tx, &attempt, &result.correlation)?;
+        crate::resources::record_correlation_in(tx, &attempt, &result.correlation)?;
         tx.execute("UPDATE day2_external_attempts SET observation=?1 WHERE identity=?2 AND effect=?3 AND observation IS NULL", params![encoded, attempt, work.identity])?;
         let settled: String = tx.query_row(
             "SELECT observation FROM day2_external_attempts WHERE identity=?1 AND effect=?2",

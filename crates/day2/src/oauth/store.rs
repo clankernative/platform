@@ -231,7 +231,7 @@ fn checked_dispatch_in(
     attempt: &str,
     authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<RefreshEligibility>> {
-    if !authorize(&tx)? {
+    if !authorize(tx)? {
         return Ok(None);
     }
     let row = tx.query_row(
@@ -478,7 +478,7 @@ fn commit_replacement_in(
         )?;
         return Ok(None);
     }
-    custody_write(&tx)?;
+    custody_write(tx)?;
     let changed = tx.execute(
         "UPDATE oauth_connection_slots SET token_version = ?2
          WHERE slot = ?1 AND generation = ?3 AND token_version = ?4 AND security_epoch = ?5

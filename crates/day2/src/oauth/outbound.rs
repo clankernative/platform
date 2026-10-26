@@ -109,7 +109,7 @@ pub(super) fn handle_callback_in(
     let outcome = match parsed {
         ParsedCallback::Code { code, .. } => {
             connect::identifier(ingress.code_ref)?;
-            custody_write(&tx, code.as_str())?;
+            custody_write(tx, code.as_str())?;
             tx.execute(
                 "UPDATE oauth_connect_attempts SET state = 'exchange_ready', code_ref = ?2
                  WHERE attempt = ?1 AND state = 'awaiting_provider_authorization'",
@@ -120,7 +120,7 @@ pub(super) fn handle_callback_in(
             }
         }
         ParsedCallback::Denied { reason, .. } => {
-            super::custody::delete_attempt_material(&tx, ingress.attempt)?;
+            super::custody::delete_attempt_material(tx, ingress.attempt)?;
             tx.execute(
                 "UPDATE oauth_connect_attempts SET state = 'denied'
                  WHERE attempt = ?1 AND state = 'awaiting_provider_authorization'",

@@ -18,7 +18,7 @@ enum PreparedStep {
         ordinal: i64,
         attempt: i64,
         capability: Box<crate::capabilities::Authorized>,
-        resource: crate::resources::ResourceUse,
+        resource: Box<crate::resources::ResourceUse>,
         reservation: crate::budget::Reservation,
         identity: String,
     },
@@ -71,7 +71,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
     }
     let Some((operation, policy, durable, registered_operation, mut request)) = runtime
         .sql_decide(|tx| {
-            runtime.check_binding(&tx)?;
+            runtime.check_binding(tx)?;
             let (operation, input, actor, artifact, status): (
                 String,
                 String,
@@ -100,9 +100,8 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 // Do not turn an old receipt into blocked unfinished work here.
                 return Ok(store::SqlDecision::Rollback(None));
             }
-            let active = crate::authority_state::require_invocation_in(
-                &tx, runtime, id, &operation, &actor,
-            )?;
+            let active =
+                crate::authority_state::require_invocation_in(tx, runtime, id, &operation, &actor)?;
             let policy = active.policy()?.clone();
             let definition = runtime.artifact().route(&operation)?;
             let durable = definition.kind == "command";
@@ -110,9 +109,9 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             let request = Request {
                 operation: operation.clone(),
                 input,
-                context: store::invocation_context(&tx, id)?,
+                context: store::invocation_context(tx, id)?,
                 observations: if durable {
-                    recorded(&tx, id)?
+                    recorded(tx, id)?
                 } else {
                     Vec::new()
                 },
@@ -134,14 +133,14 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // inputs. Activation can only commit before or after this replay step.
         let response = runtime.sql_write(|tx| {
             crate::authority_state::require_invocation_in(
-                &tx,
+                tx,
                 runtime,
                 id,
                 &operation,
                 &request.context.actor,
             )?;
             for observation in &request.observations {
-                crate::resources::validate_cached(&tx, runtime, &request, observation)?;
+                crate::resources::validate_cached(tx, runtime, &request, observation)?;
             }
             worker.exchange(&request)
         })?;
@@ -187,9 +186,9 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         // snapshot-to-writer race with another preparation. This transaction still
         // ends before any provider call, and permits no application mutation.
         let (authority, prepared) = runtime.sql_write(|tx| {
-        runtime.check_binding(&tx)?;
+        runtime.check_binding(tx)?;
         let active = crate::authority_state::require_invocation_in(
-            &tx,
+            tx,
             runtime,
             id,
             &operation,
@@ -197,7 +196,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         )?;
         let prepared = if matches!(step, Step::Database(_)) {
             let result = store::effect(
-                &tx,
+                tx,
                 store::StorageContract {
                     schema: &runtime.artifact().contract().schema,
                     domains: &crate::domain::Catalog::new(),
@@ -217,13 +216,13 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             && [crate::resources::BIND, crate::resources::ATTENUATE]
                 .contains(&instruction.model.as_str())
         {
-            let result = crate::resources::host_operation(&tx, runtime, &request, &instruction)?
+            let result = crate::resources::host_operation(tx, runtime, &request, &instruction)?
                 .context("resource_host_operation")?;
             PreparedStep::Local(Ok(result))
         } else if matches!(step, Step::Observe { .. })
             && crate::credential_codegen::observation(&instruction.model)
         {
-            let result = crate::managed_credentials::observe(&tx, runtime, &request, &instruction);
+            let result = crate::managed_credentials::observe(tx, runtime, &request, &instruction);
             PreparedStep::Local(result)
         } else if matches!(step, Step::Observe { .. })
             && crate::oauth::usage::observation(&instruction.model)
@@ -257,7 +256,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             // or settle. The grant is checked against current authority first,
             // exactly as a provider read's is.
             crate::audit::require_history(active.policy()?, runtime, &operation)?;
-            let result = crate::audit::history(&tx, runtime, &request, &instruction);
+            let result = crate::audit::history(tx, runtime, &request, &instruction);
             PreparedStep::Local(result)
         } else if matches!(step, Step::Observe { .. }) {
             // The observation's position in this invocation, which is what makes
@@ -265,7 +264,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             // the same step and so reaches the same place.
             let ordinal = i64::try_from(request.observations.len())?;
             let capability = crate::capabilities::authorized(
-                &tx,
+                tx,
                 runtime,
                 &request,
                 &instruction,
@@ -290,9 +289,9 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 ))?)[7..]
             );
             let resource = capability.resource().clone();
-            crate::resources::record_use(&tx, &identity, &resource)?;
+            crate::resources::record_use(tx, &identity, &resource)?;
             let reservation = crate::resources::reserve_in(
-                &tx,
+                tx,
                 runtime,
                 &request,
                 &instruction,
@@ -316,7 +315,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 attempt,
                 capability: Box::new(capability),
                 reservation,
-                resource,
+                resource: Box::new(resource),
                 identity,
             }
         } else {
@@ -346,7 +345,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                     ordinal,
                     attempt,
                     reservation,
-                    resource,
+                    *resource,
                     identity,
                     completed.correlation,
                 ));
@@ -382,7 +381,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         );
         if let Some((ordinal, attempt)) = connection_attempt {
             runtime.sql_write(|tx| {
-            crate::execution::check_settlement_binding(&tx, runtime, id, &authority)?;
+            crate::execution::check_settlement_binding(tx, runtime, id, &authority)?;
             tx.execute(
                 "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
                 params![encoded, id, ordinal, attempt],
@@ -394,14 +393,14 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             // Retain provider knowledge even if policy changed during the call.
             // A separate reauthorization below gates use by application code.
             runtime.sql_write(|tx| {
-            crate::execution::check_settlement_binding(&tx, runtime, id, &authority)?;
-            crate::resources::record_correlation_in(&tx, &identity, &correlation)?;
+            crate::execution::check_settlement_binding(tx, runtime, id, &authority)?;
+            crate::resources::record_correlation_in(tx, &identity, &correlation)?;
             tx.execute(
                 "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
                 params![encoded, id, ordinal, attempt],
             )?;
             crate::resources::settle_in(
-                &tx,
+                tx,
                 &reservation,
                 provider_usage.context("provider_usage_missing")?,
             )?;
@@ -409,9 +408,9 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             })?;
         }
         let winner = runtime.sql_write(|tx| {
-            runtime.check_binding(&tx)?;
+            runtime.check_binding(tx)?;
             crate::authority_state::require_invocation_in(
-                &tx,
+                tx,
                 runtime,
                 id,
                 &operation,

@@ -326,7 +326,7 @@ pub(super) fn ensure_current(
         .context("OAuth refresh authority missing")?;
     let context = serving.sql_read(runtime, |snapshot| {
         Ok(usage::refresh_context(
-            &snapshot,
+            snapshot,
             runtime,
             request,
             registration,
@@ -373,11 +373,11 @@ pub(super) fn ensure_current(
     let expected = context.eligibility();
     let source = serving.sql_write(runtime, |snapshot| {
         ensure!(
-            local_matches(&snapshot, selection, now)?,
+            local_matches(snapshot, selection, now)?,
             "refresh authority changed during key retrieval"
         );
         let source = custody::load_refresh(
-            &snapshot,
+            snapshot,
             &key,
             context.intent(),
             context.binding(),
@@ -574,7 +574,7 @@ pub(super) fn ensure_current(
             last_clock = at;
             serving.sql_read(runtime, |snapshot| {
                 ensure!(
-                    local_matches(&snapshot, &current, at)?,
+                    local_matches(snapshot, &current, at)?,
                     "OAuth refresh authority changed before account read"
                 );
                 Ok(())

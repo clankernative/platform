@@ -770,20 +770,19 @@ impl Runtime {
             )?;
             if !access(self, &operation)?.interactive {
                 ensure!(
-                    load(&read, invocation)?.is_none(),
+                    load(read, invocation)?.is_none(),
                     "unexpected credential confirmation"
                 );
                 return Ok(None);
             }
             // Final selected role and exact owning invocation are checked even for
             // terminal reuse, before returning None or calling any key provider.
-            let record = require_runtime_record(&read, self, invocation)?;
+            let record = require_runtime_record(read, self, invocation)?;
             if !pending {
                 return Ok(None);
             }
             let proof = &record.confirmation;
-            let active =
-                authority_state::authorize_in(&read, self, &proof.operation, &proof.actor)?;
+            let active = authority_state::authorize_in(read, self, &proof.operation, &proof.actor)?;
             let selected = active
                 .document
                 .credentials

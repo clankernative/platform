@@ -321,7 +321,7 @@ impl Manager {
             current.check()?;
             current.sql_commit(&self.runtime, |tx| {
             if action == Action::Connect {
-                Self::unclaimed(&tx, &selection.slot, None)?;
+                Self::unclaimed(tx, &selection.slot, None)?;
             }
             tx.execute(
                 "DELETE FROM oauth_management_intents WHERE state='pending' AND expires_at<=?1",
@@ -342,7 +342,7 @@ impl Manager {
                 app: self.runtime.app().into(),
                 scope: self.runtime.scope().into(),
                 artifact: self.runtime.artifact().id().into(),
-                authority: self.authority_in(&tx, identity)?,
+                authority: self.authority_in(tx, identity)?,
                 registration: registration.into(),
                 logical_id: selection.requirement.logical_id.clone(),
                 action,
@@ -350,7 +350,7 @@ impl Manager {
                 subject: identity.subject.clone(),
                 selection: selection.identity()?,
                 slot: selection.slot.clone(),
-                fence: Self::fence(&tx, &selection.slot)?,
+                fence: Self::fence(tx, &selection.slot)?,
                 binding_namespace: admission::binding_namespace(&selection.binding)?,
                 usage: selection.requirement.usage.clone(),
                 scopes: selection
@@ -396,14 +396,14 @@ impl Manager {
             now,
             |current| {
                 let (view, state) = current.sql_read(&self.runtime, |db| {
-                    let (view, state, _) = self.load(&db, id, identity, now)?;
+                    let (view, state, _) = self.load(db, id, identity, now)?;
                     ensure!(
                         crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
                             == intent,
                         "OAuth Pending differs from retained original"
                     );
                     if state == "pending" {
-                        self.check_in(&db, &view, identity)?;
+                        self.check_in(db, &view, identity)?;
                     }
                     Ok((view, state))
                 })?;
@@ -458,14 +458,14 @@ impl Manager {
                 // the same original/role/physical scope. No RPC occurs inside it.
                 current.sql_commit(&self.runtime, |tx| {
                     let (view, state, _) =
-                        self.load(&tx, &call.attempt, identity, effects::wall_time()?)?;
+                        self.load(tx, &call.attempt, identity, effects::wall_time()?)?;
                     ensure!(
                         state == "pending" && view == expected,
                         "OAuth management pending changed"
                     );
-                    self.check_in(&tx, &view, identity)?;
+                    self.check_in(tx, &view, identity)?;
                     let reply = crate::oauth::fresh_owner::apply_in_current_app_transaction(
-                        &tx,
+                        tx,
                         &intent,
                         call,
                         effects::wall_time()?,
@@ -676,7 +676,7 @@ impl Manager {
                 now,
                 |current| {
                     let local = current.sql_read(&self.runtime, |db| {
-                        let (view, state, stored_session) = self.load(&db, id, identity, now)?;
+                        let (view, state, stored_session) = self.load(db, id, identity, now)?;
                         ensure!(
                             crate::oauth::fresh_auth::FreshIntent::management(&view, identity)?
                                 == original,
@@ -687,9 +687,9 @@ impl Manager {
                         {
                             return Ok(None);
                         }
-                        self.check_in(&db, &view, identity)?;
-                        let (intent, binding) = self.context(&db, id)?;
-                        let private = crate::oauth::exchange::load_binding(&db, id)?
+                        self.check_in(db, &view, identity)?;
+                        let (intent, binding) = self.context(db, id)?;
+                        let private = crate::oauth::exchange::load_binding(db, id)?
                             .context("OAuth exchange missing")?;
                         Ok(Some((view, intent, binding, private)))
                     })?;
@@ -795,14 +795,14 @@ impl Manager {
                     |current| {
                         current.sql_commit(&self.runtime, |tx| {
                         let (stored, state, stored_session) =
-                            self.load(&tx, id, identity, effects::wall_time()?)?;
+                            self.load(tx, id, identity, effects::wall_time()?)?;
                         ensure!(
                             stored == view
                                 && state == "authorized"
                                 && stored_session.as_deref() == Some(session.as_str()),
                             "OAuth denied callback confirmation changed"
                         );
-                        self.check_in(&tx, &view, identity)?;
+                        self.check_in(tx, &view, identity)?;
                         ensure!(tx.execute("UPDATE oauth_management_intents SET state='completed' WHERE id=?1 AND state='authorized'", [id])? == 1, "OAuth denied callback consumed");
                         Ok(())
                         })
@@ -1004,12 +1004,12 @@ impl Manager {
                             "OAuth disconnect clock moved backwards"
                         );
                         consumer.sql_commit(&self.runtime, |tx| {
-                        let (stored, state, _) = self.load(&tx, &view.id, identity, finished)?;
+                        let (stored, state, _) = self.load(tx, &view.id, identity, finished)?;
                         ensure!(
                             state == "pending" && stored == *view,
                             "OAuth disconnect pending changed"
                         );
-                        self.check_in(&tx, view, identity)?;
+                        self.check_in(tx, view, identity)?;
                         let changed = tx.execute("UPDATE oauth_connection_slots SET status='disabled',security_epoch=security_epoch+1
                 WHERE slot=?1 AND generation=?2 AND token_version=?3 AND security_epoch=?4 AND status='active'",
                 params![view.slot.as_str(), fence.generation, fence.token_version, fence.epoch])?;

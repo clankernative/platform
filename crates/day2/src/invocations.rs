@@ -69,7 +69,7 @@ fn status_in(
     actor: &str,
     authenticated: Option<&str>,
 ) -> Result<Receipt> {
-    runtime.check_binding(&connection)?;
+    runtime.check_binding(connection)?;
     let (operation, owner, artifact, status, outcome): (
         String,
         String,
@@ -97,14 +97,9 @@ fn status_in(
         artifact == runtime.artifact().id(),
         crate::error::Failure::ArtifactBindingChanged
     );
-    let authority = crate::authority_state::authorize_in(&connection, runtime, &operation, actor)?;
+    let authority = crate::authority_state::authorize_in(connection, runtime, &operation, actor)?;
     crate::managed_credentials::ingress::require(
-        &connection,
-        runtime,
-        id,
-        &operation,
-        actor,
-        &authority,
+        connection, runtime, id, &operation, actor, &authority,
     )?;
     if let Some(authenticated) = authenticated {
         let rule = authority.policy()?.may_act_as(
@@ -121,12 +116,12 @@ fn status_in(
         )?;
         ensure!(same_request, crate::error::Failure::Forbidden);
     }
-    let blocked = status == "pending" && crate::authority_state::is_blocked(&connection, id)?;
+    let blocked = status == "pending" && crate::authority_state::is_blocked(connection, id)?;
     let outcome = if status == "pending" {
         None
     } else {
         Some(store::completed_outcome(
-            &connection,
+            connection,
             id,
             outcome.as_deref(),
             authority.policy()?,
@@ -144,7 +139,7 @@ fn status_in(
         } else {
             outcome.map_or(String::new(), |value| value.error)
         },
-        children: children_in(&connection, id)?,
+        children: children_in(connection, id)?,
     })
 }
 

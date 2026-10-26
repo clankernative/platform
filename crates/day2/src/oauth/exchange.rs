@@ -402,7 +402,7 @@ fn authorize_in(
     guard: Option<&super::management::app::FinishGuard<'_>>,
 ) -> Result<Option<CheckedExchangeDispatch>> {
     if let Some(guard) = guard {
-        guard.check(&tx, now)?;
+        guard.check(tx, now)?;
     }
     let row: Option<(ConnectIntent, String, String, String)> = tx
         .query_row(
@@ -440,15 +440,15 @@ fn authorize_in(
     let Some((stored_intent, code_ref, callback_json, exchange_json)) = row else {
         return Ok(None);
     };
-    if stored_intent != *qualified.intent() || !connect::slot_matches(&tx, &stored_intent)? {
+    if stored_intent != *qualified.intent() || !connect::slot_matches(tx, &stored_intent)? {
         return Ok(None);
     }
     let stored_callback: CallbackBinding = serde_json::from_str(&callback_json)?;
     let stored_exchange: ExchangeBinding = serde_json::from_str(&exchange_json)?;
     if &stored_callback != qualified.binding()
-        || !stored_exchange.matches_current(&input)?
-        || !custody::verifier_exists(&tx, &stored_intent, &stored_exchange)?
-        || !custody::code_exists(&tx, &stored_intent, &stored_exchange)?
+        || !stored_exchange.matches_current(input)?
+        || !custody::verifier_exists(tx, &stored_intent, &stored_exchange)?
+        || !custody::code_exists(tx, &stored_intent, &stored_exchange)?
         || code_ref != stored_exchange.code_ref
     {
         return Ok(None);
@@ -460,7 +460,7 @@ fn authorize_in(
     )?;
     ensure!(changed == 1, "qualified exchange dispatch fence lost");
     if let Some(guard) = guard {
-        guard.commit_dispatch(&tx)?;
+        guard.commit_dispatch(tx)?;
     }
     Ok(Some(CheckedExchangeDispatch {
         intent: stored_intent,
@@ -538,7 +538,7 @@ fn publish_callback_code(
     let binding = load_binding(tx, &qualified.intent().attempt)?
         .ok_or_else(|| anyhow::anyhow!("private exchange binding missing"))?;
     ensure!(
-        binding.matches_current(&input)?,
+        binding.matches_current(input)?,
         "callback exchange binding changed"
     );
     ensure!(

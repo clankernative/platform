@@ -352,9 +352,9 @@ fn begin_in(
     guard: Option<&super::management::app::StartGuard<'_>>,
 ) -> Result<bool> {
     if let Some(guard) = guard {
-        guard.check(&tx, now)?;
+        guard.check(tx, now)?;
     }
-    if !slot_matches(&tx, intent)? {
+    if !slot_matches(tx, intent)? {
         return Ok(false);
     }
     let inserted = tx.execute(
@@ -388,13 +388,13 @@ fn begin_in(
     if inserted == 1
         && let Some((exchange, verifier)) = private
     {
-        super::exchange::store_binding(&tx, &intent.attempt, exchange)?;
-        super::custody::publish_verifier(&tx, verifier)?;
+        super::exchange::store_binding(tx, &intent.attempt, exchange)?;
+        super::custody::publish_verifier(tx, verifier)?;
     }
     if inserted == 1
         && let Some(guard) = guard
     {
-        guard.commit(&tx)?;
+        guard.commit(tx)?;
     }
     Ok(inserted == 1)
 }
@@ -889,7 +889,7 @@ fn activate_in(
         return Ok(false);
     }
     if let Some(exchange) = guard.exchange {
-        let stored = super::exchange::load_binding(&tx, attempt)?;
+        let stored = super::exchange::load_binding(tx, attempt)?;
         if stored.as_ref() != Some(exchange) {
             return Ok(false);
         }
@@ -906,8 +906,8 @@ fn activate_in(
     if !approved {
         return Ok(false);
     }
-    if now >= intent.expires_at || !slot_matches(&tx, &intent)? {
-        super::custody::delete_attempt_material(&tx, attempt)?;
+    if now >= intent.expires_at || !slot_matches(tx, &intent)? {
+        super::custody::delete_attempt_material(tx, attempt)?;
         tx.execute(
             "UPDATE oauth_connect_attempts SET state = 'activation_rejected',
             code_ref = NULL, account = NULL, scope_evidence = NULL WHERE attempt = ?1",
@@ -927,12 +927,12 @@ fn activate_in(
         intent.proposed_generation,
         intent.expected_epoch,
     ))?;
-    custody_publish(&tx)?;
+    custody_publish(tx)?;
     if let Some(exchange) = guard.exchange
         && state != "awaiting_account_approval"
     {
-        super::custody::delete_code(&tx, &intent, exchange)?;
-        super::custody::delete_verifier(&tx, &intent, exchange)?;
+        super::custody::delete_code(tx, &intent, exchange)?;
+        super::custody::delete_verifier(tx, &intent, exchange)?;
     }
     if let Some(previous) = intent.expected_generation {
         let changed = tx.execute(

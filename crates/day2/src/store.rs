@@ -1434,9 +1434,9 @@ impl Runtime {
             }
             reason = AttemptReason::StorageRejected;
             self.sql_write(|tx| {
-            self.check_binding(&tx)?;
+            self.check_binding(tx)?;
             reason = AttemptReason::AuthorizationRejected;
-            let active = crate::authority_state::authorize_in(&tx, self, operation, actor)?;
+            let active = crate::authority_state::authorize_in(tx, self, operation, actor)?;
             if crate::managed_credentials::issuance::access(self, operation)?.interactive {
                 ensure!(
                     trigger == crate::audit::Trigger::Request
@@ -1445,14 +1445,14 @@ impl Runtime {
                     "interactive commands require a direct security confirmation"
                 );
                 crate::managed_credentials::issuance::require_confirmation(
-                    &tx, self, operation, actor, id, input, now,
+                    tx, self, operation, actor, id, input, now,
                 )?;
             }
             if let Some(admission) = remote {
                 ensure!(admission.origin.actor == actor, "delegated_origin_changed");
-                if crate::delegation_commands::reused_in(&tx, admission)? {
+                if crate::delegation_commands::reused_in(tx, admission)? {
                     crate::audit::record_attempt(
-                        &tx,
+                        tx,
                         self,
                         Attempt {
                             kind: AttemptKind::Admission,
@@ -1564,13 +1564,13 @@ impl Runtime {
                 );
                 // Reuse never transfers an old idempotency key to newly granted authority.
                 if status == "pending" {
-                    crate::authority_state::require_invocation_in(&tx, self, id, operation, actor)?;
+                    crate::authority_state::require_invocation_in(tx, self, id, operation, actor)?;
                 }
             } else {
                 tx.execute("INSERT INTO day2_invocations(id,operation,actor,input,artifact,now,status,trigger,caller,authenticated,delegation_rule) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7,?8,?9,?10)",
                 params![id,operation,actor,canonical,self.artifact.id(),now,trigger.as_str(),caller,authenticated,rule])?;
-                crate::authority_state::pin_invocation(&tx, id, &active.stamp)?;
-                crate::resources::capture_root_budgets(&tx, id, &definition.name, &active)?;
+                crate::authority_state::pin_invocation(tx, id, &active.stamp)?;
+                crate::resources::capture_root_budgets(tx, id, &definition.name, &active)?;
                 let seed = self.host.entropy(&self.scope, id)?;
                 tx.execute(
                     "INSERT INTO day2_id_seeds VALUES(?1,?2)",
@@ -1583,23 +1583,23 @@ impl Runtime {
                         && let Some(token) =
                             input[field].as_str().filter(|raw| raw.starts_with("sel1_"))
                     {
-                        decode_selection_cursor(&tx, token, now)?;
-                        pin_selection_cursor(&tx, token, id)?;
+                        decode_selection_cursor(tx, token, now)?;
+                        pin_selection_cursor(tx, token, id)?;
                     }
                 }
             }
-            crate::delegation::record_root_origin(&tx, id, initiator, origin, !reused)?;
+            crate::delegation::record_root_origin(tx, id, initiator, origin, !reused)?;
             if let Some(admission) = credential {
                 crate::managed_credentials::ingress::record(
-                    &tx, self, id, operation, &active, admission,
+                    tx, self, id, operation, &active, admission,
                 )?;
             }
             if let Some(admission) = remote {
-                crate::delegation_commands::record_in(&tx, id, admission)?;
+                crate::delegation_commands::record_in(tx, id, admission)?;
             }
             reason = AttemptReason::StorageRejected;
             crate::audit::record_attempt(
-                &tx,
+                tx,
                 self,
                 Attempt {
                     kind: AttemptKind::Admission,
@@ -1763,10 +1763,10 @@ impl Runtime {
         enum Decision {
             Existing(Outcome),
             Committed(Outcome),
-            Rejected(Trace, Policy),
+            Rejected(Box<Trace>, Policy),
         }
         let decision = self.sql_decide(|tx| {
-        self.check_binding(&tx)?;
+        self.check_binding(tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
             tx.query_row("SELECT operation,actor,input,artifact,status,outcome FROM day2_invocations WHERE id=?1", [id],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
@@ -1774,17 +1774,17 @@ impl Runtime {
             artifact == self.artifact.id(),
             "pinned_artifact_unavailable"
         );
-        let active = crate::authority_state::authorize_in(&tx, self, &operation, &actor)?;
+        let active = crate::authority_state::authorize_in(tx, self, &operation, &actor)?;
         let policy = active.policy()?.clone();
         if status != "pending" {
-            return completed_outcome(&tx, id, completed.as_deref(), &policy)
+            return completed_outcome(tx, id, completed.as_deref(), &policy)
                 .map(Decision::Existing)
                 .map(SqlDecision::Rollback);
         }
-        crate::authority_state::require_invocation_in(&tx, self, id, &operation, &actor)?;
+        crate::authority_state::require_invocation_in(tx, self, id, &operation, &actor)?;
         // Still pending, so any saved trace is intact: compaction only touches
         // completed invocations.
-        let continuation = crate::execution::load(&tx, id)?;
+        let continuation = crate::execution::load(tx, id)?;
         if continuation
             .as_ref()
             .is_some_and(|(phase, _)| *phase != Phase::Complete)
@@ -1805,7 +1805,7 @@ impl Runtime {
         let precondition_row =
             match precondition_target(&policy, &registered_operation, &input_value, execution) {
                 Ok(Some(target)) => guard_target(
-                    &tx,
+                    tx,
                     &target.model,
                     &self.artifact.contract().schema.models[&target.model],
                     target.id,
@@ -1829,11 +1829,11 @@ impl Runtime {
             authority: Some(active.stamp.clone()),
             precondition_row,
         };
-        let child_guard = crate::invocations::validate_target(self, &tx, id, &policy);
+        let child_guard = crate::invocations::validate_target(self, tx, id, &policy);
         let mut request = Request {
             operation,
             input,
-            context: invocation_context(&tx, id)?,
+            context: invocation_context(tx, id)?,
             observations: prepared,
         };
         if let Some((_, saved)) = continuation {
@@ -1850,7 +1850,7 @@ impl Runtime {
             );
             request = saved.request;
         } else if let Err(error) =
-            crate::preparation::validate_local(self, &tx, &request, &policy, &registered_operation)
+            crate::preparation::validate_local(self, tx, &request, &policy, &registered_operation)
             && let Some(boundary) = request
                 .observations
                 .last_mut()
@@ -1877,10 +1877,10 @@ impl Runtime {
                 boundary.error = crate::error::observation_code(&error);
             }
             for observation in &request.observations {
-                crate::resources::validate_cached(&tx, self, &request, observation)?;
+                crate::resources::validate_cached(tx, self, &request, observation)?;
             }
             self.run_transaction(
-                &tx,
+                tx,
                 &mut request,
                 &policy,
                 &registered_operation,
@@ -1897,10 +1897,10 @@ impl Runtime {
             outcome: outcome.clone(),
             guard: Some(guard),
         };
-        self.check_authority(&tx, &trace.request, &policy)?;
+        self.check_authority(tx, &trace.request, &policy)?;
         if outcome.status == "pending" {
-            crate::invocations::validate_requests(self, &tx, &trace.request)?;
-            crate::execution::begin(self, &tx, &trace)?;
+            crate::invocations::validate_requests(self, tx, &trace.request)?;
+            crate::execution::begin(self, tx, &trace)?;
             if fault == Fault::BeforeCommit {
                 return Err(fault.interruption("simulated_process_loss"));
             }
@@ -1910,11 +1910,11 @@ impl Runtime {
             // A refusal needs a durable receipt but must retain no app effects.
             // Confirm rollback and settle this scope before a separate SQL
             // unit rechecks authority and any competing completion.
-            return Ok(SqlDecision::Rollback(Decision::Rejected(trace, policy)));
+            return Ok(SqlDecision::Rollback(Decision::Rejected(Box::new(trace), policy)));
         } else {
-            crate::invocations::validate_requests(self, &tx, &trace.request)?;
+            crate::invocations::validate_requests(self, tx, &trace.request)?;
             crate::managed_credentials::issuance::validate_commit(
-                &tx,
+                tx,
                 self,
                 &trace.request,
                 credential_keys.as_ref(),
@@ -1922,7 +1922,7 @@ impl Runtime {
             if fault == Fault::BeforeCommit {
                 return Err(fault.interruption("simulated_process_loss"));
             }
-            complete(&tx, id, &trace)?;
+            complete(tx, id, &trace)?;
         }
         Ok(SqlDecision::Commit(Decision::Committed(outcome)))
         })?;
@@ -1939,21 +1939,24 @@ impl Runtime {
                 }
                 Ok(outcome)
             }
-            Decision::Rejected(trace, policy) => self.sql_decide(|tx| {
-                self.check_binding(tx)?;
-                self.check_authority(tx, &trace.request, &policy)?;
-                let existing: Option<String> = tx.query_row(
-                    "SELECT outcome FROM day2_invocations WHERE id=?1",
-                    [id],
-                    |row| row.get(0),
-                )?;
-                if let Some(existing) = existing {
-                    return completed_outcome(tx, id, Some(&existing), &policy)
-                        .map(SqlDecision::Rollback);
-                }
-                complete(tx, id, &trace)?;
-                Ok(SqlDecision::Commit(trace.outcome))
-            }),
+            Decision::Rejected(trace, policy) => {
+                let trace = *trace;
+                self.sql_decide(|tx| {
+                    self.check_binding(tx)?;
+                    self.check_authority(tx, &trace.request, &policy)?;
+                    let existing: Option<String> = tx.query_row(
+                        "SELECT outcome FROM day2_invocations WHERE id=?1",
+                        [id],
+                        |row| row.get(0),
+                    )?;
+                    if let Some(existing) = existing {
+                        return completed_outcome(tx, id, Some(&existing), &policy)
+                            .map(SqlDecision::Rollback);
+                    }
+                    complete(tx, id, &trace)?;
+                    Ok(SqlDecision::Commit(trace.outcome))
+                })
+            }
         }
     }
 
@@ -2262,11 +2265,11 @@ impl Runtime {
     /// Both complete bounded views belong to one consistent database snapshot.
     pub fn verification_snapshot(&self) -> Result<Value> {
         self.sql_read(|snapshot| {
-            self.check_binding(&snapshot)?;
+            self.check_binding(snapshot)?;
             let schema = &self.artifact.contract().schema;
             let limits = &self.artifact.contract().verification_limits;
             let live = read_model_snapshot_bounded(
-                &snapshot,
+                snapshot,
                 schema,
                 SnapshotScope::Live,
                 limits.rows_per_model,
@@ -2274,7 +2277,7 @@ impl Runtime {
                 limits.snapshot_bytes,
             )?;
             let deleted = read_model_snapshot_bounded(
-                &snapshot,
+                snapshot,
                 schema,
                 SnapshotScope::Deleted,
                 limits.rows_per_model,
@@ -2296,7 +2299,7 @@ impl Runtime {
             );
             for rollup in &schema.rollups {
                 ensure!(
-                    rollup.mismatches(&snapshot)? == 0,
+                    rollup.mismatches(snapshot)? == 0,
                     "rollup_recount_mismatch: {}",
                     rollup.table()
                 );
@@ -2307,10 +2310,10 @@ impl Runtime {
 
     fn snapshot(&self, scope: SnapshotScope) -> Result<Value> {
         self.sql_read(|snapshot| {
-            self.check_binding(&snapshot)?;
+            self.check_binding(snapshot)?;
             let limits = &self.artifact.contract().verification_limits;
             let models = read_model_snapshot_bounded(
-                &snapshot,
+                snapshot,
                 &self.artifact.contract().schema,
                 scope,
                 limits.rows_per_model,
@@ -2324,7 +2327,7 @@ impl Runtime {
             );
             for rollup in &self.artifact.contract().schema.rollups {
                 ensure!(
-                    rollup.mismatches(&snapshot)? == 0,
+                    rollup.mismatches(snapshot)? == 0,
                     "rollup_recount_mismatch: {}",
                     rollup.table()
                 );
@@ -2383,7 +2386,7 @@ fn validate_storage_in(
     artifact: &LoadedArtifact,
     scope: &str,
 ) -> Result<()> {
-    check_storage_binding(&snapshot, artifact, scope)?;
+    check_storage_binding(snapshot, artifact, scope)?;
     for (name, record) in &artifact.contract().schema.models {
         let sql = format!("SELECT {} FROM \"{name}\" ORDER BY id", projection(record));
         let mut statement = snapshot.prepare(&sql)?;
@@ -2404,10 +2407,10 @@ fn validate_storage_in(
             "invalid stored foreign key"
         );
     }
-    validate_live_relationships(&snapshot, &artifact.contract().schema)?;
+    validate_live_relationships(snapshot, &artifact.contract().schema)?;
     for rollup in &artifact.contract().schema.rollups {
         ensure!(
-            rollup.mismatches(&snapshot)? == 0,
+            rollup.mismatches(snapshot)? == 0,
             "rollup_recount_mismatch: {}",
             rollup.table()
         );
