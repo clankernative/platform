@@ -58,6 +58,8 @@ pub(crate) struct EnrolledProcessRoleOwner {
     current: SelfSnapshot,
     #[cfg(target_os = "linux")]
     clock: crate::security_epoch::native_clock::NativeConnectionClock,
+    #[cfg(target_os = "linux")]
+    policy_file: super::birth::PolicyFileOwner,
     local: PhantomData<Rc<()>>,
 }
 
@@ -74,8 +76,6 @@ pub(crate) struct EnrolledRoleStage<'a> {
     channel: Channel,
     #[cfg(target_os = "linux")]
     current_grant: SignedStage,
-    #[cfg(target_os = "linux")]
-    policy_interpretation: super::policy::PolicyInterpretation,
 }
 
 /// Exclusive, short borrow of an actual enrolled stage for storage work.
@@ -122,7 +122,7 @@ impl EnrolledProcessRoleOwner {
         let mut acquisition = NativeAcquisition::begin(5)?;
         #[cfg(target_os = "linux")]
         {
-            let policy = super::birth::load_policy(&mut acquisition)?;
+            let (policy, mut policy_file) = super::birth::admit_policy(&mut acquisition)?;
             ensure!(
                 policy.bootstrap.scope == *scope,
                 "native_enrollment_scope_mismatch"
@@ -147,6 +147,7 @@ impl EnrolledProcessRoleOwner {
                 &grant.data.runtime,
             ))?;
             acquisition.remaining()?;
+            policy_file.check(&mut acquisition)?;
             Ok(Self {
                 policy,
                 role,
@@ -165,6 +166,7 @@ impl EnrolledProcessRoleOwner {
                 self_data: grant.data.process,
                 current,
                 clock: acquisition.into_connection_clock()?,
+                policy_file,
                 local: PhantomData,
             })
         }
@@ -229,12 +231,7 @@ impl EnrolledProcessRoleOwner {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let mut policy_interpretation = super::policy::PolicyInterpretation::new();
-                    super::birth::check_policy_interpretation(
-                        &mut authentication,
-                        &mut policy_interpretation,
-                        &self.policy,
-                    )?;
+                    self.policy_file.check(&mut authentication)?;
                     self.issuer.check_live(&mut authentication)?;
                     self.certificate.verify(&self.policy)?;
                     self.current.check(&mut authentication)?;
@@ -262,7 +259,6 @@ impl EnrolledProcessRoleOwner {
                         grant_peer,
                         nonce_peer,
                         channel,
-                        policy_interpretation,
                     ))
                 }
             })();
@@ -271,15 +267,7 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (
-                    acquisition,
-                    authentication,
-                    grant,
-                    grant_peer,
-                    nonce_peer,
-                    channel,
-                    policy_interpretation,
-                ) = result?;
+                let (acquisition, authentication, grant, grant_peer, nonce_peer, channel) = result?;
                 let deadline = Duration::from_nanos(grant.data.deadline_ns);
                 let mut stage = EnrolledRoleStage {
                     owner: self,
@@ -290,7 +278,6 @@ impl EnrolledProcessRoleOwner {
                     grant_peer,
                     channel,
                     current_grant: grant,
-                    policy_interpretation,
                 };
                 stage.check()?;
                 // A longer peer interval never gives role authentication
@@ -630,11 +617,7 @@ impl EnrolledRoleStage<'_> {
             );
             #[cfg(target_os = "linux")]
             {
-                super::birth::check_policy_interpretation(
-                    &mut self.acquisition,
-                    &mut self.policy_interpretation,
-                    &self.owner.policy,
-                )?;
+                self.owner.policy_file.check(&mut self.acquisition)?;
                 self.owner.current.check(&mut self.acquisition)?;
                 self.owner.issuer.check_live(&mut self.acquisition)?;
                 self.nonce_peer.check_live(&mut self.acquisition)?;

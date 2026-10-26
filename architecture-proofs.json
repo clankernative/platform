@@ -57,6 +57,12 @@
       "scope": "const",
       "fingerprint": "sha256:10d5afa272f4b447e9b29d5e934ea00fc853003d091eaf134498827b5ab66491",
       "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/birth.rs",
+      "scope": "const",
+      "fingerprint": "sha256:8fbc3cbb911311f3ebe6ea5216a1b617a0423decef51e25e9c4179ac837f9f29",
+      "registration": null
     }
   ],
   "proofs": [
@@ -5190,6 +5196,39 @@
       ],
       "proof_uses": [],
       "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/birth.rs",
+      "type_name": "PolicyFileOwner",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >",
+        "fn check_file (& mut self , path : & 'static str , acquisition : & mut NativeAcquisition) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "fn admit_policy_file (path : & 'static str , acquisition : & mut NativeAcquisition) -> Result < (EnrollmentPolicy , PolicyFileOwner) >"
+        },
+        {
+          "owner": null,
+          "signature": "pub (super) fn admit_policy (acquisition : & mut NativeAcquisition) -> Result < (EnrollmentPolicy , PolicyFileOwner) >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PolicyFileOwner",
+          "signature": "fn check_file (& mut self , path : & 'static str , acquisition : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "PolicyFileOwner",
+          "signature": "pub (super) fn check (& mut self , acquisition : & mut NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "destructor": null,
       "consuming_methods": []
     }
   ],
