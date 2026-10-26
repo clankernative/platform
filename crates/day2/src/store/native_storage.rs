@@ -622,6 +622,12 @@ impl Drop for CallbackPolicy<'_> {
 
 impl CallbackControl {
     fn allows(&self, action: AuthAction<'_>) -> bool {
+        // SQLite authorizes preparation, not every later VM step. Deny all
+        // further preparation after refusal; finish() still rejects the whole
+        // unit, including work through statements prepared before the denial.
+        if self.denied.load(Ordering::SeqCst) {
+            return false;
+        }
         if let AuthAction::Savepoint {
             operation,
             savepoint_name,
@@ -634,7 +640,6 @@ impl CallbackControl {
                 _ => return false,
             };
             return matches!(self.mode, SqlMode::Write)
-                && !self.denied.load(Ordering::SeqCst)
                 && savepoint_name == "day2_budget_atomic"
                 && self.active_step.load(Ordering::SeqCst)
                 && self
@@ -645,13 +650,6 @@ impl CallbackControl {
         // No second statement (including ordinary DML) belongs to the fixed
         // command window. Business SQL runs only after BudgetStepGuard drops.
         if self.active_step.load(Ordering::SeqCst) {
-            return false;
-        }
-        if matches!(
-            action,
-            AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. }
-        ) && self.denied.load(Ordering::SeqCst)
-        {
             return false;
         }
         allowed_sql(action, self.mode)
@@ -807,6 +805,48 @@ mod tests {
                 0
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn budget_sql_caught_control_denial_blocks_further_preparation() -> Result<()> {
+        for following in [
+            "SELECT 1",
+            "SELECT abs(-1)",
+            "PRAGMA table_info(control_probe)",
+        ] {
+            let mut db = budget_database()?;
+            let tx = db.transaction()?;
+            let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
+            assert!(tx.execute_batch("COMMIT").is_err());
+            assert!(policy.control.denied.load(Ordering::SeqCst));
+            assert!(tx.execute_batch(following).is_err(), "{following}");
+            assert!(policy.finish().is_err());
+            tx.rollback()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn budget_sql_denied_raw_admission_leaves_the_permanent_vm_budget_intact() -> Result<()> {
+        // Ordinary real-SQLite conformance only. No native owner is created or
+        // continued after refusal; its adapter policy ends before the VM probe.
+        let mut db = Connection::open_in_memory()?;
+        configure_connection(&mut db)?;
+        let tx = db.transaction()?;
+        let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
+        assert!(crate::oauth::schema::admit(&tx, |_| Ok(())).is_err());
+        assert!(tx.execute_batch("SELECT 1").is_err());
+        assert!(policy.finish().is_err());
+        tx.rollback()?;
+        let error = db.query_row(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
+        );
         Ok(())
     }
 

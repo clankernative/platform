@@ -2855,6 +2855,36 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sql_prepared_before_denial_cannot_commit_or_return_known_data() -> Result<()> {
+        use crate::store::SqlDecision::Commit;
+        let (_directory, runtime) = sql_fixture()?;
+        let outcome = with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+            let failed = sql.write(|tx| {
+                let mut write = tx.prepare("INSERT INTO sql_guard_probe VALUES(1)")?;
+                let mut read = tx.prepare("SELECT 37")?;
+                assert!(tx.execute_batch("COMMIT").is_err());
+                // The authorizer gates preparation, not ordinary VM stepping.
+                // The mandatory whole-unit barrier must discard even these
+                // already-prepared effects and this caught-denial result.
+                assert_eq!(write.execute([])?, 1);
+                assert_eq!(read.query_row([], |row| row.get::<_, i64>(0))?, 37);
+                Ok(Commit("poisoned prepared result"))
+            });
+            assert!(failed.is_err());
+            assert!(sql.read(|_| Ok("later unit")).is_err());
+            Ok(())
+        });
+        assert!(outcome.is_err());
+        let db = crate::store::open(runtime.db())?;
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM sql_guard_probe", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
     fn runtime_sql_read_denies_dml_and_sql_read_purpose_cannot_write() -> Result<()> {
         use crate::store::SqlDecision::Commit;
         for statement in [
@@ -2892,15 +2922,16 @@ mod tests {
                 // Raw admission must fail at its first foreign_keys update,
                 // before entering nested admission or touching its raw hook.
                 assert!(crate::oauth::schema::admit(db, |_| Ok(())).is_err());
-                // Catching that denial cannot clear the original connection's
-                // cumulative work budget. Exercise the real SQLite VM, without
-                // installing/replacing a test hook on the shared callback.
-                let error = db.query_row(
-                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                ).unwrap_err();
-                assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::OperationInterrupted));
+                // Catching a control denial cannot prepare any further SQL,
+                // including reads. Separate ordinary-adapter conformance below
+                // verifies the permanent hook without continuing this owner.
+                let error = db
+                    .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .unwrap_err();
+                assert_eq!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+                );
                 Ok(())
             })
         });

@@ -265,7 +265,7 @@ fn sql_control_core_pin(source: &str) -> Option<&'static str> {
         // the progress hook; a guarded callback denies/latches that entry.
         // No module-name exemption: any byte change requires explicit review.
         "crates/day2/src/store/native_storage.rs" => {
-            Some("sha256:c729e23a8746056f9373f3162389b65fbcb156ee1feb0af8ba5c1ce8a6f2ec70")
+            Some("sha256:3c41967bfb9f2ce482112cb09863e609b2230eebd9ad7f46f4923cd6cc72f40c")
         }
         "crates/day2/src/oauth/schema.rs" => {
             Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
