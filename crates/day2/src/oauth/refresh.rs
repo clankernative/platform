@@ -10,8 +10,10 @@ const RENEW_SECONDS: i64 = 60;
 const BUDGET: Duration = Duration::from_secs(10);
 const MAX_RESPONSE: usize = 64 * 1024;
 
-/// A native producer observed a rewind even if a subsequent clock read has
-/// already recovered. Generic secret/network failures do not carry this fact.
+/// An OAuth material/readiness wall-time fence failed, even if a later sample
+/// recovered. This classification is data, not native SQL authority. It cannot
+/// override a failed BOOTTIME/original check or an already refused owner.
+/// Generic secret, network and native-owner failures do not carry this fact.
 #[derive(Debug)]
 pub(super) struct ClockRefusal;
 
