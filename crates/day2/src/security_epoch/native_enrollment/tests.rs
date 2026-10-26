@@ -8,6 +8,133 @@ use super::{
 };
 use day2_capabilities::Digest;
 
+fn enrolled_self_reborrow_shape(source: &str) -> bool {
+    use syn::visit::Visit;
+
+    fn fields(expression: &syn::Expr, expected: &[&str]) -> bool {
+        match (expression, expected.split_last()) {
+            (syn::Expr::Path(path), Some((last, []))) => path.path.is_ident(last),
+            (syn::Expr::Field(field), Some((last, rest))) => {
+                matches!(&field.member, syn::Member::Named(name) if name == last)
+                    && fields(&field.base, rest)
+            }
+            _ => false,
+        }
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        captures: usize,
+        clocks: usize,
+        owner_checks: usize,
+        stage_checks: usize,
+    }
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                let path = path.path.segments.iter().collect::<Vec<_>>();
+                self.captures += usize::from(
+                    path.len() == 2
+                        && path[0].ident == "SelfSnapshot"
+                        && path[1].ident == "acquire",
+                );
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.clocks += usize::from(call.method == "into_connection_clock");
+            self.owner_checks +=
+                usize::from(call.method == "check" && fields(&call.receiver, &["self", "current"]));
+            self.stage_checks += usize::from(
+                call.method == "check" && fields(&call.receiver, &["self", "owner", "current"]),
+            );
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    let source = syn::parse_file(source).unwrap();
+    let mut enrollment = None;
+    let mut begin = None;
+    let mut check = None;
+    for item in source.items {
+        let syn::Item::Impl(implementation) = item else {
+            continue;
+        };
+        let syn::Type::Path(owner) = &*implementation.self_ty else {
+            continue;
+        };
+        let owner = owner.path.segments.last().unwrap().ident.to_string();
+        for item in implementation.items {
+            let syn::ImplItem::Fn(function) = item else {
+                continue;
+            };
+            let mut calls = Calls::default();
+            calls.visit_block(&function.block);
+            if owner == "EnrolledProcessRoleOwner" && function.sig.ident == "enroll_current_thread"
+            {
+                assert!(enrollment.replace(calls).is_none());
+            } else if owner == "EnrolledProcessRoleOwner" && function.sig.ident == "begin_stage" {
+                assert!(begin.replace(calls).is_none());
+            } else if owner == "EnrolledRoleStage" && function.sig.ident == "check" {
+                assert!(check.replace(calls).is_none());
+            }
+        }
+    }
+    matches!(
+        enrollment,
+        Some(Calls {
+            captures: 1,
+            clocks: 1,
+            ..
+        })
+    ) && matches!(
+        begin,
+        Some(Calls {
+            captures: 0,
+            owner_checks: 1,
+            ..
+        })
+    ) && matches!(
+        check,
+        Some(Calls {
+            captures: 0,
+            stage_checks: 1,
+            ..
+        })
+    )
+}
+
+#[test]
+fn actual_enrolled_owner_retains_self_resources_for_request_checks() {
+    assert!(enrolled_self_reborrow_shape(include_str!("owner.rs")));
+}
+
+#[test]
+fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
+    let source = include_str!("owner.rs");
+    for (before, after) in [
+        ("SelfSnapshot::acquire(", "SelfSnapshot::metadata_only("),
+        (
+            "acquisition.into_connection_clock()?",
+            "acquisition.discard_clock()?",
+        ),
+        (
+            "self.current.check(&mut authentication)?",
+            "SelfSnapshot::acquire(&mut authentication)?",
+        ),
+        (
+            "self.owner.current.check(&mut self.acquisition)?",
+            "self.owner.current.skip(&mut self.acquisition)?",
+        ),
+    ] {
+        let mutated = source.replacen(before, after, 1);
+        assert_ne!(mutated, source);
+        assert!(!enrolled_self_reborrow_shape(&mutated));
+    }
+}
+
 pub(super) fn policy(root: &KeyOwner) -> EnrollmentPolicy {
     let store = crate::security_epoch::tests::selection();
     let bootstrap = crate::security_epoch::control_slot_tests::policy(&store);
