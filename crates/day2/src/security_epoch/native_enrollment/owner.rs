@@ -58,6 +58,12 @@ pub(crate) struct EnrolledProcessRoleOwner {
     current: SelfSnapshot,
     #[cfg(target_os = "linux")]
     clock: crate::security_epoch::native_clock::NativeConnectionClock,
+    #[cfg(target_os = "linux")]
+    admission: SignedStage,
+    #[cfg(target_os = "linux")]
+    admission_peers: Vec<IssuerReceipt>,
+    #[cfg(target_os = "linux")]
+    _completed_admission: Channel,
     local: PhantomData<Rc<()>>,
 }
 
@@ -67,14 +73,6 @@ pub(crate) struct EnrolledRoleStage<'a> {
     acquisition: NativeAcquisition,
     deadline: Duration,
     #[cfg(target_os = "linux")]
-    nonce_peer: IssuerReceipt,
-    #[cfg(target_os = "linux")]
-    grant_peer: IssuerReceipt,
-    #[cfg(target_os = "linux")]
-    channel: Channel,
-    #[cfg(target_os = "linux")]
-    current_grant: SignedStage,
-    #[cfg(target_os = "linux")]
     policy_interpretation: super::policy::PolicyInterpretation,
 }
 
@@ -83,6 +81,144 @@ pub(crate) struct EnrolledRoleStage<'a> {
 /// There is no raw-stage getter, dereference, adoption or independent owner.
 pub(crate) struct EnrolledStorageStage<'stage, 'role> {
     stage: &'stage mut EnrolledRoleStage<'role>,
+}
+
+/// One actual accepted-operation original, retained by its typed HTTP/driver
+/// owner across lexical callbacks. It is not an enrolled role or Current
+/// permission: every use must borrow the SAME live enrolled owner below.
+pub(crate) struct EnrolledCurrentRequest {
+    identity: Weak<OwnerIdentity>,
+    incarnation: Digest,
+    role: NativeRole,
+    process: u32,
+    thread: ThreadId,
+    acquisition: NativeAcquisition,
+    deadline: Duration,
+    finished: bool,
+    local: PhantomData<Rc<()>>,
+}
+
+/// A Shell HTTP original captured before request-selected app data is read.
+/// No app connection, role, issuer, epoch or signing permission is present.
+/// Binding consumes it once and joins its retained actual native namespaces
+/// to the selected already-enrolled Shell owner without starting another clock.
+pub(crate) struct UnselectedShellRequest {
+    acquisition: Option<NativeAcquisition>,
+    namespaces: crate::security_epoch::NativeNamespaceObservation,
+    process: u32,
+    thread: ThreadId,
+    local: PhantomData<Rc<()>>,
+}
+
+impl UnselectedShellRequest {
+    pub(crate) fn capture() -> Result<Self> {
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let namespaces =
+            crate::security_epoch::NativeNamespaceObservation::acquire(&mut acquisition)?;
+        acquisition.remaining()?;
+        Ok(Self {
+            acquisition: Some(acquisition),
+            namespaces,
+            process: std::process::id(),
+            thread: std::thread::current().id(),
+            local: PhantomData,
+        })
+    }
+
+    /// Clock and actual task/namespace continuity only. This never grants a
+    /// selected role, SQL, counter, signing or application-result permission.
+    pub(crate) fn check(&mut self) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.process == std::process::id() && self.thread == std::thread::current().id(),
+                "native_enrollment_request_owner_changed"
+            );
+            let original = self
+                .acquisition
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_already_bound"))?;
+            original.remaining()?;
+            self.namespaces.check(original)?;
+            original.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Plain unselected transport completed and passed its final postchecks.
+    /// The driver calls this only after known finite response completion.
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.check()?;
+        let _ = self.acquisition.take();
+        Ok(())
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        if let Some(original) = &mut self.acquisition {
+            original.refuse();
+        }
+    }
+}
+
+impl Drop for UnselectedShellRequest {
+    fn drop(&mut self) {
+        // No selected connection was joined, so cancellation does not refuse
+        // unused app connections. A bound acquisition is moved out exactly once.
+        if let Some(original) = &mut self.acquisition {
+            original.refuse();
+        }
+    }
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <EnrolledCurrentRequest as Ambiguous<_>>::check;
+            let _ = <UnselectedShellRequest as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
+
+impl Drop for EnrolledCurrentRequest {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.acquisition.refuse();
+        }
+    }
+}
+
+impl EnrolledCurrentRequest {
+    /// The enclosing driver calls this only after its actual known settlement,
+    /// finite response and final postchecks. No child borrow can survive this
+    /// consuming call. An error or cancellation keeps shared refusal terminal.
+    pub(crate) fn finish(mut self, owner: &mut EnrolledProcessRoleOwner) -> Result<()> {
+        {
+            let mut stage = owner.borrow_current_request(&mut self)?;
+            stage.check()?;
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        self.acquisition.refuse();
+    }
 }
 
 /// Captured at the actual creator entry, before any entropy or I/O. This owns
@@ -130,7 +266,7 @@ impl EnrolledProcessRoleOwner {
             let key = KeyOwner::generate()?;
             let mut current =
                 SelfSnapshot::acquire(policy.code(role), &mut acquisition, &HashCosts::disabled())?;
-            let (certificate, grant, issuer, _nonce_peer, _channel) = exchange(
+            let (certificate, grant, issuer, nonce_peer, channel) = exchange(
                 &policy,
                 role,
                 StagePurpose::CurrentRole,
@@ -161,10 +297,15 @@ impl EnrolledProcessRoleOwner {
                 initial_handshake_attempted: false,
                 serving_attempted: false,
                 issuer,
-                binding: grant.data.runtime,
-                self_data: grant.data.process,
+                binding: grant.data.runtime.clone(),
+                self_data: grant.data.process.clone(),
                 current,
                 clock: acquisition.into_connection_clock()?,
+                admission: grant,
+                // The original grant's actual receipt is retained in issuer.
+                // A later complete admission retains both new packet handles.
+                admission_peers: vec![nonce_peer],
+                _completed_admission: channel,
                 local: PhantomData,
             })
         }
@@ -177,6 +318,125 @@ impl EnrolledProcessRoleOwner {
 
     pub(crate) fn begin_current_stage(&mut self) -> Result<EnrolledRoleStage<'_>> {
         self.begin_stage(StagePurpose::CurrentRole)
+    }
+
+    /// Capture ONCE at the real accepted operation entry, before entropy/I/O.
+    /// Later callbacks retain this owner instead of constructing another stage
+    /// original. The live enrolled process/role is never moved into this value.
+    pub(crate) fn begin_current_request(&mut self) -> Result<EnrolledCurrentRequest> {
+        let stage = self.begin_current_stage()?;
+        Ok(EnrolledCurrentRequest {
+            identity: Rc::downgrade(&stage.owner.identity),
+            incarnation: stage.owner.incarnation.clone(),
+            role: stage.owner.role,
+            process: stage.owner.process,
+            thread: stage.owner.thread,
+            acquisition: stage.acquisition,
+            deadline: stage.deadline,
+            finished: false,
+            local: PhantomData,
+        })
+    }
+
+    pub(crate) fn bind_shell_request(
+        &mut self,
+        mut start: UnselectedShellRequest,
+    ) -> Result<EnrolledCurrentRequest> {
+        let result = (|| {
+            self.check_local()?;
+            ensure!(
+                self.role == NativeRole::SecurityShell,
+                "native_enrollment_request_shell_required"
+            );
+            ensure!(
+                start.process == std::process::id() && start.thread == std::thread::current().id(),
+                "native_enrollment_request_owner_changed"
+            );
+            let original = start
+                .acquisition
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_already_bound"))?;
+            start.namespaces.check(original)?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_enrollment_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                ensure!(
+                    start.namespaces.data() == self.current.namespace.data(),
+                    "native_enrollment_request_namespace_changed"
+                );
+                let original = start
+                    .acquisition
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_already_bound"))?;
+                let mut acquisition = self.clock.bind_captured_current(original)?;
+                let (_, deadline) = acquisition.interval_data()?;
+                let mut request = EnrolledCurrentRequest {
+                    identity: Rc::downgrade(&self.identity),
+                    incarnation: self.incarnation.clone(),
+                    role: self.role,
+                    process: self.process,
+                    thread: self.thread,
+                    deadline,
+                    acquisition,
+                    finished: false,
+                    local: PhantomData,
+                };
+                // This checks actual retained task/namespace/process and issuer
+                // handles before any caller can map expiry or use the request.
+                self.borrow_current_request(&mut request)?.check()?;
+                Ok(request)
+            }
+        })();
+        if result.is_err() {
+            self.refused = true;
+        }
+        result
+    }
+
+    /// Reborrow the SAME original with no clock factory, entropy or new grant.
+    /// Both input borrows last through the returned stage; neither owner can
+    /// be moved, finalized or concurrently reused while that stage is live.
+    pub(crate) fn borrow_current_request<'request>(
+        &'request mut self,
+        request: &'request mut EnrolledCurrentRequest,
+    ) -> Result<EnrolledRoleStage<'request>> {
+        let result = (|| {
+            self.check_local()?;
+            ensure!(!request.finished, "native_enrollment_request_finished");
+            let original = request
+                .identity
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_owner_dropped"))?;
+            ensure!(
+                Rc::ptr_eq(&original, &self.identity)
+                    && request.incarnation == self.incarnation
+                    && request.role == self.role
+                    && request.process == std::process::id()
+                    && request.thread == std::thread::current().id(),
+                "native_enrollment_request_owner_changed"
+            );
+            let acquisition = request.acquisition.narrow(5, request.deadline)?;
+            Ok(acquisition)
+        })();
+        let acquisition = match result {
+            Ok(acquisition) => acquisition,
+            Err(error) => {
+                self.refused = true;
+                request.acquisition.refuse();
+                return Err(error);
+            }
+        };
+        let mut stage = EnrolledRoleStage {
+            owner: self,
+            purpose: StagePurpose::CurrentRole,
+            acquisition,
+            deadline: request.deadline,
+            #[cfg(target_os = "linux")]
+            policy_interpretation: super::policy::PolicyInterpretation::new(),
+        };
+        stage.check()?;
+        Ok(stage)
     }
 
     /// Only the original Ready/file/first-peer composition calls this entry.
@@ -217,7 +477,6 @@ impl EnrolledProcessRoleOwner {
                         self.clock.begin_storage_metadata_observation()?
                     }
                 };
-                let mut authentication = acquisition.narrow_authentication()?;
                 self.check_local()?;
                 purpose.require_role(self.role)?;
                 if purpose == StagePurpose::InitialFirstHolder {
@@ -231,39 +490,19 @@ impl EnrolledProcessRoleOwner {
                 {
                     let mut policy_interpretation = super::policy::PolicyInterpretation::new();
                     super::birth::check_policy_interpretation(
-                        &mut authentication,
+                        &mut acquisition,
                         &mut policy_interpretation,
                         &self.policy,
                     )?;
-                    self.issuer.check_live(&mut authentication)?;
+                    self.issuer.check_live(&mut acquisition)?;
                     self.certificate.verify(&self.policy)?;
-                    self.current.check(&mut authentication)?;
+                    self.current.check(&mut acquisition)?;
                     ensure!(
                         self.current.data == self.self_data,
                         "native_enrollment_self_changed"
                     );
-                    let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
-                        &self.policy,
-                        self.role,
-                        purpose,
-                        &self.key,
-                        &mut self.current,
-                        &mut authentication,
-                    )?;
-                    ensure!(
-                        certificate == self.certificate && grant.data.runtime == self.binding,
-                        "native_enrollment_incarnation_or_runtime_changed"
-                    );
-                    self.issuer.check_live(&mut authentication)?;
-                    Ok((
-                        acquisition,
-                        authentication,
-                        grant,
-                        grant_peer,
-                        nonce_peer,
-                        channel,
-                        policy_interpretation,
-                    ))
+                    let (_, deadline) = acquisition.interval_data()?;
+                    Ok((acquisition, deadline, policy_interpretation))
                 }
             })();
             if result.is_err() {
@@ -271,35 +510,15 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (
-                    acquisition,
-                    authentication,
-                    grant,
-                    grant_peer,
-                    nonce_peer,
-                    channel,
-                    policy_interpretation,
-                ) = result?;
-                let deadline = Duration::from_nanos(grant.data.deadline_ns);
+                let (acquisition, deadline, policy_interpretation) = result?;
                 let mut stage = EnrolledRoleStage {
                     owner: self,
                     purpose,
                     acquisition,
                     deadline,
-                    nonce_peer,
-                    grant_peer,
-                    channel,
-                    current_grant: grant,
                     policy_interpretation,
                 };
                 stage.check()?;
-                // A longer peer interval never gives role authentication
-                // more than its original five-second acquisition. No reset.
-                if let Err(error) = stage.acquisition.complete_authentication(authentication) {
-                    stage.owner.refused = true;
-                    stage.acquisition.refuse();
-                    return Err(error);
-                }
                 Ok(stage)
             }
         }
@@ -356,11 +575,60 @@ impl EnrolledProcessRoleOwner {
 }
 
 impl EnrolledRoleStage<'_> {
+    /// A newly created native peer connection requires a complete fresh issuer
+    /// admission. Only cold peer factories call this; later requests borrow
+    /// their retained peer. Authentication narrows this request's ORIGINAL
+    /// interval to its first five seconds and never resets its clock.
+    pub(in crate::security_epoch::native_enrollment) fn admit_peer_connection(
+        &mut self,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check()?;
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native_enrollment_platform_unsupported");
+            #[cfg(target_os = "linux")]
+            {
+                let mut authentication = self.acquisition.narrow_authentication()?;
+                let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
+                    &self.owner.policy,
+                    self.owner.role,
+                    self.purpose,
+                    &self.owner.key,
+                    &mut self.owner.current,
+                    &mut authentication,
+                )?;
+                ensure!(
+                    certificate == self.owner.certificate
+                        && grant.data.runtime == self.owner.binding,
+                    "native_enrollment_incarnation_or_runtime_changed"
+                );
+                self.owner.issuer.check_live(&mut authentication)?;
+                let signed_deadline = Duration::from_nanos(grant.data.deadline_ns);
+                self.acquisition.complete_authentication(authentication)?;
+                // This cold exchange keeps any shorter authenticated ceiling
+                // on its SAME request; no origin or observation is replaced.
+                self.acquisition = self.acquisition.narrow(60, signed_deadline)?;
+                self.deadline = self.deadline.min(signed_deadline);
+                self.owner.admission = grant;
+                self.owner.admission_peers = vec![grant_peer, nonce_peer];
+                self.owner._completed_admission = channel;
+                self.check()
+            }
+        })();
+        if result.is_err() {
+            self.owner.refused = true;
+            self.acquisition.refuse();
+        }
+        result
+    }
+
     /// Historical sample DATA only; no clock read or new check/permission.
     pub(in crate::security_epoch) fn diagnostic_progress(
         &self,
     ) -> crate::security_epoch::native_clock::AcquisitionProgress {
-        self.acquisition.diagnostic_progress()
+        self.acquisition
+            .diagnostic_progress()
+            .with_enrollment_data(self.owner.incarnation.clone())
     }
 
     /// Closed ordinary-consumer gate. No caller-selected purpose or timeout.
@@ -637,8 +905,13 @@ impl EnrolledRoleStage<'_> {
                 )?;
                 self.owner.current.check(&mut self.acquisition)?;
                 self.owner.issuer.check_live(&mut self.acquisition)?;
-                self.nonce_peer.check_live(&mut self.acquisition)?;
-                self.grant_peer.check_live(&mut self.acquisition)?;
+                ensure!(
+                    (1..=2).contains(&self.owner.admission_peers.len()),
+                    "native_enrollment_admission_peer_bound"
+                );
+                for peer in &mut self.owner.admission_peers {
+                    peer.check_live(&mut self.acquisition)?;
+                }
                 Ok(())
             }
             #[cfg(not(target_os = "linux"))]
@@ -653,30 +926,25 @@ impl EnrolledRoleStage<'_> {
 }
 
 impl SameEnrolledOwner {
-    /// One lexical Current read view: validate the actual owner fully, then
-    /// perform only selection/purpose DATA checks and original-clock narrowing.
-    /// The sole caller observes its process under this child and fully checks
-    /// the same owner again before accepting the observation. No native check
-    /// is cached or omitted across that I/O boundary.
-    pub(in crate::security_epoch) fn current_read_view(
+    /// Meet the actual read child's earlier bounds back into THIS same stage
+    /// before a later physical/peer release can consume it. This accepts no
+    /// scalar deadline or replacement clock, and returns no permission.
+    pub(in crate::security_epoch) fn meet_current_read_view(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
-        store: &day2_capabilities::security_epoch::EpochStore,
-        role: NativeRole,
-    ) -> Result<NativeAcquisition> {
+        actual: &mut NativeAcquisition,
+    ) -> Result<()> {
         let result = (|| {
             self.check(stage)?;
-            stage.require_selection_data(policy, store, role)?;
-            stage.purpose.require_exact(StagePurpose::CurrentRole)?;
-            stage
-                .acquisition
-                .narrow(store.max_lease_seconds, stage.deadline)
+            stage.require_current_role()?;
+            stage.acquisition.exchange_current_views(actual)?;
+            stage.check()
         })();
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
             stage.acquisition.refuse();
+            actual.refuse();
         }
         result
     }

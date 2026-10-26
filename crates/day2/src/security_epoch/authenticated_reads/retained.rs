@@ -376,8 +376,9 @@ impl RetainedEpochReads {
             // neither begins a new interval nor renews our retained owner.
             let same_stage = match self.scope {
                 ReadScope::Current => {
-                    self.owner
-                        .current_read_view(stage, &self.policy, &self.store, self.purpose)?
+                    self.owner.check(stage)?;
+                    stage.check_current_selection(&self.policy, &self.store, self.purpose)?;
+                    stage.narrow_io_acquisition(self.store.max_lease_seconds)?
                 }
                 ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
                     self.owner.check(stage)?;

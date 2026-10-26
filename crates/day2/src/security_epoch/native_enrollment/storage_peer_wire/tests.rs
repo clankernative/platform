@@ -147,7 +147,7 @@ fn current_begin_ready_cannot_be_replaced_by_a_later_grant_clock_or_nonce() {
     );
     assert!(
         controller
-            .require_new_grant(&controller.grant_digest().unwrap())
+            .require_new_request(&controller.original)
             .is_err()
     );
     let original = serde_json::to_value(&ready).unwrap();
@@ -274,6 +274,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, StageStatement, K
             certificate,
             stage,
             original: OriginalInterval {
+                purpose: StagePurpose::CurrentRole,
                 domain: Digest::new(b"actual-domain-would-come-from-native-stage"),
                 origin_ns: 100_000_000_000,
                 deadline_ns: 105_000_000_000,
@@ -704,36 +705,104 @@ fn privileged_controller_attestation_is_role_and_actual_kernel_sender_bound_data
 }
 
 #[test]
-fn retained_identity_data_does_not_make_an_expired_grant_current() {
-    let (policy, old, key, issuer) = fixture_with_issuer(NativeRole::AppHost);
+fn repeated_exchange_data_keeps_the_http_original_and_rejects_replay_or_widening() {
+    let (_, admitted, key, _) = fixture_with_issuer(NativeRole::AppHost);
+    let initial = Digest::new(b"actual-initial-exchange-required-by-native-factory");
+    let request = StoragePeerRequest {
+        purpose: StoragePeerPurpose::CurrentServing,
+        binding: Digest::new(b"same-http-operation"),
+    };
+    let mut previous = admitted.original.clone();
+    for sequence in 1..=2 {
+        let mut current = admitted.clone();
+        current.original.deadline_ns = previous.deadline_ns - 1;
+        current.require_request_continuity(&previous).unwrap();
+        current
+            .validate_request(
+                &admitted,
+                Duration::from_secs(102),
+                StagePurpose::CurrentRole,
+            )
+            .unwrap();
+        assert_eq!(current.original.domain, admitted.original.domain);
+        assert_eq!(current.original.origin_ns, admitted.original.origin_ns);
+        let ready_nonce = Digest::of(&("new-controller-nonce", sequence)).unwrap();
+        let hello = signed(
+            &current,
+            &key,
+            Body::CurrentHello {
+                app: Box::new(current.clone()),
+                initial: initial.clone(),
+                sequence,
+                request: request.clone(),
+                nonce: Digest::of(&("new-app-nonce", sequence)).unwrap(),
+                controller_nonce: ready_nonce.clone(),
+            },
+        );
+        hello.verify(&current).unwrap();
+        hello
+            .current_hello(&initial, sequence, &ready_nonce, Some(&request))
+            .unwrap();
+        assert!(
+            hello
+                .current_hello(&initial, sequence + 1, &ready_nonce, Some(&request))
+                .is_err()
+        );
+        assert!(
+            hello
+                .current_hello(
+                    &initial,
+                    sequence,
+                    &Digest::new(b"stale-ready"),
+                    Some(&request)
+                )
+                .is_err()
+        );
+        for change in 0..4 {
+            let mut wrong = current.clone();
+            match change {
+                0 => wrong.original.origin_ns += 1,
+                1 => wrong.original.domain = Digest::new(b"same-origin-new-envelope"),
+                2 => wrong.original.deadline_ns = previous.deadline_ns + 1,
+                _ => wrong.original.purpose = StagePurpose::StorageBootstrap,
+            }
+            assert!(
+                wrong.require_request_continuity(&previous).is_err(),
+                "case {change}"
+            );
+        }
+        assert!(
+            current
+                .validate_request(
+                    &admitted,
+                    Duration::from_secs(105),
+                    StagePurpose::CurrentRole
+                )
+                .is_err()
+        );
+        previous = current.original;
+    }
+    // These are signed DATA controls; actual retained Peer, sequence state,
+    // kernel receipts, live clock and fresh counter checks are still mandatory.
+}
+
+#[test]
+fn cold_admission_still_expires_and_fresh_requests_bind_historical_admission_data() {
+    let (policy, old, key, _) = fixture_with_issuer(NativeRole::AppHost);
     let mut fresh = old.clone();
-    fresh.stage.data.origin_ns += 10_000_000_000;
-    fresh.stage.data.deadline_ns += 10_000_000_000;
-    fresh.stage.data.challenge = Digest::new(b"fresh-current-issuer-challenge");
-    fresh.stage.data.request = Digest::new(b"fresh-current-role-request");
-    fresh.stage.signature = issuer.sign("role-stage", &fresh.stage.data).unwrap();
     fresh.original.origin_ns += 10_000_000_000;
     fresh.original.deadline_ns += 10_000_000_000;
     fresh.original.domain = Digest::new(b"new-original-acquisition");
     assert!(old.same_enrollment(&fresh));
-    // A fresh envelope/nonce alone is not a new issuer role grant.
+    // Merely replacing a domain does not make a later bounded request.
     let mut rewrapped = old.clone();
     rewrapped.original.domain = Digest::new(b"different-envelope-only");
     assert_ne!(old.digest().unwrap(), rewrapped.digest().unwrap());
-    assert_eq!(
-        old.grant_digest().unwrap(),
-        rewrapped.grant_digest().unwrap()
-    );
-    assert_ne!(old.grant_digest().unwrap(), fresh.grant_digest().unwrap());
-    let previous = old.grant_digest().unwrap();
-    assert!(old.require_new_grant(&previous).is_err());
-    assert!(rewrapped.require_new_grant(&previous).is_err());
-    fresh.require_new_grant(&previous).unwrap();
-    assert!(
-        fresh
-            .require_new_grant(&fresh.grant_digest().unwrap())
-            .is_err()
-    );
+    assert_eq!(old.stage, fresh.stage);
+    assert!(old.require_new_request(&old.original).is_err());
+    assert!(rewrapped.require_new_request(&old.original).is_err());
+    fresh.require_new_request(&old.original).unwrap();
+    assert!(fresh.require_new_request(&fresh.original).is_err());
     let now = Duration::from_secs(112);
     assert!(
         old.validate(
@@ -746,16 +815,43 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
         )
         .is_err()
     );
+    assert!(
+        fresh
+            .validate(
+                &policy,
+                &old.certificate,
+                NativeRole::AppHost,
+                &old.stage.data.process,
+                now,
+                StagePurpose::CurrentRole,
+            )
+            .is_err()
+    );
+    // This is DATA validation, not a native owner or permission factory.
+    // Production additionally borrows the actual admitted Peer and receives
+    // this request's original kernel packet handle before it can escape.
     fresh
-        .validate(
-            &policy,
-            &old.certificate,
-            NativeRole::AppHost,
-            &old.stage.data.process,
-            now,
-            StagePurpose::CurrentRole,
-        )
+        .validate_request(&old, now, StagePurpose::CurrentRole)
         .unwrap();
+    let mut wrong = fresh.clone();
+    wrong.stage.signature.push('x');
+    assert!(
+        wrong
+            .validate_request(&old, now, StagePurpose::CurrentRole)
+            .is_err()
+    );
+    let mut wrong = fresh.clone();
+    wrong.original.purpose = StagePurpose::StorageBootstrap;
+    assert!(
+        wrong
+            .validate_request(&old, now, StagePurpose::CurrentRole)
+            .is_err()
+    );
+    assert!(
+        fresh
+            .validate_request(&old, Duration::from_secs(115), StagePurpose::CurrentRole)
+            .is_err()
+    );
     let hello = signed(
         &fresh,
         &key,
@@ -793,7 +889,7 @@ fn retained_identity_data_does_not_make_an_expired_grant_current() {
 }
 
 #[test]
-fn current_exchange_binds_sequence_purpose_request_and_both_fresh_grants() {
+fn current_exchange_binds_sequence_purpose_request_and_both_fresh_intervals() {
     let exchange = CurrentExchange {
         initial: Digest::new(b"initial"),
         sequence: 1,
@@ -996,6 +1092,7 @@ fn phase_result_consumption_and_release_require_the_exact_signed_transcript() {
 fn bootstrap_fixture(role: NativeRole) -> (EnrollmentPolicy, StageStatement, KeyOwner) {
     let (policy, mut statement, key, issuer) = fixture_with_issuer(role);
     statement.stage.data.purpose = StagePurpose::StorageBootstrap;
+    statement.original.purpose = StagePurpose::StorageBootstrap;
     statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
     (policy, statement, key)
 }
@@ -1009,6 +1106,7 @@ fn bootstrap_request_rejects_valid_ordinary_grant_even_when_both_are_short() {
         let (policy, current, key, issuer) = fixture_with_issuer(NativeRole::AppHost);
         let mut bootstrap = current.clone();
         bootstrap.stage.data.purpose = StagePurpose::StorageBootstrap;
+        bootstrap.original.purpose = StagePurpose::StorageBootstrap;
         bootstrap.stage.signature = issuer.sign("role-stage", &bootstrap.stage.data).unwrap();
         bootstrap
             .validate(
@@ -1066,6 +1164,7 @@ fn every_current_completion_binds_actual_stage_purpose_and_excludes_metadata() {
         ] {
             let mut statement = ordinary.clone();
             statement.stage.data.purpose = purpose;
+            statement.original.purpose = purpose;
             statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
             let exchange = Digest::new(b"exact-purpose-exchange");
             let body = match completion {
@@ -1129,6 +1228,7 @@ fn initial_fixture_with_issuer(
 ) -> (EnrollmentPolicy, StageStatement, KeyOwner, KeyOwner) {
     let (policy, mut statement, key, issuer) = fixture_with_issuer(role);
     statement.stage.data.purpose = StagePurpose::InitialFirstHolder;
+    statement.original.purpose = StagePurpose::InitialFirstHolder;
     statement.stage.signature = issuer.sign("role-stage", &statement.stage.data).unwrap();
     (policy, statement, key, issuer)
 }

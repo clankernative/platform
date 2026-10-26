@@ -26,10 +26,6 @@ impl Statement {
         Digest::of(&("day2-shell-controller-serving-statement-v1", self))
     }
 
-    pub(super) fn grant(&self) -> Result<Digest> {
-        Digest::of(&("day2-shell-controller-serving-grant-v1", &self.stage))
-    }
-
     pub(super) fn same_enrollment(&self, other: &Self) -> bool {
         self.certificate == other.certificate
             && self.stage.data.issuer == other.stage.data.issuer
@@ -42,12 +38,36 @@ impl Statement {
 
     pub(super) fn require_fresh(&self, previous: &Self) -> Result<()> {
         ensure!(
-            self.same_enrollment(previous)
-                && self.grant()? != previous.grant()?
-                && self.stage.data.origin_ns > previous.stage.data.origin_ns,
-            "serving_peer_fresh_role_grant_required"
+            self.same_enrollment(previous),
+            "serving_peer_admission_changed"
         );
+        self.original.require_later_request(&previous.original)?;
         Ok(())
+    }
+
+    pub(super) fn require_request_continuity(&self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.same_enrollment(previous),
+            "serving_peer_admission_changed"
+        );
+        self.original.require_request_continuity(&previous.original)
+    }
+
+    /// Request DATA only; the factory also requires the actual admitted peer
+    /// and verifies the fresh signed message and original packet handles.
+    pub(super) fn validate_request(&self, admitted: &Self, now: Duration) -> Result<()> {
+        ensure!(
+            self.same_enrollment(admitted),
+            "serving_peer_admission_changed"
+        );
+        self.original
+            .validate_request(now, StagePurpose::CurrentRole)?;
+        protocol::verify(
+            &self.certificate.data.public_key,
+            "role-stage",
+            &self.stage.data,
+            &self.stage.signature,
+        )
     }
 
     pub(super) fn validate(
@@ -280,7 +300,9 @@ impl Message {
 
     pub(super) fn verify(&self, statement: &Statement) -> Result<()> {
         ensure!(
-            self.sender == statement.digest()? && self.body.role() == statement.stage.data.role,
+            self.sender == statement.digest()?
+                && self.body.role() == statement.stage.data.role
+                && statement.original.purpose == StagePurpose::CurrentRole,
             "serving_peer_message_sender"
         );
         protocol::verify(

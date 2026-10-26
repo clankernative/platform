@@ -152,8 +152,7 @@ fn enrolled_self_reborrow_shape(source: &str) -> bool {
             {
                 assert!(enrollment.replace(calls).is_none());
             } else if owner == "EnrolledProcessRoleOwner" && function.sig.ident == "begin_stage" {
-                begin_runs =
-                    retained_check_runs(&function, &["self", "current"], &["authentication"]);
+                begin_runs = retained_check_runs(&function, &["self", "current"], &["acquisition"]);
                 assert!(begin.replace(calls).is_none());
             } else if owner == "EnrolledRoleStage" && function.sig.ident == "check" {
                 check_runs = retained_check_runs(
@@ -207,8 +206,8 @@ fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
             "acquisition.discard_clock()?",
         ),
         (
-            "self.current.check(&mut authentication)?",
-            "SelfSnapshot::acquire(&mut authentication)?",
+            "self.current.check(&mut acquisition)?",
+            "SelfSnapshot::acquire(&mut acquisition)?",
         ),
         (
             "self.owner.current.check(&mut self.acquisition)?",
@@ -225,13 +224,13 @@ fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
 fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_request() {
     let source = include_str!("owner.rs");
     for call in [
-        "self.current.check(&mut authentication)?;",
+        "self.current.check(&mut acquisition)?;",
         "self.owner.current.check(&mut self.acquisition)?;",
     ] {
         for replacement in [
             format!("if false {{ {call} }}"),
             call.replace("?;", ";"),
-            call.replace("&mut authentication", "&mut unrelated"),
+            call.replace("&mut acquisition", "&mut unrelated"),
             call.replace("&mut self.acquisition", "&mut unrelated"),
         ] {
             if replacement == call {
@@ -241,6 +240,284 @@ fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_requ
             assert_ne!(changed, source);
             assert!(!enrolled_self_reborrow_shape(&changed));
         }
+    }
+}
+
+fn owned_request_borrow_shape(source: &str) -> bool {
+    fn field(expression: &syn::Expr, member: &str) -> bool {
+        matches!(expression, syn::Expr::Field(value)
+            if matches!(&value.member, syn::Member::Named(name) if name == member)
+            && matches!(&*value.base, syn::Expr::Path(path) if path.path.is_ident("request")))
+    }
+
+    fn path(expression: &syn::Expr, name: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
+    }
+
+    let source = syn::parse_file(source).unwrap();
+    let functions = source.items.iter().filter_map(|item| {
+        let syn::Item::Impl(owner) = item else { return None; };
+        if !matches!(&*owner.self_ty, syn::Type::Path(path) if path.path.is_ident("EnrolledProcessRoleOwner")) {
+            return None;
+        }
+        owner.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(function) if function.sig.ident == "borrow_current_request" => Some(function),
+            _ => None,
+        })
+    }).collect::<Vec<_>>();
+    let [function] = functions.as_slice() else {
+        return false;
+    };
+    let inputs = function.sig.inputs.iter().collect::<Vec<_>>();
+    let [syn::FnArg::Receiver(owner), syn::FnArg::Typed(request)] = inputs.as_slice() else {
+        return false;
+    };
+    if !matches!(&owner.reference, Some((_, Some(lifetime))) if lifetime.ident == "request")
+        || owner.mutability.is_none()
+        || !matches!(&*request.pat, syn::Pat::Ident(binding) if binding.ident == "request")
+        || !matches!(&*request.ty, syn::Type::Reference(reference)
+            if reference.mutability.is_some()
+            && reference.lifetime.as_ref().is_some_and(|lifetime| lifetime.ident == "request")
+            && matches!(&*reference.elem, syn::Type::Path(path) if path.path.is_ident("EnrolledCurrentRequest")))
+    {
+        return false;
+    }
+    let syn::ReturnType::Type(_, output) = &function.sig.output else {
+        return false;
+    };
+    let syn::Type::Path(output) = &**output else {
+        return false;
+    };
+    let Some(result) = output.path.segments.last() else {
+        return false;
+    };
+    let syn::PathArguments::AngleBracketed(result_args) = &result.arguments else {
+        return false;
+    };
+    let Some(syn::GenericArgument::Type(syn::Type::Path(stage))) = result_args.args.first() else {
+        return false;
+    };
+    let Some(stage) = stage.path.segments.last() else {
+        return false;
+    };
+    if stage.ident != "EnrolledRoleStage"
+        || !matches!(&stage.arguments, syn::PathArguments::AngleBracketed(args)
+            if matches!(args.args.first(), Some(syn::GenericArgument::Lifetime(lifetime)) if lifetime.ident == "request"))
+    {
+        return false;
+    }
+    let Some(result_body) = function.block.stmts.iter().find_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "result") {
+            return None;
+        }
+        let syn::Expr::Call(call) = &*local.init.as_ref()?.expr else {
+            return None;
+        };
+        let syn::Expr::Paren(parenthesized) = &*call.func else {
+            return None;
+        };
+        let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+            return None;
+        };
+        let syn::Expr::Block(block) = &*closure.body else {
+            return None;
+        };
+        Some(&block.block)
+    }) else {
+        return false;
+    };
+    let original_narrow = result_body.stmts.iter().filter(|statement| {
+        let syn::Stmt::Local(local) = statement else { return false; };
+        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "acquisition") { return false; }
+        let Some(initializer) = &local.init else { return false; };
+        let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
+        let syn::Expr::MethodCall(call) = &*attempt.expr else { return false; };
+        call.method == "narrow" && field(&call.receiver, "acquisition") && call.args.len() == 2
+            && matches!(&call.args[0], syn::Expr::Lit(literal) if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_digits() == "5"))
+            && field(&call.args[1], "deadline")
+    }).count();
+    let stage_check = function
+        .block
+        .stmts
+        .iter()
+        .filter(|statement| {
+            matches!(statement, syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "check" && path(&call.receiver, "stage") && call.args.is_empty()))
+        })
+        .count();
+    original_narrow == 1 && stage_check == 1
+}
+
+#[test]
+fn actual_http_request_borrow_keeps_both_owners_borrowed_and_the_same_original() {
+    assert!(owned_request_borrow_shape(include_str!("owner.rs")));
+}
+
+#[test]
+fn http_request_guard_rejects_new_clocks_weaker_lifetimes_and_skipped_postchecks() {
+    let source = include_str!("owner.rs");
+    for (before, after) in [
+        (
+            "&'request mut EnrolledCurrentRequest",
+            "&mut EnrolledCurrentRequest",
+        ),
+        (
+            "request.acquisition.narrow(5, request.deadline)?",
+            "NativeAcquisition::begin(5)?",
+        ),
+        (
+            "request.acquisition.narrow(5, request.deadline)?",
+            "request.acquisition.narrow(5, unrelated)?",
+        ),
+        (
+            "request.acquisition.narrow(5, request.deadline)?",
+            "if false { request.acquisition.narrow(5, request.deadline)? } else { unrelated }",
+        ),
+    ] {
+        let changed = source.replacen(before, after, 1);
+        assert_ne!(changed, source);
+        assert!(!owned_request_borrow_shape(&changed));
+    }
+    // Pin this mutation to the actual borrow method rather than a different
+    // caller's identically named check earlier in the production source.
+    let (prefix, body) = source
+        .split_once("pub(crate) fn borrow_current_request")
+        .unwrap();
+    for replacement in ["if false { stage.check()?; }", "let _ = stage.check();"] {
+        let changed = format!(
+            "{prefix}pub(crate) fn borrow_current_request{}",
+            body.replacen("stage.check()?;", replacement, 1)
+        );
+        assert!(!owned_request_borrow_shape(&changed));
+    }
+}
+
+fn actual_read_cap_handoff(source: &str) -> bool {
+    fn is_path(expression: &syn::Expr, expected: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.path.is_ident(expected))
+    }
+    fn is_field(expression: &syn::Expr, owner: &str, member: &str) -> bool {
+        matches!(expression, syn::Expr::Field(field)
+            if is_path(&field.base, owner) && matches!(&field.member, syn::Member::Named(name) if name == member))
+    }
+    let syntax = syn::parse_file(source).unwrap();
+    let Some(function) = syntax.items.iter().find_map(|item| {
+        let syn::Item::Impl(implementation) = item else { return None; };
+        if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("SameEnrolledOwner")) { return None; }
+        implementation.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(function) if function.sig.ident == "meet_current_read_view" => Some(function),
+            _ => None,
+        })
+    }) else { return false; };
+    let Some(syn::Stmt::Local(result)) = function.block.stmts.first() else {
+        return false;
+    };
+    let Some(initializer) = &result.init else {
+        return false;
+    };
+    let syn::Expr::Call(invocation) = &*initializer.expr else {
+        return false;
+    };
+    let syn::Expr::Paren(parenthesized) = &*invocation.func else {
+        return false;
+    };
+    let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+        return false;
+    };
+    let syn::Expr::Block(body) = &*closure.body else {
+        return false;
+    };
+    if body.block.stmts.len() != 4 {
+        return false;
+    }
+    for (index, method, receiver, argument) in [
+        (0, "check", "self", Some("stage")),
+        (1, "require_current_role", "stage", None),
+        (2, "exchange_current_views", "acquisition", Some("actual")),
+        (3, "check", "stage", None),
+    ] {
+        let syn::Stmt::Expr(expression, semicolon) = &body.block.stmts[index] else {
+            return false;
+        };
+        let expression = if index < 3 {
+            let syn::Expr::Try(attempt) = expression else {
+                return false;
+            };
+            if semicolon.is_none() {
+                return false;
+            }
+            &*attempt.expr
+        } else {
+            if semicolon.is_some() {
+                return false;
+            }
+            expression
+        };
+        let syn::Expr::MethodCall(call) = expression else {
+            return false;
+        };
+        let correct_receiver = if index == 2 {
+            is_field(&call.receiver, "stage", "acquisition")
+        } else {
+            is_path(&call.receiver, receiver)
+        };
+        if call.method != method
+            || !correct_receiver
+            || match argument {
+                Some(argument) => call.args.len() != 1 || !is_path(&call.args[0], argument),
+                None => !call.args.is_empty(),
+            }
+        {
+            return false;
+        }
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::If(failed), _)) = function.block.stmts.get(1) else {
+        return false;
+    };
+    matches!(&*failed.cond, syn::Expr::MethodCall(call) if call.method == "is_err" && is_path(&call.receiver, "result"))
+        && failed.then_branch.stmts.iter().any(|statement| {
+            matches!(statement,
+            syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_))
+            if call.method == "refuse" && is_path(&call.receiver, "actual") && call.args.is_empty())
+        })
+}
+
+#[test]
+fn actual_read_handoff_meets_the_real_child_into_the_release_stage_without_a_scalar_clock() {
+    assert!(actual_read_cap_handoff(include_str!("owner.rs")));
+}
+
+#[test]
+fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
+    let source = include_str!("owner.rs");
+    let (prefix, body) = source.split_once("fn meet_current_read_view").unwrap();
+    for (before, after) in [
+        ("self.check(stage)?;", "let _ = self.check(stage);"),
+        ("stage.require_current_role()?;", "stage.check()?;"),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "if false { stage.acquisition.exchange_current_views(actual)?; }",
+        ),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "let _ = stage.acquisition.exchange_current_views(actual);",
+        ),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "stage.acquisition.exchange_current_views(unrelated)?;",
+        ),
+        ("stage.check()", "Ok(())"),
+        ("actual.refuse();", ""),
+    ] {
+        let changed = body.replacen(before, after, 1);
+        assert_ne!(changed, body);
+        assert!(!actual_read_cap_handoff(&format!(
+            "{prefix}fn meet_current_read_view{changed}"
+        )));
     }
 }
 
@@ -645,5 +922,215 @@ fn hello_bind_and_grant_signature_never_substitute_a_storage_stage_purpose() {
             value["purpose"] = serde_json::json!("any_storage");
             assert!(protocol::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         }
+    }
+}
+// Production wiring controls: no fixture constructs an admitted native peer.
+fn cold_peer_admission_wiring(owner: &str, storage: &str, serving: &str) -> bool {
+    use syn::visit::Visit;
+
+    fn method(source: &syn::File, owner: &str, name: &str) -> Option<syn::ImplItemFn> {
+        source.items.iter().find_map(|item| {
+            let syn::Item::Impl(implementation) = item else {
+                return None;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|part| part.ident == owner))
+            {
+                return None;
+            }
+            implementation.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == name => Some(function.clone()),
+                _ => None,
+            })
+        })
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        admission: usize,
+        exchange: usize,
+        authentication: usize,
+        completed: usize,
+        boundary: bool,
+        returns: bool,
+    }
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                self.exchange += usize::from(path.path.is_ident("exchange"));
+                self.boundary |= path.path.is_ident("handshake");
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.admission += usize::from(call.method == "admit_peer_connection");
+            self.authentication += usize::from(call.method == "narrow_authentication");
+            self.completed += usize::from(call.method == "complete_authentication");
+            self.boundary |= [
+                "accept",
+                "receive_storage",
+                "storage_statement",
+                "serving_statement",
+                "narrow_io_acquisition",
+                "initial_first_holder_acquisition",
+            ]
+            .iter()
+            .any(|name| call.method == name);
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.returns = true;
+        }
+    }
+
+    fn flatten<'a>(body: &'a syn::Block, statements: &mut Vec<&'a syn::Stmt>) {
+        for statement in &body.stmts {
+            if let syn::Stmt::Expr(syn::Expr::Block(block), _) = statement
+                && block.attrs.len() == 1
+                && matches!(&block.attrs[0].meta, syn::Meta::List(meta)
+                    if meta.path.is_ident("cfg") && meta.tokens.to_string() == "target_os = \"linux\"")
+            {
+                flatten(&block.block, statements);
+            } else if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "result")
+                && let Some(initializer) = &local.init
+                && let syn::Expr::Call(call) = &*initializer.expr
+                && call.args.is_empty()
+                && let syn::Expr::Paren(parenthesized) = &*call.func
+                && let syn::Expr::Closure(closure) = &*parenthesized.expr
+                && let syn::Expr::Block(block) = &*closure.body
+            {
+                flatten(&block.block, statements);
+            } else {
+                statements.push(statement);
+            }
+        }
+    }
+
+    let owner = syn::parse_file(owner).unwrap();
+    let storage = syn::parse_file(storage).unwrap();
+    let serving = syn::parse_file(serving).unwrap();
+    for (source, owner, name) in [
+        (&storage, "InitialHolderListener", "prepare"),
+        (&storage, "AuthenticatedInitialHolderOffer", "receive"),
+        (&serving, "ShellServingConnection", "receive"),
+        (&serving, "ControllerServingListener", "accept"),
+    ] {
+        let Some(function) = method(source, owner, name) else {
+            return false;
+        };
+        let mut calls = Calls::default();
+        calls.visit_block(&function.block);
+        if calls.admission != 1 || calls.returns {
+            return false;
+        }
+        let mut statements = Vec::new();
+        flatten(&function.block, &mut statements);
+        let admission = statements.iter().position(|statement| {
+            matches!(statement,
+            syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "admit_peer_connection" && call.args.is_empty()
+                && matches!(&*call.receiver, syn::Expr::Path(path) if path.path.is_ident("stage"))))
+        });
+        let boundary = statements.iter().position(|statement| {
+            let mut calls = Calls::default();
+            calls.visit_stmt(statement);
+            calls.boundary
+        });
+        if !matches!((admission, boundary), (Some(admission), Some(boundary)) if admission < boundary)
+        {
+            return false;
+        }
+    }
+    for name in ["begin_stage", "borrow_current_request"] {
+        let Some(function) = method(&owner, "EnrolledProcessRoleOwner", name) else {
+            return false;
+        };
+        let mut calls = Calls::default();
+        calls.visit_block(&function.block);
+        if calls.exchange != 0 || calls.admission != 0 || calls.authentication != 0 {
+            return false;
+        }
+    }
+    let Some(cold) = method(&owner, "EnrolledRoleStage", "admit_peer_connection") else {
+        return false;
+    };
+    let mut calls = Calls::default();
+    calls.visit_block(&cold.block);
+    calls.exchange == 1 && calls.authentication == 1 && calls.completed == 1
+}
+
+#[test]
+fn every_real_cold_peer_factory_admits_before_handshake_and_warm_borrows_do_not_enroll() {
+    assert!(cold_peer_admission_wiring(
+        include_str!("owner.rs"),
+        include_str!("storage_peer.rs"),
+        include_str!("serving_peer.rs")
+    ));
+}
+
+#[test]
+fn cold_peer_guard_rejects_omitted_conditional_swallowed_or_unrelated_admission() {
+    let owner = include_str!("owner.rs");
+    let storage = include_str!("storage_peer.rs");
+    let serving = include_str!("serving_peer.rs");
+    let call = "stage.admit_peer_connection()?;";
+    for (source, is_storage) in [(storage, true), (serving, false)] {
+        assert_eq!(source.matches(call).count(), 2);
+        for (position, _) in source.match_indices(call) {
+            for replacement in [
+                "",
+                "if false { stage.admit_peer_connection()?; }",
+                "let _ = stage.admit_peer_connection();",
+                "unrelated.admit_peer_connection()?;",
+            ] {
+                let changed = format!(
+                    "{}{replacement}{}",
+                    &source[..position],
+                    &source[position + call.len()..]
+                );
+                let (storage, serving) = if is_storage {
+                    (changed.as_str(), serving)
+                } else {
+                    (storage, changed.as_str())
+                };
+                assert!(!cold_peer_admission_wiring(owner, storage, serving));
+            }
+        }
+    }
+}
+
+#[test]
+fn cold_peer_guard_rejects_reenrollment_in_a_warm_original_and_skipped_cold_exchange() {
+    let source = include_str!("owner.rs");
+    let storage = include_str!("storage_peer.rs");
+    let serving = include_str!("serving_peer.rs");
+    let signature =
+        "fn begin_stage(&mut self, purpose: StagePurpose) -> Result<EnrolledRoleStage<'_>> {";
+    let changed = source.replacen(signature, &format!("{signature}\nexchange();"), 1);
+    assert_ne!(changed, source);
+    assert!(!cold_peer_admission_wiring(&changed, storage, serving));
+    let (prefix, cold) = source.split_once("fn admit_peer_connection").unwrap();
+    for (before, after) in [
+        ("= exchange(", "= skipped_exchange("),
+        (
+            ".narrow_authentication()?",
+            ".begin_authentication_again()?",
+        ),
+        (
+            ".complete_authentication(authentication)?",
+            ".discard_authentication(authentication)?",
+        ),
+    ] {
+        let changed = cold.replacen(before, after, 1);
+        assert_ne!(changed, cold);
+        assert!(!cold_peer_admission_wiring(
+            &format!("{prefix}fn admit_peer_connection{changed}"),
+            storage,
+            serving
+        ));
     }
 }
