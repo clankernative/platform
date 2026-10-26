@@ -174,6 +174,19 @@ struct ProfileFileIdentity {
     changed: (i64, u32),
 }
 
+impl ProfileFileIdentity {
+    fn require_operator_file(&self) -> Result<()> {
+        // The selected ConfigMap is mounted read-only with defaultMode0444.
+        // fsGroup may change its group; it must never make configuration owned
+        // by the unprivileged Controller or writable at initial admission.
+        ensure!(
+            self.uid == 0 && self.mode & 0o7777 == 0o444,
+            "storage_native_operator_profile_required"
+        );
+        Ok(())
+    }
+}
+
 impl ProfileFile {
     fn open_named(acquisition: &mut NativeAcquisition) -> Result<File> {
         acquisition.remaining()?;
@@ -195,6 +208,7 @@ impl ProfileFile {
         );
         let file = Self::open_named(acquisition)?;
         let identity = profile_file_identity(&file)?;
+        identity.require_operator_file()?;
         let mut bytes = Vec::new();
         (&file)
             .take((MAX_PROFILE + 1).try_into()?)
@@ -216,6 +230,7 @@ impl ProfileFile {
     fn check(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
         let result = (|| {
             ensure!(self.valid, "storage_native_profile_refused");
+            self.identity.require_operator_file()?;
             acquisition.remaining()?;
             let named = Self::open_named(acquisition)?;
             self.check_named(&named)?;
@@ -1469,6 +1484,21 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn storage_request_profile_requires_initial_operator_ownership_and_read_only_mode() {
+        // Metadata predicate DATA only: no descriptor or native owner is made.
+        let selected = ProfileFileIdentity {
+            device_major: 1, device_minor: 2, inode: 3, mount: 4,
+            mode: 0o100444, uid: 0, gid: 10001, size: 10,
+            modified: (1, 0), changed: (1, 0),
+        };
+        selected.require_operator_file().unwrap();
+        for (uid, mode) in [(10001, 0o100444), (0, 0o100644), (0, 0o100664), (0, 0o100555), (0, 0o104444)] {
+            let changed = ProfileFileIdentity { uid, mode, ..selected.clone() };
+            assert!(changed.require_operator_file().is_err(), "uid={uid}, mode={mode:o}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn profile_file_fixture() -> Result<(tempfile::NamedTempFile, ProfileFile)> {
         // Real file-adapter conformance only. Public fixture bytes do not
@@ -1643,6 +1673,8 @@ mod tests {
         let check = method_calls(source, "ProviderReader", "check");
         let initial = method_calls(source, "NativeVolumeContinuity", "begin_initial");
         let admitted = method_calls(source, "NativeVolumeContinuity", "finish_begin");
+        let profile = method_calls(source, "ProfileFile", "admit");
+        let profile_check = method_calls(source, "ProfileFile", "check");
         let count = |calls: &[String], name: &str| {
             calls.iter().filter(|call| call.as_str() == name).count()
         };
@@ -1676,12 +1708,15 @@ mod tests {
             })
             && count(&initial, "begin_phase") == 1
             && count(&admitted, "retained_profile_handle") == 1
+            && count(&profile, "require_operator_file") == 1
+            && count(&profile_check, "require_operator_file") == 1
     }
 
     #[test]
     fn storage_request_uses_only_retained_physical_owners_and_initial_keeps_admission() {
         let source = include_str!("native_volume.rs");
         assert!(storage_request_shape(source));
+        assert!(!storage_request_shape(&source.replacen("identity.require_operator_file()?;", "", 1)));
         assert!(!storage_request_shape(&source.replacen(
             "if !matches!(",
             "if matches!(",
