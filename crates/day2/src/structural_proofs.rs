@@ -32,6 +32,11 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::budget::AtomicControl);
+    assert_not_impl!(crate::budget::AtomicControl, std::fmt::Debug);
+    assert_not_impl!(crate::budget::AtomicControl, Send);
+    assert_not_impl!(crate::budget::AtomicControl, Sync);
+    assert_secret_references!(crate::budget::AtomicControl);
     assert_consuming!(crate::store::RuntimeSql<'static, 'static, 'static, 'static>);
     assert_not_impl!(
         crate::store::RuntimeSql<'static, 'static, 'static, 'static>,

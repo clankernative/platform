@@ -218,18 +218,20 @@ fn require_transaction(connection: &Connection) -> Result<()> {
 /// catches an admission failure and commits other work in its outer transaction.
 fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
     require_transaction(connection)?;
-    connection.execute_batch("SAVEPOINT day2_budget_atomic")?;
-    match body() {
-        Ok(value) => {
-            connection.execute_batch("RELEASE day2_budget_atomic")?;
-            Ok(value)
-        }
-        Err(error) => {
-            connection
-                .execute_batch("ROLLBACK TO day2_budget_atomic; RELEASE day2_budget_atomic")?;
-            Err(error)
-        }
-    }
+    crate::store::budget_atomic(
+        connection,
+        AtomicControl {
+            owner_thread: std::marker::PhantomData,
+        },
+        body,
+    )
+}
+
+/// Only the private accounting boundary constructs this consuming control.
+/// It selects fixed budget savepoint commands on an existing connection; it
+/// supplies no native owner, file, transaction, clock or callback exemption.
+pub(crate) struct AtomicControl {
+    owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {

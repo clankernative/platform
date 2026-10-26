@@ -909,7 +909,7 @@ pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> R
 }
 
 mod native_storage;
-pub(crate) use native_storage::{RuntimeSql, SqlDecision};
+pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};
 
 impl Runtime {
     pub(crate) fn credential_authority(
