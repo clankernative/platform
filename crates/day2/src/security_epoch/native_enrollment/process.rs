@@ -90,6 +90,7 @@ pub(super) struct MessageProcess {
     proc: File,
     process: File,
     executable: File,
+    executable_stamp: executable_bytes::Stamp,
     namespaces: BTreeMap<String, File>,
     data: ProcessData,
     local_process: u32,
@@ -157,6 +158,14 @@ impl MessageProcess {
             let proc = ns::open_root(acquisition)?;
             let process = open_process(&proc, pid, acquisition)?;
             let executable = executable(&process, acquisition)?;
+            let mut current_executable = self::executable(&process, acquisition)?;
+            let executable_stamp = executable_bytes::admit(
+                &[&executable],
+                &mut current_executable,
+                expected_code,
+                acquisition,
+                costs,
+            )?;
             let mut namespaces = BTreeMap::new();
             let mut identities = BTreeMap::new();
             for name in NAMESPACES {
@@ -176,12 +185,13 @@ impl MessageProcess {
                 proc,
                 process,
                 executable,
+                executable_stamp,
                 namespaces,
                 data: ProcessData {
                     process: pid,
                     start_ticks,
-                    // Selected DATA until the closed capture below completes,
-                    // never an observed digest or a permission by assignment.
+                    // The complete admission above checked the selected bytes;
+                    // this DATA cannot reconstruct the retained native owner.
                     code: expected_code.clone(),
                     boot,
                     namespaces: identities,
@@ -191,11 +201,10 @@ impl MessageProcess {
                 refused: false,
                 local: PhantomData,
             };
-            // This provisional value never escapes observe before validation.
-            // One full fresh current-executable read must match the selected
-            // pin and join ALL actual held/current/final-path descriptors,
-            // namespaces, proc identity and final live/original-clock guards.
-            // No protocol, provider, signature or owner publication intervenes.
+            // This provisional value never escapes before its full admission
+            // and the final held/current/path, namespace, process, liveness and
+            // original-clock joins. Later checks keep those actual resources
+            // rather than reading the complete executable again.
             owner.check_identity(acquisition, costs)?;
             Ok(owner)
         })();
@@ -209,7 +218,7 @@ impl MessageProcess {
         &self.data
     }
 
-    /// Re-observes the original retained process in a fresh bounded acquisition.
+    /// Rechecks the actual admitted process handles in a bounded acquisition.
     /// This does not extend any earlier acquisition or grant a role by itself.
     pub(super) fn check_identity(
         &mut self,
@@ -222,9 +231,9 @@ impl MessageProcess {
     /// One fresh observation for 1..=5 retained handles of the SAME actual actor.
     /// Every owner originates in a kernel packet or the fixed runtime socket;
     /// matching signed DATA alone cannot join them. Every actual native handle
-    /// is rechecked, with one full current executable read for this observation.
-    /// No reusable checked token escapes. Call again at every later guard; do
-    /// not share this observation across I/O, signatures or stage boundaries.
+    /// is rechecked against its admitted stamp without another content scan.
+    /// No reusable checked token escapes; later boundaries check these actual
+    /// resources, original clocks and refusal again.
     pub(super) fn check_same_actor(
         processes: &mut [&mut Self],
         acquisition: &mut NativeAcquisition,
@@ -275,17 +284,24 @@ impl MessageProcess {
                 boot(acquisition)? == first.data.boot,
                 "native_enrollment_boot_changed"
             );
-            let mut current_executable = executable(&current, acquisition)?;
+            let current_executable = executable(&current, acquisition)?;
             let held_executables = processes
                 .iter()
                 .map(|owner| &owner.executable)
                 .collect::<Vec<_>>();
-            let executable_stamp = executable_bytes::begin_check(
+            let executable_stamp = &first.executable_stamp;
+            for owner in processes.iter() {
+                ensure!(
+                    owner.executable_stamp == *executable_stamp,
+                    "native_enrollment_executable_admission_changed"
+                );
+            }
+            executable_bytes::check_handles(
                 &held_executables,
-                &mut current_executable,
-                &first.data.code,
+                &current_executable,
+                &current_executable,
+                executable_stamp,
                 acquisition,
-                costs,
             )?;
             for name in NAMESPACES {
                 let namespace = ns::open_namespace(&current, name, acquisition)?;
@@ -308,11 +324,11 @@ impl MessageProcess {
             // Reopen the actual process path after the remaining namespace work.
             // Earlier descriptors alone cannot observe a later exec/path change.
             let final_executable = executable(&current, acquisition)?;
-            executable_bytes::finish_check(
+            executable_bytes::check_handles(
                 &held_executables,
                 &current_executable,
                 &final_executable,
-                &executable_stamp,
+                executable_stamp,
                 acquisition,
             )?;
             // Diagnostic sampling finishes before the final pidfd/original-clock
@@ -427,6 +443,7 @@ mod tests {
         issuer_costs::{Outcome, Recorder, Subject},
         protocol::Packet,
     };
+    use anyhow::Context;
     use std::{
         process::{Command, Stdio},
         time::Duration,
@@ -543,7 +560,8 @@ mod tests {
             peer.remaining()?;
         }
         assert_eq!(total.samples, Some(8));
-        for index in [1, 2, 3, 5] {
+        assert_eq!(total.rows[1].0, Some(0));
+        for index in [2, 3, 5] {
             assert_eq!(total.rows[index].0, Some(8));
         }
         eprintln!(
@@ -558,9 +576,8 @@ mod tests {
     }
 
     #[test]
-    fn actual_same_actor_receipts_share_only_one_fresh_observation() -> Result<()> {
+    fn actual_admitted_receipts_recheck_handles_without_another_executable_read() -> Result<()> {
         let mut owners = self_receipts(5)?;
-        let length = std::fs::metadata("/proc/self/exe")?.len();
         let mut output = Vec::new();
         {
             let mut recorder = Recorder::new(&mut output);
@@ -578,14 +595,38 @@ mod tests {
         }
         let record = recorded(output)?;
         let rows = record["rows"].as_array().unwrap();
-        let hash = rows.iter().find(|r| r[0] == "hash_requester").unwrap();
-        assert_eq!(hash[1][0], 2);
-        assert_eq!(hash[1][1], 2 * length);
+        assert!(rows.iter().all(|row| row[0] != "hash_requester"));
         let body = rows
             .iter()
             .find(|r| r[0] == "identity_requester_body")
             .unwrap();
         assert_eq!(body[1][0], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn substituted_actual_retained_executable_refuses_before_and_after_restoration() -> Result<()> {
+        let mut owners = self_receipts(1)?;
+        let owner = &mut owners[0];
+        let mut foreign = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(foreign.as_file_mut(), b"foreign actual descriptor")?;
+        let admitted = std::mem::replace(&mut owner.executable, foreign.reopen()?);
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let error = owner
+            .check_identity(&mut acquisition, &HashCosts::disabled())
+            .err()
+            .context("substituted actual descriptor must refuse")?;
+        assert_eq!(error.to_string(), "native_enrollment_executable_changed");
+        assert!(owner.refused);
+        assert!(acquisition.remaining().is_err());
+        owner.executable = admitted;
+        let mut later = NativeAcquisition::begin(5)?;
+        let error = owner
+            .check_identity(&mut later, &HashCosts::disabled())
+            .err()
+            .context("restoration cannot revive the actual process owner")?;
+        assert_eq!(error.to_string(), "native_enrollment_process_refused");
+        assert!(later.remaining().is_err());
         Ok(())
     }
 

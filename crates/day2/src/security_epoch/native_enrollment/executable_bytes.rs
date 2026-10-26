@@ -1,6 +1,7 @@
-//! Fresh selected bytes for one process check, never a cached executable grant.
-//! A stamp joins held/current/final-path FDs; it is DATA, not immutability or an
-//! atomic snapshot. Code-replacing actors remain in the qualified native TCB.
+//! Full selected-byte admission, followed by actual retained-handle checks.
+//! A private stamp joins held/current/final-path FDs. It grants no permission
+//! and proves no immutable contents; ongoing integrity belongs to the trusted
+//! enrolled services/node under the selected connection contract.
 
 use super::issuer_costs::HashCosts;
 use crate::security_epoch::native_clock::NativeAcquisition;
@@ -74,10 +75,10 @@ pub(super) fn hash(
     })
 }
 
-/// Hash one freshly opened descriptor once, joining EVERY retained descriptor
-/// before and after it. The caller joins these to the same actual live actor.
-/// Each invocation rereads all bytes; no cross-check/stage cache.
-pub(super) fn begin_check(
+/// Admit one actual executable by reading all selected bytes, joining EVERY
+/// retained descriptor before and after it. Only a genuine new process capture
+/// calls this; later checks retain these actual descriptors and their stamp.
+pub(super) fn admit(
     held: &[&File],
     current: &mut File,
     selected: &Digest,
@@ -116,9 +117,11 @@ pub(super) fn begin_check(
     result
 }
 
-/// The caller reopens the actual procfs executable path after its other native
-/// checks. ctime strengthens mutation detection but is not a content version.
-pub(super) fn finish_check(
+/// Join actual held/current/final procfs executable descriptors to their original
+/// admitted stamp, without another content read. The caller retains the actual
+/// actor and original clock. Metadata is not an immutable content version or a
+/// substitute for fresh authority; drift invisible to it is a trusted assumption.
+pub(super) fn check_handles(
     held: &[&File],
     current: &File,
     final_path: &File,
@@ -164,13 +167,13 @@ mod tests {
         )
     }
 
-    fn begin_check(
+    fn admit(
         held: &File,
         current: &mut File,
         selected: &Digest,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Stamp> {
-        super::begin_check(
+        super::admit(
             &[held],
             current,
             selected,
@@ -179,18 +182,18 @@ mod tests {
         )
     }
 
-    fn finish_check(
+    fn check_handles(
         held: &File,
         current: &File,
         final_path: &File,
         before: &Stamp,
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
-        super::finish_check(&[held], current, final_path, before, acquisition)
+        super::check_handles(&[held], current, final_path, before, acquisition)
     }
 
     #[test]
-    fn multiple_retained_descriptors_share_one_fresh_read_without_a_cache() -> Result<()> {
+    fn distinct_admissions_each_read_the_selected_bytes() -> Result<()> {
         let d = tempfile::tempdir()?;
         let p = d.path().join("selected");
         let bytes = vec![23; 65_536 + 17];
@@ -208,9 +211,9 @@ mod tests {
             let hashes = costs.hashes(Subject::Requester);
             for _ in 0..2 {
                 let stamp =
-                    super::begin_check(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
+                    super::admit(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
                 assert_eq!(current.stream_position()?, bytes.len() as u64);
-                super::finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+                super::check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
             }
             recorder.emit(&costs, Outcome::Completed)?;
         }
@@ -223,6 +226,399 @@ mod tests {
         assert_eq!(rows[0][1][0], 2);
         assert_eq!(rows[0][1][1], 2 * bytes.len());
         Ok(())
+    }
+
+    #[test]
+    fn admitted_handle_checks_leave_every_executable_cursor_unchanged() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("selected");
+        let bytes = vec![23; 65_536 + 17];
+        fs::write(&path, &bytes)?;
+        let mut held = File::open(&path)?;
+        let mut current = File::open(&path)?;
+        let mut original = acquisition(Duration::from_secs(5));
+        let admitted = admit(&held, &mut current, &Digest::new(&bytes), &mut original)?;
+        held.seek(SeekFrom::Start(2))?;
+        current.seek(SeekFrom::Start(7))?;
+        let mut final_path = File::open(&path)?;
+        for _ in 0..2 {
+            check_handles(&held, &current, &final_path, &admitted, &mut original)?;
+            assert_eq!(held.stream_position()?, 2);
+            assert_eq!(current.stream_position()?, 7);
+            assert_eq!(final_path.stream_position()?, 0);
+        }
+        original.remaining()?;
+        Ok(())
+    }
+
+    fn native_result_body(function: &syn::ImplItemFn) -> Option<&syn::Block> {
+        let (_, expression) = native_local(&function.block, "result")?;
+        let syn::Expr::Call(call) = expression else {
+            return None;
+        };
+        let syn::Expr::Paren(parenthesized) = &*call.func else {
+            return None;
+        };
+        let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+            return None;
+        };
+        let syn::Expr::Block(body) = &*closure.body else {
+            return None;
+        };
+        Some(&body.block)
+    }
+
+    fn native_local<'a>(body: &'a syn::Block, name: &str) -> Option<(usize, &'a syn::Expr)> {
+        let mut found = None;
+        for (index, statement) in body.stmts.iter().enumerate() {
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding)
+                    if binding.ident == name && binding.mutability.is_none() && binding.by_ref.is_none())
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((index, local.init.as_ref()?.expr.as_ref()));
+            }
+        }
+        found
+    }
+
+    fn native_path(expression: &syn::Expr, name: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
+    }
+
+    fn native_reference(expression: &syn::Expr, name: &str) -> bool {
+        matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && native_path(&reference.expr, name))
+    }
+
+    fn native_field(expression: &syn::Expr, owner: &str, field: &str) -> bool {
+        matches!(expression, syn::Expr::Field(member)
+            if matches!(&member.member, syn::Member::Named(name) if name == field)
+            && native_path(&member.base, owner))
+    }
+
+    fn native_fallible_call<'a>(
+        expression: &'a syn::Expr,
+        names: &[&str],
+    ) -> Option<&'a syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>> {
+        let syn::Expr::Try(attempt) = expression else {
+            return None;
+        };
+        let syn::Expr::Call(call) = &*attempt.expr else {
+            return None;
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            return None;
+        };
+        (path.path.segments.len() == names.len()
+            && path
+                .path
+                .segments
+                .iter()
+                .zip(names)
+                .all(|(part, name)| part.ident == *name))
+        .then_some(&call.args)
+    }
+
+    fn native_current_executable(expression: &syn::Expr) -> bool {
+        let Some(args) = native_fallible_call(expression, &["executable"]) else {
+            return false;
+        };
+        args.len() == 2
+            && native_reference(&args[0], "current")
+            && native_path(&args[1], "acquisition")
+    }
+
+    fn native_held_executables(expression: &syn::Expr) -> bool {
+        let syn::Expr::MethodCall(collect) = expression else {
+            return false;
+        };
+        let syn::Expr::MethodCall(map) = &*collect.receiver else {
+            return false;
+        };
+        let syn::Expr::MethodCall(iter) = &*map.receiver else {
+            return false;
+        };
+        if collect.method != "collect"
+            || !collect.args.is_empty()
+            || map.method != "map"
+            || map.args.len() != 1
+            || iter.method != "iter"
+            || !iter.args.is_empty()
+            || !native_path(&iter.receiver, "processes")
+        {
+            return false;
+        }
+        let syn::Expr::Closure(mapper) = &map.args[0] else {
+            return false;
+        };
+        mapper.inputs.len() == 1
+            && matches!(&mapper.inputs[0], syn::Pat::Ident(binding) if binding.ident == "owner")
+            && matches!(&*mapper.body, syn::Expr::Reference(reference)
+                if reference.mutability.is_none() && native_field(&reference.expr, "owner", "executable"))
+    }
+
+    fn native_handle_check(statement: &syn::Stmt, final_path: &str) -> bool {
+        let syn::Stmt::Expr(expression, Some(_)) = statement else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["executable_bytes", "check_handles"])
+        else {
+            return false;
+        };
+        args.len() == 5
+            && native_reference(&args[0], "held_executables")
+            && native_reference(&args[1], "current_executable")
+            && native_reference(&args[2], final_path)
+            && native_path(&args[3], "executable_stamp")
+            && native_path(&args[4], "acquisition")
+    }
+
+    fn native_retained_check_flow(function: &syn::ImplItemFn) -> bool {
+        use syn::visit::Visit;
+        struct EarlyReturn(bool);
+        impl<'ast> Visit<'ast> for EarlyReturn {
+            fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+                self.0 = true;
+            }
+        }
+        let Some(body) = native_result_body(function) else {
+            return false;
+        };
+        let mut early = EarlyReturn(false);
+        early.visit_block(body);
+        if early.0 {
+            return false;
+        }
+        let Some((first, expression)) = native_local(body, "first") else {
+            return false;
+        };
+        if !matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none()
+            && matches!(&*reference.expr, syn::Expr::Unary(unary)
+                if matches!(unary.op, syn::UnOp::Deref(_))
+                && matches!(&*unary.expr, syn::Expr::Index(index)
+                    if native_path(&index.expr, "processes")
+                    && matches!(&*index.index, syn::Expr::Lit(literal)
+                        if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_digits() == "0")))))
+        {
+            return false;
+        }
+        let Some((proc, expression)) = native_local(body, "proc") else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["ns", "open_root"]) else {
+            return false;
+        };
+        if args.len() != 1 || !native_path(&args[0], "acquisition") {
+            return false;
+        }
+        let Some((process, expression)) = native_local(body, "current") else {
+            return false;
+        };
+        let Some(args) = native_fallible_call(expression, &["open_process"]) else {
+            return false;
+        };
+        if args.len() != 3
+            || !native_reference(&args[0], "proc")
+            || !matches!(&args[1], syn::Expr::Field(field)
+                if matches!(&field.member, syn::Member::Named(name) if name == "process")
+                && native_field(&field.base, "first", "data"))
+            || !native_path(&args[2], "acquisition")
+        {
+            return false;
+        }
+        let Some((current, expression)) = native_local(body, "current_executable") else {
+            return false;
+        };
+        if !native_current_executable(expression) {
+            return false;
+        }
+        let Some((held, expression)) = native_local(body, "held_executables") else {
+            return false;
+        };
+        if !native_held_executables(expression) {
+            return false;
+        }
+        let Some((stamp, expression)) = native_local(body, "executable_stamp") else {
+            return false;
+        };
+        if !matches!(expression, syn::Expr::Reference(reference)
+            if reference.mutability.is_none() && native_field(&reference.expr, "first", "executable_stamp"))
+        {
+            return false;
+        }
+        let Some((final_path, expression)) = native_local(body, "final_executable") else {
+            return false;
+        };
+        if !native_current_executable(expression) {
+            return false;
+        }
+        let checks = body
+            .stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                (native_handle_check(statement, "current_executable")
+                    || native_handle_check(statement, "final_executable"))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        checks.len() == 2
+            && first < proc
+            && proc < process
+            && process < current
+            && current < held
+            && held < stamp
+            && stamp < checks[0]
+            && checks[0] < final_path
+            && final_path < checks[1]
+            && native_handle_check(&body.stmts[checks[0]], "current_executable")
+            && native_handle_check(&body.stmts[checks[1]], "final_executable")
+    }
+
+    fn actual_process_capture_and_check_shape(source: &str) -> bool {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            admits: usize,
+            handle_checks: usize,
+            final_checks: usize,
+        }
+
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    let segments = path.path.segments.iter().collect::<Vec<_>>();
+                    if segments.len() == 2 && segments[0].ident == "executable_bytes" {
+                        self.admits += usize::from(segments[1].ident == "admit");
+                        self.handle_checks += usize::from(segments[1].ident == "check_handles");
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.final_checks += usize::from(call.method == "check_identity");
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+
+        let source = syn::parse_file(source).unwrap();
+        let mut capture = None;
+        let mut check = None;
+        let mut retained_flow = false;
+        for item in source.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("MessageProcess"))
+            {
+                continue;
+            }
+            for item in implementation.items {
+                let syn::ImplItem::Fn(function) = item else {
+                    continue;
+                };
+                let mut calls = Calls::default();
+                calls.visit_block(&function.block);
+                if function.sig.ident == "observe" {
+                    assert!(capture.replace(calls).is_none());
+                } else if function.sig.ident == "check_same_actor" {
+                    retained_flow = native_retained_check_flow(&function);
+                    assert!(check.replace(calls).is_none());
+                }
+            }
+        }
+        matches!(
+            capture,
+            Some(Calls {
+                admits: 1,
+                handle_checks: 0,
+                final_checks: 1
+            })
+        ) && retained_flow
+            && matches!(
+                check,
+                Some(Calls {
+                    admits: 0,
+                    handle_checks: 2,
+                    final_checks: 0
+                })
+            )
+    }
+
+    #[test]
+    fn actual_process_capture_admits_once_and_retained_checks_only_join_handles() {
+        assert!(actual_process_capture_and_check_shape(include_str!(
+            "process.rs"
+        )));
+    }
+
+    #[test]
+    fn actual_process_guard_rejects_skipped_admission_or_restored_full_checks() {
+        let source = include_str!("process.rs");
+        for (before, after) in [
+            (
+                "executable_bytes::admit(",
+                "executable_bytes::metadata_only(",
+            ),
+            (
+                "executable_bytes::check_handles(",
+                "executable_bytes::admit(",
+            ),
+            (
+                "executable_bytes::check_handles(",
+                "executable_bytes::metadata_only(",
+            ),
+            (
+                "owner.check_identity(acquisition, costs)?",
+                "owner.skip_final_check(acquisition, costs)?",
+            ),
+        ] {
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(mutated, source);
+            assert!(!actual_process_capture_and_check_shape(&mutated));
+        }
+    }
+
+    #[test]
+    fn actual_process_guard_rejects_conditional_checks_and_substituted_handle_dataflow() {
+        let source = include_str!("process.rs");
+        let close = "                acquisition,\n            )?;";
+        assert_eq!(source.matches(close).count(), 2);
+        let conditional = source
+            .replace(
+                "executable_bytes::check_handles(",
+                "if held_executables.is_empty() { executable_bytes::check_handles(",
+            )
+            .replace(close, "                acquisition,\n            )?; }");
+        assert_eq!(
+            conditional
+                .matches("executable_bytes::check_handles(")
+                .count(),
+            2
+        );
+        assert!(!actual_process_capture_and_check_shape(&conditional));
+        for (before, after) in [
+            ("&held_executables,", "&[],"),
+            ("&final_executable,", "&current_executable,"),
+            (
+                "let executable_stamp = &first.executable_stamp;",
+                "let executable_stamp = &other.executable_stamp;",
+            ),
+            (
+                ".map(|owner| &owner.executable)",
+                ".map(|owner| &other.executable)",
+            ),
+        ] {
+            let changed = source.replacen(before, after, 1);
+            assert_ne!(changed, source);
+            assert!(!actual_process_capture_and_check_shape(&changed));
+        }
     }
 
     #[test]
@@ -242,7 +638,7 @@ mod tests {
             owners[index] = &other;
             let mut a = acquisition(Duration::from_secs(5));
             assert!(
-                super::begin_check(
+                super::admit(
                     &owners,
                     &mut current,
                     &Digest::new(b"selected"),
@@ -254,9 +650,9 @@ mod tests {
             assert!(a.remaining().is_err());
 
             let mut a = acquisition(Duration::from_secs(5));
-            let stamp = begin_check(&held[0], &mut current, &Digest::new(b"selected"), &mut a)?;
+            let stamp = admit(&held[0], &mut current, &Digest::new(b"selected"), &mut a)?;
             assert!(
-                super::finish_check(&owners, &current, &File::open(&p)?, &stamp, &mut a).is_err()
+                super::check_handles(&owners, &current, &File::open(&p)?, &stamp, &mut a).is_err()
             );
             assert!(a.remaining().is_err());
         }
@@ -272,9 +668,9 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(&bytes), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(&bytes), &mut a)?;
         assert_eq!(current.stream_position()?, bytes.len() as u64);
-        finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+        check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
         a.remaining()?;
         Ok(())
     }
@@ -289,23 +685,23 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&q)?;
         let mut a = acquisition(Duration::from_secs(5));
-        assert!(begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
         let mut restored = File::open(&p)?;
-        assert!(begin_check(&held, &mut restored, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut restored, &Digest::new(b"selected"), &mut a).is_err());
         Ok(())
     }
 
     #[test]
-    fn same_length_wrong_bytes_are_rehashed_on_every_check() -> Result<()> {
+    fn a_new_admission_rejects_same_length_wrong_bytes() -> Result<()> {
         let d = tempfile::tempdir()?;
         let p = d.path().join("selected");
         fs::write(&p, b"selected")?;
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         fs::write(&p, b"changed!")?;
-        assert!(begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
         Ok(())
     }
 
@@ -318,7 +714,7 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         // The assertion is conditional on an OBSERVED distinct stamp, not on
         // every rapid write advancing ctime. Coarse timestamp resolution is
         // allowed; bound fixture preparation without skipping the oracle.
@@ -339,7 +735,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(fs::metadata(&p)?.modified()?, modified);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
         assert!(a.remaining().is_err());
         Ok(())
     }
@@ -357,11 +753,11 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         fs::remove_file(&p)?;
         symlink(&q, &p)?;
         assert!(identity(&held)? == stamp && identity(&current)? == stamp);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
         Ok(())
     }
 
@@ -373,9 +769,9 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         let mut expired = acquisition(Duration::ZERO);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut expired).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut expired).is_err());
         assert!(expired.remaining().is_err());
         Ok(())
     }
