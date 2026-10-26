@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:06ab6ba2d85e70a3c1fd816ae1fc8fd238dd0fed30eb9334e921fd81b0cdc984",
+      "fingerprint": "sha256:7292ca07ec772b1c9ffe53e429172edd766413b56df5c0e181d3b20759cf9d10",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -4917,6 +4917,24 @@
       ],
       "proof_uses": [],
       "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/budget/atomic_control.rs",
+      "type_name": "AtomicControl",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn new () -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "AtomicControl",
+          "signature": "pub (super) fn new () -> Self"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     }
   ],
   "buffer_destructors": [
