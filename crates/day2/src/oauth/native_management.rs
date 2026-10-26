@@ -4339,8 +4339,9 @@ pub(crate) mod fixtures {
                     });
                     assert!(result.is_err());
                     assert!(!entered.get());
+                    let sample = original.clock.sample();
                     assert!(
-                        original.clock.sample().is_err(),
+                        original.check_capture_sample(sample).is_err(),
                         "the same original stays refused"
                     );
                     committed_once(&runtime, preserved.as_ref().unwrap())
