@@ -1257,6 +1257,11 @@ impl NativeVolumeContinuity {
         result: Result<ProviderReader<'role>>,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let result = result.and_then(|mut reader| {
+            self.profile_file.check(&mut reader.acquisition)?;
+            ensure!(
+                reader.profile_file.identity == self.profile_file.identity,
+                "storage_native_profile_owner_changed"
+            );
             ensure!(
                 reader.profile == self.profile,
                 "storage_native_profile_changed"
@@ -1631,6 +1636,7 @@ mod tests {
         let request = method_calls(source, "ProviderReader", "request");
         let check = method_calls(source, "ProviderReader", "check");
         let initial = method_calls(source, "NativeVolumeContinuity", "begin_initial");
+        let admitted = method_calls(source, "NativeVolumeContinuity", "finish_begin");
         let count = |calls: &[String], name: &str| {
             calls.iter().filter(|call| call.as_str() == name).count()
         };
@@ -1663,6 +1669,7 @@ mod tests {
                 )
             })
             && count(&initial, "begin_phase") == 1
+            && count(&admitted, "retained_profile_handle") == 1
     }
 
     #[test]
