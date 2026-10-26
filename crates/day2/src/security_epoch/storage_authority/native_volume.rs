@@ -1551,7 +1551,7 @@ mod tests {
     }
 
     fn method_calls(source: &str, owner: &str, method: &str) -> Vec<String> {
-        use syn::visit::Visit;
+        use syn::{parse::Parser, visit::Visit};
         #[derive(Default)]
         struct Calls(Vec<String>);
         impl<'ast> Visit<'ast> for Calls {
@@ -1585,6 +1585,12 @@ mod tests {
                         .contains("self . resources . admission == VolumeAdmission :: Admitted")
                 {
                     self.0.push("completed_admission_required".into());
+                }
+                if node.path.is_ident("ensure")
+                    && let Ok(arguments) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(node.tokens.clone())
+                    && let Some(condition) = arguments.first()
+                {
+                    self.visit_expr(condition);
                 }
                 syn::visit::visit_macro(self, node);
             }
