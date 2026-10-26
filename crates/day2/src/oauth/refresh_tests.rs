@@ -326,10 +326,13 @@ impl Authority for NativeAuthority {
         if self.port.case == Case::RefusedOwnerClockClassification
             && self.port.posts.load(SeqCst) > 0
         {
-            let _ = subjects.with_runtime(|serving| {
-                serving.refuse();
-                Ok(())
-            });
+            subjects
+                .with_runtime(|serving| {
+                    serving.refuse();
+                    assert!(serving.check().is_err(), "actual owner refusal required");
+                    Ok(())
+                })
+                .expect("the paired case must borrow the actual runtime owner");
             // A known wall-clock classification cannot manufacture SQL
             // authority after the actual retained owner has been refused.
             return Err(refresh::ClockRefusal.into());
