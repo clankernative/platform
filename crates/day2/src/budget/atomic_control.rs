@@ -5,10 +5,15 @@ pub(crate) struct AtomicControl {
     owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-impl AtomicControl {
-    pub(super) fn new() -> Self {
-        Self {
+pub(super) fn atomic<T>(
+    connection: &rusqlite::Connection,
+    body: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    crate::store::budget_atomic(
+        connection,
+        AtomicControl {
             owner_thread: std::marker::PhantomData,
-        }
-    }
+        },
+        body,
+    )
 }

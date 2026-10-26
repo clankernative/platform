@@ -220,7 +220,7 @@ fn require_transaction(connection: &Connection) -> Result<()> {
 /// Internal savepoints prevent partial multi-account mutation even if the caller
 /// catches an admission failure and commits other work in its outer transaction.
 fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
-    crate::store::budget_atomic(connection, AtomicControl::new(), body)
+    atomic_control::atomic(connection, body)
 }
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
