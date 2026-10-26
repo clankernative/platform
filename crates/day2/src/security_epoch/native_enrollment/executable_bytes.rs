@@ -1,6 +1,7 @@
-//! Fresh selected bytes for one process check, never a cached executable grant.
-//! A stamp joins held/current/final-path FDs; it is DATA, not immutability or an
-//! atomic snapshot. Code-replacing actors remain in the qualified native TCB.
+//! Full selected-byte admission, followed by actual retained-handle checks.
+//! A private stamp joins held/current/final-path FDs. It grants no permission
+//! and proves no immutable contents; ongoing integrity belongs to the trusted
+//! enrolled services/node under the selected connection contract.
 
 use super::issuer_costs::HashCosts;
 use crate::security_epoch::native_clock::NativeAcquisition;
@@ -74,10 +75,10 @@ pub(super) fn hash(
     })
 }
 
-/// Hash one freshly opened descriptor once, joining EVERY retained descriptor
-/// before and after it. The caller joins these to the same actual live actor.
-/// Each invocation rereads all bytes; no cross-check/stage cache.
-pub(super) fn begin_check(
+/// Admit one actual executable by reading all selected bytes, joining EVERY
+/// retained descriptor before and after it. Only a genuine new process capture
+/// calls this; later checks retain these actual descriptors and their stamp.
+pub(super) fn admit(
     held: &[&File],
     current: &mut File,
     selected: &Digest,
@@ -116,9 +117,11 @@ pub(super) fn begin_check(
     result
 }
 
-/// The caller reopens the actual procfs executable path after its other native
-/// checks. ctime strengthens mutation detection but is not a content version.
-pub(super) fn finish_check(
+/// Join actual held/current/final procfs executable descriptors to their original
+/// admitted stamp, without another content read. The caller retains the actual
+/// actor and original clock. Metadata is not an immutable content version or a
+/// substitute for fresh authority; drift invisible to it is a trusted assumption.
+pub(super) fn check_handles(
     held: &[&File],
     current: &File,
     final_path: &File,
@@ -164,13 +167,13 @@ mod tests {
         )
     }
 
-    fn begin_check(
+    fn admit(
         held: &File,
         current: &mut File,
         selected: &Digest,
         acquisition: &mut NativeAcquisition,
     ) -> Result<Stamp> {
-        super::begin_check(
+        super::admit(
             &[held],
             current,
             selected,
@@ -179,18 +182,18 @@ mod tests {
         )
     }
 
-    fn finish_check(
+    fn check_handles(
         held: &File,
         current: &File,
         final_path: &File,
         before: &Stamp,
         acquisition: &mut NativeAcquisition,
     ) -> Result<()> {
-        super::finish_check(&[held], current, final_path, before, acquisition)
+        super::check_handles(&[held], current, final_path, before, acquisition)
     }
 
     #[test]
-    fn multiple_retained_descriptors_share_one_fresh_read_without_a_cache() -> Result<()> {
+    fn distinct_admissions_each_read_the_selected_bytes() -> Result<()> {
         let d = tempfile::tempdir()?;
         let p = d.path().join("selected");
         let bytes = vec![23; 65_536 + 17];
@@ -208,9 +211,9 @@ mod tests {
             let hashes = costs.hashes(Subject::Requester);
             for _ in 0..2 {
                 let stamp =
-                    super::begin_check(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
+                    super::admit(&held, &mut current, &Digest::new(&bytes), &mut a, &hashes)?;
                 assert_eq!(current.stream_position()?, bytes.len() as u64);
-                super::finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+                super::check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
             }
             recorder.emit(&costs, Outcome::Completed)?;
         }
@@ -223,6 +226,132 @@ mod tests {
         assert_eq!(rows[0][1][0], 2);
         assert_eq!(rows[0][1][1], 2 * bytes.len());
         Ok(())
+    }
+
+    #[test]
+    fn admitted_handle_checks_leave_every_executable_cursor_unchanged() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("selected");
+        let bytes = vec![23; 65_536 + 17];
+        fs::write(&path, &bytes)?;
+        let mut held = File::open(&path)?;
+        let mut current = File::open(&path)?;
+        let mut original = acquisition(Duration::from_secs(5));
+        let admitted = admit(&held, &mut current, &Digest::new(&bytes), &mut original)?;
+        held.seek(SeekFrom::Start(2))?;
+        current.seek(SeekFrom::Start(7))?;
+        let mut final_path = File::open(&path)?;
+        for _ in 0..2 {
+            check_handles(&held, &current, &final_path, &admitted, &mut original)?;
+            assert_eq!(held.stream_position()?, 2);
+            assert_eq!(current.stream_position()?, 7);
+            assert_eq!(final_path.stream_position()?, 0);
+        }
+        original.remaining()?;
+        Ok(())
+    }
+
+    fn actual_process_capture_and_check_shape(source: &str) -> bool {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            admits: usize,
+            handle_checks: usize,
+            final_checks: usize,
+        }
+
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    let segments = path.path.segments.iter().collect::<Vec<_>>();
+                    if segments.len() == 2 && segments[0].ident == "executable_bytes" {
+                        self.admits += usize::from(segments[1].ident == "admit");
+                        self.handle_checks += usize::from(segments[1].ident == "check_handles");
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.final_checks += usize::from(call.method == "check_identity");
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+
+        let source = syn::parse_file(source).unwrap();
+        let mut capture = None;
+        let mut check = None;
+        for item in source.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("MessageProcess"))
+            {
+                continue;
+            }
+            for item in implementation.items {
+                let syn::ImplItem::Fn(function) = item else {
+                    continue;
+                };
+                let mut calls = Calls::default();
+                calls.visit_block(&function.block);
+                if function.sig.ident == "observe" {
+                    assert!(capture.replace(calls).is_none());
+                } else if function.sig.ident == "check_same_actor" {
+                    assert!(check.replace(calls).is_none());
+                }
+            }
+        }
+        matches!(
+            capture,
+            Some(Calls {
+                admits: 1,
+                handle_checks: 0,
+                final_checks: 1
+            })
+        ) && matches!(
+            check,
+            Some(Calls {
+                admits: 0,
+                handle_checks: 2,
+                final_checks: 0
+            })
+        )
+    }
+
+    #[test]
+    fn actual_process_capture_admits_once_and_retained_checks_only_join_handles() {
+        assert!(actual_process_capture_and_check_shape(include_str!(
+            "process.rs"
+        )));
+    }
+
+    #[test]
+    fn actual_process_guard_rejects_skipped_admission_or_restored_full_checks() {
+        let source = include_str!("process.rs");
+        for (before, after) in [
+            (
+                "executable_bytes::admit(",
+                "executable_bytes::metadata_only(",
+            ),
+            (
+                "executable_bytes::check_handles(",
+                "executable_bytes::admit(",
+            ),
+            (
+                "executable_bytes::check_handles(",
+                "executable_bytes::metadata_only(",
+            ),
+            (
+                "owner.check_identity(acquisition, costs)?",
+                "owner.skip_final_check(acquisition, costs)?",
+            ),
+        ] {
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(mutated, source);
+            assert!(!actual_process_capture_and_check_shape(&mutated));
+        }
     }
 
     #[test]
@@ -242,7 +371,7 @@ mod tests {
             owners[index] = &other;
             let mut a = acquisition(Duration::from_secs(5));
             assert!(
-                super::begin_check(
+                super::admit(
                     &owners,
                     &mut current,
                     &Digest::new(b"selected"),
@@ -254,9 +383,9 @@ mod tests {
             assert!(a.remaining().is_err());
 
             let mut a = acquisition(Duration::from_secs(5));
-            let stamp = begin_check(&held[0], &mut current, &Digest::new(b"selected"), &mut a)?;
+            let stamp = admit(&held[0], &mut current, &Digest::new(b"selected"), &mut a)?;
             assert!(
-                super::finish_check(&owners, &current, &File::open(&p)?, &stamp, &mut a).is_err()
+                super::check_handles(&owners, &current, &File::open(&p)?, &stamp, &mut a).is_err()
             );
             assert!(a.remaining().is_err());
         }
@@ -272,9 +401,9 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(&bytes), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(&bytes), &mut a)?;
         assert_eq!(current.stream_position()?, bytes.len() as u64);
-        finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
+        check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a)?;
         a.remaining()?;
         Ok(())
     }
@@ -289,23 +418,23 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&q)?;
         let mut a = acquisition(Duration::from_secs(5));
-        assert!(begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
         let mut restored = File::open(&p)?;
-        assert!(begin_check(&held, &mut restored, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut restored, &Digest::new(b"selected"), &mut a).is_err());
         Ok(())
     }
 
     #[test]
-    fn same_length_wrong_bytes_are_rehashed_on_every_check() -> Result<()> {
+    fn a_new_admission_rejects_same_length_wrong_bytes() -> Result<()> {
         let d = tempfile::tempdir()?;
         let p = d.path().join("selected");
         fs::write(&p, b"selected")?;
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         fs::write(&p, b"changed!")?;
-        assert!(begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
+        assert!(admit(&held, &mut current, &Digest::new(b"selected"), &mut a).is_err());
         Ok(())
     }
 
@@ -318,7 +447,7 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         // The assertion is conditional on an OBSERVED distinct stamp, not on
         // every rapid write advancing ctime. Coarse timestamp resolution is
         // allowed; bound fixture preparation without skipping the oracle.
@@ -339,7 +468,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(fs::metadata(&p)?.modified()?, modified);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
         assert!(a.remaining().is_err());
         Ok(())
     }
@@ -357,11 +486,11 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         fs::remove_file(&p)?;
         symlink(&q, &p)?;
         assert!(identity(&held)? == stamp && identity(&current)? == stamp);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut a).is_err());
         Ok(())
     }
 
@@ -373,9 +502,9 @@ mod tests {
         let held = File::open(&p)?;
         let mut current = File::open(&p)?;
         let mut a = acquisition(Duration::from_secs(5));
-        let stamp = begin_check(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
+        let stamp = admit(&held, &mut current, &Digest::new(b"selected"), &mut a)?;
         let mut expired = acquisition(Duration::ZERO);
-        assert!(finish_check(&held, &current, &File::open(&p)?, &stamp, &mut expired).is_err());
+        assert!(check_handles(&held, &current, &File::open(&p)?, &stamp, &mut expired).is_err());
         assert!(expired.remaining().is_err());
         Ok(())
     }
