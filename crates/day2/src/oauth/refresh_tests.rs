@@ -906,11 +906,18 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: committed successor missing"
                     );
                 }
-                if matches!(case, Case::ReadinessRewind | Case::RefusedOwnerClockClassification) {
+                if matches!(
+                    case,
+                    Case::ReadinessRewind | Case::RefusedOwnerClockClassification
+                ) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,
-                        if case == Case::ReadinessRewind { "reauth_required" } else { "active" },
+                        if case == Case::ReadinessRewind {
+                            "reauth_required"
+                        } else {
+                            "active"
+                        },
                         "only a still-live owner can persist the readiness clock refusal"
                     );
                     assert_eq!(port.accounts.load(SeqCst), 0);
@@ -967,7 +974,12 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: observed clock or material refusal must persist"
                     );
                 }
-                if matches!(case, Case::PolicyChanged | Case::CustodyFailure | Case::RefusedOwnerClockClassification) {
+                if matches!(
+                    case,
+                    Case::PolicyChanged
+                        | Case::CustodyFailure
+                        | Case::RefusedOwnerClockClassification
+                ) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,
