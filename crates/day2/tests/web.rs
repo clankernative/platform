@@ -3579,7 +3579,11 @@ fn pending_invocations_refuse_incomplete_host_audit_schema_without_repair() -> R
         .runtime
         .execute("incomplete-schema", Fault::None)
         .unwrap_err();
-    assert!(error.to_string().contains("unsupported_host_schema"));
+    assert_eq!(
+        error.root_cause().to_string(),
+        "unsupported_host_schema",
+        "{error:#}"
+    );
     assert_eq!(world.count("links")?, 0);
     assert_eq!(world.count("day2_audit")?, 0);
     assert!(
