@@ -73,15 +73,18 @@ impl<'owner, 'stage, 'role, 'original> SubjectReader<'owner, 'stage, 'role, 'ori
             anyhow::bail!("OAuth subject database selection changed");
         }
         let result = match &mut self.source {
-            Source::Pending(runtime, current) => {
-                current.sql_read(runtime, |db| query_subject(db, email))
-            }
-            Source::Human(runtime, current) => {
-                current.sql_read(runtime, |db| query_subject(db, email))
-            }
-            Source::Runtime(runtime, current) => {
-                current.sql_read(runtime, |db| query_subject(db, email))
-            }
+            Source::Pending(runtime, current) => current.sql_read(runtime, |db| {
+                runtime.check_binding(db)?;
+                query_subject(db, email)
+            }),
+            Source::Human(runtime, current) => current.sql_read(runtime, |db| {
+                runtime.check_binding(db)?;
+                query_subject(db, email)
+            }),
+            Source::Runtime(runtime, current) => current.sql_read(runtime, |db| {
+                runtime.check_binding(db)?;
+                query_subject(db, email)
+            }),
             #[cfg(test)]
             Source::Fixture(path) => {
                 // The ordinary opener refuses the native path BEFORE I/O.
@@ -306,6 +309,65 @@ mod tests {
                 .is_err()
             );
             assert!(!entered.get());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn artifact_activation_blocks_subject_read_and_cannot_restore_the_same_owner() -> Result<()> {
+        let (_directory, runtime, scope) = fixture()?;
+        let world = World::new(56_705);
+        effects::scope(Arc::new(Clock(world)), || -> Result<()> {
+            native_management::fixtures::select_app_scope(&scope)?;
+            let result = native_management::with_runtime_consumer(
+                &runtime,
+                native_management::RuntimePhase::Read,
+                |current| {
+                    let mut subjects = SubjectReader::runtime(&runtime, current);
+                    assert!(
+                        subjects
+                            .subject(runtime.db(), "alice@example.com")?
+                            .is_some()
+                    );
+                    let db = crate::store::open(runtime.db())?;
+                    assert_eq!(
+                        db.execute(
+                            "UPDATE day2_authority SET artifact_id=?1 WHERE singleton=1",
+                            [crate::digest(b"replacement activated artifact")],
+                        )?,
+                        1
+                    );
+                    let error = subjects
+                        .subject(runtime.db(), "alice@example.com")
+                        .unwrap_err();
+                    assert!(error.to_string().contains("artifact_binding_changed"));
+                    assert!(
+                        subjects
+                            .with_runtime::<()>(|_| {
+                                panic!(
+                                    "a stale subject lookup cannot enter key/provider continuation"
+                                )
+                            })
+                            .is_err()
+                    );
+                    db.execute(
+                        "UPDATE day2_authority SET artifact_id=?1 WHERE singleton=1",
+                        [runtime.artifact().id()],
+                    )?;
+                    db.close().map_err(|(_, error)| error)?;
+                    assert!(subjects.subject(runtime.db(), "alice@example.com").is_err());
+                    Ok(()) // Restoring database DATA cannot restore this owner.
+                },
+            );
+            assert!(result.is_err());
+            assert!(
+                native_management::with_runtime_consumer::<()>(
+                    &runtime,
+                    native_management::RuntimePhase::Read,
+                    |_| panic!("a new lookup cannot restore the refused owner"),
+                )
+                .is_err()
+            );
             Ok(())
         })
     }
