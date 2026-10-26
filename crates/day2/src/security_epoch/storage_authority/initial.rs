@@ -330,9 +330,7 @@ impl InitialStorageContinuity {
             self.peer
                 .prepare_current(&mut stage, StoragePeerPurpose::CurrentServing)
         })?;
-        let mut file = trace.measure(ServingStep::PhysicalAcquire, || {
-            pending.acquire_durable(stage, Some(trace))
-        })?;
+        let mut file = trace.measure(ServingStep::PhysicalAcquire, || pending.acquire(stage))?;
         let peer = trace.measure(ServingStep::PeerAccept, || {
             rendezvous.accept_current(file.controller_stage_after_check()?, None)
         })?;
@@ -636,7 +634,8 @@ impl<'storage> PendingControllerStoragePhase<'storage> {
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
         ensure!(!*self.continuation, "controller_storage_phase_released");
-        let mut file = self.file.acquire_durable(stage, None)?;
+        let mut file = self.file.acquire(stage)?;
+        file.check()?;
         self.peer
             .check_retained_identity(file.controller_stage_after_check()?)?;
         let mut phase = CurrentControllerStoragePhase {
@@ -1014,9 +1013,7 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         let _profile = self_check_profile::enter(self_check_profile::Category::PhysicalLocal);
         let result = (|| {
             ensure!(!*self.continuation, "controller_storage_phase_released");
-            self_check_profile::physical(PhysicalStep::Durability, || {
-                self.file.check_current_durability()
-            })?;
+            self_check_profile::physical(PhysicalStep::FinalFile, || self.file.check())?;
             self_check_profile::physical(PhysicalStep::Peer, || match &mut self.peer {
                 PeerFence::Current(peer) => peer.check(self.file.controller_stage_after_check()?),
                 PeerFence::Retained(peer) => {
@@ -1098,7 +1095,7 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         let PeerFence::Current(mut peer) = self.peer else {
             anyhow::bail!("controller_storage_has_no_app_request")
         };
-        self.file.check_current_durability()?;
+        self.file.check()?;
         peer.release_known(self.file.controller_stage_after_check()?)?;
         peer.finish_checked(self.file.controller_stage()?)?;
         self.file.finish_checked()?;

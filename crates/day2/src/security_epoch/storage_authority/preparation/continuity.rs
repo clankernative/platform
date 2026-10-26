@@ -306,15 +306,14 @@ impl PreparedFileContinuity {
 }
 
 impl<'file> PendingPhysicalFilePhase<'file> {
-    pub(in crate::security_epoch::storage_authority) fn acquire_durable<'role>(
+    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
         self,
         stage: EnrolledRoleStage<'role>,
-        trace: Option<&crate::security_epoch::controller::serving_timing::ServingTiming>,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
         let inputs = self.inputs;
         inputs.disposition.check()?;
         let phase = inputs.volume.begin_current(stage)?;
-        let current = CurrentPhysicalFilePhase {
+        let mut current = CurrentPhysicalFilePhase {
             inner: CurrentPreparedFilePhase {
                 phase,
                 selection: inputs.selection,
@@ -328,24 +327,8 @@ impl<'file> PendingPhysicalFilePhase<'file> {
                 disposition: inputs.disposition,
             },
         };
-        // Publish only after the fixed durability operation. Its first check
-        // is also this new phase's initial file check; no earlier checked
-        // phase escapes and no immediate duplicate is needed by the caller.
-        let durable = || {
-            finish_current_durability(
-                current,
-                |current| current.check(),
-                |current| current.inner.phase.check_durability_profile(),
-                |current| current.refuse(),
-            )
-        };
-        match trace {
-            Some(trace) => trace.measure(
-                crate::security_epoch::controller::serving_timing::ServingStep::Durability,
-                durable,
-            ),
-            None => durable(),
-        }
+        current.check()?;
+        Ok(current)
     }
 }
 
@@ -401,7 +384,7 @@ impl<'file> PendingPreparedFilePhase<'file> {
         let phase = if initial {
             self.volume.begin_first_holder(stage)?
         } else {
-            self.volume.begin_current(stage)?
+            self.volume.begin_initial(stage)?
         };
         let mut current = CurrentPreparedFilePhase {
             phase,
@@ -578,16 +561,6 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 }
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
-    pub(in crate::security_epoch) fn check_current_durability(&mut self) -> Result<()> {
-        finish_current_durability(
-            self,
-            |current| current.check(),
-            |current| current.inner.phase.check_durability_profile(),
-            |current| current.refuse(),
-        )
-        .map(|_| ())
-    }
-
     pub(crate) fn check(&mut self) -> Result<()> {
         let result = (|| {
             self.inner.disposition.check()?;
