@@ -361,7 +361,7 @@ fn container_facts_and_owner_require_the_same_checked_pod_body() {
 fn single_pod_decode_keeps_byte_depth_object_and_duplicate_key_refusals() {
     let (role, subject, good) = fixture();
     let encoded = serde_json::to_vec(&good).unwrap();
-    let (parsed, owner) = identity_protocol::pod(&role, &subject, &encoded)
+    let (parsed, owner) = super::identity_protocol::pod(&role, &subject, &encoded)
         .unwrap()
         .into_parts();
     assert_eq!(parsed, good);
