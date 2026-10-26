@@ -175,6 +175,9 @@ pub struct UsageReconciliationReceipt {
 
 const UNITS: [&str; 4] = ["calls", "bytes", "cost_microunits", "concurrency"];
 
+mod atomic_control;
+pub(crate) use atomic_control::AtomicControl;
+
 #[path = "budget_reduction.rs"]
 mod reduction;
 pub use reduction::*;
@@ -218,20 +221,7 @@ fn require_transaction(connection: &Connection) -> Result<()> {
 /// catches an admission failure and commits other work in its outer transaction.
 fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
     require_transaction(connection)?;
-    crate::store::budget_atomic(
-        connection,
-        AtomicControl {
-            owner_thread: std::marker::PhantomData,
-        },
-        body,
-    )
-}
-
-/// Only the private accounting boundary constructs this consuming control.
-/// It selects fixed budget savepoint commands on an existing connection; it
-/// supplies no native owner, file, transaction, clock or callback exemption.
-pub(crate) struct AtomicControl {
-    owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    crate::store::budget_atomic(connection, AtomicControl::new(), body)
 }
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {

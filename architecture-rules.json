@@ -157,6 +157,7 @@
     "crates/day2/src/bin/sandbox_probe.rs",
     "crates/day2/src/branding.rs",
     "crates/day2/src/budget.rs",
+    "crates/day2/src/budget/atomic_control.rs",
     "crates/day2/src/budget_reduction.rs",
     "crates/day2/src/budget_tests.rs",
     "crates/day2/src/build_dependencies.rs",
