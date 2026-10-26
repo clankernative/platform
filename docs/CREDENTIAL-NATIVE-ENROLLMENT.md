@@ -24,6 +24,22 @@ hold exits with failure and a Deployment can restart it; this is no hard OS
 scheduling bound or once-across-restarts guarantee during control-plane outage
 or reboot. Capture actual Pod/container histories and verify resource closure.
 
+## Literal platform health is not Current authority
+
+The App's fixed `/health/live` and `/health/ready` responses contain only an
+empty body and the existing method/admission status. A private, immutable host
+response classification identifies that literal producer before native scope
+resolution. The HTTP owner does not acquire Current for those probes; readiness
+reports admission only, not native permission, a current counter or OAuth success.
+
+Application responses cannot obtain the classification from a URL, status,
+header, body or extension. Converting a literal response to an ordinary response
+discards the classification. All ordinary App responses still resolve their real
+scope and retain native acquisition, original-clock, transport and finalization
+guards. Shell/receiver behavior, probe timeouts, header/connection bounds and
+authentication bounds are unchanged. A cancelled literal probe holds no native
+response lease to renew or refuse.
+
 `day2-native-enrollment` implements the operator provisioner and its private
 issuer child. It supplies `AppHost`, `SecurityShell` and `EpochController` stages.
 A role stage does not supply human authentication, storage, an epoch, a first
