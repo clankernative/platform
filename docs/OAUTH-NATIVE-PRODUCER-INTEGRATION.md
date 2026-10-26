@@ -1,9 +1,10 @@
 # OAuth native producer integration
 
-This branch composes PRs 214 (enrollment), 211 (original owners and HTTP
-executors), and 209 (native storage preparation and file continuity). It does
-not enable the production fresh-human producer. The authenticated first-holder
-exchange is included, but genuine P3/current serving authority is still absent.
+The native integration composes enrollment, original owners, authenticated
+first-holder/storage, current writer and actual OAuth consumers. The selected
+[S1 connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+is being ported in place. Existing native suppliers and earlier tests do not
+qualify that new composition or establish a completed live OAuth flow.
 
 ## Required suppliers
 
@@ -13,23 +14,25 @@ exchange is included, but genuine P3/current serving authority is still absent.
   original intervals. Its native deployment qualification is separate; a first
   holder still cannot substitute for P3/current serving authority.
   Credential owns the fixed issuer entrypoint, operational composition and
-  live enrollment qualification; G1 is implementing the exchange against S1.
+  enrollment qualification; G1 owns the real first-holder/storage connection.
 - G1 owns provider P3/bootstrap/current-writer/serving implementation, native
   Runtime admission, authenticated peer helpers and the accepted governance contract.
   Product owns final consumer settlement and this integration branch. The current
   `NativeStorageCreationAuthority`, `PreparedInitialFile`, and
-  `PreparedFileContinuity` retain real resources, but cannot authorize serving
-  mutations. The native `CurrentBootstrapExecution` constructor now requires
+  `PreparedFileContinuity` retain real resources, but do not alone authorize serving
+  mutations. The native `CurrentBootstrapExecution` constructor requires
   the same retained Controller/file/peer phase and its fixed authenticated
   counter transport; it supplies only the initial bootstrap operations.
 
 `AuthenticatedReads` and `EpochObservation` are read-only observations. A file
 projection, successful bootstrap receipt, selected role, or decoded epoch row
-must not substitute for either missing supplier. S3's startup
+must not substitute for an actual supplier. S3's startup
 `CurrentPreparedFilePhase` is included: it retains the same file descriptors and
 actual Controller stage through a bounded operation, and an abandoned or
 refused phase permanently closes continuity. It is physical continuity, not
-current writer authority.
+current writer authority. Full physical/provider admission must finish before
+the actual connection lends requests. Later checks use retained handles and
+fresh authority/counters rather than repeating that admission.
 
 The stack also includes `InitialStoreMetadata`, which admits instance and
 artifact/schema inputs without opening or creating the serving database.
@@ -63,17 +66,20 @@ continuation. Returned DATA must not become a transferable permission.
 S2's `with_current_original` lends a current `RoleStage` and `OriginalPhase` on
 their owning executor. `RoleStage::with_native` lends the actual S1
 `EnrolledRoleStage`; its simulation branch cannot supply a native stage. The
-eventual S3 consumer must retain those borrows through the actual operation,
+S3 consumer must retain those borrows through the actual operation,
 including known SQL commit, session creation, signing, provider dispatch and
-socket writes as applicable. Each later phase needs its own current authority
-check. A dropped response, unknown commit or unknown send must retain the
+socket writes as applicable. Each later phase needs current authority, counters,
+actual handles and original-clock checks. Admission is not repeated per boundary;
+the connection is not reusable permission. A dropped response, unknown commit
+or unknown send must retain the
 appropriate unresolved ownership; it must not restart either original or
 create a second permit journal.
 
 `with_consumer` now retains the same original and role through the real consumer
 operation and its result. Pure input or signature refusals are known exclusions
 and do not burn another human's valid original. The boundary arms immediately
-before a commit, signature, session insertion or provider/socket send; errors
+before the first SQLite open/recovery, commit, signature, session insertion or
+provider/socket send as applicable; errors
 and unwinding after that point pessimistically retain uncertainty. The
 original remains in its owning registry, permanently refused after ambiguity;
 there is no timer-based regrant or restoration from SQL. App start, dispatch,
@@ -82,6 +88,16 @@ and a subsequent current check. A commit error cannot be swallowed to rearm
 the original. Shell session insertion, selected key loading/signing and App
 signature verification use the same boundary. Provider token and account
 requests retain it through their actual response-body reads.
+
+The Pending/human/runtime SQL facade borrows that same genuine request owner.
+Readiness and subject lookups reborrow it, without a nested Current acquisition.
+Snapshots/writers cannot escape; each unit closes and postchecks before provider
+HTTP. Intermediate units do not finalize the original. The final Pending/human
+commit is one-shot: any later SQL unit refuses before opening. Commit, rollback,
+close or owner failure poisons the actual request/original even if caught. A
+provider permit leaves only after known commit/close/postchecks; an unknown send
+retains MayHaveBeenSent and cannot run cleanup SQL after refusal. These remain
+mandatory while the connection/request and SQL caller ports are qualified.
 
 The native HTTP socket checks before and after each write/flush/shutdown poll.
 Pending and partial writes are not delivery completion. A failed, timed out or
@@ -102,12 +118,11 @@ ShellResponseComplete. Timeout/disconnect/drop performs terminal refusal in
 the existing serving owner without acquiring a new stage or reading a clock.
 Completed sockets cannot write or complete again.
 
-S3 deliberately registers no native implementation yet: the factory refuses
-before the callback, SQL or provider I/O. The actual P3/current writer/serving
-owner remains unimplemented, so the production proof producer stays closed.
-Preparation-only files, snapshots and an epoch boolean cannot fill this gap;
-the scripted simulator cannot enter the native variant or implement its sealed
-trait. This is consuming code against that contract, not a native readiness claim.
+The factories require their actual native storage/writer/peer owners;
+preparation-only files, snapshots and an epoch boolean cannot fill that role.
+The scripted simulator cannot enter the native variant or implement its sealed
+trait. Configured native startup refuses if the real suppliers cannot complete.
+The selected option-3 source port and live qualification remain owed.
 
 When a storage consumer already holds the native stage,
 `OriginalPhase::check_with_native` checks the same retained original through
@@ -130,9 +145,8 @@ valid signed ordering, and retain ambiguous observation delivery and browser
 cancellation. These are refusal and adapter controls, not a native producer
 success campaign.
 
-The positive all-suppliers-current case cannot be implemented or qualified
-until the two owners above supply their genuine production boundaries. It
-must then be paired with missing, expired, changed-selection and wrong-holder
+The complete selected-profile case must be qualified through the actual owners
+and paired with missing, expired, changed-selection and wrong-holder
 cases at every protected continuation. No fixture-success factory, boolean
 supplier matrix or unimplemented production owner is added here to stand in
 for that campaign.
@@ -142,14 +156,16 @@ for that campaign.
 The App can consume its checked original file into `AppFileContinuity` while
 its original stage is still valid. The same directory/file descriptors and
 actual enrollment identity survive; no pathname, projection, old grant or
-serialized value can recreate them. Current physical checks take a fresh
-bounded stage from that same enrollment. The initial-image check remains
+serialized value can recreate them. Request checks take a fresh
+bounded borrow from that same admitted enrollment. The initial-image admission
+remains
 separate and still rejects modified bytes. Physical continuity alone grants no
 first-holder, activation, provider durability or current writer authority.
 
 The Controller's `CurrentPhysicalFilePhase` is distinct from the initial-file
-phase accepted by the first-holder exchange. It retains the actual volume,
-provider, mount, directory and file checks while allowing SQLite length/content
+phase accepted by the first-holder exchange. It retains the admitted volume/
+provider binding and fresh mount, directory and file identity checks while
+allowing SQLite length/content
 to change after legitimate writes. Entry closes the parent continuation gate;
 abandonment or failure cannot reopen it. Known physical completion is still
 not a P3 or current-writer result.
@@ -166,10 +182,10 @@ accepted the Google-managed Firebase Rules service agent as a
 trusted writer/impersonation path, and confirmed Chander, Sebastian and
 internal-tools-infra as governance roots. That decision requests no IAM changes;
 the earlier v2 IAM proposal remains unapplied. The storage-access, impersonation
-and durability decisions are settled. Their actual writer/serving implementation
-and native qualification remain G1's work. Enrollment, local fsync, previous
+and durability decisions are settled. Their connection/request port and native
+qualification remain owed. Enrollment, local fsync, previous
 readback and an authenticated first holder cannot substitute for current
-authority. Native production factories remain closed until implemented.
+authority. No selected native factory may open a bypass if admission fails.
 
 For a selected native bootstrap, the launcher checks only desired deployment
 metadata and S3's fixed `/state` mount. It never reads an ordinary SQLite
@@ -183,18 +199,19 @@ can install `ActiveAppStorageContinuity` in the executor's registry. An attempt
 closes before stage acquisition or channel I/O; failure or panic retains the
 same refused owner and cannot restart from SQL, metadata or a second lookup.
 A scoped lend of the active owner still needs S3's actual current-serving and
-Runtime admission checks. Runtime startup remains closed pending that
-constructor. Shell receives no App file or storage authority through this path.
+Runtime admission checks. Shell receives no App file or storage authority through this path.
 
-Current App/Controller peer phases require distinct issuer-signed role grants
-from the initial exchange and the last completed phase. A new wrapper, nonce
-or acquisition domain around the same signed grant cannot refresh authority.
+Current App/Controller peer phases require distinct bound request transcripts
+from the initial exchange and the last completed phase, signed by the actually
+admitted retained peer. They borrow fresh request authority without another
+full issuer admission. A new wrapper, nonce or acquisition domain around an old
+request grant cannot refresh authority or clear refusal.
 This exchange does not supply Shell serving permission; that requires its own
 genuine narrow producer without granting Shell storage reader/writer access.
 
 `Runtime::load` now refuses an explicitly selected native bootstrap profile
 before inspecting or creating `.state` or opening SQLite. Existing SQL authority
-rows cannot recreate the missing current native holder. This closes ordinary
-startup for that selection while the real consuming Runtime admission factory
-is absent. It does not claim that ordinary apps or explicit synthetic
+rows cannot recreate the actual current native holder. Ordinary startup cannot
+bypass the real consuming Runtime admission factory for that selection.
+It does not claim that ordinary apps or explicit synthetic
 verification installations have native storage authority.

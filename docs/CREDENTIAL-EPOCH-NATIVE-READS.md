@@ -2,22 +2,35 @@
 
 The native read adapter is a private AppHost/controller implementation beneath
 `security_epoch`. It does not register an app capability or bootstrap command.
-`CurrentBootstrapExecution` still has no production factory. A read observation
-cannot authorize Create, Activate, restore or takeover.
+A read observation cannot authorize Create, Activate, restore or takeover.
+The selected [connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+is being implemented and requires separate native qualification.
 
 ## Acquisition and support
 
-An acquisition begins with actual Linux `CLOCK_BOOTTIME`, before entropy,
-executable, projection, authentication or database I/O. Identity requests and
-coherent Firestore reads retain that original interval: at most five seconds,
-or the selected shorter lease. Each HTTP timeout also respects the caller's
-smaller ceiling. A failed request, clock rewind, process change or selected
-resource mismatch refuses the owning acquisition. There is no renewal.
+Full connection authentication begins with actual Linux `CLOCK_BOOTTIME`,
+before entropy, executable, projection, authentication or database I/O. Its
+authentication work spends at most five seconds inside the same admission
+parent and any shorter cap. Successful material is retained only by the actual
+admitted connection, exact recipient, policy/store binding and credential expiry.
+It cannot authorize a later operation on its own or reconstruct its owner.
+
+Each later coherent Firestore read borrows a fresh bounded request from that
+same live owner. It does not repeat metadata/TokenReview/workload/GSA/database
+authentication. Its original interval, every HTTP timeout and response-body
+read respect the ordinary five-second request limit and all shorter ceilings.
+Current authority, counters and actual owned-handle checks remain fresh. A
+failed request, rewind, process/binding change or expired credential refuses the
+actual owning phase. A new authentication operation cannot revive refusal or
+renew an existing request, human original or signed grant.
 
 The process observer retains `/proc/self/exe`, hashes its actual bytes and
-checks the original descriptor and current executable identity. The selected
+checks the original descriptor and current executable identity at full admission.
+The selected
 `controller_code` is that executable's SHA-256, not a container image hash.
-These observations do not establish immutable executable memory, time namespace
+Later request checks join retained/named executable and namespace handles without
+scanning the bytes. These observations do not establish immutable executable
+memory, time namespace
 qualification, dependency/image admission or hostile code containment. Other
 platforms refuse; neither `Instant` nor wall time substitutes for BOOTTIME.
 
@@ -33,17 +46,22 @@ Descriptors must be regular files and reads are bounded. Projection symlinks
 may resolve Kubernetes' atomic writer; their path alone does not authenticate
 the caller or prove that its process belongs to the token's Pod. An actual
 deployment must supply and qualify these projections, executable/profile
-admission and process-to-Pod binding before a serving bootstrap factory exists.
-Acquisition now requires a borrowing real enrolled AppHost or EpochController
+admission and process-to-Pod binding before its native owner can serve requests.
+Connection admission requires a borrowing real enrolled AppHost or EpochController
 stage matching the complete bootstrap/store selection. AppHost selects its
 native host executable independently of its Roc artifact. SecurityShell is not
-an epoch reader. The original stage remains borrowed through every request and
-local use, and its narrower I/O clock preserves the original domain, origin and
-earlier deadline. Code selections or parsed certificates cannot create that
+an epoch reader. Each later request borrows the same admitted actual owner through
+its operation and local use; its narrower I/O clock preserves that request's
+original domain, origin and earlier deadline. Code selections or parsed
+certificates cannot create that
 borrow. See
 [runtime identity selections](CREDENTIAL-RUNTIME-IDENTITY.md#selected-container-data).
 
-## Authenticated response checks
+## Full admission response checks
+
+These are genuine connection-admission checks, not requests to repeat at every
+serving boundary. Selection/recipient, current authority, credential expiry,
+actual handles and fresh coherent counters still constrain each later use.
 
 TokenReview must return authentication, the exact selected audience and KSA
 name/UID, and one bound Pod name/UID. Current namespace, KSA, Pod and controlling
