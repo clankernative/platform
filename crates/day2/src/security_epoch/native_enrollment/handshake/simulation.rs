@@ -12,6 +12,7 @@ use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Duration};
 
+mod connection_request;
 mod lifecycle;
 mod model;
 pub(in crate::security_epoch) use lifecycle::{LifecycleHandshake, LifecycleModelError};
@@ -564,6 +565,9 @@ fn implementation() -> Digest {
         include_str!("../handshake.rs"),
         include_str!("simulation.rs"),
         include_str!("simulation/model.rs"),
+        include_str!("simulation/lifecycle.rs"),
+        include_str!("simulation/connection_request.rs"),
+        include_str!("simulation/connection_request/tests.rs"),
         include_str!("../channel.rs"),
         include_str!("../channel/storage.rs"),
         include_str!("../channel/serving.rs"),
@@ -634,24 +638,37 @@ fn check(program: &Program) -> Result<Vec<Record>> {
                 bytes.len() as u64 <= MAX_BUNDLE,
                 "failure evidence bound exceeded"
             );
-            // Identical reruns retain the first bundle. Never overwrite older
-            // evidence, including a different failure under the same source.
-            use std::io::Write;
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => file.write_all(&bytes)?,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
+            retain_failure_bytes(&path, &bytes)?;
             anyhow::bail!(
                 "native handshake model/replay divergence; evidence: {}",
                 path.display()
             )
         }
     }
+}
+
+// Shared by the wire campaign and the connection/request reference fixtures.
+// The caller supplies only typed synthetic evidence, never native errors or
+// secrets. Existing evidence is immutable, including identical reruns.
+fn retain_failure_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    ensure!(
+        bytes.len() as u64 <= MAX_BUNDLE,
+        "failure evidence bound exceeded"
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => file.write_all(bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 #[test]
