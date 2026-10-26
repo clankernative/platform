@@ -43,6 +43,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source }}
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Record exact source checkout
         run: git log -1 --format=fuller
       - name: Create the single-job Rust codegen jobserver
