@@ -1633,9 +1633,9 @@ pub(crate) mod tests {
         }
 
         impl<'ast> Visit<'ast> for Reads {
-            fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
-                if node.mac.path.is_ident("ensure") {
-                    self.inspect_ensure(&node.mac);
+            fn visit_macro(&mut self, node: &'ast syn::Macro) {
+                if node.path.is_ident("ensure") {
+                    self.inspect_ensure(node);
                 }
             }
 
