@@ -9,7 +9,7 @@ on:
       profile:
         description: Fixed focused test group
         type: choice
-        options: [pr276, pr273, option3]
+        options: [pr276, pr273, pr281, option3]
         default: pr276
       compilation_cache:
         description: Admitted compiled action reuse
@@ -113,6 +113,11 @@ jobs:
         if: ${{ inputs.profile == 'pr273' }}
         run: |
           build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::self_check_profile:: --nocapture --test-threads=1
+      - name: Run all Pod identity and runtime parser controls
+        if: ${{ inputs.profile == 'pr281' }}
+        run: |
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::identity_tests:: --nocapture --test-threads=1
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::runtime_identity_tests:: --nocapture --test-threads=1
       - name: Run shared handshake and connection request controls
         if: ${{ inputs.profile == 'option3' }}
         run: |
