@@ -1,5 +1,15 @@
 # Private native Controller observations
 
+The selected [connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+is being ported and needs new cold-admission/warm-request evidence. Older full
+revalidation profiles remain historical records bound to their source. A new
+profile capture must identify actual admission separately from the first and
+second requests; do not hide admission outside a request span and label it warm.
+Warm requests target zero full scans, physical attachment rounds, repeated
+provider authentication and issuer enrollment, with real authority/counter,
+owned-handle, original-clock and refusal checks retained. This is a qualification
+obligation, not a claim that current captures or their labels prove completion.
+
 The real `day2-epoch-controller` executor writes bounded historical observations
 to its private container stderr. There is no diagnostic HTTP endpoint, synthetic
 serving request, replay command or receipt-to-authority constructor. Health still

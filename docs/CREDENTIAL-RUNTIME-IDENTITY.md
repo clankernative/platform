@@ -6,6 +6,15 @@ This slice adds the first native observation primitive and bounded response code
 
 ## Retained native observation
 
+Full executable/runtime admission and later handle checks have distinct roles
+under the selected [S1 connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests).
+This contract is being ported; it is not a new native qualification result.
+Executable bytes and selected runtime/provider joins are admitted before an
+owner escapes. Later request checks retain the actual process/task/proc and
+namespace identity observations below without another executable scan or cloud
+identity/attachment round. The trusted services maintain content/physical
+integrity while current authority, counters, clock and refusal remain checked.
+
 `NativeNamespaceObservation` retains the actual proc root, kernel self-process and self-task directories, task stat/status files, time namespace offsets file, and six namespace descriptors. Acquisition starts under the existing original Linux BOOTTIME deadline. Every fixed open is bracketed by checks against that same acquisition.
 
 Linux exposes `timens_offsets` in the process (TGID) directory, not the per-thread directory. The observation reads it through the retained fixed `/proc/self` directory. Before and after each offsets read, the process time and time-for-children namespace descriptors must both match the current thread's retained time namespace. This equality does not prove membership in the node's initial namespace.

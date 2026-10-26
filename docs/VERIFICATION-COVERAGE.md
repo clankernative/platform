@@ -64,6 +64,18 @@ compares complete bounded state and retains source-bound failure histories.
 See [native handshake simulation](NATIVE-HANDSHAKE-SIMULATION.md) for coverage,
 replay and the separate kernel/storage qualification requirements.
 
+The selected [native connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+requires additional composed evidence while its port is in progress: full
+admission before an owner escapes, followed by two fresh requests on that same
+actual connection. Warm requests must perform no full executable scans, physical
+attachment rounds, repeated provider authentication or issuer enrollment.
+Current authority/counters, real sender/FD/process/thread/namespace checks,
+original clocks and permanent refusal must still execute. Cover actual caller
+wiring and replayable independent failure histories, including SQL close/commit,
+unknown effects, cancellation, peer death, replacement and old-writer/restore
+fencing. Existing portable passes do not establish these new obligations or
+live latency; source-bound cold/warm Linux and browser qualification is separate.
+
 Private native host-loop campaigns share the production supervisor reducer and
 retain source-bound event histories with independent-oracle snapshots. Replay a
 saved history from the repository root with:

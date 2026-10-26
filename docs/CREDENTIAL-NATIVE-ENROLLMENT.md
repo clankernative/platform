@@ -31,6 +31,12 @@ holder, a provider credential or writer permission.
 
 ## Selected profile
 
+The user selected connection admission followed by fresh request checks on
+26 October 2026. This is the sole target S1 contract. Its implementation and
+native qualification are in progress; this specification is not a deployment
+or readiness result. Replace the former per-boundary full revalidation in
+place, without a flag, fallback or second serving profile.
+
 The first profile is one exact authority scope on a trusted common Linux node.
 The operator must select and qualify the node, boot, kernel, architecture,
 initial PID/user/time namespaces, containerd/runc service, native executables,
@@ -45,6 +51,90 @@ or control the runtime belong to the operator's TCB. Measuring an executable and
 retaining a pidfd do not establish hostile-code containment or hardware attestation.
 The source change does not approve a deployment, install a key, change hostPID,
 create infrastructure or qualify the live canary.
+
+### Admitted connections and fresh requests
+
+A native connection is admitted once using the actual enrolled processes,
+issuer/root and role bindings, selected executable bytes and runtime/node
+identity, namespaces, original clocks, channel and received process handles.
+Storage admission additionally establishes the actual file/mount/device,
+selected provider attachment/durability profile, first holder, activated
+lineage and permitted writer. No usable owner escapes before every required
+admission operation and its postchecks complete.
+
+Successful admission installs a private, nonserializable connection owner
+retaining the actual resources on its owning process and thread. The admitted
+connection is the real enrollment/peer channel and process/role incarnation,
+including the App–Controller or Shell–Controller channel. An HTTP socket, SQL
+connection, response identity or Runtime lookup cannot manufacture that owner.
+Each newly created native peer channel requires full admission.
+
+The trusted enrolled services and node maintain executable and physical-storage
+integrity for the connection's lifetime. S1 no longer promises a complete
+executable scan, cloud attachment round or physical/durability-profile proof at
+every later boundary. Admission transcripts and selected digests are historical
+DATA, not later request permission or constructors of a native owner.
+
+Each request borrows the same live connection owner, with its own closed
+purpose, operation binding and interval captured before entropy or I/O. Check
+current user/app/operation authority and fresh coherent external counters bound
+to the exact activated lineage, writer, request and provider version. A saved
+snapshot is not another read. Protected writes, signing and transfer retain
+fresh applicable authority/counter checks and the required postchecks.
+
+At I/O, SQL, signing, acceptance, transfer and completion boundaries, the
+request still checks its actual owned resources:
+
+- The same enrolled/executor owner, role, scope, app/artifact, policy/store
+  selection, connection incarnation, process and OS thread remain bound.
+- Every relevant retained pidfd is live; the original channel has not closed.
+  Actual authenticated packet senders are joined to the admitted process and
+  retained proc/task and namespace anchors. Socket inheritance/transfer does
+  not permit substituting a connection PID for a packet's SCM_PIDFD.
+- Required fixed named file, directory, proc and namespace entries still join
+  their retained descriptors by device/inode, mount identity, required modes
+  and ownership. The executable handle/path identity is checked without
+  reading its contents. Observable exec, namespace, remount or named-file
+  replacement refuses. Metadata is not a claim of unchanged contents.
+- BOOTTIME samples use the original domain and shared latest-observation
+  state. Enforce the earliest request, human-original, credential and other
+  applicable ceilings. Rewind, expiry, changed binding and refusal remain
+  terminal; no wall clock or maximum of stale independent samples substitutes.
+- Callback arming, single-writer/restore fencing, known/excluded/unknown
+  settlement and commit/rollback/close/postcheck barriers remain mandatory.
+  Actual database durability, byte bounds and provider errors still apply.
+
+Checks borrow resources; they do not return a reusable positive witness. Scalar
+IDs, certificates, database/path lookups and serialized receipts cannot create,
+replace or retarget that borrow. Full admission still rejects wrong executable
+bytes, runtime, role, sender, namespace, file, attachment, writer or clock.
+
+A failed required check, uncertain protected effect, drop or cancellation
+permanently refuses the affected request/original and the actual connection or
+continuation owners holding that uncertainty. Catching an error, time passing,
+a new stage or historical success cannot clear refusal. Pure known exclusions
+before arming retain their existing narrower settlement semantics. No reconnect,
+old-file adoption or second first-holder attempt repairs an abandoned owner.
+
+The accepted reduction is detection of content or physical drift that retained
+handle/identity checks cannot observe, including transient drift restored
+between checks. Such drift could expose credentials or admit wrong writes.
+Node/runtime administrators were already trusted; ongoing integrity enforcement
+also rests with the admitted services. This is not hostile-code containment,
+hardware attestation or instantaneous IAM/configuration revocation.
+
+Admission consumes its own bounded work; its signed acquisition does not become
+a connection-long permission. Only the actual live owner can lend a fresh
+request interval. No existing request, grant, human original or effect is
+renewed. Ordinary serving stays bounded to five seconds. Authentication spends
+at most five seconds of its own work inside the same admission parent and all
+shorter caps. This decision enlarges no bootstrap or measurement parent.
+
+Retained provider material belongs to the admitted connection, exact recipient,
+selection and actual expiry. New authentication, if required, is a separately
+bounded admission operation; it cannot revive a refused owner or extend an
+active request. Close/fail closed if it cannot complete within existing bounds.
+A historical admission cannot substitute for current authority or a counter.
 
 ## Operator inputs and boot
 
@@ -109,7 +199,8 @@ with abandoned socket state must be recreated.
 
 ## Current stages and original clocks
 
-Native hosts connect to `/run/day2-native-enrollment/issuer.sock`. Each exchange
+Native hosts admit their connection through `/run/day2-native-enrollment/issuer.sock`.
+Each admission exchange
 uses one original acquisition of at most five seconds, captured before entropy
 and I/O. The issuer challenge and signed bind establish key possession. Each
 message retains the actual received `SCM_PIDFD`; malformed, truncated, extra-FD
@@ -145,9 +236,11 @@ an empty string; that explicit value is still compared exactly, together with
 the selected version and executable.
 
 `EnrolledProcessRoleOwner` is installed on the final owning OS thread. A fresh
-borrowing `EnrolledRoleStage` rechecks the original issuer, current self/native
-observations, operator selections and runtime incarnation. Failed acquisition,
-recheck or expiry permanently refuses that owner. Lost initial replies cannot
+borrowing `EnrolledRoleStage` is a request from that admitted live owner,
+retaining its exact identity, selected role and runtime incarnation. Its checks
+follow the retained-handle contract above; it does not reacquire executable,
+runtime or physical admission. Failed acquisition, required recheck or expiry
+permanently refuses the actual affected owner. Lost initial replies cannot
 rekey the same process; a full enrollment table refuses rather than evicting.
 
 `EnrolledOriginalClock` captures its first BOOTTIME sample at the actual creator
@@ -277,7 +370,11 @@ mutations. Those mutation-fixture capabilities are separate from the actual
 CHOWN-only provisioner control. Remove only these local fixture volumes after
 all test containers have closed; retain source/executable/image and log records.
 
-## Bounded issuer cost observations
+## Historical bounded issuer cost observations
+
+The following measurements describe their captured source before the selected
+connection/request port. Their repeated full checks and fresh issuer stages
+are historical implementation facts, not requirements of the new contract.
 
 Initial-holder transport setup and authenticated file admission are separate
 bounded operations. During App installation, its actual stage closes the
@@ -400,18 +497,18 @@ retained failed originals remain separate evidence.
 ## Current-operation rendezvous
 
 App bootstrap and App/Shell serving use a bounded untrusted wakeup on their
-already retained socket before acquiring the client's next role. The wakeup
+already retained socket before beginning the client's next request. The wakeup
 contains only the channel kind, original exchange digest and next sequence. It
 has a closed 256-byte JSON schema and a single nonblocking send; a failed or
 partial notification cannot be retried. The Controller also waits for actual
-pending DATA before each of its six bootstrap role acquisitions.
+pending DATA before each of its six bootstrap operations.
 
 The Controller closes its original file continuation before readiness I/O. Its
-actual fresh role sends a signed begin-ready statement before the provider and
-physical-file work, allowing that work to overlap the client's fresh issuer
-RPC. The exact role stage, narrowed acquisition and nonce remain fixed through
-the later exchange. The client's freshly signed Hello echoes the readiness
-nonce, and Offer must preserve the entire readiness statement and request
+actual admitted role signs a fresh begin-ready request statement. The exact
+request stage, narrowed acquisition and nonce remain fixed through the later
+exchange; a request does not perform another issuer enrollment. The client's
+freshly signed Hello echoes the readiness nonce, and Offer must preserve the
+entire readiness statement and request
 transcript. A queued wakeup is never a signer, role, file, P3 or consumer proof.
 Its strict kernel receive is deliberately discarded as untrusted DATA; the
 authenticated Ready, Hello and later messages retain their own actual sender
@@ -419,22 +516,24 @@ handles.
 
 App file continuity has separate Ready, Queued, Busy and Refused states. Queued
 notification DATA cannot restore an abandoned phase or substitute for the
-actual retained peer and fresh role. Only known completion after the existing
-physical, provider, original and consumer postchecks returns continuity to
+actual retained peer and fresh request. Only known completion after the required
+handle, counter, original and consumer postchecks returns continuity to
 Ready. Each current client receives exactly five authenticated messages
 (begin-ready, offer, ready, result/known, release); all five actual sender
 handles remain checked until final completion.
 
 Initial Shell transport setup also completes separately on its owning
 executor. It retains only same-owner connection DATA, and the authenticated
-exchange requires a different fresh issuer grant after actual readiness.
+connection must complete full admission before requests can borrow it. Each
+request after actual readiness has a distinct bound transcript and original
+interval, rather than another full issuer grant.
 Neither this setup nor the current-operation wakeup renews an old acquisition,
 human original, failed operation or permission. The original five-second stage
 limits and all provider/consumer checks remain in force. These are source and
 protocol properties; real-node timing and the complete OAuth lifecycle still
 require live qualification.
 
-## Fresh executable joins in current peer checks
+## Executable admission and retained peer handles
 
 The actual issuer baseline on 21 October measured 16 requester hash reads
 (334,095,744 bytes, 1,204,417 microseconds) and seven containerd hash reads
@@ -444,7 +543,12 @@ The containerd RPC group took 16,695 microseconds and the Kubernetes group
 not be added to their nested hash rows. This is a particular observed exchange,
 not a latency or availability bound.
 
-One current identity observation can check one to five retained message-process
+Full executable admission reads the selected bytes under its original bounded
+acquisition before returning an owner. A wrong digest refuses. Bounded reads
+and final process, path, descriptor, namespace, liveness and clock joins still
+apply to that admission; no configured digest alone proves the observed bytes.
+
+A later identity check can join one to five retained message-process
 owners of the same actual process together. Each owner still comes from its
 actual received kernel handle; signed process DATA cannot construct one. The
 observation requires equal sealed process DATA and joins every held proc root,
@@ -452,48 +556,29 @@ process directory, executable and namespace descriptor to fresh native reads.
 Every actual pidfd must be live before the reads and at the final guard.
 Different actors refuse even when their selected executable bytes match.
 
-That observation hashes all freshly opened selected executable bytes once.
-Each new message-process capture performs its own complete fresh read before
-returning an owner. Its selected digest is only DATA while the private capture
-retains the actual kernel pidfd, proc, executable and namespace descriptors.
-The existing current identity check hashes the freshly reopened executable,
-joins all retained/current/final-path descriptors and ends with the original
-liveness/clock guards before that provisional value can escape. There is no
-intervening protocol, provider, signature or publication that needs a separate
-earlier hash. A wrong selected digest refuses without returning an owner.
+An authenticated packet received on an admitted connection retains its actual
+kernel process handle and joins it to the admitted actor without another full
+executable read. A caller cannot construct a new admitted actor from the packet's
+signed DATA or numeric PID. Every retained handle and named executable/proc/
+namespace identity is checked again at the required request boundaries. No
+hash result is treated as a permission; no positive check token escapes.
 
-Later identity observations also perform a new complete read. Nothing checked
-is returned for reuse, and no observation may span intervening I/O, signatures
-or stage boundaries. The issuer uses this primitive for its adjacent Hello and
-Bind sender checks before signing. It retains both actual sender owners and all
-other runtime and publication guards. Diagnostic hash counters report actual
-read attempts and bytes, including a failing partial read; identity-body counts
-describe shared observations rather than the number of retained handles.
+Empty, oversized, mixed-actor, replaced-descriptor, dead-peer or clock failures
+latch every affected actual owner and acquisition. A later clock or stage cannot
+revive them. Diagnostic hash counters report actual admission read attempts,
+including partial failures; a warm request must not hide admission work outside
+its measured scope.
 
-Before and after that read, every held and current descriptor must agree on device,
-inode, regular-file size, modification time and change time. The existing
-512 MiB ceiling, 64 KiB bounded reads and original-clock checks remain. After
-the remaining process/namespace checks, the caller reopens the actual procfs
-executable path and joins every held descriptor, the current descriptor and that
-final path descriptor to the earlier stamp. Every original pidfd's
-liveness/original-clock check remains at the end; diagnostic sampling finishes
-before these final guards. Any refusal latches every owner supplied to the
-observation and the same acquisition, including empty or oversized group
-refusal. A later clock cannot revive refused owners. No role lifetime, signed
-ceiling or native deadline is extended or reset.
-
-These joins operate under the existing trusted executable/node profile.
-Metadata fields are observations, not an atomic snapshot or immutable content
-version. In particular, ctime adds mutation detection without proving that every
-arbitrarily timed write has a distinct timestamp. This does not claim strict
-behavioral equivalence for hostile concurrent mutation of executable files or
-containment from actors that can replace the trusted native code. A source-bound
+These joins operate under the selected trusted executable/node contract.
+Metadata is not an atomic content version: unchanged metadata cannot prove
+unchanged bytes, and transient drift may escape detection after admission.
+No lifetime, signed ceiling or native deadline is extended or reset. A source-bound
 issuer/Controller rebuild and another real-node observation must establish any
 actual performance gain; portable tests alone do not qualify preparation.
-Metadata equality and observer read-only access do not justify an issuer-lifetime
-containerd digest cache under this contract. Fresh full hashing remains required
-at each distinct identity observation, including guards around runtime and
-Kubernetes work.
+Metadata equality and observer access alone cannot install an admitted runtime
+owner. Full hashing belongs to genuine runtime/process connection admission;
+later checks retain the actual selected handles and binding rather than running
+another full scan around each runtime or Kubernetes operation.
 
 The issuer's owner and selected-container projections come from one bounded,
 validated Pod body. `runtime_profile::container` returns both DATA values after

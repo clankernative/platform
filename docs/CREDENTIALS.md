@@ -131,6 +131,17 @@ required before claiming this channel ready for an installation.
 
 ## External epoch protocol kernel
 
+Native evidence follows the selected [admitted-connection and fresh-request
+contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests).
+Full identity/physical admission installs only the actual retained connection;
+it does not cache permission to use private credential material. Every request
+still needs current role-specific authority, fresh counters, actual owned
+handles, original clocks and permanent refusal. Custody remains bound to the
+exact role/owner/material/recipient and database commit-before-permit boundary.
+Outside-backup epochs and old-writer/restore fencing are unchanged. The native
+port and composed qualification are in progress; no SDK family or OAuth protocol
+semantics change because of this trust-model decision.
+
 The private `security_epoch` module implements the first-bootstrap wire and
 state kernel for the selected Firestore Native database. It creates epoch 1,
 a permanent bootstrap sentinel and an exact-operation receipt in one conditional
@@ -154,15 +165,13 @@ and requests fresh read-only transactions with bounded cleanup and a shared
 five-second acquisition budget. Provider timestamps are version tokens, never
 host wall-clock authority.
 
-This is source and adapter conformance, not a serving readiness implementation.
-`CurrentBootstrapExecution` has no production constructor and cannot be cloned,
-serialized or moved between threads. Only test builds can construct its fixture.
-Actual current GKE identity, immutable GSA token binding, native code/process and
-continuous clock evidence, qualified shared outside-backup control storage,
-original-fresh-file observation and the first app's own holder proof are still
-required. There is no live transport installation, app startup initialization,
-SDK endpoint or cloud action in this slice. Data read from records, configuration
-or a local marker cannot manufacture a current proof.
+Source and adapter conformance is not live serving readiness.
+`CurrentBootstrapExecution` cannot be cloned, serialized or moved between threads;
+its real production constructor needs genuine native storage/peer/counter owners.
+Full GKE/GSA/code/process/storage admission, continuing owned-handle and clock
+checks, qualified outside-backup control storage and the real first holder remain
+required under the selected contract. Records, configuration and local markers
+cannot manufacture those owners or current request permission.
 
 ## Initial bootstrap selection and observations
 

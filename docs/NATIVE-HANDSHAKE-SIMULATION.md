@@ -14,13 +14,18 @@ seconds. The subsequent storage wire conversation records its explicit checked
 stage purpose: `StorageBootstrap` has a temporary sixty-second ceiling per action,
 pending the kernel-integrity/Firestore redesign, and ordinary
 `CurrentRole` remains capped at five. Serving remains capped at five seconds.
-Deadline equality refuses. No deadline, signature, sender observation, content
-hash, namespace, socket, file, physical/provider or final consumer check is removed.
+Deadline equality refuses. No request deadline, signature, actual sender,
+namespace, socket, file or final consumer boundary is removed. The selected
+[connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+replaces repeated full executable/physical/provider admission with retained-handle
+checks after genuine admission; current authority, counters, clocks and refusal
+remain mandatory. Its production port and composed qualification are in progress.
 
 The storage adapter selects this class only after matching the actual signed
 stage to the trusted request purpose and checking its purpose-specific native
-acquisition. It never selects a class from a scalar duration. Both role and full
-provider authentication still finish by the same original plus five seconds.
+acquisition. It never selects a class from a scalar duration. Authentication
+remains at most five seconds of its own work inside the same admission parent
+and all shorter caps; admission does not renew a request.
 Metadata observation and initial-first-holder purposes cannot start a subsequent
 storage transcript; bootstrap cannot start a serving transcript. Shorter signed
 or configured ceilings remain unchanged, including equal one-second ceilings
@@ -103,6 +108,16 @@ compiled source identity. Preserve the original bundle when fixing a failure;
 add its reduced semantic history as a fixed regression on the corrected source.
 
 ## Composition and limits
+
+The selected connection/request port must additionally compose full admission
+with two fresh requests borrowing the same actual owner. Its independent model
+must preserve current authority/counters, actual-handle observations, original
+request/human clocks and permanent refusal across loss, duplicates, death,
+replacement, expiry/rewind, uncertain SQL/provider completion and restore/writer
+fencing. Full content/physical revalidation after admission is deliberately no
+longer an obligation. Neither this updated specification nor the existing
+transcript campaign claims that the new composed campaign or native port has
+already passed. Wrong full-admission inputs still require actual refusal tests.
 
 The [storage lifecycle campaign](STORAGE-LIFECYCLE-SIMULATION.md) composes at the DATA transcript boundary:
 actor and original clock domain/interval, protocol purpose, sequence, accepted
