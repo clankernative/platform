@@ -644,6 +644,50 @@ mod tests {
         calls.0
     }
 
+    fn packet_direct_joins(source: &str, method: &str, original: &str, received: &str) -> bool {
+        let source = syn::parse_file(source).unwrap();
+        for item in source.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("MessageProcess"))
+            {
+                continue;
+            }
+            for item in implementation.items {
+                let syn::ImplItem::Fn(function) = item else {
+                    continue;
+                };
+                if function.sig.ident != method {
+                    continue;
+                }
+                let Some(body) = native_result_body(&function) else {
+                    return false;
+                };
+                let joins = body.stmts.iter().filter(|statement| {
+                    let syn::Stmt::Expr(expression, Some(_)) = statement else { return false; };
+                    let Some(args) = native_fallible_call(expression, &["Self", "check_same_actor"]) else { return false; };
+                    if args.len() != 3 || !native_path(&args[1], "acquisition") || !native_path(&args[2], "costs") { return false; }
+                    let syn::Expr::Reference(reference) = &args[0] else { return false; };
+                    let syn::Expr::Array(actors) = &*reference.expr else { return false; };
+                    reference.mutability.is_some() && actors.elems.len() == 2
+                        && matches!(&actors.elems[0], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some()
+                            && matches!(&*reference.expr, syn::Expr::Unary(unary)
+                                if matches!(unary.op, syn::UnOp::Deref(_)) && native_path(&unary.expr, original)))
+                        && matches!(&actors.elems[1], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some() && native_path(&reference.expr, received))
+                }).count();
+                let assignment = body.stmts.iter().filter(|statement| {
+                    matches!(statement, syn::Stmt::Expr(syn::Expr::Assign(assignment), Some(_))
+                        if native_field(&assignment.left, "received", "pidfd") && native_path(&assignment.right, "pidfd"))
+                }).count();
+                return joins == 1 && (method != "receive_admitted" || assignment == 1);
+            }
+        }
+        false
+    }
+
     fn actual_packet_reborrow_shape(
         channel: &str,
         process: &str,
@@ -656,7 +700,9 @@ mod tests {
         let count = |calls: &std::collections::BTreeMap<String, usize>, name: &str| {
             calls.get(name).copied().unwrap_or(0)
         };
-        count(&receive, "MessageProcess::receive") == 1
+        packet_direct_joins(process, "retain_message_anchor", "self", "retained")
+            && packet_direct_joins(process, "receive_admitted", "admitted", "received")
+            && count(&receive, "MessageProcess::receive") == 1
             && count(&receive, "MessageProcess::receive_admitted") == 1
             && count(&receive, "retain_message_anchor") == 1
             && count(&current, "retain_message_anchor") == 1
@@ -713,8 +759,20 @@ mod tests {
         for (before, after) in [
             ("received.pidfd = pidfd;", ""),
             (
+                "received.pidfd = pidfd;",
+                "if false { received.pidfd = pidfd; }",
+            ),
+            (
                 "Self::check_same_actor(&mut [&mut *admitted, &mut received]",
                 "Self::skip_sender_join(&mut [&mut *admitted, &mut received]",
+            ),
+            (
+                "Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?;",
+                "if false { Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?; }",
+            ),
+            (
+                "Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?;",
+                "if false { Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?; }",
             ),
             ("File::try_clone(&self.pidfd)", "self.pidfd.try_clone()"),
             ("File::try_clone(&self.proc)", "self.proc.try_clone()"),
