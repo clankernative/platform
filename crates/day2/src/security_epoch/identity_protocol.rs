@@ -234,11 +234,24 @@ pub(super) fn service_account(role: &GkeRoleSelection, bytes: &[u8]) -> Result<(
 
 /// The exact current Pod supplies its controlling owner DATA. A Deployment
 /// requires the current ReplicaSet object and the selected Deployment lineage.
+pub(super) struct PodObservation {
+    value: Value,
+    owner: Value,
+}
+
+impl PodObservation {
+    /// Move both DATA projections from the one bounded, checked reply. This
+    /// neither supplies a runtime witness nor accepts an unchecked parsed body.
+    pub(super) fn into_parts(self) -> (Value, Value) {
+        (self.value, self.owner)
+    }
+}
+
 pub(super) fn pod(
     role: &GkeRoleSelection,
     subject: &ReviewedSubject,
     bytes: &[u8],
-) -> Result<Value> {
+) -> Result<PodObservation> {
     let value = decode(bytes)?;
     live_object(
         &value,
@@ -253,7 +266,8 @@ pub(super) fn pod(
             && string(&value, "/status/phase")? == "Running",
         "epoch_identity_pod_not_running_or_wrong_ksa"
     );
-    controlling_owner(&value)
+    let owner = controlling_owner(&value)?;
+    Ok(PodObservation { value, owner })
 }
 
 fn controlling_owner(value: &Value) -> Result<Value> {
