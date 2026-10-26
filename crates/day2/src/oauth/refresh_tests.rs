@@ -154,6 +154,10 @@ impl Port {
 }
 
 impl effects::Hooks for Port {
+    fn simulate_runtime_owner(&self) -> bool {
+        self.case == Case::RefusedOwnerClockClassification
+    }
+
     fn provider_observation(
         &self,
         _: crate::oauth::shell_oidc::ProviderObservationData,
@@ -657,6 +661,16 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             publication_clock_reads: AtomicUsize::new(0),
         });
         let result = fixture_scope(port.clone(), || -> Result<()> {
+            if case == Case::RefusedOwnerClockClassification {
+                let instance = crate::artifact::Instance::load(runtime.instance_path())?;
+                super::super::native_management::fixtures::select_app_scope(
+                    &day2_capabilities::security_epoch::AuthorityScope {
+                        installation: instance.installation.try_into()?,
+                        environment: instance.environment.try_into()?,
+                        app: runtime.app().to_owned().try_into()?,
+                    },
+                )?;
+            }
             if case != Case::AbsentReturnRewind {
                 activate(&runtime, &fixture)?;
             }
