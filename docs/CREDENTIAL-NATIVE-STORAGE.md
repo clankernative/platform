@@ -149,6 +149,39 @@ identity. Failure remains latched even after restoration. A replacement interval
 cannot renew the creator. Its serialized `PreparedFileProjection` is DATA only;
 there is no inverse projection-to-owner constructor.
 
+### Retained physical owners in Current requests
+
+The physical-storage port separates initial admission from later Current
+requests. Only complete successful durability-profile validation advances the
+actual retained volume's private admission state. A Current request must borrow
+that same admitted volume, original enrolled owner and actual descriptors;
+selection DATA or a historical observation cannot construct it. Its fixed
+physical path performs named file, directory, device and mount joins, without
+another provider attachment round or full durability-profile read. The replaced
+Current-only durability helper and all of its callers are removed. Peer,
+original-clock and final file checks remain around acceptance and release.
+
+Initial admission retains the actual `/etc/day2-native/storage.json` descriptor
+after its bounded decode. It requires UID 0 and mode 0444, matching the read-only
+ConfigMap subPath; the actual group is retained because fsGroup can set it.
+Later checks join the fixed name and retained descriptor by device, inode,
+mount, mode, owner/group, size and modification/change timestamps. A failed join
+stays refused after restoration. Even another initial phase must join the
+original descriptor before using a newly read selection; equal JSON cannot
+adopt a replacement. Final-component NOFOLLOW is not an all-ancestor or atomic
+filesystem-containment guarantee, and metadata does not prove unchanged
+contents. Ongoing integrity remains the admitted services' trusted obligation.
+
+This is the physical-owner slice of the connection/request port. Initial
+creation, first-holder validation, complete initial-image checks, file and
+directory sync and readback remain. Bootstrap and counter transport still run
+their existing full admission work until their separate retained-transport
+port. Fresh counters, selected writer authority and actual SQLite durability
+are never supplied by the physical owner's admission state. The removed
+Current durability timing row is absent, rather than evidence of a new P3
+operation. Cold/warm native qualification and request latency must be measured
+on the complete reviewed composition.
+
 Fresh image preparation takes `InitialStoreMetadata`, not `Runtime::load`.
 The Controller admits the desired instance and artifact before enrollment and
 the original storage acquisition. Artifact worker exchanges produce DATA only;
