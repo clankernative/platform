@@ -329,8 +329,9 @@ impl InitialStorageContinuity {
             self.peer
                 .prepare_current(&mut stage, StoragePeerPurpose::CurrentServing)
         })?;
-        let mut file = trace.measure(ServingStep::PhysicalAcquire, || pending.acquire(stage))?;
-        trace.measure(ServingStep::Durability, || file.check_current_durability())?;
+        let mut file = trace.measure(ServingStep::PhysicalAcquire, || {
+            pending.acquire_durable(stage, Some(trace))
+        })?;
         let peer = trace.measure(ServingStep::PeerAccept, || {
             rendezvous.accept_current(file.controller_stage_after_check()?, None)
         })?;
@@ -634,8 +635,7 @@ impl<'storage> PendingControllerStoragePhase<'storage> {
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentControllerStoragePhase<'storage, 'role>> {
         ensure!(!*self.continuation, "controller_storage_phase_released");
-        let mut file = self.file.acquire(stage)?;
-        file.check_current_durability()?;
+        let mut file = self.file.acquire_durable(stage, None)?;
         self.peer
             .check_retained_identity(file.controller_stage_after_check()?)?;
         let mut phase = CurrentControllerStoragePhase {

@@ -306,14 +306,15 @@ impl PreparedFileContinuity {
 }
 
 impl<'file> PendingPhysicalFilePhase<'file> {
-    pub(in crate::security_epoch::storage_authority) fn acquire<'role>(
+    pub(in crate::security_epoch::storage_authority) fn acquire_durable<'role>(
         self,
         stage: EnrolledRoleStage<'role>,
+        trace: Option<&crate::security_epoch::controller::serving_timing::ServingTiming>,
     ) -> Result<CurrentPhysicalFilePhase<'file, 'role>> {
         let inputs = self.inputs;
         inputs.disposition.check()?;
         let phase = inputs.volume.begin_current(stage)?;
-        let mut current = CurrentPhysicalFilePhase {
+        let current = CurrentPhysicalFilePhase {
             inner: CurrentPreparedFilePhase {
                 phase,
                 selection: inputs.selection,
@@ -327,8 +328,24 @@ impl<'file> PendingPhysicalFilePhase<'file> {
                 disposition: inputs.disposition,
             },
         };
-        current.check()?;
-        Ok(current)
+        // Publish only after the fixed durability operation. Its first check
+        // is also this new phase's initial file check; no earlier checked
+        // phase escapes and no immediate duplicate is needed by the caller.
+        let durable = || {
+            finish_current_durability(
+                current,
+                |current| current.check(),
+                |current| current.inner.phase.check_durability_profile(),
+                |current| current.refuse(),
+            )
+        };
+        match trace {
+            Some(trace) => trace.measure(
+                crate::security_epoch::controller::serving_timing::ServingStep::Durability,
+                durable,
+            ),
+            None => durable(),
+        }
     }
 }
 
@@ -562,15 +579,13 @@ impl<'file, 'role> CurrentPreparedFilePhase<'file, 'role> {
 
 impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
     pub(in crate::security_epoch) fn check_current_durability(&mut self) -> Result<()> {
-        let result = (|| {
-            self.check()?;
-            self.inner.phase.check_durability_profile()?;
-            self.check()
-        })();
-        if result.is_err() {
-            self.inner.disposition.refuse();
-        }
-        result
+        finish_current_durability(
+            self,
+            |current| current.check(),
+            |current| current.inner.phase.check_durability_profile(),
+            |current| current.refuse(),
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {
@@ -631,6 +646,256 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
 
     pub(crate) fn refuse(&mut self) {
         self.inner.disposition.refuse();
+    }
+}
+
+/// One fixed precheck/observation/postcheck before publishing the actual owner.
+/// The same sequence also checks an already-owned phase. Refusal precedes its
+/// error return; no positive witness, interval or permission is cached here.
+fn finish_current_durability<Physical>(
+    mut physical: Physical,
+    mut check: impl FnMut(&mut Physical) -> Result<()>,
+    observe: impl FnOnce(&mut Physical) -> Result<()>,
+    refuse: impl FnOnce(&mut Physical),
+) -> Result<Physical> {
+    let result = (|| {
+        check(&mut physical)?;
+        observe(&mut physical)?;
+        check(&mut physical)
+    })();
+    if let Err(error) = result {
+        refuse(&mut physical);
+        return Err(error);
+    }
+    Ok(physical)
+}
+
+#[cfg(test)]
+mod durable_acquisition_tests {
+    use super::finish_current_durability;
+    use anyhow::Result;
+    use std::{cell::Cell, rc::Rc};
+
+    // Bind the controlled sequencing tests to the real factory and both
+    // Controller callers. No fixture may construct a native phase or replace
+    // Linux conformance; this guard also runs where those owners are absent.
+    fn native_durable_shape(source: &str, initial: &str) -> (usize, usize, usize, usize, usize) {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Calls {
+            finishes: usize,
+            file_checks: usize,
+            observations: usize,
+            acquisitions: usize,
+            repeats: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                self.finishes += usize::from(matches!(&*node.func, syn::Expr::Path(path)
+                    if path.path.is_ident("finish_current_durability")));
+                syn::visit::visit_expr_call(self, node);
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                self.file_checks += usize::from(
+                    node.method == "check"
+                        && matches!(&*node.receiver, syn::Expr::Path(path) if path.path.is_ident("current") || path.path.is_ident("file")),
+                );
+                self.observations += usize::from(node.method == "check_durability_profile");
+                self.acquisitions += usize::from(node.method == "acquire_durable");
+                self.repeats += usize::from(node.method == "check_current_durability");
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        fn method<'a>(file: &'a syn::File, owner: &str, name: &str) -> &'a syn::ImplItemFn {
+            file.items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Impl(item)
+                        if matches!(&*item.self_ty, syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|part| part.ident == owner)) =>
+                    {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .flat_map(|item| &item.items)
+                .find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                    _ => None,
+                })
+                .expect("actual native factory or caller")
+        }
+        let file = syn::parse_file(source).unwrap();
+        let initial = syn::parse_file(initial).unwrap();
+        let mut calls = Calls::default();
+        calls.visit_block(&method(&file, "PendingPhysicalFilePhase", "acquire_durable").block);
+        calls.visit_block(&method(&initial, "InitialStorageContinuity", "begin_current_app").block);
+        calls.visit_block(&method(&initial, "PendingControllerStoragePhase", "acquire").block);
+        (
+            calls.finishes,
+            calls.file_checks,
+            calls.observations,
+            calls.acquisitions,
+            calls.repeats,
+        )
+    }
+
+    #[test]
+    fn native_durable_factory_and_both_callers_do_not_repeat_the_acquisition_check() {
+        assert_eq!(
+            native_durable_shape(include_str!("continuity.rs"), include_str!("../initial.rs")),
+            (1, 1, 1, 2, 0),
+        );
+    }
+
+    #[test]
+    fn native_durable_guard_rejects_extra_factory_or_caller_checks() {
+        let source = include_str!("continuity.rs");
+        let initial = include_str!("../initial.rs");
+        let repeated_factory = source
+            .replacen(
+                "let current = CurrentPhysicalFilePhase",
+                "let mut current = CurrentPhysicalFilePhase",
+                1,
+            )
+            .replacen(
+                "let durable = || {",
+                "current.check()?; let durable = || {",
+                1,
+            );
+        assert_ne!(source, repeated_factory);
+        assert_ne!(
+            native_durable_shape(&repeated_factory, initial),
+            (1, 1, 1, 2, 0)
+        );
+        // Mutate each caller separately, so neither App nor Shell can silently
+        // restore the old immediate durability precheck after this factory.
+        let needle = "let mut file = ";
+        let mut count = 0;
+        for (offset, _) in initial.match_indices(needle) {
+            let tail = &initial[offset..];
+            let end = tail.find(';').unwrap() + offset + 1;
+            if !initial[offset..end].contains(".acquire_durable(stage") {
+                continue;
+            }
+            for repeat in [" file.check()?;", " file.check_current_durability()?;"] {
+                let mut repeated_caller = initial.to_owned();
+                repeated_caller.insert_str(end, repeat);
+                assert_ne!(
+                    native_durable_shape(source, &repeated_caller),
+                    (1, 1, 1, 2, 0)
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 2, "both native Controller paths are covered");
+    }
+
+    struct Physical {
+        checks: u32,
+        observations: u32,
+        fail_check: Option<u32>,
+        refused: Rc<Cell<bool>>,
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl Physical {
+        fn check(&mut self) -> Result<()> {
+            self.checks += 1;
+            anyhow::ensure!(
+                self.fail_check != Some(self.checks),
+                "actual file check refused"
+            );
+            Ok(())
+        }
+    }
+
+    impl Drop for Physical {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    fn fixture(fail_check: Option<u32>) -> Physical {
+        Physical {
+            checks: 0,
+            observations: 0,
+            fail_check,
+            refused: Rc::new(Cell::new(false)),
+            dropped: Rc::new(Cell::new(false)),
+        }
+    }
+
+    #[test]
+    fn durable_acquisition_publishes_after_two_file_checks_and_one_observation() {
+        let physical = finish_current_durability(
+            fixture(None),
+            Physical::check,
+            |physical| {
+                assert_eq!(
+                    physical.checks, 1,
+                    "no separate acquisition check is repeated"
+                );
+                physical.observations += 1;
+                Ok(())
+            },
+            |physical| physical.refused.set(true),
+        )
+        .unwrap();
+        assert_eq!(physical.checks, 2);
+        assert_eq!(physical.observations, 1);
+        assert!(!physical.refused.get() && !physical.dropped.get());
+    }
+
+    #[test]
+    fn failed_pre_or_postcheck_refuses_before_owner_drop_and_cannot_publish() {
+        for fail_check in [1, 2] {
+            let physical = fixture(Some(fail_check));
+            let refused = physical.refused.clone();
+            let dropped = physical.dropped.clone();
+            let observed = Cell::new(false);
+            let result = finish_current_durability(
+                physical,
+                Physical::check,
+                |_| {
+                    observed.set(true);
+                    Ok(())
+                },
+                |physical| {
+                    assert!(!physical.dropped.get());
+                    physical.refused.set(true);
+                },
+            );
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                "actual file check refused"
+            );
+            assert_eq!(observed.get(), fail_check == 2);
+            assert!(refused.get() && dropped.get());
+        }
+    }
+
+    #[test]
+    fn failed_durability_observation_preserves_error_and_refuses_the_owner() {
+        let physical = fixture(None);
+        let refused = physical.refused.clone();
+        let dropped = physical.dropped.clone();
+        let result = finish_current_durability(
+            physical,
+            Physical::check,
+            |physical| {
+                assert_eq!(physical.checks, 1);
+                Err(anyhow::anyhow!("actual provider observation refused"))
+            },
+            |physical| physical.refused.set(true),
+        );
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "actual provider observation refused"
+        );
+        assert!(refused.get() && dropped.get());
     }
 }
 
