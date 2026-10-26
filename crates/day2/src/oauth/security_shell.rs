@@ -54,6 +54,7 @@ impl admission::OutboundReadiness for NoAppFacts {
         _: &day2_capabilities::oauth::OutboundConnectionBinding,
         _: &day2_capabilities::oauth::ConnectionSlotKey,
         _: i64,
+        _: &mut admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
         Ok(None)
     }

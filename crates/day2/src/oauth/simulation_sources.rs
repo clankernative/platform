@@ -88,6 +88,7 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
         include_str!("simulation_sources.rs"),
     ),
     ("store.rs", include_str!("store.rs")),
+    ("subject_read.rs", include_str!("subject_read.rs")),
     ("usage.rs", include_str!("usage.rs")),
     ("workload.rs", include_str!("workload.rs")),
     ("../iap.rs", include_str!("../iap.rs")),

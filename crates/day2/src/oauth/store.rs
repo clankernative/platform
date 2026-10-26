@@ -107,7 +107,8 @@ fn install_schema_in(db: &Connection) -> Result<()> {
 
 /// A caller must establish eligibility from current identity, slot and custody
 /// evidence. This kernel repeats the durable version/fence checks under SQLite.
-pub fn claim_refresh(
+#[cfg(test)]
+fn claim_refresh(
     db: &mut Connection,
     attempt: &str,
     expected: &RefreshEligibility,
@@ -115,6 +116,29 @@ pub fn claim_refresh(
     validate_id(attempt)?;
     validate_eligibility(expected)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let inserted = claim_refresh_in(&tx, attempt, expected)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub(super) fn claim_current_refresh(
+    runtime: &crate::store::Runtime,
+    current: &mut super::native_management::RuntimeConsumer<'_, '_>,
+    attempt: &str,
+    expected: &RefreshEligibility,
+) -> Result<bool> {
+    validate_id(attempt)?;
+    validate_eligibility(expected)?;
+    current.sql_write(runtime, |tx| {
+        claim_refresh_in(tx, attempt, expected).map(crate::store::SqlDecision::Commit)
+    })
+}
+
+fn claim_refresh_in(
+    tx: &Transaction<'_>,
+    attempt: &str,
+    expected: &RefreshEligibility,
+) -> Result<bool> {
     let current: Option<(i64, i64, i64, String, String, String, String)> = tx
         .query_row(
             "SELECT generation, token_version, security_epoch, profile, account, affinity, status
@@ -162,7 +186,6 @@ pub fn claim_refresh(
             expected.affinity
         ],
     )?;
-    tx.commit()?;
     Ok(inserted == 1)
 }
 
@@ -172,17 +195,43 @@ pub fn authorize_and_commit_dispatch(
     db: &mut Connection,
     attempt: &str,
 ) -> Result<Option<RefreshDispatchPermit>> {
-    authorize_checked_dispatch(db, attempt, |_| Ok(true))
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let eligibility = checked_dispatch_in(&tx, attempt, |_| Ok(true))?;
+    tx.commit()?;
+    if eligibility.is_some() {
+        super::effects::refresh_boundary(super::effects::RefreshBoundary::DispatchCommitted);
+    }
+    Ok(eligibility.map(|eligibility| RefreshDispatchPermit {
+        attempt: attempt.into(),
+        eligibility,
+    }))
 }
 
 pub(super) fn authorize_checked_dispatch(
-    db: &mut Connection,
+    runtime: &crate::store::Runtime,
+    current: &mut super::native_management::RuntimeConsumer<'_, '_>,
     attempt: &str,
     authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<RefreshDispatchPermit>> {
     validate_id(attempt)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if !authorize(&tx)? {
+    let eligibility = current.sql_write(runtime, |tx| {
+        checked_dispatch_in(tx, attempt, authorize).map(crate::store::SqlDecision::Commit)
+    })?;
+    if eligibility.is_some() {
+        super::effects::refresh_boundary(super::effects::RefreshBoundary::DispatchCommitted);
+    }
+    Ok(eligibility.map(|eligibility| RefreshDispatchPermit {
+        attempt: attempt.into(),
+        eligibility,
+    }))
+}
+
+fn checked_dispatch_in(
+    tx: &Transaction<'_>,
+    attempt: &str,
+    authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
+) -> Result<Option<RefreshEligibility>> {
+    if !authorize(tx)? {
         return Ok(None);
     }
     let row = tx.query_row(
@@ -208,12 +257,7 @@ pub(super) fn authorize_checked_dispatch(
         [attempt],
     )?;
     ensure!(changed == 1, "refresh dispatch fence lost");
-    tx.commit()?;
-    super::effects::refresh_boundary(super::effects::RefreshBoundary::DispatchCommitted);
-    Ok(Some(RefreshDispatchPermit {
-        attempt: attempt.to_owned(),
-        eligibility,
-    }))
+    Ok(Some(eligibility))
 }
 
 /// Recovery never reconstructs a permit. A crash after fencing but before the
@@ -230,9 +274,27 @@ pub fn mark_uncertain(db: &Connection, attempt: &str) -> Result<bool> {
 /// A definitive, profile-classified invalid-grant response blocks future use
 /// only if this attempt still owns the active base version. A stale rejection
 /// cannot disable a successor connection.
-pub fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
+#[cfg(test)]
+fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<bool> {
     validate_id(attempt)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = definitive_rejection_in(&tx, attempt)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub(super) fn reject_current_refresh(
+    runtime: &crate::store::Runtime,
+    current: &mut super::native_management::RuntimeConsumer<'_, '_>,
+    attempt: &str,
+) -> Result<bool> {
+    validate_id(attempt)?;
+    current.sql_write(runtime, |tx| {
+        definitive_rejection_in(tx, attempt).map(crate::store::SqlDecision::Commit)
+    })
+}
+
+fn definitive_rejection_in(tx: &Transaction<'_>, attempt: &str) -> Result<bool> {
     let row: Option<RefreshEligibility> = tx
         .query_row(
             "SELECT slot, generation, base_version, security_epoch, profile, account, affinity
@@ -281,7 +343,6 @@ pub fn mark_definitive_rejection(db: &mut Connection, attempt: &str) -> Result<b
             }
         ],
     )?;
-    tx.commit()?;
     Ok(changed == 1)
 }
 
@@ -301,17 +362,29 @@ pub fn commit_replacement(
 /// Production publication consumes a sealed, account-verified settlement. The
 /// generic custody callback exists only in this module's kernel test seam.
 pub(super) fn publish_replacement(
-    db: &mut Connection,
+    runtime: &crate::store::Runtime,
+    current: &mut super::native_management::RuntimeConsumer<'_, '_>,
     prepared: super::refresh::PreparedReplacement,
     authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>,
 ) -> Result<Option<ReplacementReceipt>> {
     let (attempt, next, receipt, base, material) = prepared.into_parts();
-    commit_replacement_with(db, &attempt, next, &receipt, |tx| {
-        ensure!(authorize(tx)?, "refresh publication authority changed");
-        super::custody::replace_tokens(tx, material, &base)
-    })
+    validate_id(&attempt)?;
+    validate_id(&receipt)?;
+    ensure!(next > 1, "invalid replacement token version");
+    let result = current.sql_write(runtime, |tx| {
+        commit_replacement_in(tx, &attempt, next, &receipt, |tx| {
+            ensure!(authorize(tx)?, "refresh publication authority changed");
+            super::custody::replace_tokens(tx, material, &base)
+        })
+        .map(crate::store::SqlDecision::Commit)
+    })?;
+    if result.is_some() {
+        super::effects::refresh_boundary(super::effects::RefreshBoundary::PublicationCommitted);
+    }
+    Ok(result)
 }
 
+#[cfg(test)]
 fn commit_replacement_with(
     db: &mut Connection,
     attempt: &str,
@@ -323,6 +396,21 @@ fn commit_replacement_with(
     validate_id(receipt)?;
     ensure!(next_version > 1, "invalid replacement token version");
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = commit_replacement_in(&tx, attempt, next_version, receipt, custody_write)?;
+    tx.commit()?;
+    if result.is_some() {
+        super::effects::refresh_boundary(super::effects::RefreshBoundary::PublicationCommitted);
+    }
+    Ok(result)
+}
+
+fn commit_replacement_in(
+    tx: &Transaction<'_>,
+    attempt: &str,
+    next_version: i64,
+    receipt: &str,
+    custody_write: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<Option<ReplacementReceipt>> {
     let row: Option<(RefreshEligibility, String)> = tx
         .query_row(
             "SELECT slot, generation, base_version, security_epoch, profile, account, affinity, state
@@ -388,10 +476,9 @@ fn commit_replacement_with(
              WHERE attempt = ?1",
             [attempt],
         )?;
-        tx.commit()?;
         return Ok(None);
     }
-    custody_write(&tx)?;
+    custody_write(tx)?;
     let changed = tx.execute(
         "UPDATE oauth_connection_slots SET token_version = ?2
          WHERE slot = ?1 AND generation = ?3 AND token_version = ?4 AND security_epoch = ?5
@@ -413,8 +500,6 @@ fn commit_replacement_with(
          receipt = ?3 WHERE attempt = ?1 AND state IN ('may_have_been_sent', 'uncertain')",
         params![attempt, next_version, receipt],
     )?;
-    tx.commit()?;
-    super::effects::refresh_boundary(super::effects::RefreshBoundary::PublicationCommitted);
     Ok(Some(ReplacementReceipt {
         attempt: attempt.to_owned(),
         next_version,

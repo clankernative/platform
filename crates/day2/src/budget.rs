@@ -175,6 +175,9 @@ pub struct UsageReconciliationReceipt {
 
 const UNITS: [&str; 4] = ["calls", "bytes", "cost_microunits", "concurrency"];
 
+mod atomic_control;
+pub(crate) use atomic_control::AtomicControl;
+
 #[path = "budget_reduction.rs"]
 mod reduction;
 pub use reduction::*;
@@ -217,19 +220,7 @@ fn require_transaction(connection: &Connection) -> Result<()> {
 /// Internal savepoints prevent partial multi-account mutation even if the caller
 /// catches an admission failure and commits other work in its outer transaction.
 fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
-    require_transaction(connection)?;
-    connection.execute_batch("SAVEPOINT day2_budget_atomic")?;
-    match body() {
-        Ok(value) => {
-            connection.execute_batch("RELEASE day2_budget_atomic")?;
-            Ok(value)
-        }
-        Err(error) => {
-            connection
-                .execute_batch("ROLLBACK TO day2_budget_atomic; RELEASE day2_budget_atomic")?;
-            Err(error)
-        }
-    }
+    atomic_control::atomic(connection, body)
 }
 
 pub(crate) fn upgrade(connection: &Connection) -> Result<()> {

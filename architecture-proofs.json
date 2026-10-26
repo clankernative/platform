@@ -4,7 +4,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:36b2842a688983287399d00068f71783cdc3f760f04b3de91e4396fc7a27afca",
+      "fingerprint": "sha256:7292ca07ec772b1c9ffe53e429172edd766413b56df5c0e181d3b20759cf9d10",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -143,8 +143,14 @@
       "methods": [
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
-        "fn refuse (& mut self)",
-        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "fn prepare_sql_commit (& mut self) -> Result < () >",
+        "pub (super) fn refuse (& mut self)",
+        "fn require_sql_write (& mut self) -> Result < () >",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_commit < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
       ],
       "factories": [
         {
@@ -159,11 +165,31 @@
         },
         {
           "owner": "PendingWriter < '_ , '_ >",
-          "signature": "fn refuse (& mut self)"
+          "signature": "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn prepare_sql_commit (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "fn require_sql_write (& mut self) -> Result < () >"
         },
         {
           "owner": "PendingWriter < '_ , '_ >",
           "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (crate) fn sql_commit < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
         },
         {
           "owner": "PendingWriter < '_ , '_ >",
@@ -172,6 +198,14 @@
         {
           "owner": "PendingWriter < '_ , '_ >",
           "signature": "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "PendingWriter < '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self"
         }
       ],
       "proof_uses": [],
@@ -196,11 +230,16 @@
         "pub (crate) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
         "fn prepare_finalization (& mut self) -> Result < () >",
-        "fn refuse (& mut self)",
+        "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (super) fn refuse (& mut self)",
         "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >",
         "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >",
         "pub (crate) fn require_signature (& mut self , expected : & FreshIntent) -> Result < () >",
-        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        "fn require_sql_write (& mut self) -> Result < () >",
+        "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_commit < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
       ],
       "factories": [
         {
@@ -223,7 +262,11 @@
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
-          "signature": "fn refuse (& mut self)"
+          "signature": "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "fn require_sql_write (& mut self) -> Result < () >"
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
@@ -251,11 +294,31 @@
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn sql_commit < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "Consumer < '_ , '_ , '_ >",
           "signature": "pub (super) fn require_context (& mut self , intent : & FreshIntent , phase : Phase) -> Result < () >"
         },
         {
           "owner": "Consumer < '_ , '_ , '_ >",
           "signature": "pub (super) fn require_management_producer (& mut self , intent : & FreshIntent) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self"
         }
       ],
       "proof_uses": [],
@@ -589,15 +652,19 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub fn authorize_and_commit_qualified_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "fn authorize_checked (db : & mut Connection , input : OutboundQualification < '_ > , now : i64) -> Result < Option < ExchangeDispatchPermit > >"
         },
         {
           "owner": null,
-          "signature": "pub(in crate::oauth) fn authorize_managed_exchange(db: &mut Connection, input: OutboundQualification<'_>, now: i64, guard: &super::management::app::FinishGuard<'_>, current: &mut super::native_management::Consumer<'_, '_, '_>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub (in crate :: oauth) fn authorize_managed_exchange (runtime : & crate :: store :: Runtime , input : OutboundQualification < '_ > , now : i64 , guard : & super :: management :: app :: FinishGuard < '_ > , current : & mut super :: native_management :: Consumer < '_ , '_ , '_ >) -> Result < Option < ExchangeDispatchPermit > >"
         },
         {
           "owner": null,
-          "signature": "fn authorize_checked(db: &mut Connection, input: OutboundQualification<'_>, now: i64, mut guard: Option<(&super::management::app::FinishGuard<'_>, &mut super::native_management::Consumer<'_, '_, '_>,)>) -> Result<Option<ExchangeDispatchPermit>>"
+          "signature": "pub fn authorize_and_commit_qualified_exchange (db : & mut Connection , input : OutboundQualification < '_ > , now : i64) -> Result < Option < ExchangeDispatchPermit > >"
+        },
+        {
+          "owner": "CheckedExchangeDispatch",
+          "signature": "fn committed (self) -> ExchangeDispatchPermit"
         }
       ]
     },
@@ -615,7 +682,7 @@
       "factories": [
         {
           "owner": null,
-          "signature": "pub(super) fn authorize_checked_dispatch(db: &mut Connection, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
+          "signature": "pub(super) fn authorize_checked_dispatch(runtime: &crate::store::Runtime, current: &mut super::native_management::RuntimeConsumer<'_, '_>, attempt: &str, authorize: impl FnOnce(&Transaction<'_>) -> Result<bool>) -> Result<Option<RefreshDispatchPermit>>"
         }
       ]
     },
@@ -4006,10 +4073,14 @@
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "fn require_sql_write (& mut self) -> Result < () >",
         "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
-        "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
       ],
       "factories": [
         {
@@ -4028,7 +4099,23 @@
         },
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "fn require_sql_write (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "fn run < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (crate) fn sql_read < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (crate) fn sql_write < T > (& mut self , runtime : & crate :: store :: Runtime , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
         },
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
@@ -4053,6 +4140,10 @@
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "pub (super) fn send < T > (& mut self , operation : impl FnOnce () -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
         }
       ],
       "proof_uses": [],
@@ -4641,6 +4732,202 @@
       "consuming_methods": [
         "rollback"
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management.rs",
+      "type_name": "SqlOwner",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn commit_read (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
+        "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self",
+        "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self",
+        "pub (crate) fn prepare (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn require_write (& mut self) -> Result < () >",
+        "pub (crate) fn rollback_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
+      ],
+      "factories": [
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn commit_read (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn prepare (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn require_write (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn rollback_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/response.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "response"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/store/native_storage.rs",
+      "type_name": "RuntimeSql",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "fn close (& mut self) -> Result < () >",
+        "fn fail (& mut self)",
+        "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db Connection) -> Result < T >) -> Result < T >",
+        "fn unit < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >",
+        "pub (crate) fn with_owner < T > (runtime : & Runtime , mut owner : SqlOwner < 'owner , 'stage , 'role , 'original > , operation : impl for < 'sql > FnOnce (& 'sql mut Self) -> Result < T >) -> Result < T >",
+        "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < SqlDecision < T > >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn with_owner < T > (runtime : & Runtime , mut owner : SqlOwner < 'owner , 'stage , 'role , 'original > , operation : impl for < 'sql > FnOnce (& 'sql mut Self) -> Result < T >) -> Result < T >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn close (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn fail (& mut self)"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn unit < T > (& mut self , operation : impl FnOnce (& mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn with_owner < T > (runtime : & Runtime , mut owner : SqlOwner < 'owner , 'stage , 'role , 'original > , operation : impl for < 'sql > FnOnce (& 'sql mut Self) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "RuntimeSql < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ >) -> Result < SqlDecision < T > >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/oauth/subject_read.rs",
+      "type_name": "SubjectReader",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: oauth) fn fixture (database : & 'owner Path) -> Self",
+        "pub (crate) fn human (runtime : & 'owner Runtime , current : & 'owner mut Consumer < 'stage , 'role , 'original >) -> Self",
+        "pub (crate) fn pending (runtime : & 'owner Runtime , current : & 'owner mut PendingWriter < 'stage , 'role >) -> Self",
+        "fn refuse (& mut self)",
+        "pub (crate) fn runtime (runtime : & 'owner Runtime , current : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self",
+        "pub (super) fn subject (& mut self , database : & Path , email : & str) -> Result < Option < String > >",
+        "pub (crate) fn with_human < T > (& mut self , operation : impl FnOnce (& mut Consumer < 'stage , 'role , 'original >) -> Result < T >) -> Result < T >",
+        "pub (crate) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < 'stage , 'role >) -> Result < T >) -> Result < T >",
+        "pub (crate) fn with_runtime < T > (& mut self , operation : impl FnOnce (& mut RuntimeConsumer < 'stage , 'role >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn human (runtime : & 'owner Runtime , current : & 'owner mut Consumer < 'stage , 'role , 'original >) -> Self"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn pending (runtime : & 'owner Runtime , current : & 'owner mut PendingWriter < 'stage , 'role >) -> Self"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn runtime (runtime : & 'owner Runtime , current : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn with_human < T > (& mut self , operation : impl FnOnce (& mut Consumer < 'stage , 'role , 'original >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn with_pending < T > (& mut self , operation : impl FnOnce (& mut PendingWriter < 'stage , 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (crate) fn with_runtime < T > (& mut self , operation : impl FnOnce (& mut RuntimeConsumer < 'stage , 'role >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "SubjectReader < 'owner , 'stage , 'role , 'original >",
+          "signature": "pub (super) fn subject (& mut self , database : & Path , email : & str) -> Result < Option < String > >"
+        }
+      ],
+      "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/budget/atomic_control.rs",
+      "type_name": "AtomicControl",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn atomic < T > (connection : & rusqlite :: Connection , body : impl FnOnce () -> anyhow :: Result < T >) -> anyhow :: Result < T >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     }
   ],
   "buffer_destructors": [

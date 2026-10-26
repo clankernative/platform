@@ -120,6 +120,39 @@ further execution and does not become current again if identical grants are
 restored. Already admitted calls may finish; settlement records their outcome
 even after revocation without invoking application completion writes. Retries
 require fresh admission, a distinct attempt identity and the original effect ID.
+For the fixed native App database, a pathname or previously admitted Runtime is
+not current storage permission. Each SQL unit borrows the actual enrolled owner
+before open/recovery, retains it through its snapshot or FIFO transaction, checks
+the same owner at commit, and closes the connection before known settlement.
+Command selection, schedule cursors, journal compaction and ordinary execution
+phases follow this rule even when their queries find no work. Immutable admitted
+declarations can exclude an absent command pump before opening the database;
+an earlier empty queue read cannot supply that exclusion.
+
+OAuth's Pending and human consumers use their existing original owner for these
+units. Intermediate writes do not finalize the original; the final consumer
+commit does so once. SQL handles cannot escape into provider calls. A failed or
+unknown commit, rollback, close, policy check or owner check refuses the unit;
+another timer, callback or identical selection cannot rearm it. These guards
+apply to trusted private Rust callbacks and do not claim hostile native-code
+containment. Native-node and live-provider qualification remain separate from
+these local ownership and replay controls. Fresh readiness subject lookups borrow
+that same owner through a sealed reader; the reader cannot acquire Current,
+return a SQL handle, or replace an original clock. Each subject snapshot closes
+before edge/key-provider work or the final consumer continuation. Production
+approval and credential fresh-owner purposes remain unavailable at this OAuth
+receiver; only connect/disconnect and the existing registration handler are
+mounted. Standalone ordinary-database approval adapters exist only in tests.
+
+SQLite's authorizer gates statement preparation. A control denial blocks later
+preparation and latches failure of the whole unit. A statement prepared before
+that denial can still execute inside the trusted callback; the final barrier
+refuses its result and requires rollback. A failed rollback remains unknown and
+terminal. Callbacks retain query data until this barrier; applications receive
+no raw SQL callback API. Internal budget savepoints use fixed commands on the
+same connection, with a separate single-command guard that ends before the
+accounting body runs.
+
 Migration/activation requires pending invocations to drain, including commands
 whose local decision committed while external delivery remains incomplete.
 

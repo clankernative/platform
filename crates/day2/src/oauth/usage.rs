@@ -39,6 +39,7 @@ pub(crate) trait Authority: Send + Sync {
         registration: &str,
         owner: &str,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<Selection>>;
     fn custody(
         &self,
@@ -47,6 +48,7 @@ pub(crate) trait Authority: Send + Sync {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<KeyLease>>;
     fn refresh_client(
         &self,
@@ -55,17 +57,23 @@ pub(crate) trait Authority: Send + Sync {
         owner: &str,
         expected: &Digest,
         now: i64,
+        subjects: &mut super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<super::refresh::ClientCredential>>;
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         app: &str,
         registration: &str,
         owner: &str,
         now: i64,
-        commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+        subjects: &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            &Selection,
+            &mut super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool>;
 }
 
+use super::admission::SubjectReader;
 use crate::{
     authority_state::AuthorityStamp,
     protocol::{Instruction, Observation, Request},
@@ -493,17 +501,16 @@ fn resolve(
         requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman,
         "unsupported connection owner"
     );
-    let mut db = store::open(runtime.db())?;
-    let snapshot = db.transaction()?;
-    runtime.check_binding(&snapshot)?;
-    require_action(
-        &snapshot,
-        runtime,
-        request,
-        crate::connection_codegen::RESOLVE,
-    )?;
-    let subject = human(&snapshot, runtime, request)?;
-    serving.commit(snapshot)?;
+    let subject = serving.sql_read(runtime, |snapshot| {
+        runtime.check_binding(snapshot)?;
+        require_action(
+            snapshot,
+            runtime,
+            request,
+            crate::connection_codegen::RESOLVE,
+        )?;
+        human(snapshot, runtime, request)
+    })?;
     let Some(subject) = subject else {
         return Ok(unavailable("PermissionDenied"));
     };
@@ -516,6 +523,7 @@ fn resolve(
         &input.registration,
         &request.context.actor,
         started,
+        &mut SubjectReader::runtime(runtime, serving),
     )?
     else {
         return Ok(unavailable("BindingUnavailable"));
@@ -544,15 +552,14 @@ fn resolve(
         "cu1_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce)
     );
-    let tx = crate::write_queue::immediate(&mut db)?;
+    serving.sql_write(runtime, |tx| {
     let now = super::effects::wall_time()?;
-    if !refresh.validate(&tx, now)? {
-        serving.commit_write(tx)?;
-        return Ok(unavailable("ReauthRequired"));
+    if !refresh.validate(tx, now)? {
+        return Ok(store::SqlDecision::Commit(unavailable("ReauthRequired")));
     }
-    runtime.check_binding(&tx)?;
+    runtime.check_binding(tx)?;
     ensure!(
-        human(&tx, runtime, request)?.as_deref() == Some(subject.as_str()),
+        human(tx, runtime, request)?.as_deref() == Some(subject.as_str()),
         "connection human changed during readiness"
     );
     let pending: bool = tx.query_row(
@@ -567,13 +574,13 @@ fn resolve(
         )
         .optional()?;
     if pending && status.as_deref() != Some("active") {
-        return Ok(unavailable("AccountApprovalRequired"));
+        return Ok(store::SqlDecision::Rollback(unavailable("AccountApprovalRequired")));
     }
     if status.as_deref() == Some("disabled") {
-        return Ok(unavailable("NeedsConnection"));
+        return Ok(store::SqlDecision::Rollback(unavailable("NeedsConnection")));
     }
     let claims = match capture(
-        &tx,
+        tx,
         &selection,
         request,
         runtime,
@@ -582,15 +589,15 @@ fn resolve(
         now,
     ) {
         Ok(Some(claims)) => claims,
-        Ok(None) => return Ok(unavailable("NeedsConnection")),
-        Err(_) => return Ok(unavailable("ReauthRequired")),
+        Ok(None) => return Ok(store::SqlDecision::Rollback(unavailable("NeedsConnection"))),
+        Err(_) => return Ok(store::SqlDecision::Rollback(unavailable("ReauthRequired"))),
     };
     tx.execute("DELETE FROM oauth_use_handles WHERE json_extract(claims,'$.expires_at') <= ?1 OR invocation IN (SELECT id FROM day2_invocations WHERE status != 'pending')", [now])?;
     let count: i64 = tx.query_row("SELECT count(*) FROM oauth_use_handles", [], |row| {
         row.get(0)
     })?;
     if count >= MAX_HANDLES {
-        return Ok(unavailable("CapacityDeferred"));
+        return Ok(store::SqlDecision::Rollback(unavailable("CapacityDeferred")));
     }
     tx.execute(
         "INSERT INTO oauth_use_handles VALUES(?1,?2,?3)",
@@ -600,8 +607,8 @@ fn resolve(
             serde_json::to_string(&claims)?
         ],
     )?;
-    serving.commit_write(tx)?;
-    Ok(json!({"Available": reference}).to_string())
+    Ok(store::SqlDecision::Commit(json!({"Available": reference}).to_string()))
+    })
 }
 
 pub(crate) fn execute(
@@ -657,32 +664,36 @@ fn execute_current(
     );
     let input: ReadInput = crate::json::decode(instruction.data.as_bytes())?;
     let started = super::effects::wall_time()?;
-    let mut db = store::open(runtime.db())?;
-    let snapshot = db.transaction()?;
-    runtime.check_binding(&snapshot)?;
-    require_action(
-        &snapshot,
-        runtime,
-        request,
-        crate::connection_codegen::LIST_EVENTS,
-    )?;
-    let mut claims = load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        started,
-    )?;
-    serving.commit(snapshot)?;
+    let mut claims = serving.sql_read(runtime, |snapshot| {
+        runtime.check_binding(snapshot)?;
+        require_action(
+            snapshot,
+            runtime,
+            request,
+            crate::connection_codegen::LIST_EVENTS,
+        )?;
+        load(
+            snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            started,
+        )
+    })?;
     if !input.window.valid() {
         return Ok(json!("InvalidWindow").to_string());
     }
     let Some(authority) = runtime.connections.as_deref() else {
         return Ok(unavailable("BindingUnavailable"));
     };
-    let Some(selection) =
-        authority.current(runtime.app(), &input.registration, &claims.actor, started)?
+    let Some(selection) = authority.current(
+        runtime.app(),
+        &input.registration,
+        &claims.actor,
+        started,
+        &mut SubjectReader::runtime(runtime, serving),
+    )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
@@ -694,9 +705,10 @@ fn execute_current(
     );
     let selected_at = super::effects::wall_time()?;
     if selected_at < started {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
     serving.check()?;
@@ -706,65 +718,74 @@ fn execute_current(
         &claims.actor,
         &claims.selection,
         selected_at,
+        &mut SubjectReader::runtime(runtime, serving),
     )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
     let now = super::effects::wall_time()?;
     if now < selected_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let snapshot = crate::write_queue::immediate(&mut db)?;
-    let current = load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        now,
-    )?;
-    ensure!(
-        current == claims,
-        "connection use changed during key retrieval"
-    );
-    let (intent, binding) = activation(&snapshot, &claims, &selection)?;
-    serving.check()?;
-    let token = super::custody::load_access(
-        &snapshot,
-        &key,
-        &intent,
-        &binding,
-        &claims.account,
-        claims.token_version,
-        now,
-    )?;
-    if let Some(token) = &token {
-        claims.expires_at = claims.expires_at.min(token.expires_at);
-        snapshot.execute(
-            "UPDATE oauth_use_handles SET claims=?1 WHERE reference=?2 AND invocation=?3",
-            params![
-                serde_json::to_string(&claims)?,
-                input.reference,
-                request.context.invocation_id
-            ],
+    let token = serving.sql_write(runtime, |snapshot| {
+        let current = load(
+            snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            now,
         )?;
-    }
-    serving.commit_write(snapshot)?;
+        ensure!(
+            current == claims,
+            "connection use changed during key retrieval"
+        );
+        let (intent, binding) = activation(snapshot, &claims, &selection)?;
+        let token = super::custody::load_access(
+            snapshot,
+            &key,
+            &intent,
+            &binding,
+            &claims.account,
+            claims.token_version,
+            now,
+        )?;
+        if let Some(token) = &token {
+            claims.expires_at = claims.expires_at.min(token.expires_at);
+            snapshot.execute(
+                "UPDATE oauth_use_handles SET claims=?1 WHERE reference=?2 AND invocation=?3",
+                params![
+                    serde_json::to_string(&claims)?,
+                    input.reference,
+                    request.context.invocation_id
+                ],
+            )?;
+        }
+        Ok(store::SqlDecision::Commit(token))
+    })?;
     let Some(token) = token else {
         return Ok(unavailable("ReauthRequired"));
     };
     let result = serving.send(|| super::calendar::list(&token, &input.window))?;
     let at = super::effects::wall_time()?;
     if at < now || at >= token.expires_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let Some(current) = authority.current(runtime.app(), &input.registration, &claims.actor, at)?
+    let Some(current) = authority.current(
+        runtime.app(),
+        &input.registration,
+        &claims.actor,
+        at,
+        &mut SubjectReader::runtime(runtime, serving),
+    )?
     else {
         return Ok(unavailable("BindingUnavailable"));
     };
@@ -774,21 +795,23 @@ fn execute_current(
     );
     let completed_at = super::effects::wall_time()?;
     if completed_at < at || completed_at >= token.expires_at {
-        let tx = crate::write_queue::immediate(&mut db)?;
-        refuse(&tx, &claims)?;
-        serving.commit_write(tx)?;
+        serving.sql_write(runtime, |tx| {
+            refuse(tx, &claims)?;
+            Ok(store::SqlDecision::Commit(()))
+        })?;
         return Ok(unavailable("ReauthRequired"));
     }
-    let snapshot = db.transaction()?;
-    load(
-        &snapshot,
-        runtime,
-        request,
-        &input.registration,
-        &input.reference,
-        completed_at,
-    )?;
-    serving.commit(snapshot)?;
+    serving.sql_read(runtime, |snapshot| {
+        load(
+            snapshot,
+            runtime,
+            request,
+            &input.registration,
+            &input.reference,
+            completed_at,
+        )?;
+        Ok(())
+    })?;
     Ok(result)
 }
 
@@ -887,6 +910,121 @@ mod tests {
         request: Request,
         claims: Claims,
         reference: String,
+    }
+
+    #[test]
+    fn native_sql_callers_require_the_real_owner_before_open_or_dispatch() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let mut contract = fixture.runtime.artifact().contract().clone();
+        contract.operations[0].kind = "command".into();
+        let runtime = Runtime::from_artifact_for_tests(
+            fixture.runtime.instance_path().to_owned(),
+            fixture.runtime.app().into(),
+            "/state/day2-native/day2-initial.sqlite".into(),
+            LoadedArtifact::from_contract_for_tests(
+                fixture.runtime.artifact().id().into(),
+                fixture.runtime.artifact().directory().to_owned(),
+                contract,
+            ),
+        )?;
+        let entered = std::cell::Cell::new(false);
+        assert!(
+            runtime
+                .sql_read(|_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(
+            runtime
+                .sql_write(|_| {
+                    entered.set(true);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!entered.get());
+        let schedule = crate::schedules::Schedule {
+            app: runtime.app().into(),
+            name: "guarded".into(),
+            interval_ms: 60_000,
+            anchor_hour: None,
+            missed: crate::schedules::Missed::Coalesce,
+        };
+        for result in [
+            crate::invocations::drain(&runtime, 8).map(|_| ()),
+            crate::invocations::children(&runtime, "absent").map(|_| ()),
+            crate::invocations::status(&runtime, "absent", "alice").map(|_| ()),
+            crate::journal::compact(&runtime, 100, 500).map(|_| ()),
+            runtime.execute("absent", store::Fault::None).map(|_| ()),
+            runtime.verification_snapshot().map(|_| ()),
+            crate::schedules::advance(&runtime, &schedule, "alice", "read", &json!({}), 100_000)
+                .map(|_| ()),
+        ] {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "native runtime executor missing"
+            );
+        }
+        assert_eq!(
+            store::open(runtime.db()).unwrap_err().to_string(),
+            "native_runtime_sql_owner_required"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_query_only_declarations_exclude_command_pump_without_storage() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let runtime = Runtime::from_artifact_for_tests(
+            fixture.runtime.instance_path().to_owned(),
+            fixture.runtime.app().into(),
+            "/state/day2-native/day2-initial.sqlite".into(),
+            fixture.runtime.artifact().clone(),
+        )?;
+        assert!(crate::invocations::drain(&runtime, 8)?.is_empty());
+        // A declaration can exclude command work; it cannot authorize any
+        // other native read, including an empty journal or invocation lookup.
+        assert!(crate::journal::compact(&runtime, 100, 500).is_err());
+        assert!(crate::invocations::children(&runtime, "absent").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_sql_units_keep_one_snapshot_and_confirm_explicit_rollback() -> Result<()> {
+        // Adapter conformance only. This ordinary fixture supplies no native
+        // participant, Current phase or enrolled role.
+        let fixture = Fixture::new()?;
+        let writer = store::open(fixture.runtime.db())?;
+        writer.execute_batch(
+            "CREATE TABLE unit_probe(value INTEGER NOT NULL) STRICT;
+            INSERT INTO unit_probe VALUES(1)",
+        )?;
+        let read_value = |db: &Connection| -> Result<i64> {
+            Ok(db.query_row("SELECT value FROM unit_probe", [], |row| row.get(0))?)
+        };
+        let values = fixture.runtime.sql_read(|snapshot| {
+            let before = read_value(snapshot)?;
+            // A distinct real SQLite writer advances the file while this
+            // unit retains its original WAL read snapshot.
+            writer.execute("UPDATE unit_probe SET value=2", [])?;
+            Ok((before, read_value(snapshot)?))
+        })?;
+        assert_eq!(values, (1, 1));
+        assert_eq!(read_value(&writer)?, 2);
+        let result = fixture.runtime.sql_decide(|tx| {
+            tx.execute("UPDATE unit_probe SET value=3", [])?;
+            Ok(store::SqlDecision::Rollback("rejected"))
+        })?;
+        assert_eq!(result, "rejected");
+        assert_eq!(read_value(&writer)?, 2);
+        fixture.runtime.sql_write(|tx| {
+            tx.execute("UPDATE unit_probe SET value=4", [])?;
+            Ok(())
+        })?;
+        assert_eq!(read_value(&writer)?, 4);
+        Ok(())
     }
 
     impl Fixture {
@@ -1309,22 +1447,27 @@ mod tests {
             _: &str,
             _: &Digest,
             _: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<super::super::refresh::ClientCredential>> {
             anyhow::bail!("unexpected refresh of an unexpired original test token")
         }
 
-        fn with_current(
+        fn with_current<'owner, 'stage, 'role, 'original>(
             &self,
             app: &str,
             registration: &str,
             owner: &str,
             now: i64,
-            commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+            subjects: &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+            commit: &mut dyn FnMut(
+                &Selection,
+                &mut SubjectReader<'owner, 'stage, 'role, 'original>,
+            ) -> Result<bool>,
         ) -> Result<bool> {
-            let Some(current) = self.current(app, registration, owner, now)? else {
+            let Some(current) = self.current(app, registration, owner, now, subjects)? else {
                 return Ok(false);
             };
-            commit(&current)
+            commit(&current, subjects)
         }
 
         fn current(
@@ -1333,6 +1476,7 @@ mod tests {
             registration: &str,
             owner: &str,
             _: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<Selection>> {
             ensure!(
                 app == "app" && registration == "calendar" && owner == "alice@example.com",
@@ -1369,6 +1513,7 @@ mod tests {
             _: &str,
             expected: &Digest,
             now: i64,
+            _: &mut SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<KeyLease>> {
             assert_eq!(&self.selection.identity()?, expected);
             let mut db = store::open(&self.port.db)?;
@@ -1631,7 +1776,6 @@ mod tests {
                             now: 2
                         },
                         &key,
-                        None,
                     )?,
                     CallbackOutcome::CodeAccepted { .. }
                 ));

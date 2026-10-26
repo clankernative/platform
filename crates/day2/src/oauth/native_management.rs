@@ -527,6 +527,51 @@ enum PendingSource<'a, 'role> {
 }
 
 impl PendingWriter<'_, '_> {
+    pub(crate) fn sql_read<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::pending(self, SqlCommit::Intermediate),
+            |sql| sql.read(operation),
+        )
+    }
+
+    pub(crate) fn sql_write<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(
+            &'db rusqlite::Transaction<'_>,
+        ) -> Result<crate::store::SqlDecision<T>>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::pending(self, SqlCommit::Intermediate),
+            |sql| sql.write(operation),
+        )
+    }
+
+    pub(crate) fn sql_commit<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::pending(self, SqlCommit::Final),
+            |sql| sql.write(|tx| operation(tx).map(crate::store::SqlDecision::Commit)),
+        )
+    }
+
+    fn prepare_sql_commit(&mut self) -> Result<()> {
+        ensure!(!self.committed, "native Pending commit already attempted");
+        self.check()?;
+        self.committed = true;
+        Ok(())
+    }
+
     pub(super) fn check(&mut self) -> Result<()> {
         match &mut self.source {
             PendingSource::Native {
@@ -549,9 +594,7 @@ impl PendingWriter<'_, '_> {
 
     pub(super) fn commit(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
         let result = (|| {
-            ensure!(!self.committed, "native Pending commit already attempted");
-            self.check()?;
-            self.committed = true;
+            self.prepare_sql_commit()?;
             tx.commit()?;
             self.check()
         })();
@@ -594,7 +637,7 @@ impl PendingWriter<'_, '_> {
         }
     }
 
-    fn refuse(&mut self) {
+    pub(super) fn refuse(&mut self) {
         match &mut self.source {
             PendingSource::Native {
                 original, current, ..
@@ -922,6 +965,8 @@ pub(crate) enum RuntimePhase {
     Registration,
     Read,
     Refresh,
+    SqlRead,
+    SqlWrite,
 }
 
 /// Autonomous operation borrow. It has no human original, signature factory or
@@ -930,6 +975,7 @@ pub(crate) enum RuntimePhase {
 pub(crate) struct RuntimeConsumer<'a, 'role> {
     source: RuntimeSource<'a, 'role>,
     runtime: Option<&'a crate::store::Runtime>,
+    phase: Option<RuntimePhase>,
 }
 
 enum RuntimeSource<'a, 'role> {
@@ -942,7 +988,282 @@ enum RuntimeSource<'a, 'role> {
     Simulated(&'a mut RoleStage<'role>),
 }
 
+#[derive(Clone, Copy)]
+enum SqlCommit {
+    Intermediate,
+    Final,
+}
+
+// The adapter is closed here to the three existing owning borrows. It cannot
+// be built from Runtime metadata, a Boolean, a receipt or a serialized value.
+pub(crate) struct SqlOwner<'owner, 'stage, 'role, 'original> {
+    source: SqlOwnerSource<'owner, 'stage, 'role, 'original>,
+    commit: SqlCommit,
+}
+
+enum SqlOwnerSource<'owner, 'stage, 'role, 'original> {
+    Pending(&'owner mut PendingWriter<'stage, 'role>),
+    Human(&'owner mut Consumer<'stage, 'role, 'original>),
+    Runtime(&'owner mut RuntimeConsumer<'stage, 'role>),
+}
+
+impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original> {
+    fn runtime(owner: &'owner mut RuntimeConsumer<'stage, 'role>) -> Self {
+        Self {
+            source: SqlOwnerSource::Runtime(owner),
+            commit: SqlCommit::Intermediate,
+        }
+    }
+
+    fn pending(owner: &'owner mut PendingWriter<'stage, 'role>, commit: SqlCommit) -> Self {
+        Self {
+            source: SqlOwnerSource::Pending(owner),
+            commit,
+        }
+    }
+
+    fn human(owner: &'owner mut Consumer<'stage, 'role, 'original>, commit: SqlCommit) -> Self {
+        Self {
+            source: SqlOwnerSource::Human(owner),
+            commit,
+        }
+    }
+
+    pub(crate) fn prepare(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.prepare_sql(runtime),
+            SqlOwnerSource::Human(owner) => owner.prepare_sql(runtime),
+            SqlOwnerSource::Runtime(owner) => owner.prepare_sql(runtime),
+        }
+    }
+
+    pub(crate) fn check(&mut self) -> Result<()> {
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.check(),
+            SqlOwnerSource::Human(owner) => owner.check(),
+            SqlOwnerSource::Runtime(owner) => owner.check(),
+        }
+    }
+
+    pub(crate) fn require_write(&mut self) -> Result<()> {
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.require_sql_write(),
+            SqlOwnerSource::Human(owner) => owner.require_sql_write(),
+            SqlOwnerSource::Runtime(owner) => owner.require_sql_write(),
+        }
+    }
+
+    pub(crate) fn commit_read(&mut self, tx: rusqlite::Transaction<'_>) -> Result<()> {
+        self.check()?;
+        tx.commit()?;
+        self.check()
+    }
+
+    pub(crate) fn commit_write(
+        &mut self,
+        tx: crate::write_queue::WriteTransaction<'_>,
+    ) -> Result<()> {
+        self.check()?;
+        if matches!(self.commit, SqlCommit::Final) {
+            match &mut self.source {
+                SqlOwnerSource::Pending(owner) => owner.prepare_sql_commit()?,
+                SqlOwnerSource::Human(owner) => owner.prepare_finalization()?,
+                SqlOwnerSource::Runtime(_) => {
+                    anyhow::bail!("runtime SQL cannot finalize a human or Pending original")
+                }
+            }
+        }
+        tx.commit()?;
+        self.check()
+    }
+
+    pub(crate) fn rollback_write(
+        &mut self,
+        tx: crate::write_queue::WriteTransaction<'_>,
+    ) -> Result<()> {
+        self.check()?;
+        tx.rollback()?;
+        self.check()
+    }
+
+    pub(crate) fn refuse(&mut self) {
+        match &mut self.source {
+            SqlOwnerSource::Pending(owner) => owner.refuse(),
+            SqlOwnerSource::Human(owner) => owner.refuse(),
+            SqlOwnerSource::Runtime(owner) => owner.refuse(),
+        }
+    }
+}
+
+// Selection DATA is compared with an actual enrolled App stage below. Parsing
+// it supplies no native owner, file, clock or current epoch authority.
+fn sql_runtime_scope(runtime: &crate::store::Runtime) -> Result<AuthorityScope> {
+    let mut parts = runtime.scope().split('/');
+    let installation = parts.next().context("native SQL installation missing")?;
+    let environment = parts.next().context("native SQL environment missing")?;
+    let app = parts.next().context("native SQL app missing")?;
+    ensure!(
+        app == runtime.app() && parts.next().is_none(),
+        "native SQL runtime selection changed"
+    );
+    Ok(AuthorityScope {
+        installation: installation.to_owned().try_into()?,
+        environment: environment.to_owned().try_into()?,
+        app: app.to_owned().try_into()?,
+    })
+}
+
 impl RuntimeConsumer<'_, '_> {
+    fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        self.require_runtime(runtime)?;
+        ensure!(self.phase.is_some(), "native SQL runtime phase absent");
+        match &mut self.source {
+            RuntimeSource::Native { stage, .. } => {
+                ensure!(runtime.uses_native_storage(), "native SQL file changed");
+                stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
+            }
+            RuntimeSource::Ordinary => {
+                ensure!(!runtime.uses_native_storage(), "native SQL owner missing");
+            }
+            #[cfg(test)]
+            RuntimeSource::Simulated(_) => {
+                ensure!(!runtime.uses_native_storage(), "scripted SQL owner refused");
+            }
+        }
+        // run() already armed this SAME scope before entering its callback.
+        // Calling Current.arm again would permanently refuse the real owner.
+        self.check()
+    }
+
+    fn require_sql_write(&mut self) -> Result<()> {
+        ensure!(
+            matches!(
+                self.phase,
+                Some(
+                    RuntimePhase::Registration
+                        | RuntimePhase::Read
+                        | RuntimePhase::Refresh
+                        | RuntimePhase::SqlWrite
+                )
+            ),
+            "native SQL write purpose refused"
+        );
+        Ok(())
+    }
+}
+
+impl PendingWriter<'_, '_> {
+    fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(!self.committed, "native Pending commit already attempted");
+        match &mut self.source {
+            PendingSource::Native { stage, .. } => {
+                ensure!(
+                    runtime.uses_native_storage(),
+                    "native Pending SQL file changed"
+                );
+                stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
+            }
+            #[cfg(test)]
+            PendingSource::Simulated { .. } => {
+                ensure!(
+                    !runtime.uses_native_storage(),
+                    "scripted Pending SQL owner refused"
+                );
+            }
+        }
+        // PendingWriter::run armed the genuine scope before this callback.
+        self.check()
+    }
+
+    fn require_sql_write(&mut self) -> Result<()> {
+        ensure!(!self.committed, "native Pending commit already attempted");
+        self.check()
+    }
+}
+
+impl Consumer<'_, '_, '_> {
+    fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(
+            !self.finalized,
+            "native consumer finalization already attempted"
+        );
+        ensure!(
+            self.original.intent.app() == runtime.app(),
+            "native human SQL app changed"
+        );
+        match &mut self.source {
+            ConsumerSource::Native { stage, .. } => {
+                ensure!(
+                    runtime.uses_native_storage(),
+                    "native human SQL file changed"
+                );
+                stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
+            }
+            #[cfg(test)]
+            ConsumerSource::Simulated(_) => {
+                ensure!(
+                    !runtime.uses_native_storage(),
+                    "scripted human SQL owner refused"
+                );
+            }
+        }
+        if self.armed.get() {
+            self.check()
+        } else {
+            // Consumer::run only prechecks. Its FIRST actual SQL access arms
+            // once; subsequent units borrow/check that same armed original.
+            self.arm()
+        }
+    }
+
+    fn require_sql_write(&mut self) -> Result<()> {
+        ensure!(
+            !self.finalized,
+            "native consumer finalization already attempted"
+        );
+        self.check()
+    }
+}
+
+pub(crate) fn with_runtime_sql<T>(
+    runtime: &crate::store::Runtime,
+    phase: RuntimePhase,
+    operation: impl for<'sql, 'stage, 'role, 'original> FnOnce(
+        &mut crate::store::RuntimeSql<'sql, 'stage, 'role, 'original>,
+    ) -> Result<T>,
+) -> Result<T> {
+    ensure!(
+        matches!(phase, RuntimePhase::SqlRead | RuntimePhase::SqlWrite),
+        "explicit runtime SQL purpose required"
+    );
+    with_runtime_consumer(runtime, phase, |current| {
+        crate::store::RuntimeSql::with_owner(runtime, SqlOwner::runtime(current), operation)
+    })
+}
+
+impl RuntimeConsumer<'_, '_> {
+    pub(crate) fn sql_read<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(runtime, SqlOwner::runtime(self), |sql| {
+            sql.read(operation)
+        })
+    }
+
+    pub(crate) fn sql_write<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(
+            &'db rusqlite::Transaction<'_>,
+        ) -> Result<crate::store::SqlDecision<T>>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(runtime, SqlOwner::runtime(self), |sql| {
+            sql.write(operation)
+        })
+    }
+
     pub(super) fn require_runtime(&self, runtime: &crate::store::Runtime) -> Result<()> {
         ensure!(
             self.runtime
@@ -1048,6 +1369,8 @@ pub(super) fn with_runtime_consumer<T>(
         }
         RuntimePhase::Read => crate::security_epoch::serving::RuntimeServingUse::Read,
         RuntimePhase::Refresh => crate::security_epoch::serving::RuntimeServingUse::Refresh,
+        RuntimePhase::SqlRead => crate::security_epoch::serving::RuntimeServingUse::SqlRead,
+        RuntimePhase::SqlWrite => crate::security_epoch::serving::RuntimeServingUse::SqlWrite,
         RuntimePhase::InitialStorage => {
             anyhow::bail!("native initial admission requires its dedicated factory")
         }
@@ -1059,6 +1382,7 @@ pub(super) fn with_runtime_consumer<T>(
                 RuntimeConsumer {
                     source: RuntimeSource::Simulated(stage),
                     runtime: Some(runtime),
+                    phase: Some(phase),
                 }
                 .run(operation)
             });
@@ -1066,6 +1390,7 @@ pub(super) fn with_runtime_consumer<T>(
         return RuntimeConsumer {
             source: RuntimeSource::Ordinary,
             runtime: Some(runtime),
+            phase: Some(phase),
         }
         .run(operation);
     }
@@ -1092,6 +1417,7 @@ pub(super) fn with_runtime_consumer<T>(
                         stage: same,
                     },
                     runtime: Some(runtime),
+                    phase: Some(phase),
                 }
                 .run(operation)
             },
@@ -1162,6 +1488,7 @@ fn with_runtime_response<T>(
                         stage: same,
                     },
                     runtime: None,
+                    phase: None,
                 };
                 consumer.run(|_| operation())
             },
@@ -1307,6 +1634,44 @@ enum ConsumerSource<'stage, 'role> {
 }
 
 impl Consumer<'_, '_, '_> {
+    pub(crate) fn sql_read<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::human(self, SqlCommit::Intermediate),
+            |sql| sql.read(operation),
+        )
+    }
+
+    pub(crate) fn sql_write<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(
+            &'db rusqlite::Transaction<'_>,
+        ) -> Result<crate::store::SqlDecision<T>>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::human(self, SqlCommit::Intermediate),
+            |sql| sql.write(operation),
+        )
+    }
+
+    pub(crate) fn sql_commit<T>(
+        &mut self,
+        runtime: &crate::store::Runtime,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        crate::store::RuntimeSql::with_owner(
+            runtime,
+            SqlOwner::human(self, SqlCommit::Final),
+            |sql| sql.write(|tx| operation(tx).map(crate::store::SqlDecision::Commit)),
+        )
+    }
+
     /// A provider observation is consumed only inside the genuine Shell
     /// session/signature phase for this exact retained original. No simulator,
     /// serialized observation or registry DATA can supply native permission.
@@ -1425,7 +1790,7 @@ impl Consumer<'_, '_, '_> {
         self.check()
     }
 
-    fn refuse(&mut self) {
+    pub(super) fn refuse(&mut self) {
         self.original.refuse();
         match &mut self.source {
             ConsumerSource::Native { current, .. } => current.refuse(),
@@ -2354,6 +2719,8 @@ mod tests {
                 RuntimePhase::Registration,
                 RuntimePhase::Read,
                 RuntimePhase::Refresh,
+                RuntimePhase::SqlRead,
+                RuntimePhase::SqlWrite,
             ] {
                 let entered = std::cell::Cell::new(false);
                 let error = with_runtime_consumer(&metadata_only, phase, |_| {
@@ -2386,6 +2753,233 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    fn sql_fixture() -> Result<(tempfile::TempDir, crate::store::Runtime)> {
+        let directory = tempfile::tempdir()?;
+        let (runtime, _, _) = super::super::admission::tests::management_fixture(directory.path())?;
+        let db = crate::store::open(runtime.db())?;
+        db.pragma_update(None, "journal_mode", "WAL")?;
+        db.execute_batch("CREATE TABLE sql_guard_probe(value INTEGER PRIMARY KEY)")?;
+        drop(db);
+        Ok((directory, runtime))
+    }
+
+    #[test]
+    fn runtime_sql_snapshot_commit_and_deliberate_rollback_use_real_sqlite() -> Result<()> {
+        use crate::store::SqlDecision::{Commit, Rollback};
+        let (_directory, runtime) = sql_fixture()?;
+        with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+            sql.write(|tx| {
+                tx.execute("INSERT INTO sql_guard_probe VALUES(1)", [])?;
+                Ok(Commit(()))
+            })?;
+            let other = crate::store::open(runtime.db())?;
+            sql.read(|db| {
+                assert!(
+                    !db.is_autocommit(),
+                    "the facade owns one consistent snapshot"
+                );
+                let before: i64 =
+                    db.query_row("SELECT count(*) FROM sql_guard_probe", [], |r| r.get(0))?;
+                other.execute("INSERT INTO sql_guard_probe VALUES(2)", [])?;
+                let after: i64 =
+                    db.query_row("SELECT count(*) FROM sql_guard_probe", [], |r| r.get(0))?;
+                assert_eq!((before, after), (1, 1));
+                let foreign_keys: Vec<_> = db
+                    .prepare("PRAGMA foreign_key_check")?
+                    .query_map([], |_| Ok(()))?
+                    .collect::<rusqlite::Result<_>>()?;
+                assert!(foreign_keys.is_empty());
+                Ok(())
+            })?;
+            assert_eq!(
+                sql.write(|tx| {
+                    tx.execute("INSERT INTO sql_guard_probe VALUES(3)", [])?;
+                    Ok(Rollback("deliberate exclusion"))
+                })?,
+                "deliberate exclusion"
+            );
+            sql.read(|db| {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM sql_guard_probe", [], |r| r
+                        .get::<_, i64>(0))?,
+                    2
+                );
+                Ok(())
+            })
+        })?;
+        let db = crate::store::open(runtime.db())?;
+        db.execute("INSERT INTO sql_guard_probe VALUES(4)", [])?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sql_swallowed_control_denial_cannot_return_commit_or_known_data() -> Result<()> {
+        use crate::store::SqlDecision::Commit;
+        for statement in [
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT escaped",
+            "RELEASE escaped",
+            "ATTACH DATABASE ':memory:' AS escaped",
+            "DETACH DATABASE main",
+            "PRAGMA query_only=OFF",
+            "PRAGMA writable_schema=ON",
+            "CREATE TABLE escaped(value INTEGER)",
+        ] {
+            let (_directory, runtime) = sql_fixture()?;
+            let outcome = with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+                let failed = sql.write(|tx| {
+                    tx.execute("INSERT INTO sql_guard_probe VALUES(1)", [])?;
+                    assert!(tx.execute_batch(statement).is_err(), "{statement}");
+                    Ok(Commit(()))
+                });
+                assert!(failed.is_err(), "a swallowed control denial cannot commit");
+                assert!(
+                    sql.read(|_| Ok(())).is_err(),
+                    "this actual facade stays refused"
+                );
+                Ok(())
+            });
+            assert!(outcome.is_err(), "{statement}");
+            let db = crate::store::open(runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM sql_guard_probe", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sql_prepared_before_denial_cannot_commit_or_return_known_data() -> Result<()> {
+        use crate::store::SqlDecision::Commit;
+        let (_directory, runtime) = sql_fixture()?;
+        let outcome = with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+            let failed = sql.write(|tx| {
+                let mut write = tx.prepare("INSERT INTO sql_guard_probe VALUES(1)")?;
+                let mut read = tx.prepare("SELECT 37")?;
+                assert!(tx.execute_batch("COMMIT").is_err());
+                // The authorizer gates preparation, not ordinary VM stepping.
+                // The mandatory whole-unit barrier must discard even these
+                // already-prepared effects and this caught-denial result.
+                assert_eq!(write.execute([])?, 1);
+                assert_eq!(read.query_row([], |row| row.get::<_, i64>(0))?, 37);
+                Ok(Commit("poisoned prepared result"))
+            });
+            assert!(failed.is_err());
+            assert!(sql.read(|_| Ok("later unit")).is_err());
+            Ok(())
+        });
+        assert!(outcome.is_err());
+        let db = crate::store::open(runtime.db())?;
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM sql_guard_probe", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sql_read_denies_dml_and_sql_read_purpose_cannot_write() -> Result<()> {
+        use crate::store::SqlDecision::Commit;
+        for statement in [
+            "INSERT INTO sql_guard_probe VALUES(1)",
+            "UPDATE sql_guard_probe SET value=2",
+            "DELETE FROM sql_guard_probe",
+        ] {
+            let (_directory, runtime) = sql_fixture()?;
+            assert!(
+                with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+                    sql.read(|db| {
+                        assert!(db.execute_batch(statement).is_err());
+                        Ok(())
+                    })
+                })
+                .is_err(),
+                "{statement}"
+            );
+        }
+        let (_directory, runtime) = sql_fixture()?;
+        assert!(
+            with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+                sql.write(|_| Ok(Commit(())))
+            })
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sql_raw_schema_refusal_preserves_the_lifetime_progress_hook() -> Result<()> {
+        let (_directory, runtime) = sql_fixture()?;
+        let result = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+            sql.read(|db| {
+                // Raw admission must fail at its first foreign_keys update,
+                // before entering nested admission or touching its raw hook.
+                assert!(crate::oauth::schema::admit(db, |_| Ok(())).is_err());
+                // Catching a control denial cannot prepare any further SQL,
+                // including reads. Separate ordinary-adapter conformance below
+                // verifies the permanent hook without continuing this owner.
+                let error = db
+                    .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .unwrap_err();
+                assert_eq!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+                );
+                Ok(())
+            })
+        });
+        assert!(
+            result.is_err(),
+            "swallowing both errors must still refuse the owner"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_sql_error_and_caught_panic_rollback_and_latch_the_same_facade() -> Result<()> {
+        use crate::store::SqlDecision::Commit;
+        let (_directory, runtime) = sql_fixture()?;
+        let error = with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+            sql.write::<()>(|tx| {
+                tx.execute("INSERT INTO sql_guard_probe VALUES(1)", [])?;
+                anyhow::bail!("actual callback failure")
+            })
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "actual callback failure");
+        let error = with_runtime_sql(&runtime, RuntimePhase::SqlRead, |sql| {
+            sql.read::<()>(|_| anyhow::bail!("actual read refusal"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "actual read refusal");
+        assert!(
+            with_runtime_sql(&runtime, RuntimePhase::SqlWrite, |sql| {
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sql.write::<()>(|tx| {
+                        tx.execute("INSERT INTO sql_guard_probe VALUES(2)", [])?;
+                        panic!("actual callback panic")
+                    })
+                }));
+                assert!(panic.is_err());
+                assert!(sql.write(|_| Ok(Commit(()))).is_err());
+                Ok(())
+            })
+            .is_err()
+        );
+        let db = crate::store::open(runtime.db())?;
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM sql_guard_probe", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
     }
 
     fn original_intent(attempt: &str, deadline: i64) -> Result<FreshIntent> {
@@ -3688,5 +4282,179 @@ pub(crate) mod fixtures {
             }
             use_current(&mut stage, &mut original)
         })
+    }
+
+    mod sql_terminal_tests {
+        use super::*;
+
+        fn database() -> Result<(tempfile::TempDir, crate::store::Runtime)> {
+            let directory = tempfile::tempdir()?;
+            let (runtime, _, _) =
+                super::super::super::admission::tests::management_fixture(directory.path())?;
+            let db = crate::store::open(runtime.db())?;
+            db.execute_batch("CREATE TABLE terminal_sql_probe(value INTEGER)")?;
+            drop(db);
+            Ok((directory, runtime))
+        }
+
+        // Rename the actual closed database after COMMIT. A wrongly admitted
+        // new ordinary open would create a replacement even before binding
+        // validation or the callback. A callback-only assertion misses that.
+        fn remove_selection(runtime: &crate::store::Runtime) -> Result<std::path::PathBuf> {
+            let preserved = runtime.db().with_extension("committed.sqlite");
+            std::fs::rename(runtime.db(), &preserved)?;
+            assert!(!runtime.db().exists());
+            Ok(preserved)
+        }
+
+        fn committed_once(
+            runtime: &crate::store::Runtime,
+            preserved: &std::path::Path,
+        ) -> Result<()> {
+            assert!(
+                !runtime.db().exists(),
+                "a consumed SQL owner must refuse BEFORE open"
+            );
+            let db = rusqlite::Connection::open_with_flags(
+                preserved,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            assert_eq!(
+                db.query_row("SELECT sum(value) FROM terminal_sql_probe", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))?,
+                1
+            );
+            db.close().map_err(|(_, error)| error)?;
+            Ok(())
+        }
+
+        #[test]
+        fn runtime_sql_final_commit_closes_pending_before_new_read_or_write_open() -> Result<()> {
+            for write in [false, true] {
+                let (_directory, runtime) = database()?;
+                let world =
+                    super::super::super::simulation::World::new(if write { 619 } else { 618 });
+                super::super::super::effects::scope(world, || -> Result<()> {
+                    select_app_scope(&sql_runtime_scope(&runtime)?)?;
+                    let mut original = FIXTURE.with(|slot| {
+                        capture(
+                            slot.borrow_mut().as_mut().context("SQL fixture missing")?,
+                            NativeRole::AppHost,
+                            runtime.app(),
+                        )
+                    })?;
+                    let mut preserved = None;
+                    let entered = Cell::new(false);
+                    let result = with_pending(&mut original, |current| {
+                        current.sql_commit(&runtime, |tx| {
+                            tx.execute("INSERT INTO terminal_sql_probe VALUES(1)", [])?;
+                            Ok(())
+                        })?;
+                        preserved = Some(remove_selection(&runtime)?);
+                        let refused = if write {
+                            current.sql_write(&runtime, |_| {
+                                entered.set(true);
+                                Ok(crate::store::SqlDecision::Commit(()))
+                            })
+                        } else {
+                            current.sql_read(&runtime, |_| {
+                                entered.set(true);
+                                Ok(())
+                            })
+                        };
+                        assert!(
+                            refused
+                                .unwrap_err()
+                                .to_string()
+                                .contains("commit already attempted")
+                        );
+                        Ok(()) // Swallowing the refused unit cannot settle it.
+                    });
+                    assert!(result.is_err());
+                    assert!(!entered.get());
+                    let sample = original.clock.sample();
+                    assert!(
+                        original.check_capture_sample(sample).is_err(),
+                        "the same original stays refused"
+                    );
+                    committed_once(&runtime, preserved.as_ref().unwrap())
+                })?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn runtime_sql_final_commit_closes_human_before_new_read_or_write_open() -> Result<()> {
+            use super::super::super::management::app::{Call, Manager, Reply};
+            for write in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let (runtime, authority, _) =
+                    super::super::super::admission::tests::management_fixture(directory.path())?;
+                let db = crate::store::open(runtime.db())?;
+                db.execute_batch("CREATE TABLE terminal_sql_probe(value INTEGER)")?;
+                drop(db);
+                let world =
+                    super::super::super::simulation::World::new(if write { 621 } else { 620 });
+                world.advance(95);
+                super::super::super::effects::scope(world, || -> Result<()> {
+                    select_app_scope(&sql_runtime_scope(&runtime)?)?;
+                    let identity = crate::iap::Verified {
+                        email: "alice@example.com".into(),
+                        subject: "accounts.google.com:alice".into(),
+                    };
+                    let Reply::Pending { view } = Manager::new(runtime.clone(), authority)
+                        .dispatch(
+                            Call::Capture {
+                                registration: "calendar".into(),
+                                operation: super::super::super::management::Action::Connect,
+                            },
+                            &identity,
+                            100,
+                        )?
+                    else {
+                        anyhow::bail!("SQL fixture capture missing");
+                    };
+                    let intent = FreshIntent::management(&view, &identity)?;
+                    let mut preserved = None;
+                    let entered = Cell::new(false);
+                    let result =
+                        super::super::with_consumer(&intent, Phase::Pending, 100, |current| {
+                            current.sql_commit(&runtime, |tx| {
+                                tx.execute("INSERT INTO terminal_sql_probe VALUES(1)", [])?;
+                                Ok(())
+                            })?;
+                            preserved = Some(remove_selection(&runtime)?);
+                            let refused = if write {
+                                current.sql_write(&runtime, |_| {
+                                    entered.set(true);
+                                    Ok(crate::store::SqlDecision::Commit(()))
+                                })
+                            } else {
+                                current.sql_read(&runtime, |_| {
+                                    entered.set(true);
+                                    Ok(())
+                                })
+                            };
+                            assert!(
+                                refused
+                                    .unwrap_err()
+                                    .to_string()
+                                    .contains("finalization already attempted")
+                            );
+                            Ok(())
+                        });
+                    assert!(result.is_err());
+                    assert!(!entered.get());
+                    assert!(
+                        super::super::with_consumer(&intent, Phase::Pending, 100, |_| Ok(()))
+                            .is_err()
+                    );
+                    committed_once(&runtime, preserved.as_ref().unwrap())
+                })?;
+            }
+            Ok(())
+        }
     }
 }

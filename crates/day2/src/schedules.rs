@@ -375,13 +375,22 @@ pub fn advance(
         offered: Vec::new(),
         skipped: None,
     };
-    let connection = crate::store::open(runtime.db())?;
-    if let Some(since_ms) = in_flight(&connection, schedule)? {
+    // Queue facts are DATA. The native SQL owner must close and settle before
+    // accept/execute can enter their separate SQL and provider phases.
+    let (in_flight, last) = runtime.sql_read(|connection| {
+        runtime.check_binding(connection)?;
+        let pending = in_flight(connection, schedule)?;
+        let last = if pending.is_none() {
+            last_offered(connection, schedule)?
+        } else {
+            None
+        };
+        Ok((pending, last))
+    })?;
+    if let Some(since_ms) = in_flight {
         tick.skipped = Some(Skipped::InFlight { since_ms });
         return Ok(tick);
     }
-    let last = last_offered(&connection, schedule)?;
-    drop(connection);
     let due = match schedule.due(last, now_ms) {
         Ok(due) => due,
         Err(error) => {

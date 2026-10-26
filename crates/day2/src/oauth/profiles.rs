@@ -845,7 +845,6 @@ pub(super) mod tests {
                 now: 2,
             },
             key,
-            None,
         )
         .unwrap();
         assert!(matches!(outcome, CallbackOutcome::CodeAccepted { .. }));
@@ -916,18 +915,22 @@ pub(super) mod tests {
     }
 
     impl ApprovalAuthority for TestApprovalAuthority {
-        fn with_current(
+        fn with_current<'owner, 'stage, 'role, 'original>(
             &self,
             app: &str,
             intent: &ConnectIntent,
             binding: &CallbackBinding,
             now: i64,
-            commit: &mut dyn FnMut(ApprovalTerms) -> Result<bool>,
+            subjects: &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+            commit: &mut dyn FnMut(
+                ApprovalTerms,
+                &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+            ) -> Result<bool>,
         ) -> Result<bool> {
-            let Some(terms) = self.current(app, intent, binding, now)? else {
+            let Some(terms) = self.current(app, intent, binding, now, subjects)? else {
                 return Ok(false);
             };
-            commit(terms)
+            commit(terms, subjects)
         }
 
         fn current(
@@ -936,6 +939,7 @@ pub(super) mod tests {
             intent: &ConnectIntent,
             binding: &CallbackBinding,
             _: i64,
+            _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<ApprovalTerms>> {
             if app != self.app || intent != &self.fixture.intent || binding != &self.fixture.binding
             {
@@ -1060,33 +1064,73 @@ pub(super) mod tests {
                 .unwrap();
         assert!(
             authority
-                .current("app", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "app",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .unwrap()
                 .is_some()
         );
         assert!(
             authority
-                .current("other", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "other",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .unwrap()
                 .is_none()
         );
         keys.0.store(1, Ordering::SeqCst);
         assert!(
             authority
-                .current("app", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "app",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .is_err()
         );
         keys.0.store(2, Ordering::SeqCst);
         assert!(
             authority
-                .current("app", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "app",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .is_err()
         );
         keys.0.store(0, Ordering::SeqCst);
         authority.replace(BTreeMap::new()).unwrap();
         assert!(
             authority
-                .current("app", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "app",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .unwrap()
                 .is_none()
         );
@@ -1101,7 +1145,15 @@ pub(super) mod tests {
         assert!(authority.replace(wrong_origin).is_err());
         assert!(
             authority
-                .current("app", &fixture.intent, &fixture.binding, 5)
+                .current(
+                    "app",
+                    &fixture.intent,
+                    &fixture.binding,
+                    5,
+                    &mut super::super::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite"
+                    ))
+                )
                 .unwrap()
                 .is_none()
         );
@@ -1156,6 +1208,7 @@ pub(super) mod tests {
                 app: &str,
                 identity: &crate::iap::Verified,
                 _: i64,
+                _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
             ) -> Result<()> {
                 assert_eq!(app, "app");
                 let db = rusqlite::Connection::open(&self.path)?;
@@ -1174,6 +1227,7 @@ pub(super) mod tests {
                 _: &connect::ConnectIntent,
                 _: &connect::CallbackBinding,
                 _: i64,
+                _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
             ) -> Result<Option<ApprovalTerms>> {
                 assert!(self.calls.load(Ordering::SeqCst) > 0);
                 Ok(None)

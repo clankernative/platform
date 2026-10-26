@@ -32,6 +32,59 @@ macro_rules! assert_secret_references {
 }
 
 const _: () = {
+    assert_consuming!(crate::budget::AtomicControl);
+    assert_not_impl!(crate::budget::AtomicControl, std::fmt::Debug);
+    assert_not_impl!(crate::budget::AtomicControl, Send);
+    assert_not_impl!(crate::budget::AtomicControl, Sync);
+    assert_secret_references!(crate::budget::AtomicControl);
+    assert_consuming!(crate::store::RuntimeSql<'static, 'static, 'static, 'static>);
+    assert_not_impl!(
+        crate::store::RuntimeSql<'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::store::RuntimeSql<'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::store::RuntimeSql<'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_secret_references!(crate::store::RuntimeSql<'static, 'static, 'static, 'static>);
+    assert_consuming!(
+        crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_secret_references!(
+        crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>
+    );
+    assert_consuming!(crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>);
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>,
+        Sync
+    );
+    assert_secret_references!(
+        crate::oauth::admission::SubjectReader<'static, 'static, 'static, 'static>
+    );
     assert_consuming!(crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>);
     assert_not_impl!(
         crate::security_epoch::native_enrollment::PendingAppCurrentPeer<'static>,

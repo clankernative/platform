@@ -29,6 +29,7 @@ enum Case {
     PolicyChanged,
     EpochChanged,
     ReadinessRewind,
+    RefusedOwnerClockClassification,
     PublicationRewind,
     PublicationExpired,
     CustodyFailure,
@@ -153,6 +154,10 @@ impl Port {
 }
 
 impl effects::Hooks for Port {
+    fn simulate_runtime_owner(&self) -> bool {
+        self.case == Case::RefusedOwnerClockClassification
+    }
+
     fn provider_observation(
         &self,
         _: crate::oauth::shell_oidc::ProviderObservationData,
@@ -310,7 +315,28 @@ struct NativeAuthority {
 }
 
 impl Authority for NativeAuthority {
-    fn current(&self, _: &str, _: &str, _: &str, _: i64) -> Result<Option<Selection>> {
+    fn current(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: i64,
+        subjects: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<Option<Selection>> {
+        if self.port.case == Case::RefusedOwnerClockClassification
+            && self.port.posts.load(SeqCst) > 0
+        {
+            subjects
+                .with_runtime(|serving| {
+                    serving.refuse();
+                    assert!(serving.check().is_err(), "actual owner refusal required");
+                    Ok(())
+                })
+                .expect("the paired case must borrow the actual runtime owner");
+            // A known wall-clock classification cannot manufacture SQL
+            // authority after the actual retained owner has been refused.
+            return Err(refresh::ClockRefusal.into());
+        }
         if self.port.case == Case::AbsentReturnRewind {
             let db = store::open(&self.port.db)?;
             let missing: bool = db.query_row(
@@ -334,6 +360,7 @@ impl Authority for NativeAuthority {
         _: &str,
         expected: &Digest,
         _: i64,
+        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<KeyLease>> {
         assert_eq!(&self.selection.identity()?, expected);
         Ok(Some(profiles::tests::exchange_key()))
@@ -345,6 +372,7 @@ impl Authority for NativeAuthority {
         _: &str,
         expected: &Digest,
         _: i64,
+        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<refresh::ClientCredential>> {
         assert_eq!(&self.selection.identity()?, expected);
         if self.port.case == Case::CredentialRewind {
@@ -370,13 +398,17 @@ impl Authority for NativeAuthority {
             checked_at,
         )?))
     }
-    fn with_current(
+    fn with_current<'owner, 'stage, 'role, 'original>(
         &self,
         _: &str,
         _: &str,
         _: &str,
         _: i64,
-        commit: &mut dyn FnMut(&Selection) -> Result<bool>,
+        subjects: &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        commit: &mut dyn FnMut(
+            &Selection,
+            &mut super::super::admission::SubjectReader<'owner, 'stage, 'role, 'original>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let call = self.commits.fetch_add(1, SeqCst);
         if call == 0 && self.port.case == Case::DispatchReturnRewind {
@@ -409,7 +441,7 @@ impl Authority for NativeAuthority {
                 self.port.publication_clock_reads.store(0, SeqCst);
             }
         }
-        let result = commit(&self.selection);
+        let result = commit(&self.selection, subjects);
         if call == 0 && self.port.case == Case::DispatchErrorRecovery {
             self.port.now.store(250, SeqCst);
         }
@@ -508,7 +540,6 @@ fn activate(runtime: &Runtime, fixture: &profiles::tests::QualificationFixture) 
                 now: 2
             },
             &key,
-            None,
         )?,
         outbound::CallbackOutcome::CodeAccepted { .. }
     ));
@@ -572,6 +603,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
         Case::PolicyChanged,
         Case::EpochChanged,
         Case::ReadinessRewind,
+        Case::RefusedOwnerClockClassification,
         Case::PublicationRewind,
         Case::PublicationExpired,
         Case::CustodyFailure,
@@ -632,6 +664,16 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
             publication_clock_reads: AtomicUsize::new(0),
         });
         let result = fixture_scope(port.clone(), || -> Result<()> {
+            if case == Case::RefusedOwnerClockClassification {
+                let instance = crate::artifact::Instance::load(runtime.instance_path())?;
+                super::super::native_management::fixtures::select_app_scope(
+                    &day2_capabilities::security_epoch::AuthorityScope {
+                        installation: instance.installation.try_into()?,
+                        environment: instance.environment.try_into()?,
+                        app: runtime.app().to_owned().try_into()?,
+                    },
+                )?;
+            }
             if case != Case::AbsentReturnRewind {
                 activate(&runtime, &fixture)?;
             }
@@ -881,6 +923,27 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: committed successor missing"
                     );
                 }
+                if matches!(
+                    case,
+                    Case::ReadinessRewind | Case::RefusedOwnerClockClassification
+                ) {
+                    assert_eq!(
+                        db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
+                            .get::<_, String>(0))?,
+                        if case == Case::ReadinessRewind {
+                            "reauth_required"
+                        } else {
+                            "active"
+                        },
+                        "only a still-live owner can persist the readiness clock refusal"
+                    );
+                    assert_eq!(port.accounts.load(SeqCst), 0);
+                    assert_eq!(
+                        db.query_row("SELECT count(*) FROM oauth_refresh_attempts WHERE state='may_have_been_sent' AND base_version=1", [], |r| r.get::<_, i64>(0))?,
+                        1,
+                        "clock refusal cannot clear the durable no-resend barrier"
+                    );
+                }
                 let before = port.posts.load(SeqCst);
                 port.fail_clock.store(false, SeqCst);
                 port.now.store(
@@ -928,7 +991,12 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: observed clock or material refusal must persist"
                     );
                 }
-                if matches!(case, Case::PolicyChanged | Case::CustodyFailure) {
+                if matches!(
+                    case,
+                    Case::PolicyChanged
+                        | Case::CustodyFailure
+                        | Case::RefusedOwnerClockClassification
+                ) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,

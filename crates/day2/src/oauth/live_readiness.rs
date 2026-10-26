@@ -3,7 +3,8 @@
 //! humans supply facts. No receipt or owner lease can be restored from JSON or SQLite.
 
 use super::{
-    OutboundReadiness, QualifiedConnections, binding_namespace, instance_identity, profiles,
+    OutboundReadiness, QualifiedConnections, SubjectReader, binding_namespace, instance_identity,
+    profiles,
 };
 use crate::oauth::approval_registry::{ApprovalKeyProvider, ApprovalKeyPurpose};
 use crate::oauth::effects::{Client, Instant, Response};
@@ -17,7 +18,6 @@ use day2_capabilities::{
     },
 };
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -396,22 +396,6 @@ impl Facts {
             &instance.security_edge()?.0.hosted_domain,
         ))
     }
-
-    fn subject(&self, email: &str) -> Result<Option<String>> {
-        let db = rusqlite::Connection::open_with_flags(
-            &self.db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_secs(2))?;
-        db.pragma_update(None, "trusted_schema", false)?;
-        Ok(db
-            .query_row(
-                "SELECT subject FROM day2_principals WHERE email=?1",
-                [email],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
 }
 
 impl OutboundReadiness for Facts {
@@ -424,7 +408,12 @@ impl OutboundReadiness for Facts {
             .transpose()
     }
 
-    fn observe_identity(&self, identity: &iap::Verified, now: i64) -> Result<()> {
+    fn observe_identity(
+        &self,
+        identity: &iap::Verified,
+        now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
+    ) -> Result<()> {
         let tenant = &self.selected.instance.security_edge()?.0.hosted_domain;
         ensure!(
             identity
@@ -437,7 +426,8 @@ impl OutboundReadiness for Facts {
                     .is_some_and(|s| !s.is_empty()
                         && s.len() <= 255
                         && s.bytes().all(|b| b.is_ascii_graphic()))
-                && self.subject(&identity.email)?.as_deref() == Some(&identity.subject),
+                && subjects.subject(&self.db, &identity.email)?.as_deref()
+                    == Some(&identity.subject),
             "OAuth current human does not match immutable IAP subject"
         );
         let mut state = self
@@ -466,6 +456,7 @@ impl OutboundReadiness for Facts {
         binding: &OutboundConnectionBinding,
         slot: &ConnectionSlotKey,
         now: i64,
+        subjects: &mut SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<profiles::OutboundInstanceEvidence>> {
         let Some(((app, registration), connection)) = self
             .selected
@@ -493,7 +484,7 @@ impl OutboundReadiness for Facts {
             return Ok(None);
         };
         if !human.lease.fresh(now, HUMAN_SECONDS)
-            || self.subject(owner)?.as_deref() != Some(&human.subject)
+            || subjects.subject(&self.db, owner)?.as_deref() != Some(&human.subject)
         {
             return Ok(None);
         }
@@ -537,7 +528,7 @@ impl OutboundReadiness for Facts {
             state.connections.insert(namespace.clone(), lease);
         }
         if !state.humans[owner].lease.fresh(now, HUMAN_SECONDS)
-            || self.subject(owner)?.as_deref() != Some(&state.humans[owner].subject)
+            || subjects.subject(&self.db, owner)?.as_deref() != Some(&state.humans[owner].subject)
         {
             return Ok(None);
         }
@@ -1444,10 +1435,15 @@ pub(crate) mod tests {
         let mut edge = GcpEdge::new(&selected.instance, Arc::new(Tokens))?;
         let wire = successful_wire(&mut edge)?;
         let keys = Arc::new(Keys::default());
-        let mut facts = Facts::new(selected, path, edge, keys.clone())?;
-        assert!(facts.current(&binding, &slot, 100)?.is_none());
-        facts.observe_identity(&identity, 100)?;
-        let evidence = facts.current(&binding, &slot, 100)?.unwrap();
+        let mut subjects = SubjectReader::fixture(&path);
+        let mut facts = Facts::new(selected, path.clone(), edge, keys.clone())?;
+        assert!(
+            facts
+                .current(&binding, &slot, 100, &mut subjects)?
+                .is_none()
+        );
+        facts.observe_identity(&identity, 100, &mut subjects)?;
+        let evidence = facts.current(&binding, &slot, 100, &mut subjects)?.unwrap();
         assert_eq!(evidence.registration.registration, binding.registration);
         let connection = facts.selected.entries.values().next().unwrap();
         let intent = crate::oauth::connect::ConnectIntent {
@@ -1489,29 +1485,49 @@ pub(crate) mod tests {
             &evidence,
         )?;
         assert_eq!(keys.calls.load(Ordering::SeqCst), 3);
-        assert!(facts.current(&binding, &slot, 159)?.is_some());
+        assert!(
+            facts
+                .current(&binding, &slot, 159, &mut subjects)?
+                .is_some()
+        );
         assert_eq!(keys.calls.load(Ordering::SeqCst), 3);
-        assert!(facts.current(&binding, &slot, 99)?.is_none());
-        assert!(facts.current(&binding, &slot, 220)?.is_none());
+        assert!(facts.current(&binding, &slot, 99, &mut subjects)?.is_none());
+        assert!(
+            facts
+                .current(&binding, &slot, 220, &mut subjects)?
+                .is_none()
+        );
         let requests = wire.worker.join().unwrap();
         assert_eq!(requests.len(), 10);
         let unavailable = Wire::new(vec![(403, json!({"error":"retired"}))])?;
         facts.edge.endpoint = unavailable.endpoint.clone();
         facts.edge.project_endpoint = unavailable.endpoint.join("resource-manager/v1/projects/")?;
-        assert!(facts.current(&binding, &slot, 160).is_err());
+        assert!(facts.current(&binding, &slot, 160, &mut subjects).is_err());
         assert!(facts.state.lock().unwrap().connections.is_empty());
         unavailable.worker.join().unwrap();
         let mut substitute = identity.clone();
         substitute.subject = "accounts.google.com:replacement".into();
-        assert!(facts.observe_identity(&substitute, 100).is_err());
+        assert!(
+            facts
+                .observe_identity(&substitute, 100, &mut subjects)
+                .is_err()
+        );
         db.execute(
             "UPDATE day2_principals SET subject='accounts.google.com:replacement'",
             [],
         )?;
-        assert!(facts.current(&binding, &slot, 100)?.is_none());
+        assert!(
+            facts
+                .current(&binding, &slot, 100, &mut subjects)?
+                .is_none()
+        );
         // Removing the native lease cannot be repaired by a durable principal row.
         facts.state.lock().unwrap().humans.clear();
-        assert!(facts.current(&binding, &slot, 100)?.is_none());
+        assert!(
+            facts
+                .current(&binding, &slot, 100, &mut subjects)?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1575,9 +1591,12 @@ pub(crate) mod tests {
         let wire = successful_wire(&mut edge)?;
         let keys = Arc::new(Keys::default());
         keys.wrong.store(true, Ordering::SeqCst);
-        let facts = Facts::new(selected, path, edge, keys.clone())?;
-        facts.observe_identity(&identity, 100)?;
-        let error = facts.current(&binding, &slot, 100).unwrap_err();
+        let mut subjects = SubjectReader::fixture(&path);
+        let facts = Facts::new(selected, path.clone(), edge, keys.clone())?;
+        facts.observe_identity(&identity, 100, &mut subjects)?;
+        let error = facts
+            .current(&binding, &slot, 100, &mut subjects)
+            .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1586,6 +1605,120 @@ pub(crate) mod tests {
         assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
         assert!(facts.state.lock().unwrap().connections.is_empty());
         wire.worker.join().unwrap();
+        Ok(())
+    }
+
+    fn require_scoped_subject_reads(source: &str) -> Result<()> {
+        use syn::visit::Visit;
+
+        #[derive(Default)]
+        struct Reads {
+            scoped: usize,
+            ambient: usize,
+        }
+
+        impl Reads {
+            fn inspect_ensure(&mut self, mac: &syn::Macro) {
+                use syn::parse::Parser;
+                let expressions =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(mac.tokens.clone())
+                        .expect("actual Facts ensure arguments are Rust expressions");
+                // Default Visit treats macro tokens as opaque. Inspect
+                // the actual condition as well as its diagnostic arguments.
+                for expression in &expressions {
+                    self.visit_expr(expression);
+                }
+            }
+        }
+
+        impl<'ast> Visit<'ast> for Reads {
+            fn visit_macro(&mut self, node: &'ast syn::Macro) {
+                if node.path.is_ident("ensure") {
+                    self.inspect_ensure(node);
+                }
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "subject" {
+                    if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("subjects"))
+                        && node.args.len() == 2
+                    {
+                        self.scoped += 1;
+                    } else {
+                        self.ambient += 1;
+                    }
+                }
+                if node.method == "open" || node.method == "open_with_flags" {
+                    self.ambient += 1;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+
+            fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                if matches!(node.func.as_ref(), syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|part| part.ident == "open" || part.ident == "open_with_flags"))
+                {
+                    self.ambient += 1;
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+        }
+
+        let file = syn::parse_file(source)?;
+        let mut observed = std::collections::BTreeMap::new();
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            if !matches!(item.self_ty.as_ref(), syn::Type::Path(path) if path.path.is_ident("Facts"))
+            {
+                continue;
+            }
+            for member in &item.items {
+                let syn::ImplItem::Fn(function) = member else {
+                    continue;
+                };
+                let name = function.sig.ident.to_string();
+                ensure!(name != "subject", "ambient Facts subject reader restored");
+                let mut reads = Reads::default();
+                reads.visit_block(&function.block);
+                ensure!(
+                    reads.ambient == 0,
+                    "ambient Facts SQL or subject lookup restored"
+                );
+                if matches!(name.as_str(), "observe_identity" | "current") {
+                    observed.insert(name, reads.scoped);
+                }
+            }
+        }
+        ensure!(
+            observed.get("observe_identity") == Some(&1) && observed.get("current") == Some(&2),
+            "Facts must borrow the same subject reader before and after external reads"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn live_facts_use_the_borrowed_subject_reader_at_every_resampling_boundary() -> Result<()> {
+        require_scoped_subject_reads(include_str!("live_readiness.rs"))
+    }
+
+    #[test]
+    fn live_facts_guard_rejects_restoring_an_ambient_subject_lookup() -> Result<()> {
+        let source = include_str!("live_readiness.rs");
+        let source = &source[..source.find("struct GcpEdge").unwrap()];
+        require_scoped_subject_reads(source)?;
+        let locations: Vec<_> = source
+            .match_indices("subjects.subject(")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(locations.len(), 3);
+        for at in locations {
+            let mut mutated = source.to_owned();
+            mutated.replace_range(at..at + "subjects".len(), "self");
+            assert!(require_scoped_subject_reads(&mutated).is_err());
+        }
         Ok(())
     }
 
@@ -1618,9 +1751,14 @@ pub(crate) mod tests {
             swap_owner: Some(path.clone()),
             ..Keys::default()
         });
-        let facts = Facts::new(selected, path, edge, keys.clone())?;
-        facts.observe_identity(&identity, 100)?;
-        assert!(facts.current(&binding, &slot, 100)?.is_none());
+        let mut subjects = SubjectReader::fixture(&path);
+        let facts = Facts::new(selected, path.clone(), edge, keys.clone())?;
+        facts.observe_identity(&identity, 100, &mut subjects)?;
+        assert!(
+            facts
+                .current(&binding, &slot, 100, &mut subjects)?
+                .is_none()
+        );
         assert_eq!(keys.calls.load(Ordering::SeqCst), 3);
         wire.worker.join().unwrap();
         Ok(())

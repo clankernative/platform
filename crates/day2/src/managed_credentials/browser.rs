@@ -99,42 +99,6 @@ fn require_current_pending(
     Ok(())
 }
 
-/// The selected app host resolves its own actual credential Pending. This is
-/// allocation/publication DATA only, not acceptance, enrollment or fresh proof.
-pub(crate) fn fresh_owner(
-    runtime: &Runtime,
-    call: &crate::oauth::fresh_owner::CallData,
-    identity: &iap::Verified,
-    now: i64,
-) -> Result<crate::oauth::fresh_owner::ReplyData> {
-    ensure!(
-        call.purpose == crate::oauth::fresh_owner::PurposeData::CredentialIntent,
-        "credential fresh purpose changed"
-    );
-    let instance = Instance::load(runtime.instance_path())?;
-    ensure!(
-        instance.scope(runtime.app())? == runtime.scope(),
-        "credential fresh scope changed"
-    );
-    let (_, app) = instance.edge(runtime.app())?;
-    let (_, shell) = instance.security_edge()?;
-    let mut db = open(runtime.db())?;
-    let tx = crate::write_queue::immediate(&mut db)?;
-    let pending = load(&tx, &call.attempt)?.context("credential fresh pending unavailable")?;
-    require_current_pending(&tx, runtime, &pending, identity, &shell.origin, now)?;
-    let intent = crate::oauth::fresh_auth::FreshIntent::credential(
-        runtime,
-        &pending,
-        identity,
-        &app.origin,
-        &shell.origin,
-    )?;
-    let reply =
-        crate::oauth::fresh_owner::apply_in_current_app_transaction(&tx, &intent, call, now)?;
-    tx.commit()?;
-    Ok(reply)
-}
-
 /// Called only after ordinary app authentication, CSRF, input and idempotency
 /// validation. This creates navigation, never acceptance or issuance authority.
 pub(crate) fn start(
