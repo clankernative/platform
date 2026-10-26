@@ -666,6 +666,7 @@ mod tests {
             && count(&current, "Self::observe") == 0
             && count(&anchor, "check_identity") == 1
             && count(&anchor, "Self::check_same_actor") == 1
+            && count(&anchor, "File::try_clone") == 5
             && count(&anchor, "executable_bytes::admit") == 0
             && [(storage, "receive_storage"), (serving, "receive_serving")]
                 .iter()
@@ -712,9 +713,17 @@ mod tests {
         for (before, after) in [
             ("received.pidfd = pidfd;", ""),
             (
-                "Self::check_same_actor(&mut [admitted, &mut received]",
-                "Self::skip_sender_join(&mut [admitted, &mut received]",
+                "Self::check_same_actor(&mut [&mut *admitted, &mut received]",
+                "Self::skip_sender_join(&mut [&mut *admitted, &mut received]",
             ),
+            ("File::try_clone(&self.pidfd)", "self.pidfd.try_clone()"),
+            ("File::try_clone(&self.proc)", "self.proc.try_clone()"),
+            ("File::try_clone(&self.process)", "self.process.try_clone()"),
+            (
+                "File::try_clone(&self.executable)",
+                "self.executable.try_clone()",
+            ),
+            ("File::try_clone(file)", "file.try_clone()"),
         ] {
             let mutated = process.replacen(before, after, 1);
             assert_ne!(mutated, process);
