@@ -570,6 +570,19 @@ impl Message {
     }
 }
 
+/// Closed verification/observation ordering. The statement is public DATA;
+/// the native caller alone supplies the actual final sender observation.
+/// No native owner or successful observation is cached or constructed here.
+pub(super) fn verify_message_then_observe<Owner>(
+    owner: &mut Owner,
+    message: &Message,
+    statement: impl FnOnce(&Owner) -> &StageStatement,
+    observe: impl FnOnce(&mut Owner) -> Result<()>,
+) -> Result<()> {
+    message.verify(statement(owner))?;
+    observe(owner)
+}
+
 /// The fixed boundary rejects struct-as-sequence JSON as well as duplicate,
 /// unknown and oversized fields. Namespace identities alone intentionally use
 /// typed two-element tuples; no native owner is decoded from this DATA.

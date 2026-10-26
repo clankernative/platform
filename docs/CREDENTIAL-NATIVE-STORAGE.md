@@ -6,6 +6,11 @@ separately selected reader identity; SecurityShell does not acquire a counter
 writer. Selecting an account or checking a decoded reply does not establish
 exclusive IAM, P3 or current writer authority.
 
+The selected S1 rule is [full connection admission followed by fresh request
+checks](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests).
+The port and its native qualification are in progress. This document specifies
+the single target contract; historical full-check receipts do not qualify it.
+
 ## T6 decision
 
 Use the existing Calendar Firestore database and controller GSA from the
@@ -74,8 +79,10 @@ their numeric equality across controller and App namespaces is not a volume
 join. No arbitrary signing, pathname, descriptor adoption or generic callback
 belongs in this interface.
 
-The Controller authenticates the unprivileged App through each actual received
-SCM_PIDFD and its executable/process/namespace checks. The App retains the
+The Controller fully admits the unprivileged App using actual received SCM_PIDFD
+handles and executable/process/namespace checks. Later authenticated packets
+retain their actual sender handles and join them to that admitted actor without
+another content scan. The App retains the
 Controller's actual received kernel handle and verifies the same live issuer's
 signed Controller grant plus fresh key possession. This grants the App no additional ptrace capability or containerd access and
 claims no independent privileged-process inspection.
@@ -102,10 +109,13 @@ key stays with the original enrollment owner; losing that owner refuses every
 future phase. Nothing recreates a key or descriptor from a projection.
 
 A later peer phase performs CurrentHello, CurrentOffer, CurrentAck and
-CurrentReady on that same connected socket. Both participants must supply new
-issuer-signed stages. The exchange binds the initial transcript, checked
+CurrentReady on that same connected socket. Both participants borrow fresh
+request stages from their genuinely admitted connection. The exchange binds the
+initial transcript, checked
 nonwrapping sequence, closed purpose, exact request digest and both fresh
-nonces. Original identity/liveness checks do not renew the historical grant.
+nonces. A fresh signed request proves the admitted peer's retained key possession;
+it does not require another full issuer admission. Original identity/liveness
+checks do not renew the historical grant.
 The returned current-peer phase retains the actual narrowed acquisition and
 fresh signed statement. Every check and known completion borrows the same
 stage again and verifies its owner, acquisition domain/origin/deadline and exact
@@ -116,12 +126,22 @@ Beginning a phase closes the local socket disposition before fallible work.
 Drop, uncertainty and expiry cannot reopen it. A late completion cannot settle
 a different paused sequence. Terminal refusal remains possible after known
 completion without a live stage, clock or request. `finish_checked` releases
-the peer scope only after all physical/provider/original/consumer postchecks;
+the peer scope only after all required handle/counter/original/consumer postchecks;
 it is distinct from recording a consumer's known result. This in-memory socket
 disposition is neither another distributed permit journal nor storage authority.
 Current peer identity alone still supplies no P3, active epoch or writer.
 
 ## Retained boundaries
+
+Full physical/provider/durability-profile admission belongs to construction of
+the actual storage connection. It must complete before that owner is usable.
+Later requests borrow its retained file, directory, mount/device, first holder,
+activated lineage, selected writer and authenticated counter transport.
+Required named-FD, process/thread, namespace, channel and clock checks stay fresh;
+the repeated provider attachment rounds and full physical composites are removed.
+The trusted services maintain the admitted physical/content assumptions. A
+receipt or matching row cannot create the connection or substitute for current
+authority, a fresh counter, actual writer ownership or database durability.
 
 `PreparedInitialFile` packages the original creator, admitted layout and the
 same original acquisition. `check_original` checks unchanged initial bytes and
@@ -270,7 +290,7 @@ consumed at send, and the response still owns its execution context. It cannot
 be used for a second send or an arbitrary URL/body. A malformed, lost or expired
 reply cannot reconstruct send authority or clear the permanent slot.
 
-## Remaining production composition
+## Admission and bootstrap composition
 
 `InitialStorageContinuity::establish` now consumes the actual prepared-file
 continuation and a new enrolled Controller stage. Its fixed operation performs
@@ -292,8 +312,9 @@ conditional model; this is not a regional availability guarantee.
 [Linux ext4 documentation](https://cdn.kernel.org/doc/html/latest/admin-guide/ext4.html).
 
 Known establishment retains the SAME file, volume, channel and authenticated
-first holder. Each `CurrentStorageBootstrapPhase` owns a fresh physical phase
-and new peer handshake, bound to the exact original seed and request. Completion
+first holder. Each `CurrentStorageBootstrapPhase` owns a fresh bounded request
+borrow and peer transcript, bound to the exact original seed and request.
+Completion
 must select the same actual first App participant's Pod, process incarnation and
 ephemeral key. The enclosing continuation closes before fallible work, and only
 known completion after all final checks releases it. Errors, unknown outcomes,
@@ -302,16 +323,17 @@ closed. The new private owner types reject cloning, serialization and thread
 transfer. These types supply neither effective IAM nor active epoch/writer or
 Shell serving authority on their own. The fixed native bootstrap dispatcher now
 retains this phase through the consuming counter claim, send, response and final
-provider/file checks; the Controller lifecycle and live qualification remain owed.
+handle/counter/file checks; live qualification remains separate.
 
 The App counterpart, `AppInitialStorageContinuity`, consumes its genuine
 authenticated first holder and retains the SAME read-only file and peer in one
 private owner. Each `CurrentAppStorageBootstrapPhase` checks that file around
 the fresh handshake and through final completion on the same actual App stage.
 It cannot receive a Controller stage, mutation credential or reconstructed file
-owner. The Controller rechecks its joined durability operation within each new
-bootstrap stage before advertising that phase. Neither side reuses the original
-grant or treats the historical durability completion as a configuration lease.
+owner. Full durability-profile admission must have completed before the admitted
+connection can advertise a usable phase. Later phases retain actual durability
+effects and handle/counter checks without repeating the full provider profile.
+Neither side reuses an old request grant or treats admission as current permission.
 
 The native creation factory consumes the actual enrolled controller stage and
 performs authenticated provider reads and native block-device/mount checks. It
@@ -380,8 +402,8 @@ serialized or transferred to another thread. Native deployment qualification rem
 
 ## Current App serving and existing-file Runtime admission
 
-An active App participant now supplies the sealed serving borrow from its real
-retained initial file and Controller channel. Every operation uses a fresh role
+An active App participant supplies the sealed serving borrow from its real
+admitted file and Controller channel. Every operation uses a fresh request
 stage, fresh signed peer transcript, and coherent four-document observation
 matching the original activation, including provider version tokens. Controller
 release follows the App consumption acknowledgement and a fresh provider read.
@@ -408,7 +430,8 @@ The Shell supplier now retains the actual separately enrolled Shell/Controller
 channel. Its current phase waits for the Controller's signed known result, then
 keeps the same channel and original role interval through consumer settlement
 and original postchecks. Only that known completion acknowledges consumption;
-the Controller rereads the fixed epoch and checks actual physical/P3 continuity
+the Controller rereads the fixed epoch and checks the actual admitted handles,
+writer and required original/consumer postchecks
 before releasing the same transcript. A forgotten/dropped phase leaves its
 parent busy; there is no replacement/reconnect or expiry regrant. The Shell has
 no Runtime admission or App database identity.

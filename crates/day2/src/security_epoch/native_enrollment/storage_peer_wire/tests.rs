@@ -3,6 +3,83 @@
 
 use super::*;
 
+// Cryptographic DATA tests alone cannot detect a repeated native observation
+// at the caller. Inspect the actual Linux method as well, without constructing
+// fake native handles or treating a macOS run as kernel qualification.
+fn native_accept_observation_shape(source: &str) -> (usize, usize, usize) {
+    use syn::visit::Visit;
+
+    #[derive(Default)]
+    struct Calls {
+        verifiers: usize,
+        checks: usize,
+        final_checks: usize,
+    }
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if matches!(&*node.func, syn::Expr::Path(path)
+                if path.path.segments.last().is_some_and(|part| part.ident == "verify_message_then_observe"))
+            {
+                self.verifiers += 1;
+                let syn::Expr::Closure(observe) = &node.args[3] else {
+                    panic!("native post-verification observation must be a closed callback");
+                };
+                let mut final_calls = Calls::default();
+                final_calls.visit_expr(&observe.body);
+                self.final_checks += final_calls.checks;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.checks += usize::from(node.method == "check");
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let file = syn::parse_file(source).unwrap();
+    let method = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if matches!(&*item.self_ty, syn::Type::Path(path)
+            if path.path.is_ident("Peer")) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .find_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.ident == "accept_message" => Some(method),
+            _ => None,
+        })
+        .expect("actual native message acceptance");
+    let mut calls = Calls::default();
+    calls.visit_block(&method.block);
+    (calls.verifiers, calls.checks, calls.final_checks)
+}
+
+#[test]
+fn native_accept_caller_has_only_the_post_verification_full_observation() {
+    assert_eq!(
+        native_accept_observation_shape(include_str!("../storage_peer_native.rs")),
+        (1, 1, 1),
+    );
+}
+
+#[test]
+fn native_accept_caller_guard_rejects_restoring_the_pre_verification_check() {
+    let source = include_str!("../storage_peer_native.rs");
+    let repeated = source.replacen(
+        "super::storage_peer_wire::verify_message_then_observe(",
+        "self.check(stage, acquisition)?; super::storage_peer_wire::verify_message_then_observe(",
+        1,
+    );
+    assert_ne!(source, repeated);
+    assert_ne!(native_accept_observation_shape(&repeated), (1, 1, 1));
+}
+
 #[test]
 fn current_hello_selects_the_queued_ready_and_exact_request_even_when_validly_signed() {
     let (_, app, key) = fixture(NativeRole::AppHost);
@@ -294,6 +371,101 @@ fn signed(statement: &StageStatement, key: &KeyOwner, body: Body) -> Message {
         body,
         signature,
     }
+}
+
+#[test]
+fn received_message_has_exactly_one_final_observation_after_valid_signature() {
+    let (_, statement, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    struct Owner {
+        statement: StageStatement,
+        observations: u32,
+    }
+    let original = statement.original.clone();
+    let mut owner = Owner {
+        statement,
+        observations: 0,
+    };
+    verify_message_then_observe(
+        &mut owner,
+        &message,
+        |owner| &owner.statement,
+        |owner| {
+            owner.observations += 1;
+            assert!(owner.statement.original == original);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(owner.observations, 1);
+}
+
+#[test]
+fn invalid_message_never_reaches_a_successful_native_observation() {
+    let (_, mut statement, key) = fixture(NativeRole::AppHost);
+    let mut message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    message.signature = "invalid".into();
+    let mut observed = false;
+    let result = verify_message_then_observe(
+        &mut statement,
+        &message,
+        |statement| statement,
+        |_| {
+            observed = true;
+            Ok(())
+        },
+    );
+    assert!(result.is_err());
+    assert!(!observed);
+}
+
+#[test]
+fn every_valid_message_reobserves_and_preserves_the_actual_observation_refusal() {
+    let (_, mut statement, key) = fixture(NativeRole::AppHost);
+    let message = signed(
+        &statement,
+        &key,
+        Body::CurrentAck {
+            exchange: Digest::new(b"one exact exchange"),
+        },
+    );
+    let mut observations = 0;
+    for allowed in [true, false, false] {
+        let result = verify_message_then_observe(
+            &mut statement,
+            &message,
+            |statement| statement,
+            |_| {
+                observations += 1;
+                anyhow::ensure!(allowed, "actual sender observation refused");
+                Ok(())
+            },
+        );
+        if allowed {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "actual sender observation refused"
+            );
+        }
+    }
+    assert_eq!(
+        observations, 3,
+        "a prior observation is never a cached grant"
+    );
 }
 
 #[test]

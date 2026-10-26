@@ -1,5 +1,15 @@
 # Private native Controller observations
 
+The selected [connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
+is being ported and needs new cold-admission/warm-request evidence. Older full
+revalidation profiles remain historical records bound to their source. A new
+profile capture must identify actual admission separately from the first and
+second requests; do not hide admission outside a request span and label it warm.
+Warm requests target zero full scans, physical attachment rounds, repeated
+provider authentication and issuer enrollment, with real authority/counter,
+owned-handle, original-clock and refusal checks retained. This is a qualification
+obligation, not a claim that current captures or their labels prove completion.
+
 The real `day2-epoch-controller` executor writes bounded historical observations
 to its private container stderr. There is no diagnostic HTTP endpoint, synthetic
 serving request, replay command or receipt-to-authority constructor. Health still
@@ -28,9 +38,10 @@ The closed `observation.event` values are:
 
 The bootstrap `step` order is exactly `create_reserve`, `create_dispatch`,
 `create_settle`, `activate_reserve`, `activate_dispatch`, `activate_settle`.
-Each record is at most 2,048 bytes including prefix and newline; the exporter
-writes at most twelve records (24 KiB) per process. Repeated serving operations
-do not grow the transcript. A partial/failed export stops the executor and cannot
+Each ordinary lifecycle record is at most 2,048 bytes including prefix and
+newline; at most twelve such records (24 KiB) are written per process. Repeated
+serving operations do not grow this lifecycle transcript. The separately bounded
+timing DATA below can include later Current operations. A partial/failed export stops the executor and cannot
 be followed by another purported complete evidence record. OS logging can block
 or perturb another executor's existing deadline; neither an elapsed-time bound
 nor a deadline extension is implied.
@@ -214,11 +225,15 @@ per-syscall identity, role, policy and clock guards and existing batch size.
 ## Preparation timing diagnosis
 
 Ordinary Current App-serving has a distinct diagnostic root around its actual
-operation, including role acquisition. After the role/file/peer borrows unwind,
+Controller operation, including its role acquisition. App-side work before its
+request becomes pending at the Controller is outside this sample. After the role/file/peer borrows unwind,
 the Controller can emit `day2-native-controller-self-check` with format
-`controller_current_app_serving_exclusive_ns_v2`, scope
-`whole_current_app_serving_operation`, and the following main record's sequence,
-selection and Controller incarnation. It is historical DATA, not readiness,
+`controller_current_app_serving_exclusive_ns_v3`, scope
+`whole_current_app_serving_operation`, its own consecutive `sequence`, the count
+of already emitted ordinary lifecycle records in `lifecycle_sequence`, selection
+and Controller incarnation. `completed` reports only whether this actual Current
+operation returned successfully; a later log or consumer can still fail.
+It is historical DATA, not readiness,
 permission, current validity or a sampled remaining budget. It has no bootstrap
 action field and cannot be interpreted as a bootstrap full-check sample.
 
@@ -264,8 +279,14 @@ These rows overlap the exclusive profile and must not be added to it. A subcall
 can contain several guards; the marker does not establish a failed statement or
 cause. If role acquisition fails first, no physical row is fabricated.
 
-The Current record is capped separately at 1536 bytes and emitted at most once
-for the first actual App-serving result/refusal. The existing 1024-byte
+The Current record is capped separately at 1536 bytes and at 256 records per
+Controller. Each available sample is consumed once, including later successful
+Current operations and a terminal refusal; startup does not consume the entire
+capture. Ordinary lifecycle records still contain only the first release per
+role. Reaching the diagnostic cap neither starts another native operation nor
+changes its result. A capture reaching 256 records is potentially truncated;
+missing samples, records or null timings are not zero exchanges or zero cost.
+The existing 1024-byte
 bootstrap profile and 2048-byte authority-record bounds stay unchanged. Missing,
 rewound, nested-root or overflowed metric samples are inconclusive, never zero
 cost. The collector does not replace native clocks, reset an original, cache a
@@ -273,6 +294,29 @@ check, suppress an error, skip I/O or change any five-second guard. Leaf spans
 still finish before terminal native checks. Diagnostic clocks and output can
 perturb elapsed time; no measured saving or complete serving margin follows
 from enabling them. Bootstrap counts/costs do not transfer to Current.
+
+For one isolated browser query, first retain private Controller and App stderr
+with their actual process incarnations and note the last Current sequence after
+startup and sign-in. In the authenticated same-origin browser, GET
+`/api/oauthcalendar.inspect` once with no input or query string. The admitted
+canary's `InspectIntent` handler has no provider effects and returns only its
+declared connection and purpose. Do not reload `/docs`, fetch the schema, poll
+health, or run other product actions inside that observation interval. Retain
+the browser status/body and wall elapsed time privately, then collect the
+subsequent Controller records from the same original. Count these whole Current
+records and sum their sixteen exclusive ns rows once per record; inclusive
+physical rows overlap and are never added. Report any refusal or missing/capped
+interval rather than inferring a complete count. This is an observed isolated
+interval, not an invocation-ID join: unrelated concurrent native work would
+invalidate per-query attribution. Caller issuer spans are not remote RPC counts.
+
+When the finite App response driver is included, join the App's private
+`day2-native-response-delivery` record from that same isolated interval. Its own
+sequence, attempts/entries, actual socket/Pending polls, written/postchecked
+bytes and elapsed DATA cover delivery only, not handler scopes. Browser wall
+latency, whole Current totals and response-driver elapsed time are different
+measurements and must not be added. Completion is local transport completion,
+not human exposure, Calendar qualification or a connected product account.
 
 ### Initial Current authentication: immediate checked-stage handoff
 
@@ -302,6 +346,41 @@ is not proof that the required checks or the complete serving operation passed.
 The controlled handoff regressions cover one full check, the same stage and
 original interval, later-boundary refusal, and error/unwind ownership. Actual
 Linux/provider qualification and measured canary savings remain separate.
+
+### Current prefix duplicate audit
+
+The native25 whole-Current capture started eighteen App executable scans,
+totalling 1.681 seconds (93.4 ms per scan on average). The source path through
+the first composite check accounts for those eighteen: three in peer preparation,
+thirteen in peer acceptance, and two in the final composite peer check. Role
+acquisition scans the Controller itself; its cost is separate. Within acceptance,
+two scans capture newly received Hello/Ack senders and the others reobserve the
+retained/current sender sets. This is a source attribution of that prefix, not
+evidence that every future request has the same counts or per-scan cost.
+
+| Call site / repeat | S1 boundary decision | Expected gross saving |
+| --- | --- | --- |
+| `owner::begin_stage`: self capture, issuer exchange, final stage check | Keep: nonce/grant receive and role-bind signing intervene; self identity, namespaces and the final original clock stay fresh. | None from deleting a repeat. |
+| `RetainedPeer::start_phase` / `prepare_current`: three retained-App checks | Keep: idle packet receive, Ready signing, send and their postchecks intervene. | None. |
+| `PendingPhysicalFilePhase::acquire` final file check followed by `check_current_durability`'s first file check | Clear duplicate in both fixed Controller callers. Fuse acquisition and durability before publishing the physical phase; retain durability's pre/post checks around real provider/block reads. | One file check: roughly 6 ms as a proxy from native25's 5.9 ms FinalFile span; not an isolated measurement here. |
+| `CurrentPhysicalFilePhase::check_current_durability`: surrounding file checks | Keep: authenticated provider reads, sysfs/proc reads and block preads intervene. | None. |
+| `receive_storage` / `Peer::authenticate`: capture and publication observation | Keep: the kernel sender is received, bound to a signed grant and published as a new peer. Removing that scan requires a different closed constructor, not deleting a check. | None claimed. |
+| `Peer::accept_message`: full sender check, `Message::verify`, full sender check | Clear duplicate: verification is bounded public-key/DATA work, with no signing, I/O, wait, effect or outgoing owner publication. Retain the incoming handles first, valid/original-budget gates, signature validation and one final full check of every sender handle. | One App scan for the Controller's prefix Ack: about 93 ms using native25's average. Further accepted App messages can save one each; count them in a matched capture. |
+| `RetainedPeer::check_resources` followed by `Peer::check` in a current phase | Keep: these validate different old/current native handle sets and different grant/interval obligations. A joint observation could be a later separately qualified optimization; one set cannot simply be omitted. | None from deletion. |
+| `accept_current`'s final peer check followed by the composite peer check | Keep: the intervening composite durability operation performs provider and block/profile I/O. The post-durability peer must be current again. | None. |
+| `MessageProcess::check_same_actor`: byte scan followed by namespace/final-path/pidfd guards | Keep: one scan already joins every held/current/final descriptor. The later guards detect replacement, namespace change, death and expiry; they are not another byte scan. | None. |
+
+The message-acceptance fix verifies the signed DATA before its one full native
+observation; it never reuses a prior successful observation. Invalid signatures
+and native refusal remain terminal. Its regression uses the production ordering
+helper with signed DATA and controlled observations; a separate AST guard binds
+that ordering to the actual native caller and rejects restoring the earlier
+full check. Neither test supplies a native owner or claims kernel qualification.
+The separate physical-factory candidate above needs its own closed-composition
+change and regression. Newer native26/27 evidence must be joined to the same
+prefix before updating these estimates: a whole-operation count can also include
+later serving work. The estimates are gross removed work, not promised net
+latency, a five-second fit or a completed serving result.
 
 Bootstrap reads its counter and control slot in one bounded Controller-owned
 read-write transaction, consumed by the slot commit. The post-commit and App

@@ -589,8 +589,68 @@ fn health_response(method: &Method, ready: bool) -> Response {
     secure(status.into_response())
 }
 
+/// Closed response classification, never permission. Only this module's
+/// literal health producer can set the health case; raw application responses
+/// cannot acquire it through a path, header, status, body or extension.
+pub(crate) struct NativeResponse {
+    response: Response,
+    literal_health: bool,
+}
+
+impl NativeResponse {
+    pub(crate) fn application(response: Response) -> Self {
+        Self {
+            response,
+            literal_health: false,
+        }
+    }
+
+    fn health(method: &Method, ready: bool) -> Self {
+        Self {
+            response: health_response(method, ready),
+            literal_health: true,
+        }
+    }
+
+    pub(crate) fn response(&self) -> &Response {
+        &self.response
+    }
+
+    pub(crate) fn into_response(self) -> Response {
+        self.response
+    }
+
+    pub(crate) fn app_scope(
+        &self,
+        resolve: impl FnOnce() -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>>,
+    ) -> Result<Option<day2_capabilities::security_epoch::AuthorityScope>> {
+        if self.literal_health {
+            Ok(None)
+        } else {
+            resolve()
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn literal_health_fixture(method: &Method, ready: bool) -> NativeResponse {
+    NativeResponse::health(method, ready)
+}
+
+fn literal_health_request(
+    enabled: bool,
+    admitting: &AtomicBool,
+    request: &Request,
+) -> Option<NativeResponse> {
+    if !enabled || !matches!(request.uri().path(), "/health/live" | "/health/ready") {
+        return None;
+    }
+    let ready = request.uri().path() == "/health/live" || admitting.load(Ordering::Acquire);
+    Some(NativeResponse::health(request.method(), ready))
+}
+
 async fn handle(State(host): State<Arc<Host>>, request: Request) -> Response {
-    handle_native(host, request).await
+    handle_native(host, request).await.into_response()
 }
 
 pub(crate) fn native_selections(
@@ -622,19 +682,21 @@ pub(crate) async fn native_pump(
     .await
 }
 
-pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> Response {
+pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeResponse {
     host.credential_effects
         .clone()
-        .run_async(handle_inner(host, request))
+        .run_async(async move {
+            if let Some(response) =
+                literal_health_request(host.health_endpoints, &host.admitting, &request)
+            {
+                return response;
+            }
+            NativeResponse::application(handle_inner(host, request).await)
+        })
         .await
 }
 
 async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
-    if host.health_endpoints && matches!(request.uri().path(), "/health/live" | "/health/ready") {
-        let ready =
-            request.uri().path() == "/health/live" || host.admitting.load(Ordering::Acquire);
-        return health_response(request.method(), ready);
-    }
     if !host.admitting.load(Ordering::Acquire) {
         return secure(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
@@ -2878,6 +2940,29 @@ mod presentation_delivery_tests;
 #[cfg(test)]
 mod deployment_health_tests {
     use super::*;
+
+    #[test]
+    fn only_the_enabled_literal_platform_paths_can_produce_health_classification() {
+        let admitting = AtomicBool::new(true);
+        for path in [
+            "/",
+            "/health/ready/",
+            "/health/ready/../query",
+            "/_platform/app-query",
+        ] {
+            let request = axum::http::Request::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            assert!(literal_health_request(true, &admitting, &request).is_none());
+        }
+        let request = axum::http::Request::builder()
+            .uri("/health/ready")
+            .body(Body::empty())
+            .unwrap();
+        assert!(literal_health_request(false, &admitting, &request).is_none());
+        assert!(literal_health_request(true, &admitting, &request).is_some());
+    }
 
     #[tokio::test]
     async fn health_has_no_sensitive_body_or_mutating_method() -> Result<()> {
