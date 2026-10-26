@@ -29,6 +29,7 @@ enum Case {
     PolicyChanged,
     EpochChanged,
     ReadinessRewind,
+    RefusedOwnerClockClassification,
     PublicationRewind,
     PublicationExpired,
     CustodyFailure,
@@ -316,8 +317,19 @@ impl Authority for NativeAuthority {
         _: &str,
         _: &str,
         _: i64,
-        _: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
+        subjects: &mut super::super::admission::SubjectReader<'_, '_, '_, '_>,
     ) -> Result<Option<Selection>> {
+        if self.port.case == Case::RefusedOwnerClockClassification
+            && self.port.posts.load(SeqCst) > 0
+        {
+            let _ = subjects.with_runtime(|serving| {
+                serving.refuse();
+                Ok(())
+            });
+            // A known wall-clock classification cannot manufacture SQL
+            // authority after the actual retained owner has been refused.
+            return Err(refresh::ClockRefusal.into());
+        }
         if self.port.case == Case::AbsentReturnRewind {
             let db = store::open(&self.port.db)?;
             let missing: bool = db.query_row(
@@ -584,6 +596,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
         Case::PolicyChanged,
         Case::EpochChanged,
         Case::ReadinessRewind,
+        Case::RefusedOwnerClockClassification,
         Case::PublicationRewind,
         Case::PublicationExpired,
         Case::CustodyFailure,
@@ -893,12 +906,12 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: committed successor missing"
                     );
                 }
-                if case == Case::ReadinessRewind {
+                if matches!(case, Case::ReadinessRewind | Case::RefusedOwnerClockClassification) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,
-                        "reauth_required",
-                        "the observed readiness clock refusal must persist before recovery"
+                        if case == Case::ReadinessRewind { "reauth_required" } else { "active" },
+                        "only a still-live owner can persist the readiness clock refusal"
                     );
                     assert_eq!(port.accounts.load(SeqCst), 0);
                     assert_eq!(
@@ -954,7 +967,7 @@ fn compiled_calendar_refresh_publishes_versions_and_fences_failure_recovery() ->
                         "{case:?}: observed clock or material refusal must persist"
                     );
                 }
-                if matches!(case, Case::PolicyChanged | Case::CustodyFailure) {
+                if matches!(case, Case::PolicyChanged | Case::CustodyFailure | Case::RefusedOwnerClockClassification) {
                     assert_eq!(
                         db.query_row("SELECT status FROM oauth_connection_slots", [], |r| r
                             .get::<_, String>(0))?,
