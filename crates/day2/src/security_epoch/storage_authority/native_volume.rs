@@ -206,7 +206,7 @@ impl ProfileFile {
         let _profile = crate::security_epoch::self_check_profile::enter(
             crate::security_epoch::self_check_profile::Category::StorageProfile,
         );
-        let file = Self::open_named(acquisition)?;
+        let file: File = Self::open_named(acquisition)?;
         let identity = profile_file_identity(&file)?;
         identity.require_operator_file()?;
         let mut bytes = Vec::new();
@@ -267,7 +267,7 @@ impl ProfileFile {
         self.check(acquisition)?;
         let result = (|| {
             let mut borrowed = Self {
-                file: self.file.try_clone()?,
+                file: File::try_clone(&self.file)?,
                 identity: self.identity.clone(),
                 valid: true,
             };
@@ -1605,6 +1605,15 @@ mod tests {
         #[derive(Default)]
         struct Calls(Vec<String>);
         impl<'ast> Visit<'ast> for Calls {
+            fn visit_local(&mut self, node: &'ast syn::Local) {
+                if matches!(&node.pat, syn::Pat::Type(binding)
+                    if matches!(&*binding.pat, syn::Pat::Ident(name) if name.ident == "file")
+                    && matches!(&*binding.ty, syn::Type::Path(path) if path.path.is_ident("File")))
+                {
+                    self.0.push("typed_profile_descriptor".into());
+                }
+                syn::visit::visit_local(self, node);
+            }
             fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
                 if matches!(&*node.cond, syn::Expr::Unary(unary)
                     if matches!(unary.op, syn::UnOp::Not(_))
@@ -1699,6 +1708,7 @@ mod tests {
         let admitted = method_calls(source, "NativeVolumeContinuity", "finish_begin");
         let profile = method_calls(source, "ProfileFile", "admit");
         let profile_check = method_calls(source, "ProfileFile", "check");
+        let profile_borrow = method_calls(source, "ProfileFile", "borrow_descriptor");
         let count = |calls: &[String], name: &str| {
             calls.iter().filter(|call| call.as_str() == name).count()
         };
@@ -1733,13 +1743,25 @@ mod tests {
             && count(&initial, "begin_phase") == 1
             && count(&admitted, "retained_profile_handle") == 1
             && count(&profile, "require_operator_file") == 1
+            && count(&profile, "typed_profile_descriptor") == 1
             && count(&profile_check, "require_operator_file") == 1
+            && count(&profile_borrow, "File::try_clone") == 1
     }
 
     #[test]
     fn storage_request_uses_only_retained_physical_owners_and_initial_keeps_admission() {
         let source = include_str!("native_volume.rs");
         assert!(storage_request_shape(source));
+        assert!(!storage_request_shape(&source.replacen(
+            "let file: File = Self::open_named(",
+            "let file = Self::open_named(",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "File::try_clone(&self.file)",
+            "self.file.try_clone()",
+            1
+        )));
         assert!(!storage_request_shape(&source.replacen(
             "identity.require_operator_file()?;",
             "",
