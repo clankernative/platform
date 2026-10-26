@@ -2342,16 +2342,12 @@ fn check_storage_binding(
     artifact: &LoadedArtifact,
     expected_scope: &str,
 ) -> Result<()> {
-    let scope: String =
-        connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
-            row.get(0)
-        })?;
+    check_database_scope(connection, expected_scope)?;
     let schema: String = connection.query_row(
         "SELECT value FROM day2_meta WHERE key='schema'",
         [],
         |row| row.get(0),
     )?;
-    ensure!(scope == expected_scope, "database_scope_mismatch");
     ensure!(
         schema == artifact.contract().schema_digest,
         "schema_migration_required"
@@ -2363,6 +2359,15 @@ fn check_storage_binding(
             crate::error::Failure::ArtifactBindingChanged
         );
     }
+    Ok(())
+}
+
+fn check_database_scope(connection: &Connection, expected_scope: &str) -> Result<()> {
+    let scope: String =
+        connection.query_row("SELECT value FROM day2_meta WHERE key='scope'", [], |row| {
+            row.get(0)
+        })?;
+    ensure!(scope == expected_scope, "database_scope_mismatch");
     Ok(())
 }
 

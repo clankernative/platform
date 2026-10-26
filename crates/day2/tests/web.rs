@@ -3518,33 +3518,50 @@ fn company_brand_bindings_cannot_escape_the_instance_directory() -> Result<()> {
 }
 
 #[test]
-fn pending_invocations_upgrade_legacy_host_audit_schema_without_app_migration() -> Result<()> {
+fn pending_invocations_refuse_incomplete_host_audit_schema_without_repair() -> Result<()> {
     let world = World::new()?;
-    let input = json!({"title":"Legacy pending invocation","destination":"https://example.com/"});
+    let input = json!({"title":"Pending invocation","destination":"https://example.com/"});
     world
         .runtime
-        .accept("links.create", "alice", "legacy-pending", &input, 100)?;
+        .accept("links.create", "alice", "incomplete-schema", &input, 100)?;
     world.db()?.execute_batch("DROP TABLE day2_audit_changes; DROP TABLE day2_web_events; DROP TABLE day2_web_sessions; DROP TABLE day2_web_secret; DROP TRIGGER day2_audit_no_update; DROP TRIGGER day2_audit_no_delete; DROP TRIGGER day2_receipt_event; DROP TRIGGER day2_audit_no_replace; DELETE FROM day2_meta WHERE key='host_schema';")?;
-    assert_eq!(
-        world.runtime.execute("legacy-pending", Fault::None)?.status,
-        "success"
-    );
-    assert_eq!(world.count("links")?, 1);
-    assert_eq!(world.count("day2_audit_changes")?, 1);
-    assert_eq!(
+    let schema = || -> Result<Vec<(String, String, Option<String>)>> {
+        Ok(world
+            .db()?
+            .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let before = schema()?;
+    let error = world
+        .runtime
+        .execute("incomplete-schema", Fault::None)
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported_host_schema"));
+    assert_eq!(world.count("links")?, 0);
+    assert_eq!(world.count("day2_audit")?, 0);
+    assert!(
         world
             .runtime
             .invoke(
                 "links.create",
                 "alice",
-                "legacy-pending",
+                "incomplete-schema",
                 &input,
                 101,
                 Fault::None
-            )?
-            .status,
-        "success"
+            )
+            .is_err()
     );
-    assert_eq!(world.count("links")?, 1);
+    assert_eq!(schema()?, before);
+    assert_eq!(world.count("links")?, 0);
+    assert_eq!(
+        world.db()?.query_row(
+            "SELECT status FROM day2_invocations WHERE id='incomplete-schema'",
+            [],
+            |row| row.get::<_, String>(0)
+        )?,
+        "pending"
+    );
     Ok(())
 }

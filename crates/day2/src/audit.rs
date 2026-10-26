@@ -457,6 +457,28 @@ pub(crate) fn validate_trigger(db: &Connection, name: &str, expected: &str) -> R
     Ok(())
 }
 
+/// Runtime admission only validates the installed current shape. Missing or
+/// changed audit guards are corruption, never an instruction to repair state.
+pub(crate) fn require_current_schema(db: &Connection) -> Result<()> {
+    let version: Option<String> = db
+        .query_row(
+            "SELECT value FROM day2_meta WHERE key='host_schema'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(version.as_deref() == Some("10"), "unsupported_host_schema");
+    validate_event_stream(db)?;
+    for (name, sql) in APPEND_TRIGGERS
+        .iter()
+        .chain(RECEIPT_TRIGGERS)
+        .chain(REMOVAL_TRIGGERS)
+    {
+        validate_trigger(db, name, sql)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_event_stream(db: &Connection) -> Result<()> {
     ensure!(
         !db.is_autocommit(),

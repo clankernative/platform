@@ -156,6 +156,7 @@ pub(crate) enum SqlDecision<T> {
 pub(crate) struct RuntimeSql<'owner, 'stage, 'role, 'original> {
     connection: Option<Connection>,
     owner: SqlOwner<'owner, 'stage, 'role, 'original>,
+    scope: String,
     failed: bool,
 }
 
@@ -190,11 +191,19 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
         let mut sql = Self {
             connection: Some(connection),
             owner,
+            scope: runtime.scope().to_owned(),
             failed: false,
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
             sql.check()?;
-            runtime.check_binding(sql.connection.as_ref().context("SQL connection closed")?)?;
+            // This facade binds the actual file/owner and installation scope.
+            // Current work checks the active artifact in its callback; an
+            // already-admitted effect instead checks its original invocation
+            // and captured authority stamp before recording its result.
+            super::check_database_scope(
+                sql.connection.as_ref().context("SQL connection closed")?,
+                &sql.scope,
+            )?;
             operation(&mut sql)
         }));
         // Close/recovery/rollback cleanup happens while the genuine owner is
@@ -262,7 +271,11 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
                 let tx = connection.transaction()?;
                 sql.owner.check()?;
                 let policy = CallbackPolicy::install(&tx, SqlMode::Read)?;
-                let value = operation(&tx);
+                let value = (|| {
+                    super::check_database_scope(&tx, &sql.scope)?;
+                    crate::audit::require_current_schema(&tx)?;
+                    operation(&tx)
+                })();
                 let admitted = policy.finish();
                 match (value, admitted) {
                     (Ok(value), Ok(())) => {
@@ -301,7 +314,11 @@ impl<'owner, 'stage, 'role, 'original> RuntimeSql<'owner, 'stage, 'role, 'origin
             let tx = crate::write_queue::immediate(connection)?;
             sql.owner.check()?;
             let policy = CallbackPolicy::install(&tx, SqlMode::Write)?;
-            let value = operation(&tx);
+            let value = (|| {
+                super::check_database_scope(&tx, &sql.scope)?;
+                crate::audit::require_current_schema(&tx)?;
+                operation(&tx)
+            })();
             let admitted = policy.finish();
             match (value, admitted) {
                 (Ok(SqlDecision::Commit(value)), Ok(())) => {
