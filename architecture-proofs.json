@@ -4922,13 +4922,11 @@
       "source": "crates/day2/src/budget/atomic_control.rs",
       "type_name": "AtomicControl",
       "owning_children": [],
-      "methods": [
-        "pub (super) fn new () -> Self"
-      ],
+      "methods": [],
       "factories": [
         {
-          "owner": "AtomicControl",
-          "signature": "pub (super) fn new () -> Self"
+          "owner": null,
+          "signature": "pub (super) fn atomic < T > (connection : & rusqlite :: Connection , body : impl FnOnce () -> anyhow :: Result < T >) -> anyhow :: Result < T >"
         }
       ],
       "material_uses": [],
