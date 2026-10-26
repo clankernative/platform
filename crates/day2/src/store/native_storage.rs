@@ -429,7 +429,7 @@ impl BudgetStepGuard {
             if let Some(control) = &control {
                 control.denied.store(true, Ordering::SeqCst);
             }
-            anyhow::bail!("budget SQL outer transaction ended");
+            anyhow::bail!("budget_requires_transaction");
         }
         if let Some(control) = &control {
             if !matches!(control.mode, SqlMode::Write)
@@ -889,7 +889,8 @@ mod tests {
         assert!(tx.is_autocommit());
         // Actual production budget entry must reach the lower precondition,
         // refuse before SAVEPOINT and latch even if this error is caught.
-        assert!(crate::budget::reserve_in(&tx, &budget_request(false)).is_err());
+        let error = crate::budget::reserve_in(&tx, &budget_request(false)).unwrap_err();
+        assert_eq!(error.to_string(), "budget_requires_transaction");
         assert!(policy.control.denied.load(Ordering::SeqCst));
         assert!(tx.is_autocommit());
         assert!(
