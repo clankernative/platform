@@ -55,9 +55,11 @@ impl AcquisitionScope {
 pub(crate) struct NativeAcquisition {
     scope: AcquisitionScope,
     domain: Digest,
+    identity_domain: Digest,
     process: u32,
     origin: Duration,
     observation: Rc<Cell<OriginalObservation>>,
+    connection_observation: Option<Rc<Cell<OriginalObservation>>>,
     deadline: Duration,
     valid: bool,
     local: PhantomData<Rc<()>>,
@@ -74,6 +76,97 @@ pub(crate) struct NativeAcquisition {
 struct OriginalObservation {
     latest: Duration,
     refused: bool,
+}
+
+/// The actual completed admission's clock continuity, never its permission or
+/// deadline. Only consuming that live acquisition creates this connection
+/// anchor. Each later request has a distinct domain and bounded interval while
+/// retaining this private identity join and the same rewind/refusal latch.
+pub(super) struct NativeConnectionClock {
+    identity_domain: Digest,
+    process: u32,
+    observation: Rc<Cell<OriginalObservation>>,
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <NativeConnectionClock as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
+
+impl NativeConnectionClock {
+    pub(super) fn begin_current(&mut self) -> Result<NativeAcquisition> {
+        self.begin(AcquisitionScope::Current)
+    }
+
+    pub(super) fn begin_initial_first_holder(&mut self) -> Result<NativeAcquisition> {
+        self.begin(AcquisitionScope::InitialFirstHolder)
+    }
+
+    pub(super) fn begin_storage_bootstrap(&mut self) -> Result<NativeAcquisition> {
+        self.begin(AcquisitionScope::StorageBootstrap)
+    }
+
+    pub(super) fn begin_storage_metadata_observation(&mut self) -> Result<NativeAcquisition> {
+        self.begin(AcquisitionScope::StorageMetadataObservation)
+    }
+
+    fn begin(&mut self, scope: AcquisitionScope) -> Result<NativeAcquisition> {
+        let result = (|| {
+            // Capture the new origin before entropy, owner checks or I/O.
+            let request = NativeAcquisition::begin_bounded(scope, scope.limit())?;
+            self.join_request(request)
+        })();
+        if result.is_err() {
+            self.observation.set(OriginalObservation {
+                refused: true,
+                ..self.observation.get()
+            });
+        }
+        result
+    }
+
+    fn join_request(&mut self, mut request: NativeAcquisition) -> Result<NativeAcquisition> {
+        let result = (|| {
+            request.sample()?;
+            let prior = self.observation.get();
+            ensure!(
+                !prior.refused
+                    && request.process == self.process
+                    && request.origin >= prior.latest
+                    && request.connection_observation.is_none(),
+                "epoch_native_connection_clock_refused"
+            );
+            request.identity_domain = self.identity_domain.clone();
+            request.connection_observation = Some(Rc::clone(&self.observation));
+            request.sample()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            request.refuse();
+            self.observation.set(OriginalObservation {
+                refused: true,
+                ..self.observation.get()
+            });
+            return Err(error);
+        }
+        Ok(request)
+    }
 }
 
 /// Read-only historical DATA from the same original's existing samples. This
@@ -105,24 +198,6 @@ impl NativeAcquisition {
         Self::begin_bounded(
             AcquisitionScope::Current,
             MAX_ACQUISITION.min(Duration::from_secs(u64::from(max_lease_seconds))),
-        )
-    }
-
-    pub(super) fn begin_initial_first_holder() -> Result<Self> {
-        Self::begin_bounded(
-            AcquisitionScope::InitialFirstHolder,
-            INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT,
-        )
-    }
-
-    pub(super) fn begin_storage_bootstrap() -> Result<Self> {
-        Self::begin_bounded(AcquisitionScope::StorageBootstrap, STORAGE_BOOTSTRAP_LIMIT)
-    }
-
-    pub(super) fn begin_storage_metadata_observation() -> Result<Self> {
-        Self::begin_bounded(
-            AcquisitionScope::StorageMetadataObservation,
-            STORAGE_METADATA_OBSERVATION_LIMIT,
         )
     }
 
@@ -160,6 +235,7 @@ impl NativeAcquisition {
             .ok_or_else(|| anyhow::anyhow!("epoch_native_clock_overflow"))?;
         let mut acquisition = Self {
             scope,
+            identity_domain: domain.clone(),
             domain,
             process,
             origin,
@@ -167,6 +243,7 @@ impl NativeAcquisition {
                 latest: origin,
                 refused: false,
             })),
+            connection_observation: None,
             deadline,
             valid: true,
             local: PhantomData,
@@ -177,9 +254,34 @@ impl NativeAcquisition {
         Ok(acquisition)
     }
 
+    pub(super) fn into_connection_clock(mut self) -> Result<NativeConnectionClock> {
+        if self.connection_observation.is_some() {
+            self.refuse();
+            anyhow::bail!("epoch_native_connection_clock_already_attached");
+        }
+        self.sample()?;
+        Ok(NativeConnectionClock {
+            identity_domain: self.identity_domain,
+            process: self.process,
+            observation: self.observation,
+        })
+    }
+
+    /// A private join to the actual admitted resources, distinct from this
+    /// request's fresh domain. It cannot construct or refresh either owner.
+    pub(super) fn identity_domain(&mut self) -> Result<Digest> {
+        self.sample()?;
+        Ok(self.identity_domain.clone())
+    }
+
     pub(super) fn sample(&mut self) -> Result<Sample> {
         ensure!(
-            self.valid && !self.observation.get().refused,
+            self.valid
+                && !self.observation.get().refused
+                && self
+                    .connection_observation
+                    .as_ref()
+                    .is_none_or(|shared| !shared.get().refused),
             "epoch_native_acquisition_refused"
         );
         let result = (|| {
@@ -202,10 +304,22 @@ impl NativeAcquisition {
     fn observe(&mut self, now: Duration) -> Result<Sample> {
         let original = self.observation.get();
         ensure!(
-            self.valid && !original.refused,
+            self.valid
+                && !original.refused
+                && self
+                    .connection_observation
+                    .as_ref()
+                    .is_none_or(|shared| !shared.get().refused),
             "epoch_native_acquisition_refused"
         );
-        if now < original.latest || now < self.origin || now >= self.deadline {
+        if now < original.latest
+            || self
+                .connection_observation
+                .as_ref()
+                .is_some_and(|shared| now < shared.get().latest)
+            || now < self.origin
+            || now >= self.deadline
+        {
             self.refuse();
             anyhow::bail!("epoch_native_clock_rewind_or_expired");
         }
@@ -213,6 +327,12 @@ impl NativeAcquisition {
             latest: now,
             refused: false,
         });
+        if let Some(shared) = &self.connection_observation {
+            shared.set(OriginalObservation {
+                latest: now,
+                refused: false,
+            });
+        }
         Ok(Sample {
             domain: self.domain.clone(),
             elapsed: now,
@@ -263,6 +383,12 @@ impl NativeAcquisition {
             refused: true,
             ..self.observation.get()
         });
+        if let Some(shared) = &self.connection_observation {
+            shared.set(OriginalObservation {
+                refused: true,
+                ..shared.get()
+            });
+        }
     }
 
     pub(super) fn budget(&mut self) -> Result<Budget> {
@@ -464,9 +590,11 @@ impl NativeAcquisition {
             let mut child = Self {
                 scope: self.scope,
                 domain: self.domain.clone(),
+                identity_domain: self.identity_domain.clone(),
                 process: self.process,
                 origin: self.origin,
                 observation: Rc::clone(&self.observation),
+                connection_observation: self.connection_observation.as_ref().map(Rc::clone),
                 deadline,
                 valid: true,
                 local: PhantomData,
@@ -492,6 +620,7 @@ impl NativeAcquisition {
     pub(super) fn fixture(domain: Digest, process: u32, origin: Duration, limit: Duration) -> Self {
         Self {
             scope: AcquisitionScope::Current,
+            identity_domain: domain.clone(),
             domain,
             process,
             origin,
@@ -499,6 +628,7 @@ impl NativeAcquisition {
                 latest: origin,
                 refused: false,
             })),
+            connection_observation: None,
             deadline: origin + limit,
             valid: true,
             local: PhantomData,
@@ -528,6 +658,176 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_clock_joins_distinct_requests_without_renewing_old_intervals() {
+        // Clock-only DATA fixtures; this constructs no enrolled native owner.
+        let admission = NativeAcquisition::fixture(
+            Digest::new(b"admission"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        let admitted_identity = admission.identity_domain.clone();
+        let mut connection = admission.into_connection_clock().unwrap();
+        let mut first = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"first-request"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        let first_interval = (first.domain.clone(), first.origin, first.deadline);
+        let mut second = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"second-request"),
+                std::process::id(),
+                Duration::from_secs(104),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        assert_ne!(first.domain, second.domain);
+        assert_eq!(first.identity_domain, admitted_identity);
+        assert_eq!(second.identity_domain, admitted_identity);
+        assert!(!Rc::ptr_eq(&first.observation, &second.observation));
+        assert!(Rc::ptr_eq(
+            first.connection_observation.as_ref().unwrap(),
+            second.connection_observation.as_ref().unwrap()
+        ));
+        assert_eq!(
+            (first.domain.clone(), first.origin, first.deadline),
+            first_interval
+        );
+        first.fixture_time = Some(Duration::from_secs(105));
+        assert_eq!(first.remaining().unwrap(), Duration::from_secs(2));
+        second.fixture_time = Some(Duration::from_secs(105));
+        assert_eq!(second.remaining().unwrap(), Duration::from_secs(4));
+        // The old request's equality expiry remains terminal even though the
+        // later request would otherwise still have two seconds left.
+        first.fixture_time = Some(Duration::from_secs(107));
+        assert!(first.remaining().is_err());
+        second.fixture_time = Some(Duration::from_secs(107));
+        assert!(second.remaining().is_err());
+    }
+
+    #[test]
+    fn admitted_clock_keeps_rewind_and_refusal_between_requests() {
+        for case in 0..4 {
+            let admission = NativeAcquisition::fixture(
+                Digest::new(b"admission"),
+                std::process::id(),
+                Duration::from_secs(100),
+                MAX_ACQUISITION,
+            );
+            let mut connection = admission.into_connection_clock().unwrap();
+            let mut first = connection
+                .join_request(NativeAcquisition::fixture(
+                    Digest::new(b"first"),
+                    std::process::id(),
+                    Duration::from_secs(102),
+                    MAX_ACQUISITION,
+                ))
+                .unwrap();
+            first.fixture_time = Some(Duration::from_secs(104));
+            first.sample().unwrap();
+            let mut next = NativeAcquisition::fixture(
+                Digest::new(b"next"),
+                std::process::id(),
+                Duration::from_secs(105),
+                MAX_ACQUISITION,
+            );
+            match case {
+                // Recovering after a rewind in the origin is insufficient.
+                0 => next.origin = Duration::from_secs(103),
+                1 => next.process = next.process.wrapping_add(1),
+                2 => next.refuse(),
+                _ => first.refuse(),
+            }
+            assert!(connection.join_request(next).is_err(), "case {case}");
+            first.fixture_time = Some(Duration::from_secs(105));
+            assert!(first.remaining().is_err(), "case {case}");
+            assert!(
+                connection
+                    .join_request(NativeAcquisition::fixture(
+                        Digest::new(b"later"),
+                        std::process::id(),
+                        Duration::from_secs(106),
+                        MAX_ACQUISITION,
+                    ))
+                    .is_err(),
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_clock_cannot_hide_a_request_rewind_at_a_later_handoff() {
+        let admission = NativeAcquisition::fixture(
+            Digest::new(b"admission"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        let mut connection = admission.into_connection_clock().unwrap();
+        let mut first = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"first"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        let mut second = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"second"),
+                std::process::id(),
+                Duration::from_secs(103),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        first.fixture_time = Some(Duration::from_millis(104_500));
+        first.sample().unwrap();
+        second.fixture_time = Some(Duration::from_millis(104_250));
+        assert!(second.budget().is_err());
+        first.fixture_time = Some(Duration::from_millis(104_750));
+        assert!(first.remaining().is_err());
+    }
+
+    #[test]
+    fn admitted_clock_keeps_each_request_diagnostic_samples_separate() {
+        let admission = NativeAcquisition::fixture(
+            Digest::new(b"admission"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        let mut connection = admission.into_connection_clock().unwrap();
+        let mut first = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"first"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        let progress = first.diagnostic_progress();
+        first.fixture_time = Some(Duration::from_secs(104));
+        first.sample().unwrap();
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
+        drop(first);
+        let mut second = connection
+            .join_request(NativeAcquisition::fixture(
+                Digest::new(b"second"),
+                std::process::id(),
+                Duration::from_secs(110),
+                MAX_ACQUISITION,
+            ))
+            .unwrap();
+        second.sample().unwrap();
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
+        assert_eq!(second.last_checked_elapsed_micros(), Some(0));
+    }
 
     fn storage_fixture(scope: AcquisitionScope) -> NativeAcquisition {
         let mut clock = NativeAcquisition::fixture(

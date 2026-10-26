@@ -56,7 +56,7 @@ impl NativeNamespaceObservation {
         let result = (|| {
             #[cfg(target_os = "linux")]
             {
-                let domain = acquisition.sample()?.domain;
+                let domain = acquisition.identity_domain()?;
                 let process = std::process::id();
                 let thread = std::thread::current().id();
                 let proc_root = open_root(acquisition)?;
@@ -131,7 +131,7 @@ impl NativeNamespaceObservation {
                 "epoch_native_task_changed"
             );
             ensure!(
-                acquisition.sample()?.domain == self.domain,
+                acquisition.identity_domain()? == self.domain,
                 "epoch_native_namespace_acquisition_changed"
             );
             #[cfg(target_os = "linux")]

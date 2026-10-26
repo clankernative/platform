@@ -33,7 +33,7 @@ impl NativeProcessObservation {
             {
                 use ring::digest::{Context, SHA256};
                 use std::{fs::File, io::Read};
-                let origin = acquisition.sample()?.domain;
+                let origin = acquisition.identity_domain()?;
                 let process = std::process::id();
                 let mut executable = File::open("/proc/self/exe")?;
                 let identity = file_identity(&executable)?;
@@ -106,7 +106,7 @@ impl NativeProcessObservation {
             #[cfg(target_os = "linux")]
             {
                 ensure!(
-                    acquisition.sample()?.domain == self.acquisition,
+                    acquisition.identity_domain()? == self.acquisition,
                     "epoch_native_acquisition_changed"
                 );
                 ensure!(
@@ -172,6 +172,71 @@ mod tests {
             .is_err()
         );
         assert!(acquisition.remaining().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_admitted_self_handles_check_two_fresh_requests_without_another_scan() {
+        let code = Digest::new(&std::fs::read("/proc/self/exe").unwrap());
+        let mut admission = NativeAcquisition::begin(5).unwrap();
+        let mut process =
+            NativeProcessObservation::acquire(&code, &mut admission, &HashCosts::disabled())
+                .unwrap();
+        let mut namespace =
+            super::super::NativeNamespaceObservation::acquire(&mut admission).unwrap();
+        let admitted_identity = admission.identity_domain().unwrap();
+        let mut connection = admission.into_connection_clock().unwrap();
+        let mut previous_domain = None;
+        for _ in 0..2 {
+            let mut request = connection.begin_current().unwrap();
+            let domain = request.sample().unwrap().domain;
+            assert!(
+                previous_domain
+                    .as_ref()
+                    .is_none_or(|prior| prior != &domain)
+            );
+            assert_eq!(request.identity_domain().unwrap(), admitted_identity);
+            let (checked, profile) = super::super::self_check_profile::sample_current(|| {
+                process.check(&mut request)?;
+                namespace.check(&mut request)?;
+                request.remaining().map(|_| ())
+            });
+            checked.unwrap();
+            assert_eq!(profile.unwrap().profile.rows[9].0, Some(0));
+            previous_domain = Some(domain);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_retained_self_anchors_refuse_an_unrelated_live_acquisition() {
+        let code = Digest::new(&std::fs::read("/proc/self/exe").unwrap());
+        for check_namespace in [false, true] {
+            let mut admission = NativeAcquisition::begin(5).unwrap();
+            let mut process =
+                NativeProcessObservation::acquire(&code, &mut admission, &HashCosts::disabled())
+                    .unwrap();
+            let mut namespace =
+                super::super::NativeNamespaceObservation::acquire(&mut admission).unwrap();
+            let mut connection = admission.into_connection_clock().unwrap();
+            let mut request = connection.begin_current().unwrap();
+            let mut foreign = NativeAcquisition::begin(5).unwrap();
+            let refused = if check_namespace {
+                namespace.check(&mut foreign)
+            } else {
+                process.check(&mut foreign)
+            };
+            assert!(refused.is_err());
+            assert!(foreign.remaining().is_err());
+            let restored = if check_namespace {
+                namespace.check(&mut request)
+            } else {
+                process.check(&mut request)
+            };
+            assert!(restored.is_err());
+            assert!(request.remaining().is_err());
+            assert!(connection.begin_current().is_err());
+        }
     }
 
     #[cfg(target_os = "linux")]
