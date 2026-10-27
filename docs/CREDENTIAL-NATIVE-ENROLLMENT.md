@@ -261,7 +261,12 @@ rekey the same process; a full enrollment table refuses rather than evicting.
 
 One accepted HTTP operation owns one `EnrolledCurrentRequest`, captured before
 entropy or I/O. SQL and response callbacks borrow that same original and live
-enrolled owner; they cannot start another clock. Separate closed Current
+enrolled owner; they cannot start another clock. Each stage borrows the stored
+acquisition itself, so every narrower counter or peer
+ceiling remains on the request after the lexical borrow ends. A later callback
+cannot recover the earlier wider ceiling or detach a borrowed acquisition.
+This does not merge an authentication work child's separate bound into its
+completed bootstrap parent. Separate closed Current
 exchanges may serve those callbacks without rearming a completed phase. On an
 actual retained peer, the same request domain and exact origin are valid only
 with a nonincreasing deadline, the next sequence, new nonces, a signed closed

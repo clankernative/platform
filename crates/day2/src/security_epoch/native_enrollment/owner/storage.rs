@@ -33,7 +33,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -49,7 +49,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -69,8 +69,8 @@ impl EnrolledStorageStage<'_, '_> {
         anyhow::bail!("storage_peer_platform_unsupported");
         #[cfg(target_os = "linux")]
         {
-            let (origin, deadline) = self.stage.acquisition.interval_data()?;
-            let sample = self.stage.acquisition.sample()?;
+            let (origin, deadline) = self.stage.acquisition.as_mut().interval_data()?;
+            let sample = self.stage.acquisition.as_mut().sample()?;
             Ok(StageStatement {
                 certificate: self.stage.owner.certificate.clone(),
                 stage: self.stage.owner.admission.clone(),
@@ -113,7 +113,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -127,9 +127,9 @@ impl EnrolledStorageStage<'_, '_> {
             if self.stage.purpose == super::StagePurpose::StorageBootstrap {
                 acquisition.require_storage_bootstrap()?;
             }
-            let current = self.stage.acquisition.sample()?;
+            let current = self.stage.acquisition.as_mut().sample()?;
             let child = acquisition.sample()?;
-            let (origin, deadline) = self.stage.acquisition.interval_data()?;
+            let (origin, deadline) = self.stage.acquisition.as_mut().interval_data()?;
             let (child_origin, child_deadline) = acquisition.interval_data()?;
             ensure!(
                 child.domain == current.domain
@@ -141,7 +141,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -201,7 +201,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -241,7 +241,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -272,7 +272,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -311,7 +311,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }

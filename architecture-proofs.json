@@ -43,7 +43,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_clock.rs",
       "scope": "const",
-      "fingerprint": "sha256:44b54fbd3dd4563ff1009934ae0e7bc09b1b60d363df2b98ffd6e006ec2166cf",
+      "fingerprint": "sha256:c40a27c41bac85e5c459a5db9d3cabe406c897cd0485b5dccf1b2896768aa991",
       "registration": null
     },
     {
@@ -1066,6 +1066,18 @@
         {
           "owner": "NativeConnectionClock",
           "signature": "pub (super) fn bind_captured_current (& mut self , mut original : NativeAcquisition) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "StageAcquisition < 'a >",
+          "signature": "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition"
+        },
+        {
+          "owner": "StageAcquisition < 'a >",
+          "signature": "pub (super) fn as_ref (& self) -> & NativeAcquisition"
+        },
+        {
+          "owner": "StageAcquisition < 'a >",
+          "signature": "pub (super) fn into_owned (self) -> Result < NativeAcquisition >"
         }
       ],
       "material_uses": [
@@ -1180,6 +1192,14 @@
         {
           "owner": "NativeConnectionClock",
           "signature": "pub (super) fn bind_captured_current (& mut self , mut original : NativeAcquisition) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "StageAcquisition < 'a >",
+          "signature": "pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self"
+        },
+        {
+          "owner": "StageAcquisition < 'a >",
+          "signature": "pub (super) fn owned (original : NativeAcquisition) -> Self"
         }
       ],
       "proof_uses": [],
@@ -1187,6 +1207,30 @@
       "consuming_methods": [
         "into_connection_clock"
       ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_clock.rs",
+      "type_name": "StageAcquisition",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition",
+        "pub (super) fn as_ref (& self) -> & NativeAcquisition",
+        "pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self",
+        "pub (super) fn into_owned (self) -> Result < NativeAcquisition >",
+        "pub (super) fn owned (original : NativeAcquisition) -> Self"
+      ],
+      "factories": [
+        {"owner":"StageAcquisition < 'a >","signature":"pub (super) fn borrowed (original : & 'a mut NativeAcquisition) -> Self"},
+        {"owner":"StageAcquisition < 'a >","signature":"pub (super) fn owned (original : NativeAcquisition) -> Self"}
+      ],
+      "material_uses": [
+        {"owner":"StageAcquisition < 'a >","signature":"pub (super) fn as_mut (& mut self) -> & mut NativeAcquisition"},
+        {"owner":"StageAcquisition < 'a >","signature":"pub (super) fn as_ref (& self) -> & NativeAcquisition"},
+        {"owner":"StageAcquisition < 'a >","signature":"pub (super) fn into_owned (self) -> Result < NativeAcquisition >"}
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": ["into_owned"]
     },
     {
       "source": "crates/day2/src/security_epoch/native_clock.rs",

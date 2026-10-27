@@ -73,8 +73,14 @@ fn enrolled_self_reborrow_shape(source: &str) -> bool {
                     call.method == "check"
                         && fields(&call.receiver, owner)
                         && call.args.len() == 1
-                        && matches!(&call.args[0], syn::Expr::Reference(reference)
-                            if reference.mutability.is_some() && fields(&reference.expr, clock)),
+                        && if clock.len() == 1 {
+                            matches!(&call.args[0], syn::Expr::Reference(reference)
+                                if reference.mutability.is_some() && fields(&reference.expr, clock))
+                        } else {
+                            matches!(&call.args[0], syn::Expr::MethodCall(borrow)
+                                if borrow.method == "as_mut" && borrow.args.is_empty()
+                                && fields(&borrow.receiver, clock))
+                        },
                 )
             })
             .sum()
@@ -210,8 +216,8 @@ fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
             "SelfSnapshot::acquire(&mut acquisition)?",
         ),
         (
-            "self.owner.current.check(&mut self.acquisition)?",
-            "self.owner.current.skip(&mut self.acquisition)?",
+            "self.owner.current.check(self.acquisition.as_mut())?",
+            "self.owner.current.skip(self.acquisition.as_mut())?",
         ),
     ] {
         let mutated = source.replacen(before, after, 1);
@@ -225,13 +231,14 @@ fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_requ
     let source = include_str!("owner.rs");
     for call in [
         "self.current.check(&mut acquisition)?;",
-        "self.owner.current.check(&mut self.acquisition)?;",
+        "self.owner.current.check(self.acquisition.as_mut())?;",
     ] {
         for replacement in [
             format!("if false {{ {call} }}"),
             call.replace("?;", ";"),
             call.replace("&mut acquisition", "&mut unrelated"),
             call.replace("&mut self.acquisition", "&mut unrelated"),
+            call.replace("self.acquisition.as_mut()", "unrelated.as_mut()"),
         ] {
             if replacement == call {
                 continue;
@@ -329,16 +336,85 @@ fn owned_request_borrow_shape(source: &str) -> bool {
     }) else {
         return false;
     };
-    let original_narrow = result_body.stmts.iter().filter(|statement| {
+    let original_interval = result_body.stmts.iter().filter(|statement| {
         let syn::Stmt::Local(local) = statement else { return false; };
-        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "acquisition") { return false; }
+        let syn::Pat::Tuple(tuple) = &local.pat else { return false; };
+        if tuple.elems.len() != 2
+            || !matches!(&tuple.elems[0], syn::Pat::Wild(_))
+            || !matches!(&tuple.elems[1], syn::Pat::Ident(binding) if binding.ident == "deadline") { return false; }
         let Some(initializer) = &local.init else { return false; };
         let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
         let syn::Expr::MethodCall(call) = &*attempt.expr else { return false; };
-        call.method == "narrow" && field(&call.receiver, "acquisition") && call.args.len() == 2
-            && matches!(&call.args[0], syn::Expr::Lit(literal) if matches!(&literal.lit, syn::Lit::Int(value) if value.base10_digits() == "5"))
-            && field(&call.args[1], "deadline")
+        call.method == "interval_data" && field(&call.receiver, "acquisition") && call.args.is_empty()
     }).count();
+    let actual_owner = result_body.stmts.iter().any(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return false;
+        };
+        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "original") {
+            return false;
+        }
+        let Some(initializer) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Try(attempt) = &*initializer.expr else {
+            return false;
+        };
+        let syn::Expr::MethodCall(error) = &*attempt.expr else {
+            return false;
+        };
+        let syn::Expr::MethodCall(upgrade) = &*error.receiver else {
+            return false;
+        };
+        error.method == "ok_or_else"
+            && upgrade.method == "upgrade"
+            && upgrade.args.is_empty()
+            && field(&upgrade.receiver, "identity")
+    });
+    let bound_owner = result_body.stmts.iter().any(|statement| {
+        matches!(statement, syn::Stmt::Macro(statement)
+            if statement.mac.path.is_ident("ensure")
+            && statement.mac.tokens.to_string().replace(' ', "").starts_with(
+                "Rc::ptr_eq(&original,&self.identity)&&request.incarnation==self.incarnation&&request.role==self.role&&request.process==std::process::id()&&request.thread==std::thread::current().id(),"))
+    });
+    let actual_borrow = function.block.stmts.iter().any(|statement| {
+        let syn::Stmt::Local(local) = statement else { return false; };
+        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "stage") { return false; }
+        let Some(initializer) = &local.init else { return false; };
+        let syn::Expr::Struct(stage) = &*initializer.expr else { return false; };
+        stage.path.is_ident("EnrolledRoleStage") && stage.fields.iter().any(|value| {
+            if !matches!(&value.member, syn::Member::Named(name) if name == "acquisition") { return false; }
+            let syn::Expr::Call(call) = &value.expr else { return false; };
+            matches!(&*call.func, syn::Expr::Path(path)
+                if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["StageAcquisition", "borrowed"])
+                && call.args.len() == 1
+                && matches!(&call.args[0], syn::Expr::Reference(reference)
+                    if reference.mutability.is_some() && field(&reference.expr, "acquisition"))
+        })
+    });
+    #[derive(Default)]
+    struct CopiedOriginal(bool);
+    impl<'ast> syn::visit::Visit<'ast> for CopiedOriginal {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.0 |= matches!(&*call.func, syn::Expr::Path(path)
+                if path.path.segments.last().is_some_and(|part| part.ident == "begin" || part.ident == "begin_bounded"));
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0 |= [
+                "narrow",
+                "begin_stage",
+                "begin_current_stage",
+                "begin_current",
+            ]
+            .iter()
+            .any(|name| call.method == name);
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut copied = CopiedOriginal::default();
+    syn::visit::Visit::visit_block(&mut copied, &function.block);
     let stage_check = function
         .block
         .stmts
@@ -349,7 +425,12 @@ fn owned_request_borrow_shape(source: &str) -> bool {
                 if call.method == "check" && path(&call.receiver, "stage") && call.args.is_empty()))
         })
         .count();
-    original_narrow == 1 && stage_check == 1
+    original_interval == 1
+        && actual_owner
+        && bound_owner
+        && actual_borrow
+        && !copied.0
+        && stage_check == 1
 }
 
 #[test]
@@ -366,17 +447,26 @@ fn http_request_guard_rejects_new_clocks_weaker_lifetimes_and_skipped_postchecks
             "&mut EnrolledCurrentRequest",
         ),
         (
-            "request.acquisition.narrow(5, request.deadline)?",
-            "NativeAcquisition::begin(5)?",
+            "request.acquisition.interval_data()?",
+            "NativeAcquisition::begin(5)?.interval_data()?",
         ),
         (
-            "request.acquisition.narrow(5, request.deadline)?",
-            "request.acquisition.narrow(5, unrelated)?",
+            "StageAcquisition::borrowed(&mut request.acquisition)",
+            "StageAcquisition::owned(request.acquisition.narrow(5, deadline)?)",
         ),
         (
-            "request.acquisition.narrow(5, request.deadline)?",
-            "if false { request.acquisition.narrow(5, request.deadline)? } else { unrelated }",
+            "StageAcquisition::borrowed(&mut request.acquisition)",
+            "StageAcquisition::borrowed(&mut unrelated)",
         ),
+        (
+            "request.acquisition.interval_data()?",
+            "request.unrelated.interval_data()?",
+        ),
+        ("Rc::ptr_eq(&original, &self.identity)", "true"),
+        ("request.incarnation == self.incarnation", "true"),
+        ("request.role == self.role", "true"),
+        ("request.process == std::process::id()", "true"),
+        ("request.thread == std::thread::current().id()", "true"),
     ] {
         let changed = source.replacen(before, after, 1);
         assert_ne!(changed, source);
@@ -461,7 +551,9 @@ fn actual_read_cap_handoff(source: &str) -> bool {
             return false;
         };
         let correct_receiver = if index == 2 {
-            is_field(&call.receiver, "stage", "acquisition")
+            matches!(&*call.receiver, syn::Expr::MethodCall(borrow)
+                if borrow.method == "as_mut" && borrow.args.is_empty()
+                && is_field(&borrow.receiver, "stage", "acquisition"))
         } else {
             is_path(&call.receiver, receiver)
         };
@@ -499,16 +591,16 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
         ("self.check(stage)?;", "let _ = self.check(stage);"),
         ("stage.require_current_role()?;", "stage.check()?;"),
         (
-            "stage.acquisition.exchange_current_views(actual)?;",
-            "if false { stage.acquisition.exchange_current_views(actual)?; }",
+            "stage.acquisition.as_mut().exchange_current_views(actual)?;",
+            "if false { stage.acquisition.as_mut().exchange_current_views(actual)?; }",
         ),
         (
-            "stage.acquisition.exchange_current_views(actual)?;",
-            "let _ = stage.acquisition.exchange_current_views(actual);",
+            "stage.acquisition.as_mut().exchange_current_views(actual)?;",
+            "let _ = stage.acquisition.as_mut().exchange_current_views(actual);",
         ),
         (
-            "stage.acquisition.exchange_current_views(actual)?;",
-            "stage.acquisition.exchange_current_views(unrelated)?;",
+            "stage.acquisition.as_mut().exchange_current_views(actual)?;",
+            "stage.acquisition.as_mut().exchange_current_views(unrelated)?;",
         ),
         ("stage.check()", "Ok(())"),
         ("actual.refuse();", ""),

@@ -1,7 +1,7 @@
 //! Stable native executor ownership. Nothing here adopts a parsed certificate as
 //! authority, moves a role between threads, or renews a failed original.
 
-use crate::security_epoch::native_clock::{NativeAcquisition, boottime};
+use crate::security_epoch::native_clock::{NativeAcquisition, StageAcquisition, boottime};
 #[cfg(target_os = "linux")]
 use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 #[cfg(target_os = "linux")]
@@ -70,7 +70,7 @@ pub(crate) struct EnrolledProcessRoleOwner {
 pub(crate) struct EnrolledRoleStage<'a> {
     owner: &'a mut EnrolledProcessRoleOwner,
     purpose: StagePurpose,
-    acquisition: NativeAcquisition,
+    acquisition: StageAcquisition<'a>,
     deadline: Duration,
     #[cfg(target_os = "linux")]
     policy_interpretation: super::policy::PolicyInterpretation,
@@ -93,7 +93,6 @@ pub(crate) struct EnrolledCurrentRequest {
     process: u32,
     thread: ThreadId,
     acquisition: NativeAcquisition,
-    deadline: Duration,
     finished: bool,
     local: PhantomData<Rc<()>>,
 }
@@ -331,8 +330,7 @@ impl EnrolledProcessRoleOwner {
             role: stage.owner.role,
             process: stage.owner.process,
             thread: stage.owner.thread,
-            acquisition: stage.acquisition,
-            deadline: stage.deadline,
+            acquisition: stage.acquisition.into_owned()?,
             finished: false,
             local: PhantomData,
         })
@@ -369,15 +367,13 @@ impl EnrolledProcessRoleOwner {
                     .acquisition
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_already_bound"))?;
-                let mut acquisition = self.clock.bind_captured_current(original)?;
-                let (_, deadline) = acquisition.interval_data()?;
+                let acquisition = self.clock.bind_captured_current(original)?;
                 let mut request = EnrolledCurrentRequest {
                     identity: Rc::downgrade(&self.identity),
                     incarnation: self.incarnation.clone(),
                     role: self.role,
                     process: self.process,
                     thread: self.thread,
-                    deadline,
                     acquisition,
                     finished: false,
                     local: PhantomData,
@@ -416,11 +412,11 @@ impl EnrolledProcessRoleOwner {
                     && request.thread == std::thread::current().id(),
                 "native_enrollment_request_owner_changed"
             );
-            let acquisition = request.acquisition.narrow(5, request.deadline)?;
-            Ok(acquisition)
+            let (_, deadline) = request.acquisition.interval_data()?;
+            Ok(deadline)
         })();
-        let acquisition = match result {
-            Ok(acquisition) => acquisition,
+        let deadline = match result {
+            Ok(deadline) => deadline,
             Err(error) => {
                 self.refused = true;
                 request.acquisition.refuse();
@@ -430,8 +426,8 @@ impl EnrolledProcessRoleOwner {
         let mut stage = EnrolledRoleStage {
             owner: self,
             purpose: StagePurpose::CurrentRole,
-            acquisition,
-            deadline: request.deadline,
+            acquisition: StageAcquisition::borrowed(&mut request.acquisition),
+            deadline,
             #[cfg(target_os = "linux")]
             policy_interpretation: super::policy::PolicyInterpretation::new(),
         };
@@ -514,7 +510,7 @@ impl EnrolledProcessRoleOwner {
                 let mut stage = EnrolledRoleStage {
                     owner: self,
                     purpose,
-                    acquisition,
+                    acquisition: StageAcquisition::owned(acquisition),
                     deadline,
                     policy_interpretation,
                 };
@@ -588,7 +584,7 @@ impl EnrolledRoleStage<'_> {
             anyhow::bail!("native_enrollment_platform_unsupported");
             #[cfg(target_os = "linux")]
             {
-                let mut authentication = self.acquisition.narrow_authentication()?;
+                let mut authentication = self.acquisition.as_mut().narrow_authentication()?;
                 let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
                     &self.owner.policy,
                     self.owner.role,
@@ -604,10 +600,13 @@ impl EnrolledRoleStage<'_> {
                 );
                 self.owner.issuer.check_live(&mut authentication)?;
                 let signed_deadline = Duration::from_nanos(grant.data.deadline_ns);
-                self.acquisition.complete_authentication(authentication)?;
+                self.acquisition
+                    .as_mut()
+                    .complete_authentication(authentication)?;
                 // This cold exchange keeps any shorter authenticated ceiling
                 // on its SAME request; no origin or observation is replaced.
-                self.acquisition = self.acquisition.narrow(60, signed_deadline)?;
+                *self.acquisition.as_mut() =
+                    self.acquisition.as_mut().narrow(60, signed_deadline)?;
                 self.deadline = self.deadline.min(signed_deadline);
                 self.owner.admission = grant;
                 self.owner.admission_peers = vec![grant_peer, nonce_peer];
@@ -617,7 +616,7 @@ impl EnrolledRoleStage<'_> {
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
         }
         result
     }
@@ -627,6 +626,7 @@ impl EnrolledRoleStage<'_> {
         &self,
     ) -> crate::security_epoch::native_clock::AcquisitionProgress {
         self.acquisition
+            .as_ref()
             .diagnostic_progress()
             .with_enrollment_data(self.owner.incarnation.clone())
     }
@@ -654,13 +654,16 @@ impl EnrolledRoleStage<'_> {
         let result = (|| {
             self.require_purpose(StagePurpose::CurrentRole)?;
             self.check()?;
-            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            let child = self
+                .acquisition
+                .as_mut()
+                .narrow(max_lease_seconds, self.deadline)?;
             self.check()?;
             Ok(child)
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
         }
         result
     }
@@ -681,13 +684,13 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.require_storage_authentication_purpose()?;
-            let child = self.stage.acquisition.narrow_authentication()?;
+            let child = self.stage.acquisition.as_mut().narrow_authentication()?;
             self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -702,11 +705,14 @@ impl EnrolledStorageStage<'_, '_> {
         if let Err(error) = self.require_storage_authentication_purpose() {
             child.refuse();
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             return Err(error);
         }
         let result = (|| {
-            self.stage.acquisition.complete_authentication(child)?;
+            self.stage
+                .acquisition
+                .as_mut()
+                .complete_authentication(child)?;
             match self.stage.purpose {
                 StagePurpose::StorageBootstrap => {
                     self.narrow_storage_bootstrap_io_acquisition(max_lease_seconds)
@@ -719,7 +725,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -730,17 +736,21 @@ impl EnrolledStorageStage<'_, '_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.stage.require_purpose(StagePurpose::StorageBootstrap)?;
-            self.stage.acquisition.require_storage_bootstrap()?;
+            self.stage
+                .acquisition
+                .as_mut()
+                .require_storage_bootstrap()?;
             let child = self
                 .stage
                 .acquisition
+                .as_mut()
                 .narrow(max_lease_seconds, self.stage.deadline)?;
             self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -754,17 +764,19 @@ impl EnrolledStorageStage<'_, '_> {
                 .require_purpose(StagePurpose::StorageMetadataObservation)?;
             self.stage
                 .acquisition
+                .as_mut()
                 .require_storage_metadata_observation()?;
             let child = self
                 .stage
                 .acquisition
+                .as_mut()
                 .narrow(max_lease_seconds, self.stage.deadline)?;
             self.stage.check()?;
             Ok(child)
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -774,18 +786,19 @@ impl EnrolledStorageStage<'_, '_> {
             self.stage.check()?;
             match self.stage.purpose {
                 StagePurpose::StorageBootstrap => {
-                    self.stage.acquisition.require_storage_bootstrap()
+                    self.stage.acquisition.as_mut().require_storage_bootstrap()
                 }
                 StagePurpose::StorageMetadataObservation => self
                     .stage
                     .acquisition
+                    .as_mut()
                     .require_storage_metadata_observation(),
                 _ => anyhow::bail!("native_enrollment_storage_authentication_purpose"),
             }
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -798,7 +811,7 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<()> {
         if let Err(error) = self.purpose.require_exact(purpose) {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
             return Err(error);
         }
         self.check()
@@ -813,13 +826,16 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<NativeAcquisition> {
         let result = (|| {
             self.require_purpose(StagePurpose::InitialFirstHolder)?;
-            let child = self.acquisition.narrow(max_lease_seconds, self.deadline)?;
+            let child = self
+                .acquisition
+                .as_mut()
+                .narrow(max_lease_seconds, self.deadline)?;
             self.check()?;
             Ok(child)
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
         }
         result
     }
@@ -854,7 +870,7 @@ impl EnrolledRoleStage<'_> {
     ) -> Result<()> {
         if self.owner.policy.bootstrap != *policy || self.owner.policy.store != *store {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
         self.require_role_data(&policy.scope, role)
@@ -875,7 +891,7 @@ impl EnrolledRoleStage<'_> {
         let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
         if !selected {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
             anyhow::bail!("native_enrollment_stage_selection_changed");
         }
         Ok(())
@@ -886,31 +902,34 @@ impl EnrolledRoleStage<'_> {
             self.owner.check_local()?;
             self.purpose.require_role(self.owner.role)?;
             match self.purpose {
-                StagePurpose::StorageBootstrap => self.acquisition.require_storage_bootstrap()?,
-                StagePurpose::StorageMetadataObservation => {
-                    self.acquisition.require_storage_metadata_observation()?
+                StagePurpose::StorageBootstrap => {
+                    self.acquisition.as_mut().require_storage_bootstrap()?
                 }
+                StagePurpose::StorageMetadataObservation => self
+                    .acquisition
+                    .as_mut()
+                    .require_storage_metadata_observation()?,
                 StagePurpose::CurrentRole | StagePurpose::InitialFirstHolder => {}
             }
             ensure!(
-                self.acquisition.sample()?.elapsed < self.deadline,
+                self.acquisition.as_mut().sample()?.elapsed < self.deadline,
                 "native_enrollment_stage_expired"
             );
             #[cfg(target_os = "linux")]
             {
                 super::birth::check_policy_interpretation(
-                    &mut self.acquisition,
+                    self.acquisition.as_mut(),
                     &mut self.policy_interpretation,
                     &self.owner.policy,
                 )?;
-                self.owner.current.check(&mut self.acquisition)?;
-                self.owner.issuer.check_live(&mut self.acquisition)?;
+                self.owner.current.check(self.acquisition.as_mut())?;
+                self.owner.issuer.check_live(self.acquisition.as_mut())?;
                 ensure!(
                     (1..=2).contains(&self.owner.admission_peers.len()),
                     "native_enrollment_admission_peer_bound"
                 );
                 for peer in &mut self.owner.admission_peers {
-                    peer.check_live(&mut self.acquisition)?;
+                    peer.check_live(self.acquisition.as_mut())?;
                 }
                 Ok(())
             }
@@ -919,7 +938,7 @@ impl EnrolledRoleStage<'_> {
         })();
         if result.is_err() {
             self.owner.refused = true;
-            self.acquisition.refuse();
+            self.acquisition.as_mut().refuse();
         }
         result
     }
@@ -937,13 +956,13 @@ impl SameEnrolledOwner {
         let result = (|| {
             self.check(stage)?;
             stage.require_current_role()?;
-            stage.acquisition.exchange_current_views(actual)?;
+            stage.acquisition.as_mut().exchange_current_views(actual)?;
             stage.check()
         })();
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.refuse();
+            stage.acquisition.as_mut().refuse();
             actual.refuse();
         }
         result
@@ -966,7 +985,7 @@ impl SameEnrolledOwner {
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.refuse();
+            stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -1002,7 +1021,7 @@ impl EnrolledOriginalClock {
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
-            stage.acquisition.refuse();
+            stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -1028,13 +1047,13 @@ impl ClockAnchors {
         {
             use crate::security_epoch::native_namespace as ns;
             stage.check()?;
-            let proc = ns::open_root(&mut stage.acquisition)?;
-            let task = ns::open_task(&proc, &mut stage.acquisition)?;
+            let proc = ns::open_root(stage.acquisition.as_mut())?;
+            let task = ns::open_task(&proc, stage.acquisition.as_mut())?;
             let mut namespaces = std::collections::BTreeMap::new();
             for name in ["time", "time_for_children", "pid", "user"] {
                 namespaces.insert(
                     name.to_owned(),
-                    ns::open_namespace(&task, name, &mut stage.acquisition)?,
+                    ns::open_namespace(&task, name, stage.acquisition.as_mut())?,
                 );
             }
             let mut owner = Self {
@@ -1057,19 +1076,19 @@ impl ClockAnchors {
         {
             use crate::security_epoch::native_namespace as ns;
             stage.check()?;
-            let current = ns::open_root(&mut stage.acquisition)?;
+            let current = ns::open_root(stage.acquisition.as_mut())?;
             ensure!(
                 ns::proc_identity(&current)? == ns::proc_identity(&self.proc)?,
                 "native_enrollment_clock_proc_changed"
             );
-            let current = ns::open_task(&current, &mut stage.acquisition)?;
+            let current = ns::open_task(&current, stage.acquisition.as_mut())?;
             ensure!(
                 ns::proc_identity(&current)? == ns::proc_identity(&self.task)?,
                 "native_enrollment_clock_task_changed"
             );
             for (name, original) in &self.namespaces {
                 let value = ns::namespace_identity(original)?;
-                let current = ns::open_namespace(&current, name, &mut stage.acquisition)?;
+                let current = ns::open_namespace(&current, name, stage.acquisition.as_mut())?;
                 ensure!(
                     ns::namespace_identity(&current)? == value
                         && stage.owner.current.data.namespaces.get(name)

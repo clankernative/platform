@@ -67,6 +67,58 @@ pub(crate) struct NativeAcquisition {
     fixture_time: Option<Duration>,
 }
 
+/// A cold stage owns its actual original; an HTTP callback exclusively borrows
+/// the request's actual stored original. Borrowing creates no narrowed copy,
+/// so a counter/peer meet remains on the request after the callback returns.
+pub(super) struct StageAcquisition<'a> {
+    original: StageOriginal<'a>,
+}
+
+enum StageOriginal<'a> {
+    Owned(NativeAcquisition),
+    Borrowed(&'a mut NativeAcquisition),
+}
+
+impl<'a> StageAcquisition<'a> {
+    pub(super) fn owned(original: NativeAcquisition) -> Self {
+        Self {
+            original: StageOriginal::Owned(original),
+        }
+    }
+
+    pub(super) fn borrowed(original: &'a mut NativeAcquisition) -> Self {
+        Self {
+            original: StageOriginal::Borrowed(original),
+        }
+    }
+
+    pub(super) fn as_ref(&self) -> &NativeAcquisition {
+        match &self.original {
+            StageOriginal::Owned(original) => original,
+            StageOriginal::Borrowed(original) => original,
+        }
+    }
+
+    pub(super) fn as_mut(&mut self) -> &mut NativeAcquisition {
+        match &mut self.original {
+            StageOriginal::Owned(original) => original,
+            StageOriginal::Borrowed(original) => original,
+        }
+    }
+
+    /// Only the new-request constructor consumes a freshly owned stage.
+    /// A borrowed original cannot be detached from its actual request owner.
+    pub(super) fn into_owned(self) -> Result<NativeAcquisition> {
+        match self.original {
+            StageOriginal::Owned(original) => Ok(original),
+            StageOriginal::Borrowed(original) => {
+                original.refuse();
+                anyhow::bail!("epoch_native_borrowed_original_cannot_detach")
+            }
+        }
+    }
+}
+
 // Every actual narrowed view shares this original observation, including the
 // enrolled role parent. A parent observation is visible BEFORE the next child
 // sample/send, not imported only at a later handoff. Refusal cannot be repaired
@@ -97,6 +149,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <NativeConnectionClock as Ambiguous<_>>::check;
+            let _ = <StageAcquisition<'static> as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -706,6 +759,106 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lexical_request_borrows_keep_the_actual_parents_earliest_cap_and_refusal() {
+        // Clock ownership only. No enrolled role, native stage, counter or
+        // positive serving permission can be constructed by this fixture.
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"one stored request original"),
+            std::process::id(),
+            origin,
+            MAX_ACQUISITION,
+        );
+        let identity = original.domain.clone();
+        let observation = Rc::clone(&original.observation);
+        {
+            let mut stage = StageAcquisition::borrowed(&mut original);
+            let mut counter = stage
+                .as_mut()
+                .narrow(5, origin + Duration::from_secs(2))
+                .unwrap();
+            stage.as_mut().exchange_current_views(&mut counter).unwrap();
+            drop(counter); // The known child completion cannot restore a cap.
+        }
+        assert_eq!(original.deadline, origin + Duration::from_secs(2));
+        original.fixture_time = Some(origin + Duration::from_millis(500));
+        {
+            let mut stage = StageAcquisition::borrowed(&mut original);
+            // A later callback cannot get the original five-second ceiling.
+            let mut peer = stage.as_mut().narrow(5, origin + MAX_ACQUISITION).unwrap();
+            assert_eq!(peer.deadline, origin + Duration::from_secs(2));
+            peer = peer.narrow(5, origin + Duration::from_secs(1)).unwrap();
+            stage.as_mut().exchange_current_views(&mut peer).unwrap();
+        }
+        assert_eq!(original.deadline, origin + Duration::from_secs(1));
+        assert_eq!(
+            (original.domain.clone(), original.origin),
+            (identity, origin)
+        );
+        assert!(Rc::ptr_eq(&original.observation, &observation));
+        original.fixture_time = Some(origin + Duration::from_secs(1));
+        assert!(
+            StageAcquisition::borrowed(&mut original)
+                .as_mut()
+                .remaining()
+                .is_err()
+        );
+        original.fixture_time = Some(origin);
+        assert!(
+            StageAcquisition::borrowed(&mut original)
+                .as_mut()
+                .remaining()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn borrowed_request_acquisition_cannot_be_detached_as_an_owned_original() {
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"the actual stored request"),
+            std::process::id(),
+            origin,
+            MAX_ACQUISITION,
+        );
+        let error = StageAcquisition::borrowed(&mut original)
+            .into_owned()
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "epoch_native_borrowed_original_cannot_detach"
+        );
+        assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn owned_cold_stage_preserves_the_distinct_completed_authentication_work_bound() {
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"a cold bootstrap original"),
+            std::process::id(),
+            origin,
+            STORAGE_BOOTSTRAP_LIMIT,
+        );
+        original.scope = AcquisitionScope::StorageBootstrap;
+        let mut stage = StageAcquisition::owned(original);
+        let authentication = stage.as_mut().narrow_authentication().unwrap();
+        assert_eq!(authentication.deadline, origin + MAX_ACQUISITION);
+        stage
+            .as_mut()
+            .complete_authentication(authentication)
+            .unwrap();
+        let mut actual = stage.into_owned().unwrap();
+        assert_eq!(
+            actual.interval_data().unwrap(),
+            (origin, origin + STORAGE_BOOTSTRAP_LIMIT)
+        );
+        actual.fixture_time = Some(origin + Duration::from_secs(6));
+        assert!(actual.remaining().is_ok());
+    }
 
     #[test]
     fn admitted_clock_joins_distinct_requests_without_renewing_old_intervals() {

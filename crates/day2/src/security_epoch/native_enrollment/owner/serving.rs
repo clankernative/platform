@@ -79,13 +79,13 @@ impl EnrolledRoleStage<'_> {
             anyhow::bail!("serving_peer_platform_unsupported");
             #[cfg(target_os = "linux")]
             {
-                let (origin, deadline) = self.acquisition.interval_data()?;
+                let (origin, deadline) = self.acquisition.as_mut().interval_data()?;
                 let statement = Statement {
                     certificate: self.owner.certificate.clone(),
                     stage: self.owner.admission.clone(),
                     original: OriginalInterval {
                         purpose: self.purpose,
-                        domain: self.acquisition.sample()?.domain,
+                        domain: self.acquisition.as_mut().sample()?.domain,
                         origin_ns: origin.as_nanos().try_into()?,
                         deadline_ns: deadline.min(self.deadline).as_nanos().try_into()?,
                     },
@@ -224,6 +224,6 @@ impl EnrolledRoleStage<'_> {
 
     pub(in crate::security_epoch::native_enrollment) fn refuse_serving(&mut self) {
         self.owner.refused = true;
-        self.acquisition.refuse();
+        self.acquisition.as_mut().refuse();
     }
 }
