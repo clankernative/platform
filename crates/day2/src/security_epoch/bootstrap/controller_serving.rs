@@ -5,8 +5,8 @@ use super::{
     ActiveControllerStorageContinuity, ServingObservation, check_active_snapshot, request_names,
 };
 use crate::security_epoch::controller::serving_timing::{ServingStep, ServingTiming};
+use crate::security_epoch::native_enrollment::EnrolledRoleStage;
 use crate::security_epoch::self_check_profile::{self, Category};
-use crate::security_epoch::{AuthenticatedReads, native_enrollment::EnrolledRoleStage};
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::bootstrap::NativeRole;
 
@@ -27,8 +27,13 @@ impl ActiveControllerStorageContinuity {
         let result = (|| {
             let (mut physical, mut reads) = trace.measure(ServingStep::PhysicalBegin, || {
                 let _profile = self_check_profile::enter(Category::PhysicalLocal);
-                self.storage
-                    .begin_current_app(stage, &self.policy, &self.store, trace)
+                self.storage.begin_current_app(
+                    stage,
+                    &self.policy,
+                    &self.store,
+                    &mut self.counter,
+                    trace,
+                )
             })?;
             // Authenticated request selection is DATA. This can only be the
             // original App enrollment and a fresh current-serving transcript.
@@ -74,6 +79,10 @@ impl ActiveControllerStorageContinuity {
             let snapshot = trace.measure(ServingStep::Snapshot, || {
                 super::super::journal::snapshot_digest(observed.snapshot())
             })?;
+            reads.finish(physical.controller_stage()?)?;
+            // The enclosing active owner remains closed until the actual
+            // physical/peer release succeeds too. A later failure refuses its
+            // retained connection; no new request can enter during release.
             trace.measure(ServingStep::Release, || physical.finish_app_known())?;
             Ok(ServingObservation { binding, snapshot })
         })();
@@ -81,6 +90,7 @@ impl ActiveControllerStorageContinuity {
             self.valid = true;
         } else {
             self.storage.refuse();
+            self.counter.refuse();
         }
         result
     }
@@ -98,18 +108,19 @@ impl ActiveControllerStorageContinuity {
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
+            // Meet the already-admitted token ceiling before the first
+            // immutable Shell Current statement is constructed.
+            let mut reads = self.counter.request(
+                &mut stage,
+                &self.policy,
+                &self.store,
+                NativeRole::EpochController,
+            )?;
             let pending = self.storage.begin_pending_current_controller()?;
             let rendezvous = peer.prepare_current(&mut stage)?;
             let mut physical = pending.acquire(stage)?;
             let mut shell = rendezvous.accept_current(physical.controller_stage()?)?;
             let binding = shell.request_binding().clone();
-            let mut reads = AuthenticatedReads::acquire(
-                &self.policy,
-                &self.store,
-                NativeRole::EpochController,
-                physical.controller_stage()?,
-            )?
-            .retain_current()?;
             let names = request_names(&self.store, &self.completion)?;
             let mut observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
             check_active_snapshot(
@@ -137,6 +148,7 @@ impl ActiveControllerStorageContinuity {
             shell.release(physical.controller_stage()?)?;
             shell.finish_checked(physical.controller_stage()?)?;
             let snapshot = super::super::journal::snapshot_digest(observed.snapshot())?;
+            reads.finish(physical.controller_stage()?)?;
             physical.finish_controller_known()?;
             Ok(ServingObservation { binding, snapshot })
         })();
@@ -144,6 +156,7 @@ impl ActiveControllerStorageContinuity {
             self.valid = true;
         } else {
             self.storage.refuse();
+            self.counter.refuse();
             peer.refuse();
         }
         result

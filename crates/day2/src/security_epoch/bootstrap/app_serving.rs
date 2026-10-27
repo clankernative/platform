@@ -4,7 +4,6 @@ use super::{
     request_names,
 };
 use crate::security_epoch::{
-    AuthenticatedReads,
     native_enrollment::{EnrolledRoleStage, StoragePeerPurpose, StoragePeerRequest},
     serving::CurrentServingPhase,
 };
@@ -54,15 +53,16 @@ impl ActiveAppStorageContinuity {
             request.binding.clone(),
             purpose,
         );
-        let mut physical = self.storage.begin_current(stage, request)?;
-        physical.await_known(stage)?;
-        let mut reads = AuthenticatedReads::acquire(
+        // The admitted credential's fixed ceiling meets the actual stage
+        // BEFORE a peer statement/signature captures its immutable interval.
+        let mut reads = self.counter.request(
+            stage,
             &self.policy,
             &self.store,
             day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
-            stage,
-        )?
-        .retain_current()?;
+        )?;
+        let mut physical = self.storage.begin_current(stage, request)?;
+        physical.await_known(stage)?;
         let names = request_names(&self.store, &self.completion)?;
         let observed = reads.read(stage, &self.store, &names)?;
         check_active_snapshot(
@@ -289,6 +289,7 @@ impl<'storage> CurrentAppServingPhase<'storage> {
         let known = self.disposition == ServingDisposition::Known;
         self.physical.finish_checked(stage)?;
         stage.check()?;
+        self.reads.finish(stage)?;
         *self.continuation = true;
         if known {
             self.evidence

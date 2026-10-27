@@ -391,11 +391,17 @@ impl ServingParticipant {
         }
     }
 
-    pub(crate) fn app(app: super::ActiveAppStorageContinuity) -> Self {
-        Self {
+    /// Cold connection setup after activation, outside any HTTP request. Only
+    /// fully admitted counter material may escape in a serving participant.
+    pub(crate) fn app(
+        mut app: super::ActiveAppStorageContinuity,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<Self> {
+        app.admit_counter(stage)?;
+        Ok(Self {
             native: ParticipantOwner::App(Box::new(app)),
             response: ResponseHolds::default(),
-        }
+        })
     }
 
     pub(crate) fn shell(peer: super::native_enrollment::ShellServingPeer) -> Self {

@@ -297,6 +297,26 @@ impl RetainedPeer {
 }
 
 impl AppHolderPeerContinuity {
+    /// Rejoin the original admitted App owner and peer without starting a
+    /// packet exchange or issuing request/serving authority.
+    pub(in crate::security_epoch) fn check_retained_identity(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                matches!(self.owner.disposition, Disposition::Ready(_)),
+                "storage_peer_retained_busy_or_refused"
+            );
+            let mut acquisition = stage.narrow_io_acquisition(5)?;
+            self.owner.check_resources(stage, &mut acquisition)
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn first_holder(&self) -> &crate::security_epoch::kernel::Holder {
         &self.owner.first_holder
     }

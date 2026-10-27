@@ -653,30 +653,25 @@ impl EnrolledRoleStage<'_> {
 }
 
 impl SameEnrolledOwner {
-    /// One lexical Current read view: validate the actual owner fully, then
-    /// perform only selection/purpose DATA checks and original-clock narrowing.
-    /// The sole caller observes its process under this child and fully checks
-    /// the same owner again before accepting the observation. No native check
-    /// is cached or omitted across that I/O boundary.
-    pub(in crate::security_epoch) fn current_read_view(
+    /// Meet the actual read child's earlier bounds back into THIS same stage
+    /// before a later physical/peer release can consume it. This accepts no
+    /// scalar deadline or replacement clock, and returns no permission.
+    pub(in crate::security_epoch) fn meet_current_read_view(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
-        policy: &day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
-        store: &day2_capabilities::security_epoch::EpochStore,
-        role: NativeRole,
-    ) -> Result<NativeAcquisition> {
+        actual: &mut NativeAcquisition,
+    ) -> Result<()> {
         let result = (|| {
             self.check(stage)?;
-            stage.require_selection_data(policy, store, role)?;
-            stage.purpose.require_exact(StagePurpose::CurrentRole)?;
-            stage
-                .acquisition
-                .narrow(store.max_lease_seconds, stage.deadline)
+            stage.require_purpose(StagePurpose::CurrentRole)?;
+            stage.acquisition.exchange_current_views(actual)?;
+            stage.check()
         })();
         if result.is_err() {
             self.refused = true;
             stage.owner.refused = true;
             stage.acquisition.refuse();
+            actual.refuse();
         }
         result
     }
