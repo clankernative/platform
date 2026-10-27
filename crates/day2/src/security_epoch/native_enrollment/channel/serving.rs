@@ -419,6 +419,40 @@ impl ControllerReceipt {
         crate::security_epoch::native_enrollment::process::live(&self.pidfd, acquisition)
     }
 
+    /// Require an actual bound admission receipt in addition to this packet's
+    /// original SCM_PIDFD. No statement/PID factory can substitute for it.
+    pub(in crate::security_epoch::native_enrollment) fn bind_admitted(
+        &mut self,
+        statement: &Statement,
+        original: &mut Self,
+        admitted: &Statement,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            original.check_continuity(admitted, stage, acquisition)?;
+            self.check_received(acquisition)?;
+            ensure!(
+                self.kernel_process == original.kernel_process
+                    && statement.same_enrollment(admitted),
+                "serving_peer_controller_admission_changed"
+            );
+            let digest = statement.digest()?;
+            ensure!(
+                self.statement.as_ref().is_none_or(|old| old == &digest),
+                "serving_peer_controller_statement_changed"
+            );
+            self.statement = Some(digest);
+            self.check_continuity(statement, stage, acquisition)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            original.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
     /// A retained original sender handle is identity/liveness continuity only;
     /// it does not make the old grant current. Fresh phases verify a newly
     /// signed role statement and nonce exchange separately.
@@ -463,12 +497,7 @@ impl ControllerReceipt {
                 self.statement.as_ref() == Some(&statement.digest()?),
                 "serving_peer_controller_not_bound"
             );
-            stage.check_serving_controller_statement(
-                statement,
-                self.kernel_process,
-                acquisition,
-            )?;
-            self.check_received(acquisition)
+            self.check_continuity(statement, stage, acquisition)
         })();
         if result.is_err() {
             self.valid = false;

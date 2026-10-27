@@ -219,6 +219,7 @@ fn fixture_with_issuer(role: NativeRole) -> (EnrollmentPolicy, Statement, KeyOwn
             certificate,
             stage,
             original: OriginalInterval {
+                purpose: StagePurpose::CurrentRole,
                 domain: Digest::new(b"actual-domain-would-come-from-native-stage"),
                 origin_ns: 100_000_000_000,
                 deadline_ns: 105_000_000_000,
@@ -302,7 +303,7 @@ fn statement_data_binds_same_issuer_full_policy_role_process_and_original_budget
 }
 
 #[test]
-fn current_phase_needs_a_later_distinct_signed_grant_not_rewrapped_data() {
+fn current_phase_needs_a_later_distinct_request_interval_not_rewrapped_data() {
     let (policy, statement, _, issuer) = fixture_with_issuer(NativeRole::SecurityShell);
     assert!(statement.require_fresh(&statement).is_err());
     let mut wrapped = statement.clone();
@@ -335,6 +336,111 @@ fn current_phase_needs_a_later_distinct_signed_grant_not_rewrapped_data() {
     assert!(statement.require_fresh(&fresh).is_err());
     fresh.stage.data.process.start_ticks += 1;
     assert!(fresh.require_fresh(&statement).is_err());
+}
+
+#[test]
+fn repeated_serving_exchange_data_retains_one_http_original_without_replay() {
+    let (_, admitted, key, _) = fixture_with_issuer(NativeRole::SecurityShell);
+    let initial = Digest::new(b"retained-native-serving-exchange-required");
+    let mut previous = admitted.clone();
+    for sequence in 1..=2 {
+        let mut current = admitted.clone();
+        current.original.deadline_ns = previous.original.deadline_ns - 1;
+        current.require_request_continuity(&previous).unwrap();
+        current
+            .validate_request(&admitted, Duration::from_secs(102))
+            .unwrap();
+        assert_eq!(current.original.domain, admitted.original.domain);
+        assert_eq!(current.original.origin_ns, admitted.original.origin_ns);
+        let ready_nonce = Digest::of(&("next-serving-controller-nonce", sequence)).unwrap();
+        let hello = signed(
+            &current,
+            &key,
+            Body::CurrentHello {
+                shell: Box::new(current.clone()),
+                initial: initial.clone(),
+                sequence,
+                binding: Digest::new(b"same-http-operation"),
+                nonce: Digest::of(&("next-serving-shell-nonce", sequence)).unwrap(),
+                controller_nonce: ready_nonce.clone(),
+            },
+        );
+        hello.verify(&current).unwrap();
+        hello.hello(Some(&initial), sequence, &ready_nonce).unwrap();
+        assert!(
+            hello
+                .hello(Some(&initial), sequence + 1, &ready_nonce)
+                .is_err()
+        );
+        assert!(
+            hello
+                .hello(Some(&initial), sequence, &Digest::new(b"stale-ready"))
+                .is_err()
+        );
+        for change in 0..5 {
+            let mut wrong = current.clone();
+            match change {
+                0 => wrong.original.origin_ns += 1,
+                1 => wrong.original.domain = Digest::new(b"same-origin-new-envelope"),
+                2 => wrong.original.deadline_ns = previous.original.deadline_ns + 1,
+                3 => wrong.original.purpose = StagePurpose::StorageBootstrap,
+                _ => wrong.stage.data.process.start_ticks += 1,
+            }
+            assert!(
+                wrong.require_request_continuity(&previous).is_err(),
+                "case {change}"
+            );
+        }
+        assert!(
+            current
+                .validate_request(&admitted, Duration::from_secs(105))
+                .is_err()
+        );
+        previous = current;
+    }
+    // No native Peer is constructed here. The production path must also hold
+    // its actual admitted peer, strict sequence, nonces, counters and clock.
+}
+
+#[test]
+fn admitted_request_data_never_relaxes_new_connection_admission() {
+    let (policy, admitted, _, _) = fixture_with_issuer(NativeRole::SecurityShell);
+    let mut request = admitted.clone();
+    request.original.domain = Digest::new(b"new-request-on-the-actual-admitted-peer");
+    request.original.origin_ns += 10_000_000_000;
+    request.original.deadline_ns += 10_000_000_000;
+    let now = Duration::from_secs(112);
+    request.require_fresh(&admitted).unwrap();
+    assert!(
+        request
+            .validate(
+                &policy,
+                &admitted.certificate,
+                NativeRole::SecurityShell,
+                request.stage.data.process.process,
+                Some(&request.stage.data.process),
+                now,
+            )
+            .is_err()
+    );
+    // Pure DATA validation only. Production must additionally borrow the
+    // actual admitted Peer, verify the signed request and retain this packet's
+    // original kernel handle. Neither statement can create that owner.
+    request.validate_request(&admitted, now).unwrap();
+    assert!(
+        request
+            .validate_request(&admitted, Duration::from_secs(115))
+            .is_err()
+    );
+    let mut wrong = request.clone();
+    wrong.stage.signature.push('x');
+    assert!(wrong.validate_request(&admitted, now).is_err());
+    let mut wrong = request.clone();
+    wrong.original.purpose = StagePurpose::StorageBootstrap;
+    assert!(wrong.validate_request(&admitted, now).is_err());
+    let mut wrong = request.clone();
+    wrong.stage.data.process.start_ticks += 1;
+    assert!(wrong.validate_request(&admitted, now).is_err());
 }
 
 #[test]

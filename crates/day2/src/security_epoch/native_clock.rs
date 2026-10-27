@@ -67,6 +67,58 @@ pub(crate) struct NativeAcquisition {
     fixture_time: Option<Duration>,
 }
 
+/// A cold stage owns its actual original; an HTTP callback exclusively borrows
+/// the request's actual stored original. Borrowing creates no narrowed copy,
+/// so a counter/peer meet remains on the request after the callback returns.
+pub(super) struct StageAcquisition<'a> {
+    original: StageOriginal<'a>,
+}
+
+enum StageOriginal<'a> {
+    Owned(NativeAcquisition),
+    Borrowed(&'a mut NativeAcquisition),
+}
+
+impl<'a> StageAcquisition<'a> {
+    pub(super) fn owned(original: NativeAcquisition) -> Self {
+        Self {
+            original: StageOriginal::Owned(original),
+        }
+    }
+
+    pub(super) fn borrowed(original: &'a mut NativeAcquisition) -> Self {
+        Self {
+            original: StageOriginal::Borrowed(original),
+        }
+    }
+
+    pub(super) fn as_ref(&self) -> &NativeAcquisition {
+        match &self.original {
+            StageOriginal::Owned(original) => original,
+            StageOriginal::Borrowed(original) => original,
+        }
+    }
+
+    pub(super) fn as_mut(&mut self) -> &mut NativeAcquisition {
+        match &mut self.original {
+            StageOriginal::Owned(original) => original,
+            StageOriginal::Borrowed(original) => original,
+        }
+    }
+
+    /// Only the new-request constructor consumes a freshly owned stage.
+    /// A borrowed original cannot be detached from its actual request owner.
+    pub(super) fn into_owned(self) -> Result<NativeAcquisition> {
+        match self.original {
+            StageOriginal::Owned(original) => Ok(original),
+            StageOriginal::Borrowed(original) => {
+                original.refuse();
+                anyhow::bail!("epoch_native_borrowed_original_cannot_detach")
+            }
+        }
+    }
+}
+
 // Every actual narrowed view shares this original observation, including the
 // enrolled role parent. A parent observation is visible BEFORE the next child
 // sample/send, not imported only at a later handoff. Refusal cannot be repaired
@@ -97,6 +149,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <NativeConnectionClock as Ambiguous<_>>::check;
+            let _ = <StageAcquisition<'static> as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);
@@ -110,6 +163,23 @@ const _: () = {
 };
 
 impl NativeConnectionClock {
+    /// Bind the actual preselection original after its retained native task and
+    /// namespace anchors join the selected owner. No scalar clock restoration,
+    /// new origin, entropy or deadline widening is permitted at this handoff.
+    pub(super) fn bind_captured_current(
+        &mut self,
+        mut original: NativeAcquisition,
+    ) -> Result<NativeAcquisition> {
+        if let Err(error) = original.require_scope(AcquisitionScope::Current) {
+            self.observation.set(OriginalObservation {
+                refused: true,
+                ..self.observation.get()
+            });
+            return Err(error);
+        }
+        self.join_request(original)
+    }
+
     pub(super) fn begin_current(&mut self) -> Result<NativeAcquisition> {
         self.begin(AcquisitionScope::Current)
     }
@@ -175,9 +245,38 @@ impl NativeConnectionClock {
 pub(super) struct AcquisitionProgress {
     origin: Duration,
     observation: Rc<Cell<OriginalObservation>>,
+    request_domain: Digest,
+    enrolled_incarnation: Option<Digest>,
+}
+
+/// Redacted historical commitments, never a current permission or owner.
+/// There is no inverse native constructor from either digest.
+#[derive(Clone, serde::Serialize)]
+pub(super) struct EnrolledRequestDiagnosticData {
+    pub enrolled_incarnation: Digest,
+    pub request_original: Digest,
 }
 
 impl AcquisitionProgress {
+    pub(super) fn with_enrollment_data(mut self, incarnation: Digest) -> Self {
+        self.enrolled_incarnation = Some(incarnation);
+        self
+    }
+
+    pub(super) fn historical_request_binding_data(&self) -> Result<EnrolledRequestDiagnosticData> {
+        let enrolled_incarnation = self
+            .enrolled_incarnation
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("native_enrollment_diagnostic_binding_unavailable"))?;
+        Ok(EnrolledRequestDiagnosticData {
+            enrolled_incarnation,
+            request_original: Digest::of(&(
+                "day2-native-request-diagnostic-commitment-v1",
+                &self.request_domain,
+            ))?,
+        })
+    }
+
     pub(super) fn last_checked_elapsed_micros(&self) -> Option<u32> {
         self.observation
             .get()
@@ -363,6 +462,8 @@ impl NativeAcquisition {
         AcquisitionProgress {
             origin: self.origin,
             observation: Rc::clone(&self.observation),
+            request_domain: self.domain.clone(),
+            enrolled_incarnation: None,
         }
     }
 
@@ -660,6 +761,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lexical_request_borrows_keep_the_actual_parents_earliest_cap_and_refusal() {
+        // Clock ownership only. No enrolled role, native stage, counter or
+        // positive serving permission can be constructed by this fixture.
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"one stored request original"),
+            std::process::id(),
+            origin,
+            MAX_ACQUISITION,
+        );
+        let identity = original.domain.clone();
+        let observation = Rc::clone(&original.observation);
+        {
+            let mut stage = StageAcquisition::borrowed(&mut original);
+            let mut counter = stage
+                .as_mut()
+                .narrow(5, origin + Duration::from_secs(2))
+                .unwrap();
+            stage.as_mut().exchange_current_views(&mut counter).unwrap();
+            drop(counter); // The known child completion cannot restore a cap.
+        }
+        assert_eq!(original.deadline, origin + Duration::from_secs(2));
+        original.fixture_time = Some(origin + Duration::from_millis(500));
+        {
+            let mut stage = StageAcquisition::borrowed(&mut original);
+            // A later callback cannot get the original five-second ceiling.
+            let mut peer = stage.as_mut().narrow(5, origin + MAX_ACQUISITION).unwrap();
+            assert_eq!(peer.deadline, origin + Duration::from_secs(2));
+            peer = peer.narrow(5, origin + Duration::from_secs(1)).unwrap();
+            stage.as_mut().exchange_current_views(&mut peer).unwrap();
+        }
+        assert_eq!(original.deadline, origin + Duration::from_secs(1));
+        assert_eq!(
+            (original.domain.clone(), original.origin),
+            (identity, origin)
+        );
+        assert!(Rc::ptr_eq(&original.observation, &observation));
+        original.fixture_time = Some(origin + Duration::from_secs(1));
+        assert!(
+            StageAcquisition::borrowed(&mut original)
+                .as_mut()
+                .remaining()
+                .is_err()
+        );
+        original.fixture_time = Some(origin);
+        assert!(
+            StageAcquisition::borrowed(&mut original)
+                .as_mut()
+                .remaining()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn borrowed_request_acquisition_cannot_be_detached_as_an_owned_original() {
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"the actual stored request"),
+            std::process::id(),
+            origin,
+            MAX_ACQUISITION,
+        );
+        let error = StageAcquisition::borrowed(&mut original)
+            .into_owned()
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "epoch_native_borrowed_original_cannot_detach"
+        );
+        assert!(original.remaining().is_err());
+    }
+
+    #[test]
+    fn owned_cold_stage_preserves_the_distinct_completed_authentication_work_bound() {
+        let origin = Duration::from_secs(100);
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"a cold bootstrap original"),
+            std::process::id(),
+            origin,
+            STORAGE_BOOTSTRAP_LIMIT,
+        );
+        original.scope = AcquisitionScope::StorageBootstrap;
+        let mut stage = StageAcquisition::owned(original);
+        let authentication = stage.as_mut().narrow_authentication().unwrap();
+        assert_eq!(authentication.deadline, origin + MAX_ACQUISITION);
+        stage
+            .as_mut()
+            .complete_authentication(authentication)
+            .unwrap();
+        let mut actual = stage.into_owned().unwrap();
+        assert_eq!(
+            actual.interval_data().unwrap(),
+            (origin, origin + STORAGE_BOOTSTRAP_LIMIT)
+        );
+        actual.fixture_time = Some(origin + Duration::from_secs(6));
+        assert!(actual.remaining().is_ok());
+    }
+
+    #[test]
     fn admitted_clock_joins_distinct_requests_without_renewing_old_intervals() {
         // Clock-only DATA fixtures; this constructs no enrolled native owner.
         let admission = NativeAcquisition::fixture(
@@ -827,6 +1028,143 @@ mod tests {
         second.sample().unwrap();
         assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
         assert_eq!(second.last_checked_elapsed_micros(), Some(0));
+    }
+
+    #[test]
+    fn captured_current_binding_spends_the_preselection_original_and_shorter_ceiling() {
+        // Clock-only model fixtures, never enrolled/native success owners.
+        let admission = NativeAcquisition::fixture(
+            Digest::new(b"admission"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        let identity = admission.identity_domain.clone();
+        let mut connection = admission.into_connection_clock().unwrap();
+        let mut captured = NativeAcquisition::fixture(
+            Digest::new(b"before-body-and-scope-selection"),
+            std::process::id(),
+            Duration::from_secs(102),
+            Duration::from_secs(3),
+        );
+        captured.fixture_time = Some(Duration::from_secs(104));
+        captured.sample().unwrap();
+        let original = (captured.domain.clone(), captured.origin, captured.deadline);
+        let observation = Rc::clone(&captured.observation);
+        let mut bound = connection.bind_captured_current(captured).unwrap();
+        assert_eq!(
+            (bound.domain.clone(), bound.origin, bound.deadline),
+            original
+        );
+        assert_eq!(bound.identity_domain, identity);
+        assert!(Rc::ptr_eq(&bound.observation, &observation));
+        assert_eq!(bound.remaining().unwrap(), Duration::from_secs(1));
+        let mut callback = bound.narrow(5, Duration::from_secs(200)).unwrap();
+        assert_eq!(
+            (callback.domain.clone(), callback.origin, callback.deadline),
+            original
+        );
+        callback.fixture_time = Some(Duration::from_secs(105));
+        assert!(callback.remaining().is_err());
+        // A larger wrapper bound or a later callback cannot renew the original.
+        bound.fixture_time = Some(Duration::from_secs(105));
+        assert!(bound.remaining().is_err());
+        assert!(connection.observation.get().refused);
+    }
+
+    #[test]
+    fn diagnostic_binding_is_unavailable_without_annotation_and_never_checks_or_revives() {
+        // Historical DATA fixtures only. Annotating a diagnostic cannot
+        // construct an enrolled role, permission or successful native owner.
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"first-request"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        assert!(
+            original
+                .diagnostic_progress()
+                .historical_request_binding_data()
+                .is_err()
+        );
+        let incarnation = Digest::new(b"fixture-historical-enrollment-data");
+        let progress = original
+            .diagnostic_progress()
+            .with_enrollment_data(incarnation.clone());
+        let before = progress.historical_request_binding_data().unwrap();
+        assert_eq!(before.enrolled_incarnation, incarnation);
+        assert_ne!(before.request_original, original.domain);
+        original.fixture_time = Some(Duration::from_secs(102));
+        original.sample().unwrap();
+        assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
+        original.refuse();
+        let after = progress.historical_request_binding_data().unwrap();
+        assert_eq!(after.enrolled_incarnation, before.enrolled_incarnation);
+        assert_eq!(after.request_original, before.request_original);
+        assert!(original.remaining().is_err());
+        let encoded = serde_json::to_value(after).unwrap();
+        assert_eq!(encoded.as_object().unwrap().len(), 2);
+        assert!(encoded["enrolled_incarnation"].is_string());
+        assert!(encoded["request_original"].is_string());
+        let next = NativeAcquisition::fixture(
+            Digest::new(b"second-request"),
+            std::process::id(),
+            Duration::from_secs(110),
+            MAX_ACQUISITION,
+        );
+        let next = next
+            .diagnostic_progress()
+            .with_enrollment_data(incarnation)
+            .historical_request_binding_data()
+            .unwrap();
+        assert_ne!(next.request_original, before.request_original);
+    }
+
+    #[test]
+    fn captured_current_binding_rejects_wrong_scope_late_selection_and_recovery() {
+        for case in 0..5 {
+            let admission = NativeAcquisition::fixture(
+                Digest::new(b"admission"),
+                std::process::id(),
+                Duration::from_secs(100),
+                MAX_ACQUISITION,
+            );
+            let mut connection = admission.into_connection_clock().unwrap();
+            let mut captured = NativeAcquisition::fixture(
+                Digest::new(b"captured"),
+                std::process::id(),
+                Duration::from_secs(102),
+                MAX_ACQUISITION,
+            );
+            match case {
+                0 => captured.scope = AcquisitionScope::StorageBootstrap,
+                1 => captured.process = captured.process.wrapping_add(1),
+                // Intervening actual observations conservatively refuse a
+                // preselected original; a later now cannot hide the ordering.
+                2 => connection.observation.set(OriginalObservation {
+                    latest: Duration::from_secs(103),
+                    refused: false,
+                }),
+                3 => captured.fixture_time = Some(Duration::from_secs(107)),
+                _ => captured.refuse(),
+            }
+            assert!(
+                connection.bind_captured_current(captured).is_err(),
+                "case {case}"
+            );
+            assert!(connection.observation.get().refused, "case {case}");
+            let later = NativeAcquisition::fixture(
+                Digest::new(b"later"),
+                std::process::id(),
+                Duration::from_secs(110),
+                MAX_ACQUISITION,
+            );
+            assert!(
+                connection.bind_captured_current(later).is_err(),
+                "case {case}"
+            );
+        }
     }
 
     fn storage_fixture(scope: AcquisitionScope) -> NativeAcquisition {
@@ -1888,6 +2226,29 @@ mod tests {
             assert!(a.remaining().is_err());
             assert!(b.remaining().is_err());
         }
+    }
+
+    #[test]
+    fn completing_a_counter_child_does_not_remove_the_release_stages_earlier_cap() {
+        // Clock-only model: no enrolled role or native physical stage exists
+        // in this fixture. The production handoff wiring is guarded separately.
+        let origin = Duration::from_secs(100);
+        let mut stage = NativeAcquisition::fixture(
+            Digest::new(b"one-http-original"),
+            std::process::id(),
+            origin,
+            MAX_ACQUISITION,
+        );
+        let domain = stage.domain.clone();
+        let token_expiry = origin + Duration::from_secs(2);
+        let mut read = stage.narrow(5, token_expiry).unwrap();
+        stage.exchange_current_views(&mut read).unwrap();
+        assert_eq!(stage.deadline, token_expiry);
+        assert_eq!((stage.domain.clone(), stage.origin), (domain, origin));
+        drop(read); // Known counter completion, before the physical release.
+        stage.fixture_time = Some(token_expiry);
+        assert!(stage.remaining().is_err());
+        assert!(stage.narrow(5, origin + MAX_ACQUISITION).is_err());
     }
 
     #[test]
