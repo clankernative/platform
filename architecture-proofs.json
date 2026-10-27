@@ -2419,7 +2419,7 @@
       "factories": [
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
@@ -2723,7 +2723,7 @@
         },
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -4280,7 +4280,7 @@
       "type_name": "PendingPhysicalFilePhase",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
       ],
       "factories": [
         {
@@ -4291,7 +4291,7 @@
       "material_uses": [
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "proof_uses": [],
