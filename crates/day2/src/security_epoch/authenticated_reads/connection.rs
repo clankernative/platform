@@ -934,8 +934,8 @@ mod tests {
             source.replacen("self.stage.capture_same_owner()?", "unavailable_owner()", 1),
             source.replacen(".admit_counter(", ".unqualified_counter(", 1),
             source.replacen(
-                "if !matches!(&self.state, CounterConnectionState::Vacant)",
-                "if false",
+                "let was_vacant = matches!(&self.state, CounterConnectionState::Vacant);",
+                "let was_vacant = true;",
                 1,
             ),
             source.replacen(
