@@ -47,9 +47,65 @@ impl Peer {
         &self.statement
     }
 
-    /// Original peer identity/liveness only. Deliberately does NOT renew or
-    /// accept the old signed stage as current. A new exchange must authenticate
-    /// fresh grants before CurrentServingPeerPhase can be constructed.
+    /// Borrow actual admission, not historical issuer DATA, for one new signed
+    /// request. Every packet still supplies its original kernel sender handle.
+    pub(super) fn authenticate_request(
+        &mut self,
+        message: &Message,
+        statement: Statement,
+        mut process: ServingSender,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let result = (|| {
+            self.check_continuity(stage, acquisition)?;
+            message.verify(&statement)?;
+            stage.check_admitted_serving_statement(&statement, &self.statement, acquisition)?;
+            match &mut process {
+                ServingSender::Shell(process) => {
+                    ensure!(
+                        process.data() == &self.statement.stage.data.process,
+                        "serving_peer_message_sender_changed"
+                    );
+                    process.check_identity(acquisition, &HashCosts::disabled())?;
+                }
+                ServingSender::Controller(receipt) => {
+                    let original = self
+                        .processes
+                        .iter_mut()
+                        .find_map(|sender| match sender {
+                            ServingSender::Controller(original) => Some(original),
+                            ServingSender::Shell(_) => None,
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("serving_peer_original_controller_missing")
+                        })?;
+                    receipt.bind_admitted(
+                        &statement,
+                        original,
+                        &self.statement,
+                        stage,
+                        acquisition,
+                    )?;
+                }
+            }
+            self.check_continuity(stage, acquisition)?;
+            let mut request = Self {
+                statement,
+                processes: vec![process],
+                valid: true,
+            };
+            request.check(stage, acquisition)?;
+            Ok(request)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    /// Original peer identity/liveness only, never request permission.
     pub(super) fn check_continuity(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -126,7 +182,7 @@ impl Peer {
                         same_actor.push(process.as_mut());
                     }
                     ServingSender::Controller(receipt) => {
-                        receipt.bind(&self.statement, stage, acquisition)?
+                        receipt.check(&self.statement, stage, acquisition)?
                     }
                 }
             }
@@ -159,6 +215,23 @@ impl Peer {
             ensure!(self.processes.len() < 5, "serving_peer_message_count");
             // Retain the actual newly received handle before fallible checks.
             self.processes.push(process);
+            let (received, originals) = self.processes.split_last_mut().unwrap();
+            if let ServingSender::Controller(receipt) = received {
+                let original = originals
+                    .iter_mut()
+                    .find_map(|sender| match sender {
+                        ServingSender::Controller(original) => Some(original),
+                        ServingSender::Shell(_) => None,
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("serving_peer_original_controller_missing"))?;
+                receipt.bind_admitted(
+                    &self.statement,
+                    original,
+                    &self.statement,
+                    stage,
+                    acquisition,
+                )?;
+            }
             self.check(stage, acquisition)?;
             message.verify(&self.statement)?;
             self.check(stage, acquisition)

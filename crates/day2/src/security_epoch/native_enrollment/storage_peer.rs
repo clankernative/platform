@@ -45,7 +45,7 @@ pub(crate) struct InitialHolderListener {
 /// Readiness polling is DATA only; consuming it requires a fresh actual stage.
 pub(crate) struct InitialHolderConnection {
     owner: SameEnrolledOwner,
-    setup_grant: day2_capabilities::Digest,
+    setup_request: super::storage_peer_wire::OriginalInterval,
     valid: bool,
     #[cfg(target_os = "linux")]
     channel: Channel,
@@ -162,7 +162,7 @@ impl InitialHolderConnection {
             let mut owner = stage.capture_same_owner()?;
             let mut acquisition = stage.narrow_io_acquisition(5)?;
             let mut channel = Channel::connect_storage(stage, &mut acquisition)?;
-            let setup_grant = stage.storage()?.storage_statement()?.grant_digest()?;
+            let setup_request = stage.storage()?.storage_statement()?.original.clone();
             owner.check(stage)?;
             channel.check_storage_open(stage, &mut acquisition)?;
             stage
@@ -170,7 +170,7 @@ impl InitialHolderConnection {
                 .check_storage_acquisition(&mut acquisition)?;
             Ok(Self {
                 owner,
-                setup_grant,
+                setup_request,
                 valid: true,
                 channel,
             })
@@ -268,6 +268,7 @@ impl InitialHolderListener {
         #[cfg(target_os = "linux")]
         {
             self.owner.check(stage)?;
+            stage.admit_peer_connection()?;
             let mut acquisition = stage.initial_first_holder_acquisition(
                 INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
             )?;
@@ -521,8 +522,9 @@ impl AuthenticatedInitialHolderOffer {
         #[cfg(target_os = "linux")]
         {
             connection.owner.check(stage)?;
+            stage.admit_peer_connection()?;
             let local = stage.storage()?.storage_statement()?;
-            local.require_new_grant(&connection.setup_grant)?;
+            local.require_new_request(&connection.setup_request)?;
             let mut acquisition = stage.initial_first_holder_acquisition(
                 INITIAL_FIRST_HOLDER_HANDSHAKE_LIMIT.as_secs().try_into()?,
             )?;

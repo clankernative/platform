@@ -15,26 +15,63 @@ use std::time::Duration;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::security_epoch::native_enrollment) struct OriginalInterval {
+    pub purpose: StagePurpose,
     pub domain: Digest,
     pub origin_ns: u64,
     pub deadline_ns: u64,
 }
 
 impl OriginalInterval {
+    pub(super) fn validate_request(&self, now: Duration, purpose: StagePurpose) -> Result<()> {
+        let origin = Duration::from_nanos(self.origin_ns);
+        let deadline = Duration::from_nanos(self.deadline_ns);
+        ensure!(
+            self.purpose == purpose
+                && purpose != StagePurpose::StorageMetadataObservation
+                && origin <= now
+                && now < deadline
+                && deadline > origin
+                && deadline - origin <= purpose.limit(),
+            "storage_peer_original_interval"
+        );
+        Ok(())
+    }
+
+    pub(super) fn require_later_request(&self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.domain != previous.domain && self.origin_ns > previous.origin_ns,
+            "storage_peer_new_request_required"
+        );
+        Ok(())
+    }
+
+    /// Interval DATA continuity, never replay permission. Only an actual
+    /// retained peer can authenticate another exchange on this original, with
+    /// its next sequence, fresh nonces, signed binding and fresh counters.
+    /// A callback cannot restart the original or increase its earlier ceiling.
+    pub(super) fn require_request_continuity(&self, previous: &Self) -> Result<()> {
+        if self.domain != previous.domain {
+            return self.require_later_request(previous);
+        }
+        ensure!(
+            self.purpose == previous.purpose
+                && self.origin_ns == previous.origin_ns
+                && self.deadline_ns > self.origin_ns
+                && self.deadline_ns <= previous.deadline_ns,
+            "storage_peer_request_original_changed"
+        );
+        Ok(())
+    }
+
     pub(super) fn validate(
         &self,
         now: Duration,
         issuer_deadline_ns: u64,
         purpose: StagePurpose,
     ) -> Result<()> {
-        let origin = Duration::from_nanos(self.origin_ns);
-        let deadline = Duration::from_nanos(self.deadline_ns);
+        self.validate_request(now, purpose)?;
         ensure!(
-            origin <= now
-                && now < deadline
-                && deadline > origin
-                && deadline - origin <= purpose.limit()
-                && self.deadline_ns <= issuer_deadline_ns,
+            self.deadline_ns <= issuer_deadline_ns,
             "storage_peer_original_interval"
         );
         Ok(())
@@ -76,22 +113,17 @@ impl StageStatement {
         Ok(holder)
     }
 
-    pub(super) fn grant_digest(&self) -> Result<Digest> {
-        Digest::of(&("day2-storage-peer-role-grant-v1", &self.stage))
+    /// DATA replay check only. The actual retained peer and signed request
+    /// transcript remain mandatory; this cannot admit a new connection.
+    pub(super) fn require_new_request(&self, previous: &OriginalInterval) -> Result<()> {
+        self.original.require_later_request(previous)
     }
 
-    /// DATA replay check only. Issuer/time/sender validation and actual native
-    /// ownership are separate requirements of the current peer factory.
-    pub(super) fn require_new_grant(&self, previous: &Digest) -> Result<()> {
-        ensure!(
-            self.grant_digest()? != *previous,
-            "storage_peer_new_role_grant_required"
-        );
-        Ok(())
+    pub(super) fn require_request_continuity(&self, previous: &OriginalInterval) -> Result<()> {
+        self.original.require_request_continuity(previous)
     }
 
-    /// Stable original enrollment identity, not a current grant. Later phases
-    /// must additionally validate a NEW issuer-signed stage and fresh message.
+    /// Stable admission identity, never request permission by itself.
     pub(super) fn same_enrollment(&self, other: &Self) -> bool {
         self.certificate == other.certificate
             && self.stage.data.issuer == other.stage.data.issuer
@@ -104,6 +136,30 @@ impl StageStatement {
 
     pub(in crate::security_epoch::native_enrollment) fn digest(&self) -> Result<Digest> {
         Digest::of(&("day2-initial-holder-stage-v1", self))
+    }
+
+    /// Historical identity plus fresh request DATA. Only a caller retaining
+    /// the actual admitted native peer may use this instead of cold validate.
+    /// The message signature binds this interval, purpose and exchange; the
+    /// old issuer grant's deadline is never reinterpreted or extended.
+    pub(super) fn validate_request(
+        &self,
+        admitted: &Self,
+        now: Duration,
+        purpose: StagePurpose,
+    ) -> Result<()> {
+        ensure!(
+            self.same_enrollment(admitted),
+            "storage_peer_admission_changed"
+        );
+        purpose.require_role(self.stage.data.role)?;
+        self.original.validate_request(now, purpose)?;
+        protocol::verify(
+            &self.certificate.data.public_key,
+            "role-stage",
+            &self.stage.data,
+            &self.stage.signature,
+        )
     }
 
     /// Validate DATA against the actual message process and local issuer. The
@@ -276,7 +332,7 @@ impl CurrentExchange {
     ) -> Result<()> {
         ensure!(
             offered == ready
-                && ready.stage.data.purpose == self.request.purpose.stage_purpose()
+                && ready.original.purpose == self.request.purpose.stage_purpose()
                 && self.controller_stage == ready.digest()?
                 && self.controller_nonce == *nonce,
             "storage_peer_current_ready_stage_or_nonce_changed"
@@ -410,11 +466,11 @@ impl Body {
         match self {
             Self::InitialReady { controller, .. } | Self::Offer { controller, .. } => ensure!(
                 expected == StagePurpose::InitialFirstHolder
-                    && controller.stage.data.purpose == expected,
+                    && controller.original.purpose == expected,
                 "storage_peer_stage_purpose"
             ),
             Self::Hello { app, .. } => ensure!(
-                expected == StagePurpose::InitialFirstHolder && app.stage.data.purpose == expected,
+                expected == StagePurpose::InitialFirstHolder && app.original.purpose == expected,
                 "storage_peer_stage_purpose"
             ),
             Self::Confirm { .. } | Self::Complete { .. } | Self::Accepted { .. } => ensure!(
@@ -424,8 +480,7 @@ impl Body {
             Self::CurrentHello { app, request, .. } => {
                 current()?;
                 ensure!(
-                    request.purpose.stage_purpose() == expected
-                        && app.stage.data.purpose == expected,
+                    request.purpose.stage_purpose() == expected && app.original.purpose == expected,
                     "storage_peer_stage_purpose"
                 );
             }
@@ -436,14 +491,14 @@ impl Body {
                 current()?;
                 ensure!(
                     exchange.request.purpose.stage_purpose() == expected
-                        && controller.stage.data.purpose == expected,
+                        && controller.original.purpose == expected,
                     "storage_peer_stage_purpose"
                 );
             }
             Self::CurrentBeginReady { controller, .. } => {
                 current()?;
                 ensure!(
-                    controller.stage.data.purpose == expected,
+                    controller.original.purpose == expected,
                     "storage_peer_stage_purpose"
                 );
             }
@@ -514,7 +569,7 @@ impl Message {
                 nonce,
                 controller_nonce: echoed,
             } => {
-                self.body.require_stage_purpose(app.stage.data.purpose)?;
+                self.body.require_stage_purpose(app.original.purpose)?;
                 ensure!(
                     selected == initial
                         && *number == sequence
@@ -555,7 +610,7 @@ impl Message {
 
     pub(super) fn verify(&self, statement: &StageStatement) -> Result<()> {
         self.body
-            .require_stage_purpose(statement.stage.data.purpose)?;
+            .require_stage_purpose(statement.original.purpose)?;
         ensure!(
             self.sender == statement.digest()?
                 && self.body.sender_role() == statement.stage.data.role,

@@ -47,9 +47,70 @@ impl Peer {
         &self.statement
     }
 
-    /// Original peer identity/liveness only. Deliberately does NOT renew or
-    /// accept the old signed stage as current. A new exchange must authenticate
-    /// fresh grants before CurrentStoragePeerPhase can be constructed.
+    /// A fresh request can only borrow an actual fully admitted peer. A saved
+    /// statement cannot enter this factory or replace any original handle.
+    pub(super) fn authenticate_request(
+        &mut self,
+        message: &Message,
+        statement: StageStatement,
+        mut process: StorageSender,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let result = (|| {
+            self.check_continuity(stage, acquisition)?;
+            message.verify(&statement)?;
+            stage.storage()?.check_admitted_storage_statement(
+                &statement,
+                &self.statement,
+                acquisition,
+            )?;
+            match &mut process {
+                StorageSender::App(process) => {
+                    ensure!(
+                        process.data() == &self.statement.stage.data.process,
+                        "storage_peer_message_sender_changed"
+                    );
+                    process.check_identity(acquisition, &HashCosts::disabled())?;
+                }
+                StorageSender::Controller(receipt) => {
+                    let original = self
+                        .processes
+                        .iter_mut()
+                        .find_map(|sender| match sender {
+                            StorageSender::Controller(original) => Some(original),
+                            StorageSender::App(_) => None,
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("storage_peer_original_controller_missing")
+                        })?;
+                    receipt.bind_admitted(
+                        &statement,
+                        original,
+                        &self.statement,
+                        stage,
+                        acquisition,
+                    )?;
+                }
+            }
+            self.check_continuity(stage, acquisition)?;
+            let mut request = Self {
+                statement,
+                processes: vec![process],
+                valid: true,
+            };
+            request.check(stage, acquisition)?;
+            Ok(request)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    /// Original peer identity/liveness only, never permission for a request.
+    /// A new exchange must authenticate its own signed request and interval.
     pub(super) fn check_continuity(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -129,7 +190,7 @@ impl Peer {
                         same_actor.push(process.as_mut());
                     }
                     StorageSender::Controller(receipt) => {
-                        receipt.bind(&self.statement, stage, acquisition)?
+                        receipt.check(&self.statement, stage, acquisition)?
                     }
                 }
             }
@@ -164,8 +225,25 @@ impl Peer {
             self.processes.push(process);
             ensure!(self.valid, "storage_peer_retained_process_refused");
             acquisition.remaining()?;
+            let (received, originals) = self.processes.split_last_mut().unwrap();
+            if let StorageSender::Controller(receipt) = received {
+                let original = originals
+                    .iter_mut()
+                    .find_map(|sender| match sender {
+                        StorageSender::Controller(original) => Some(original),
+                        StorageSender::App(_) => None,
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("storage_peer_original_controller_missing"))?;
+                receipt.bind_admitted(
+                    &self.statement,
+                    original,
+                    &self.statement,
+                    stage,
+                    acquisition,
+                )?;
+            }
             // Verification is bounded public DATA work, with no signing,
-            // I/O or publication. The one final full observation joins ALL
+            // I/O or publication. The one final retained observation joins ALL
             // retained sender handles after verification before returning.
             super::storage_peer_wire::verify_message_then_observe(
                 self,

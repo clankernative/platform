@@ -313,6 +313,32 @@ const _: () = {
         std::fmt::Debug
     );
     assert_consuming!(crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner);
+    assert_consuming!(crate::security_epoch::native_enrollment::EnrolledCurrentRequest);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledCurrentRequest,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledCurrentRequest,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::EnrolledCurrentRequest,
+        std::fmt::Debug
+    );
+    assert_consuming!(crate::security_epoch::native_enrollment::UnselectedShellRequest);
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::UnselectedShellRequest,
+        Send
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::UnselectedShellRequest,
+        Sync
+    );
+    assert_not_impl!(
+        crate::security_epoch::native_enrollment::UnselectedShellRequest,
+        std::fmt::Debug
+    );
     assert_not_impl!(
         crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
         Send

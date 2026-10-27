@@ -192,6 +192,7 @@ impl ShellServingConnection {
         self.valid = false;
         let result = (|| {
             self.same.check(stage)?;
+            stage.admit_peer_connection()?;
             let local = stage.serving_statement()?;
             local.require_fresh(&self.setup)?;
             let acquisition = stage.narrow_io_acquisition(5)?;
@@ -334,6 +335,7 @@ impl ControllerServingListener {
                 stage.serving_role()? == NativeRole::EpochController,
                 "serving_peer_controller_role"
             );
+            stage.admit_peer_connection()?;
             let acquisition = stage.narrow_io_acquisition(5)?;
             let local = stage.serving_statement()?;
             local.require_fresh(&self.setup)?;
@@ -567,7 +569,7 @@ fn current_resources(
     ensure!(stage.serving_role()? == role, "serving_peer_phase_role");
     let mut acquisition = stage.narrow_io_acquisition(5)?;
     let local = stage.serving_statement()?;
-    local.require_fresh(&owner.latest_local)?;
+    local.require_request_continuity(&owner.latest_local)?;
     owner.check_resources(stage, &mut acquisition)?;
     Ok((acquisition, local))
 }
@@ -728,6 +730,10 @@ fn handshake(
     ready_nonce: Option<Digest>,
 ) -> Result<(Peer, Exchange)> {
     let current = initial.is_some();
+    ensure!(
+        current == session.original.is_some(),
+        "serving_peer_actual_admitted_connection_required"
+    );
     if local.stage.data.role == NativeRole::SecurityShell {
         ensure!(ready_nonce.is_none(), "serving_peer_shell_ready_argument");
         let (ready, process) = session.receive()?;
@@ -746,10 +752,20 @@ fn handshake(
             _ => anyhow::bail!("serving_peer_begin_ready_changed"),
         };
         if let Some(previous) = previous {
-            remote.require_fresh(previous)?;
+            remote.require_request_continuity(previous)?;
         }
-        let mut peer =
-            Peer::authenticate(&ready, remote, process, session.stage, session.acquisition)?;
+        let mut peer = match session.original.as_deref_mut() {
+            Some(admitted) => admitted.authenticate_request(
+                &ready,
+                remote,
+                process,
+                session.stage,
+                session.acquisition,
+            )?,
+            None => {
+                Peer::authenticate(&ready, remote, process, session.stage, session.acquisition)?
+            }
+        };
         let nonce = protocol::nonce("serving-shell")?;
         let hello = match initial {
             None => Body::Hello {
@@ -828,10 +844,20 @@ fn handshake(
         let (remote, nonce, binding) = hello.hello(initial, sequence, &controller_nonce)?;
         let (remote, nonce, binding) = (remote.clone(), nonce.clone(), binding.cloned());
         if let Some(previous) = previous {
-            remote.require_fresh(previous)?;
+            remote.require_request_continuity(previous)?;
         }
-        let mut peer =
-            Peer::authenticate(&hello, remote, process, session.stage, session.acquisition)?;
+        let mut peer = match session.original.as_deref_mut() {
+            Some(admitted) => admitted.authenticate_request(
+                &hello,
+                remote,
+                process,
+                session.stage,
+                session.acquisition,
+            )?,
+            None => {
+                Peer::authenticate(&hello, remote, process, session.stage, session.acquisition)?
+            }
+        };
         let exchange = Exchange {
             initial: initial.cloned(),
             sequence,
