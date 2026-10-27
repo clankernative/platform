@@ -640,6 +640,8 @@ impl NativeAppStartup {
         self,
         admission: Arc<AtomicBool>,
     ) -> Result<(Arc<crate::web::Host>, tokio::net::TcpListener)> {
+        use crate::web::{NativeStartupObservation, NativeStartupStep};
+        let mut observed = NativeStartupObservation::new(true, NativeStartupStep::Selection);
         ensure!(
             admission.load(Ordering::Acquire),
             "native App startup admission closed"
@@ -648,6 +650,7 @@ impl NativeAppStartup {
         let native_initial = matches!(&self.runtime, AppStartupRuntime::Initial(_));
         let runtime = match self.runtime {
             AppStartupRuntime::Ordinary(runtime) => {
+                observed.enter(NativeStartupStep::RuntimeAdmission);
                 for scope in scopes {
                     crate::oauth::native_management::with_current_app_role(
                         &scope,
@@ -661,16 +664,19 @@ impl NativeAppStartup {
                 let [scope] = scopes.as_slice() else {
                     anyhow::bail!("native App startup scope required")
                 };
+                observed.enter(NativeStartupStep::InitialStorage);
                 crate::oauth::native_management::prepare_initial_app_storage(
                     &metadata,
                     &self.declared,
                 )?;
+                observed.enter(NativeStartupStep::RuntimeAdmission);
                 crate::oauth::native_management::load_initial_app_runtime(scope, *metadata)?
             }
         };
         // Native admission already checked the existing store while its actual
         // participant and stage were held. It must never run an initializer or
         // open ordinary serving SQL again outside that native scope.
+        observed.enter(NativeStartupStep::RuntimePostcheck);
         let security = if native_initial {
             None
         } else {
@@ -683,22 +689,28 @@ impl NativeAppStartup {
         if let Some(requirements) = &security {
             requirements.require_runtime()?;
         }
+        observed.enter(NativeStartupStep::Configuration);
         let runtime = (self.configure)(runtime)?;
+        observed.enter(NativeStartupStep::Providers);
         let providers = match self.providers {
             Some(providers) => providers,
             None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
         };
+        observed.enter(NativeStartupStep::Receiver);
         let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
         ensure!(
             admission.load(Ordering::Acquire),
             "native App startup admission closed"
         );
+        observed.enter(NativeStartupStep::Edge);
         let (identity, edge) = self.declared.edge(runtime.app())?;
+        observed.enter(NativeStartupStep::Verifier);
         let verifier = crate::iap::Verifier::new(
             &edge.iap_audience,
             &identity.hosted_domain,
             Box::new(crate::iap::GoogleKeys),
         )?;
+        observed.enter(NativeStartupStep::Host);
         let mut server = LocalServer::bind_edge_listener(
             runtime,
             self.listener,
@@ -706,6 +718,7 @@ impl NativeAppStartup {
             verifier,
             self.concurrency,
         )?;
+        observed.enter(NativeStartupStep::Mount);
         server.mount_oauth(receiver)?;
         println!(
             "{}",
@@ -714,7 +727,10 @@ impl NativeAppStartup {
                 "origin":server.origin, "replicas":self.replicas
             })
         );
-        server.into_native_parts(admission)
+        observed.enter(NativeStartupStep::HostParts);
+        let parts = server.into_native_parts(admission)?;
+        observed.complete();
+        Ok(parts)
     }
 }
 

@@ -2706,6 +2706,7 @@ mod tests {
         )?;
         assert!(metadata_only.uses_native_storage());
         assert!(!ordinary.uses_native_storage());
+        crate::web::admit_listener_storage(&ordinary)?;
         let instance = crate::artifact::Instance::load(ordinary.instance_path())?;
         let scope = AuthorityScope {
             installation: instance.installation.try_into()?,
@@ -2715,6 +2716,8 @@ mod tests {
         let world = super::super::simulation::World::new(458);
         super::super::effects::scope(world, || -> Result<()> {
             fixtures::select_app_scope(&scope)?;
+            let error = crate::web::admit_listener_storage(&metadata_only).unwrap_err();
+            assert_eq!(error.to_string(), "native runtime executor missing");
             for phase in [
                 RuntimePhase::Registration,
                 RuntimePhase::Read,
@@ -2753,6 +2756,122 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[test]
+    fn native_listener_snapshot_predicates_refuse_changed_binding_schema_artifact_and_security_without_repair()
+    -> Result<()> {
+        for (statement, expected) in [
+            (
+                "UPDATE day2_meta SET value='foreign' WHERE key='scope'",
+                "database_scope_mismatch",
+            ),
+            (
+                "UPDATE day2_meta SET value='foreign' WHERE key='schema'",
+                "schema_migration_required",
+            ),
+            (
+                "UPDATE day2_meta SET value='7' WHERE key='host_schema'",
+                "unsupported_host_schema",
+            ),
+            (
+                "DROP TRIGGER day2_audit_no_update",
+                "audit_guard_missing_or_changed",
+            ),
+            (
+                "UPDATE day2_authority SET artifact_id='foreign' WHERE singleton=1",
+                "artifact_binding_changed",
+            ),
+        ] {
+            let directory = tempfile::tempdir()?;
+            let (runtime, _, _) =
+                super::super::admission::tests::management_fixture(directory.path())?;
+            let db = crate::store::open(runtime.db())?;
+            crate::web::validate_listener_snapshot(&runtime, &db)?;
+            assert!(db.is_autocommit());
+            db.execute_batch(statement)?;
+            let changed = db.total_changes();
+            let schema: i64 = db.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+            let error = crate::web::validate_listener_snapshot(&runtime, &db).unwrap_err();
+            assert!(error.to_string().contains(expected), "{statement}: {error}");
+            assert_eq!(db.total_changes(), changed);
+            assert_eq!(
+                db.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))?,
+                schema
+            );
+        }
+        let directory = tempfile::tempdir()?;
+        let (runtime, _, _) = super::super::admission::tests::management_fixture(directory.path())?;
+        let db = crate::store::open(runtime.db())?;
+        let mut active = crate::authority_state::current(&db)?;
+        active.document.security = Some(crate::security_admission::Requirements {
+            version: 2,
+            artifact: runtime.artifact().id().into(),
+            platform_inventory: crate::digest(b"invalid fixture security"),
+            roc_version: runtime.artifact().contract().roc_version.clone(),
+            containment: crate::security_admission::Containment::MacosSandboxV1 {
+                supervisor: crate::digest(b"not this runtime"),
+            },
+        });
+        db.execute(
+            "UPDATE day2_authority SET document=?1 WHERE singleton=1",
+            [serde_json::to_string(&active.document)?],
+        )?;
+        let changed = db.total_changes();
+        let error = crate::web::validate_listener_snapshot(&runtime, &db).unwrap_err();
+        assert_eq!(error.to_string(), "unsupported_security_requirements");
+        assert_eq!(db.total_changes(), changed);
+
+        // Valid operator requirement DATA still cannot claim this process is
+        // its approved runtime. No native role or serving proof is constructed.
+        let mut contract = runtime.artifact().contract().clone();
+        for key in [
+            "compiler/roc",
+            "crates/day2/src/admission.rs",
+            "sdk/main.roc",
+            "sdk/contracts/Resource.roc",
+        ] {
+            contract
+                .sources
+                .insert(key.into(), crate::digest(key.as_bytes()));
+        }
+        let artifact = crate::artifact::LoadedArtifact::from_contract_for_tests(
+            runtime.artifact().id().into(),
+            runtime.artifact().directory().into(),
+            contract,
+        );
+        let selected = crate::store::Runtime::from_artifact_for_tests(
+            runtime.instance_path().into(),
+            runtime.app().into(),
+            runtime.db().into(),
+            artifact,
+        )?;
+        let requirements = crate::security_admission::Requirements {
+            version: 1,
+            artifact: selected.artifact().id().into(),
+            platform_inventory: crate::security_admission::platform_inventory_digest(
+                selected.artifact(),
+            )?,
+            roc_version: selected.artifact().contract().roc_version.clone(),
+            containment: crate::security_admission::Containment::MacosSandboxV1 {
+                supervisor: crate::digest(b"different approved runtime"),
+            },
+        };
+        requirements.validate(selected.artifact())?;
+        assert!(requirements.require_runtime().is_err());
+        active.document.security = Some(requirements);
+        db.execute(
+            "UPDATE day2_authority SET document=?1 WHERE singleton=1",
+            [serde_json::to_string(&active.document)?],
+        )?;
+        let changed = db.total_changes();
+        let error = crate::web::validate_listener_snapshot(&selected, &db).unwrap_err();
+        assert!(matches!(
+            error.to_string().as_str(),
+            "security_runtime_mismatch" | "security_host_evidence_unavailable"
+        ));
+        assert_eq!(db.total_changes(), changed);
+        Ok(())
     }
 
     fn sql_fixture() -> Result<(tempfile::TempDir, crate::store::Runtime)> {
