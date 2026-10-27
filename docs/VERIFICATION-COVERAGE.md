@@ -76,6 +76,16 @@ unknown effects, cancellation, peer death, replacement and old-writer/restore
 fencing. Existing portable passes do not establish these new obligations or
 live latency; source-bound cold/warm Linux and browser qualification is separate.
 
+PR 283's independent connection/request reference histories run in this harness,
+but their receipt explicitly sets `production_request_wiring_executed` and
+`real_linux_owner_executed` to false. Joining the actual request, storage and
+consumer transitions remains pending CI's **Compose the independent
+connection/request failure campaign** plan row, after the Credential/G1/Product
+ports. Root's **Qualify the admitted-connection path on the real node** owns the
+separate native gate. PR 291's partial diagnostic coverage cannot prove zero
+warm work. The [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status)
+lists the landed pieces and pending production rows.
+
 Private native host-loop campaigns share the production supervisor reducer and
 retain source-bound event histories with independent-oracle snapshots. Replay a
 saved history from the repository root with:

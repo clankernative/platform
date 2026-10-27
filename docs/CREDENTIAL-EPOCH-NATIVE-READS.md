@@ -8,16 +8,26 @@ is being implemented and requires separate native qualification.
 
 ## Acquisition and support
 
-Full connection authentication begins with actual Linux `CLOCK_BOOTTIME`,
+Main's Current read acquisition still authenticates new material through
+`AuthenticatedReads::acquire`. Connection-retained transport is pending the plan
+row **Retain authenticated counter transport in the real storage connection**
+(G1); the new request borrow is pending **Borrow fresh requests from the
+admitted enrolled connection** (Credential). See the
+[landed/pending status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status).
+The following admission/request separation is the selected contract, not a
+claim that this warm transport has landed.
+
+Required full connection authentication begins with actual Linux `CLOCK_BOOTTIME`,
 before entropy, executable, projection, authentication or database I/O. Its
 authentication work spends at most five seconds inside the same admission
 parent and any shorter cap. Successful material is retained only by the actual
 admitted connection, exact recipient, policy/store binding and credential expiry.
 It cannot authorize a later operation on its own or reconstruct its owner.
 
-Each later coherent Firestore read borrows a fresh bounded request from that
-same live owner. It does not repeat metadata/TokenReview/workload/GSA/database
-authentication. Its original interval, every HTTP timeout and response-body
+Under that contract, each later coherent Firestore read must borrow a fresh
+bounded request from that same live owner without repeating metadata,
+TokenReview, workload, GSA or database authentication. Its original interval,
+every HTTP timeout and response-body
 read respect the ordinary five-second request limit and all shorter ceilings.
 Current authority, counters and actual owned-handle checks remain fresh. A
 failed request, rewind, process/binding change or expired credential refuses the
@@ -59,8 +69,10 @@ borrow. See
 
 ## Full admission response checks
 
-These are genuine connection-admission checks, not requests to repeat at every
-serving boundary. Selection/recipient, current authority, credential expiry,
+These checks exist in the current acquisition path. Moving them exclusively to
+connection admission is pending the G1 transport row above. Under the selected
+contract they are not repeated at every serving boundary. Selection/recipient,
+current authority, credential expiry,
 actual handles and fresh coherent counters still constrain each later use.
 
 TokenReview must return authentication, the exact selected audience and KSA
