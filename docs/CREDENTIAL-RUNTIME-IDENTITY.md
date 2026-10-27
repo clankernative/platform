@@ -2,13 +2,23 @@
 
 The credential bootstrap path needs a current native runtime identity before it can authorize an initial epoch write. Kubernetes response data does not establish which Pod contains the calling process.
 
-This slice adds the first native observation primitive and bounded response codecs. It does not expose a runtime binding or a production bootstrap execution factory.
+These primitives and bounded response codecs are used by the implemented native
+enrollment/runtime producer. They cannot independently construct a role or a
+bootstrap execution owner.
 
 ## Retained native observation
 
 Full executable/runtime admission and later handle checks have distinct roles
 under the selected [S1 connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests).
 This contract is being ported; it is not a new native qualification result.
+Main separates full `MessageProcess` capture from later retained-descriptor
+checks (PR 284). PR 286 also retains the role's self snapshot and actual
+connection-clock anchors across bounded stages; `begin_stage` still exchanges
+with the issuer. The remaining packet/caller work under **Separate full process
+admission from retained-handle checks** and **Borrow fresh requests from the
+admitted enrolled connection** is Credential's pending plan work.
+Provider/transport reuse remains G1's pending counter row;
+see the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status).
 Executable bytes and selected runtime/provider joins are admitted before an
 owner escapes. Later request checks retain the actual process/task/proc and
 namespace identity observations below without another executable scan or cloud
@@ -61,17 +71,24 @@ additional required inputs of the native enrollment producer.
 
 All these selections and the borrowed view are DATA. They do not prove
 executable admission, enrollment, namespace/clock identity or a current role.
-The production AppHost and SecurityShell read producers continue to refuse
-until their actual native owners are available. No existing canary is migrated
-to this required shape: regenerate desired metadata and redeploy it.
+The implemented AppHost and SecurityShell producers require their actual native
+owners and refuse when those suppliers cannot complete. Selections alone cannot
+replace them. Disposable installations are regenerated and redeployed.
 
 The response codec joins the selected container to the exact TokenReview Pod UID and existing role/lifecycle checks. It requires the supported containerd identifier and both configured image and current image status to match the selected immutable SHA256 image digest. A running container may be unready because readiness can depend on bootstrap completion.
 
 These joins remain response data. They cannot mint a role capability or reconstruct a native observation.
 
-## Remaining runtime join
+## Required runtime join
 
-Production enrollment still requires a qualified trusted native issuer that joins the current process incarnation, actual container/sandbox/Pod, image and node initial time namespace. Projected Pod UID, cgroup text, Kubernetes status, zero offsets, historical receipts or a peer PID alone do not establish that join. The endpoint, kernel process handle, issuer/runtime profile and deployment must be implemented and qualified before the production factory can become available.
+The fixed native enrollment producer implements the issuer/runtime join to the
+actual process incarnation, container/sandbox/Pod, image and node initial time
+namespace. Projected Pod UID, cgroup text, Kubernetes status, zero offsets,
+historical receipts or a peer PID alone do not establish that join. Each selected
+deployment still needs its real kernel/issuer/runtime qualification. Qualifying
+the new composed connection/request path remains Root's pending **Qualify the
+admitted-connection path on the real node** row; existing producers are not absent
+factories, and earlier qualification does not qualify the new port.
 
 ## Connection creator PID visibility
 

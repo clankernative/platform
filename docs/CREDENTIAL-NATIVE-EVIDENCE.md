@@ -10,6 +10,47 @@ provider authentication and issuer enrollment, with real authority/counter,
 owned-handle, original-clock and refusal checks retained. This is a qualification
 obligation, not a claim that current captures or their labels prove completion.
 
+## Selected-contract implementation status
+
+This source snapshot covers main including PRs 286, 287 and 291. PR 282 installed
+the selected contract in the native documents; the shared proposals also reference that
+contract. Specification changes did not implement or qualify it. The row names
+below are from the workspace option-3 implementation plan. Open PRs and private
+compositions are not counted as landed implementation.
+
+| Owning plan row | Landed on this main snapshot | Still pending |
+| --- | --- | --- |
+| **Specify admitted connections and fresh requests** — Credential | PR 282 specifies admission, fresh requests, trusted ongoing content integrity and retained refusal/clock guarantees. | No runtime qualification follows from the specification. |
+| **Separate full process admission from retained-handle checks** — Credential | PR 284 separates full `MessageProcess` executable admission from later retained-descriptor checks; PR 286 retains the role's self snapshot and connection-clock anchors across bounded stages. | Remaining packet/caller ports. Retained self checks do not remove main's per-stage issuer exchange or qualify the complete request port. |
+| **Admit storage once and retain its actual physical owners** — G1 | PR 287 makes Current physical phases borrow the admitted volume and actual file/directory/device/mount/profile handles, removing repeated attachment rounds and the Current-only durability helper. Initial creation, first-holder/activation, real file owners and existing-file Runtime admission remain. | Bootstrap integration and the separate counter/request ports; this physical primitive does not qualify the complete warm path. Actual file/mount/writer and durability barriers remain required. |
+| **Borrow fresh requests from the admitted enrolled connection** — Credential | Native channels, purpose-bound transcripts, actual sender handles and original refusal rules exist. | The owned request/lexical borrow, retained sender reuse and warm peer protocol. Main still exchanges with the issuer in `begin_stage`. |
+| **Retain authenticated counter transport in the real storage connection** — G1 | Authenticated bounded coherent epoch reads and their actual owner checks exist. | Connection-retained authentication/expiry and the warm Current transport; existing Current acquisition still authenticates material. |
+| **Port App/Shell consumers and SQL to the same request owner** — Product, with G1 owning serving | PR 285 binds SQL units and protected subject reads to actual consumer owners, with arming, close/postchecks and one-shot final settlement. | Porting the App/Shell callbacks and serving composition to the new single request original. |
+| **Compose the independent connection/request failure campaign** — CI | PR 283 adds replayable independent reference histories; the production cold-handshake reducer and earlier campaigns remain. | Joining the new warm production transitions and consumer failures to those histories. The reference receipt explicitly reports no production-request or real-Linux-owner execution. |
+| **Qualify the admitted-connection path on the real node** — Root | Earlier source-bound native evidence remains available. | Complete cold admission, two warm requests, refusal cases and browser lifecycle evidence for the composed implementation under the ordinary five-second bound. |
+
+### Cumulative work currently available
+
+PR 291 adds a process-wide diagnostic ledger for both actual executable-hash
+loops, issuer-client exchanges and accepted issuer-service admissions, including
+failed/partial work. Its nine-kind schema leaves the six storage/provider kinds
+explicitly uncovered/null. A successful leaf count is not successful admission,
+delivery or commit. SHA byte counts describe actual reads, including partial
+failures; missing coverage, contention/loss, poison, abandonment and overflow
+cannot be interpreted as zero work.
+
+The issuer's `day2_native_issuer_cost_v2` records include a cumulative snapshot
+within their 8 KiB bound. The detailed stream still stops after sixteen records;
+the in-memory ledger continues but that capped export cannot prove later zero
+work. Complete producer/owner/request joins, authenticated issuer cutpoints and
+the six real storage hooks remain pending under the production, campaign and
+qualification rows above. These are instrumentation results, not a completed
+warm-request measurement or a new diagnostic authority endpoint.
+
+The records below describe their actual implemented emitters or historical
+source-bound measurements. They do not turn those pending rows into qualified
+implementation, and a temporary measurement window is not the ordinary limit.
+
 The real `day2-epoch-controller` executor writes bounded historical observations
 to its private container stderr. There is no diagnostic HTTP endpoint, synthetic
 serving request, replay command or receipt-to-authority constructor. Health still

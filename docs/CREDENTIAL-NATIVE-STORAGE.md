@@ -109,9 +109,11 @@ key stays with the original enrollment owner; losing that owner refuses every
 future phase. Nothing recreates a key or descriptor from a projection.
 
 A later peer phase performs CurrentHello, CurrentOffer, CurrentAck and
-CurrentReady on that same connected socket. Both participants borrow fresh
-request stages from their genuinely admitted connection. The exchange binds the
-initial transcript, checked
+CurrentReady on that same connected socket. The selected contract requires both
+participants to borrow fresh request stages from their genuinely admitted
+connection. Replacing main's per-stage issuer exchange is pending Credential's
+**Borrow fresh requests from the admitted enrolled connection** plan row.
+The exchange binds the initial transcript, checked
 nonwrapping sequence, closed purpose, exact request digest and both fresh
 nonces. A fresh signed request proves the admitted peer's retained key possession;
 it does not require another full issuer admission. Original identity/liveness
@@ -133,12 +135,21 @@ Current peer identity alone still supplies no P3, active epoch or writer.
 
 ## Retained boundaries
 
-Full physical/provider/durability-profile admission belongs to construction of
-the actual storage connection. It must complete before that owner is usable.
+PR 287 implements retained Current physical owners under G1's **Admit storage
+once and retain its actual physical owners** plan row. Bootstrap integration
+and **Retain authenticated counter transport in the real storage connection**
+remain separate pending work. The following whole-connection separation is the
+required contract; the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status)
+distinguishes this landed physical primitive from the remaining ports.
+
+Under that contract, full physical/provider/durability-profile admission belongs
+to construction of the actual storage connection. It must complete before that
+owner is usable.
 Later requests borrow its retained file, directory, mount/device, first holder,
 activated lineage, selected writer and authenticated counter transport.
 Required named-FD, process/thread, namespace, channel and clock checks stay fresh;
-the repeated provider attachment rounds and full physical composites are removed.
+PR 287 removes Current attachment rounds and full durability-profile reads;
+the remaining request/transport port must preserve that separation.
 The trusted services maintain the admitted physical/content assumptions. A
 receipt or matching row cannot create the connection or substitute for current
 authority, a fresh counter, actual writer ownership or database durability.
@@ -345,10 +356,11 @@ conditional model; this is not a regional availability guarantee.
 [Linux ext4 documentation](https://cdn.kernel.org/doc/html/latest/admin-guide/ext4.html).
 
 Known establishment retains the SAME file, volume, channel and authenticated
-first holder. Each `CurrentStorageBootstrapPhase` owns a fresh bounded request
-borrow and peer transcript, bound to the exact original seed and request.
-Completion
-must select the same actual first App participant's Pod, process incarnation and
+first holder. Each `CurrentStorageBootstrapPhase` retains a bounded stage and
+peer transcript, bound to the exact original seed and request. Replacing its
+fresh issuer stage with a request borrow is part of Credential's pending row
+above; the established file/holder ownership is already implemented.
+Completion must select the same actual first App participant's Pod, process incarnation and
 ephemeral key. The enclosing continuation closes before fallible work, and only
 known completion after all final checks releases it. Errors, unknown outcomes,
 drop and a failure after the peer's local completion leave the enclosing owner
@@ -370,8 +382,10 @@ Neither side reuses an old request grant or treats admission as current permissi
 
 The native creation factory consumes the actual enrolled controller stage and
 performs authenticated provider reads and native block-device/mount checks. It
-has not been qualified on the live GKE profile. Bind the first-holder peer, current serving transition and production
-bootstrap-execution factory under the accepted governance contract below. Recheck these
+is implemented together with the first-holder peer, current serving transition
+and production bootstrap-execution factory. Earlier source-bound measurements
+remain separate from Root's pending qualification of the new connection/request
+composition under the accepted governance contract below. Recheck these
 owners through known local admission commits, provider/body sends and final
 settlement. Keep unknown outcomes retained. Do not treat a completed response
 object as a completed human or provider exposure.
@@ -436,12 +450,17 @@ serialized or transferred to another thread. Native deployment qualification rem
 ## Current App serving and existing-file Runtime admission
 
 An active App participant supplies the sealed serving borrow from its real
-admitted file and Controller channel. Every operation uses a fresh request
-stage, fresh signed peer transcript, and coherent four-document observation
+admitted file and Controller channel. Every operation retains a bounded stage,
+fresh signed peer transcript, and coherent four-document observation
 matching the original activation, including provider version tokens. Controller
 release follows the App consumption acknowledgement and a fresh provider read.
 Unknown outcomes close the same retained continuation; a later stage cannot
 reopen it. The Controller path has no consumer callback.
+
+The whole fresh-request composition remains pending the Credential request row
+and G1 bootstrap/transport work named above. Product's **Port App/Shell
+consumers and SQL to the same request owner** row owns the final caller port;
+main's existing serving borrow and SQL owner are not that completed composition.
 
 The actual response connection reserves its identity before its first poll.
 Connection clones share that identity; another connection cannot complete or

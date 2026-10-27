@@ -196,8 +196,14 @@ retains its original before-I/O clock domain and deadline, clamped to the lesser
 of five seconds and the selected lease. It cannot be cloned, serialized or moved
 between threads. Extracting its snapshot discards acquisition state and returns
 historical DATA. A controlled-port observation still grants no current physical
-resource, role or execution authority. The production context factory and live
-port remain unavailable until their actual native producers are qualified.
+resource, role or execution authority. The actual native enrollment, first-holder
+and storage producers are implemented; their source-bound evidence is not a
+qualification of the new connection/request port. Credential's **Borrow fresh
+requests from the admitted enrolled connection**, G1's **Retain authenticated
+counter transport in the real storage connection**, Product's **Port App/Shell
+consumers and SQL to the same request owner**, and Root's **Qualify the
+admitted-connection path on the real node** plan rows remain pending as described
+in the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status).
 
 ## Private per-app state
 

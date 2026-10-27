@@ -6,6 +6,17 @@ first-holder/storage, current writer and actual OAuth consumers. The selected
 is being ported in place. Existing native suppliers and earlier tests do not
 qualify that new composition or establish a completed live OAuth flow.
 
+Main already has the fixed enrollment/storage producers, actual SQL consumer
+ownership through PR 285 and retained Current physical owners through PR 287.
+The remaining connection/request port belongs to
+Credential's **Borrow fresh requests from the admitted enrolled connection**,
+G1's remaining bootstrap integration under **Admit storage once and retain its actual physical owners** and **Retain
+authenticated counter transport in the real storage connection**, and Product's
+**Port App/Shell consumers and SQL to the same request owner** plan rows. Root
+owns **Qualify the admitted-connection path on the real node** after composition.
+See the [landed/pending status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status);
+the requirements below do not claim those pending ports have landed.
+
 ## Required suppliers
 
 - G1's authenticated initial-holder peer exchange joins enrolled Controller and
@@ -30,9 +41,11 @@ must not substitute for an actual supplier. S3's startup
 `CurrentPreparedFilePhase` is included: it retains the same file descriptors and
 actual Controller stage through a bounded operation, and an abandoned or
 refused phase permanently closes continuity. It is physical continuity, not
-current writer authority. Full physical/provider admission must finish before
-the actual connection lends requests. Later checks use retained handles and
-fresh authority/counters rather than repeating that admission.
+current writer authority. Under the selected contract, full physical/provider
+admission must finish before the actual connection lends requests. PR 287 moves
+Current physical checks to retained handles without repeated attachment/profile
+reads. Bootstrap integration and fresh retained counter transport remain the
+pending G1 work above.
 
 The stack also includes `InitialStoreMetadata`, which admits instance and
 artifact/schema inputs without opening or creating the serving database.
@@ -69,7 +82,8 @@ their owning executor. `RoleStage::with_native` lends the actual S1
 S3 consumer must retain those borrows through the actual operation,
 including known SQL commit, session creation, signing, provider dispatch and
 socket writes as applicable. Each later phase needs current authority, counters,
-actual handles and original-clock checks. Admission is not repeated per boundary;
+actual handles and original-clock checks. Under the selected contract, admission
+must not be repeated per boundary; that caller replacement is still pending and
 the connection is not reusable permission. A dropped response, unknown commit
 or unknown send must retain the
 appropriate unresolved ownership; it must not restart either original or
@@ -89,7 +103,7 @@ the original. Shell session insertion, selected key loading/signing and App
 signature verification use the same boundary. Provider token and account
 requests retain it through their actual response-body reads.
 
-The Pending/human/runtime SQL facade borrows that same genuine request owner.
+The Pending/human/runtime SQL facade borrows the actual consumer/original owner.
 Readiness and subject lookups reborrow it, without a nested Current acquisition.
 Snapshots/writers cannot escape; each unit closes and postchecks before provider
 HTTP. Intermediate units do not finalize the original. The final Pending/human
@@ -97,7 +111,9 @@ commit is one-shot: any later SQL unit refuses before opening. Commit, rollback,
 close or owner failure poisons the actual request/original even if caught. A
 provider permit leaves only after known commit/close/postchecks; an unknown send
 retains MayHaveBeenSent and cannot run cleanup SQL after refusal. These remain
-mandatory while the connection/request and SQL caller ports are qualified.
+mandatory. PR 285 implements this SQL-unit ownership; one original covering the
+whole new App/Shell HTTP request still depends on the pending request and caller
+rows. A passed SQL unit does not qualify that complete composition.
 
 The native HTTP socket checks before and after each write/flush/shutdown poll.
 Pending and partial writes are not delivery completion. A failed, timed out or
@@ -132,8 +148,10 @@ enrolled clock are still sampled. It neither reacquires a stage nor authorizes
 an operation. Purpose/phase and the actual S3 owner remain mandatory at the
 protected consumer.
 
-Approval, CredentialIntent, reveal/ack and all other purposes remain
-unsupported. Recurring read and refresh need their own current narrow phase
+In this native Google-original purpose dispatcher, Approval, CredentialIntent,
+reveal/ack and all purposes other than OAuthConnect/OAuthDisconnect remain
+unsupported. This does not remove the portable credential reveal/ack APIs.
+Recurring read and refresh need their own current narrow phase
 authority; the human original is not an autonomous grant.
 
 ## Verification boundary
@@ -156,17 +174,17 @@ for that campaign.
 The App can consume its checked original file into `AppFileContinuity` while
 its original stage is still valid. The same directory/file descriptors and
 actual enrollment identity survive; no pathname, projection, old grant or
-serialized value can recreate them. Request checks take a fresh
-bounded borrow from that same admitted enrollment. The initial-image admission
-remains
+serialized value can recreate them. Replacing fresh issuer-stage acquisition
+with request borrows from the same admitted enrollment remains Credential's
+pending request row. The initial-image admission remains
 separate and still rejects modified bytes. Physical continuity alone grants no
 first-holder, activation, provider durability or current writer authority.
 
 The Controller's `CurrentPhysicalFilePhase` is distinct from the initial-file
-phase accepted by the first-holder exchange. It retains the admitted volume/
-provider binding and fresh mount, directory and file identity checks while
-allowing SQLite length/content
-to change after legitimate writes. Entry closes the parent continuation gate;
+phase accepted by the first-holder exchange. It retains actual volume/file
+owners. PR 287 removes repeated Current provider/profile validation while
+retaining fresh mount, directory and file identity checks and allowing
+SQLite length/content to change after legitimate writes. Entry closes the parent continuation gate;
 abandonment or failure cannot reopen it. Known physical completion is still
 not a P3 or current-writer result.
 
@@ -203,9 +221,10 @@ Runtime admission checks. Shell receives no App file or storage authority throug
 
 Current App/Controller peer phases require distinct bound request transcripts
 from the initial exchange and the last completed phase, signed by the actually
-admitted retained peer. They borrow fresh request authority without another
-full issuer admission. A new wrapper, nonce or acquisition domain around an old
-request grant cannot refresh authority or clear refusal.
+admitted retained peer. The selected contract requires fresh request authority
+without another full issuer admission; main still acquires issuer stages until
+Credential's request row lands. A new wrapper, nonce or acquisition domain around
+an old request grant cannot refresh authority or clear refusal.
 This exchange does not supply Shell serving permission; that requires its own
 genuine narrow producer without granting Shell storage reader/writer access.
 
