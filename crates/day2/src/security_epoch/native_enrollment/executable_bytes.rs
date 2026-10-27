@@ -42,10 +42,13 @@ pub(super) fn hash(
     acquisition: &mut NativeAcquisition,
     costs: &HashCosts,
 ) -> Result<Digest> {
+    let mut work = crate::security_epoch::admission_work::begin(
+        crate::security_epoch::admission_work::Work::ExecutableSha256,
+    );
     let _profile = crate::security_epoch::self_check_profile::enter(
         crate::security_epoch::self_check_profile::Category::ExecutableBytes,
     );
-    costs.hash(|read_bytes| {
+    let result = costs.hash(|read_bytes| {
         acquisition.remaining()?;
         let before = identity(file)?;
         file.seek(SeekFrom::Start(0))?;
@@ -55,6 +58,10 @@ pub(super) fn hash(
         loop {
             acquisition.remaining()?;
             let count = file.read(&mut buffer)?;
+            work.bytes(
+                crate::security_epoch::admission_work::Bytes::ShaRead,
+                count as u64,
+            );
             if count == 0 {
                 break;
             }
@@ -72,7 +79,9 @@ pub(super) fn hash(
         );
         acquisition.remaining()?;
         format!("sha256:{}", crate::hex(hasher.finish().as_ref())).try_into()
-    })
+    });
+    work.finish(result.is_ok());
+    result
 }
 
 /// Admit one actual executable by reading all selected bytes, joining EVERY

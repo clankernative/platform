@@ -5,6 +5,7 @@
 //! retains a joined Controller/file/peer phase through the consuming dispatch.
 //! Ordinary startup cannot initialize a counter or adopt an existing database;
 //! the serving supplier and lifecycle still need composition and qualification.
+mod admission_work;
 mod authenticated_reads;
 mod bootstrap;
 mod control_slot;

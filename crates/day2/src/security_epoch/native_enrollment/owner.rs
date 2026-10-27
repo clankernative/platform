@@ -834,97 +834,104 @@ fn exchange(
     IssuerReceipt,
     Channel,
 )> {
-    let request = protocol::nonce("role-request")?;
-    let public_key = key.public();
-    let policy_hash = policy.digest()?;
-    let mut channel = Channel::connect(acquisition)?;
-    {
-        let _profile = crate::security_epoch::self_check_profile::enter(
-            crate::security_epoch::self_check_profile::Category::IssuerTransport,
+    let mut work = crate::security_epoch::admission_work::begin(
+        crate::security_epoch::admission_work::Work::IssuerClientExchange,
+    );
+    let result = (|| {
+        let request = protocol::nonce("role-request")?;
+        let public_key = key.public();
+        let policy_hash = policy.digest()?;
+        let mut channel = Channel::connect(acquisition)?;
+        {
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::IssuerTransport,
+            );
+            channel.send(
+                &Packet::StageHello {
+                    policy: policy_hash.clone(),
+                    role,
+                    purpose,
+                    public_key: public_key.clone(),
+                    request: request.clone(),
+                },
+                acquisition,
+            )?;
+        }
+        let (packet, mut nonce_peer) = channel.receive_issuer(acquisition)?;
+        let Packet::StageNonce {
+            request: echoed,
+            challenge,
+        } = packet
+        else {
+            anyhow::bail!("native_enrollment_stage_order")
+        };
+        ensure!(echoed == request, "native_enrollment_request_nonce");
+        let binding = (
+            &policy_hash,
+            role,
+            purpose,
+            &public_key,
+            &request,
+            &challenge,
         );
-        channel.send(
-            &Packet::StageHello {
-                policy: policy_hash.clone(),
-                role,
-                purpose,
-                public_key: public_key.clone(),
-                request: request.clone(),
-            },
-            acquisition,
-        )?;
-    }
-    let (packet, mut nonce_peer) = channel.receive_issuer(acquisition)?;
-    let Packet::StageNonce {
-        request: echoed,
-        challenge,
-    } = packet
-    else {
-        anyhow::bail!("native_enrollment_stage_order")
-    };
-    ensure!(echoed == request, "native_enrollment_request_nonce");
-    let binding = (
-        &policy_hash,
-        role,
-        purpose,
-        &public_key,
-        &request,
-        &challenge,
-    );
-    let signature = key.sign("role-bind", &binding)?;
-    {
-        let _profile = crate::security_epoch::self_check_profile::enter(
-            crate::security_epoch::self_check_profile::Category::IssuerTransport,
+        let signature = key.sign("role-bind", &binding)?;
+        {
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::IssuerTransport,
+            );
+            channel.send(
+                &Packet::StageBind {
+                    policy: policy_hash.clone(),
+                    role,
+                    purpose,
+                    public_key: public_key.clone(),
+                    request: request.clone(),
+                    challenge: challenge.clone(),
+                    signature,
+                },
+                acquisition,
+            )?;
+        }
+        let (packet, mut issuer) = channel.receive_issuer(acquisition)?;
+        let Packet::StageGrant { certificate, stage } = packet else {
+            anyhow::bail!("native_enrollment_stage_order")
+        };
+        certificate.verify(policy)?;
+        runtime::require_common(&certificate.data.process, &certificate.data.provisioner)?;
+        runtime::require_common(&current.data, &certificate.data.process)?;
+        ensure!(
+            stage.data.issuer == certificate.digest()?
+                && stage.data.policy == policy_hash
+                && stage.data.role == role
+                && stage.data.purpose == purpose
+                && stage.data.public_key == public_key
+                && stage.data.request == request
+                && stage.data.challenge == challenge
+                && stage.data.process == current.data,
+            "native_enrollment_stage_binding"
         );
-        channel.send(
-            &Packet::StageBind {
-                policy: policy_hash.clone(),
-                role,
-                purpose,
-                public_key: public_key.clone(),
-                request: request.clone(),
-                challenge: challenge.clone(),
-                signature,
-            },
-            acquisition,
+        protocol::verify(
+            &certificate.data.public_key,
+            "role-stage",
+            &stage.data,
+            &stage.signature,
         )?;
-    }
-    let (packet, mut issuer) = channel.receive_issuer(acquisition)?;
-    let Packet::StageGrant { certificate, stage } = packet else {
-        anyhow::bail!("native_enrollment_stage_order")
-    };
-    certificate.verify(policy)?;
-    runtime::require_common(&certificate.data.process, &certificate.data.provisioner)?;
-    runtime::require_common(&current.data, &certificate.data.process)?;
-    ensure!(
-        stage.data.issuer == certificate.digest()?
-            && stage.data.policy == policy_hash
-            && stage.data.role == role
-            && stage.data.purpose == purpose
-            && stage.data.public_key == public_key
-            && stage.data.request == request
-            && stage.data.challenge == challenge
-            && stage.data.process == current.data,
-        "native_enrollment_stage_binding"
-    );
-    protocol::verify(
-        &certificate.data.public_key,
-        "role-stage",
-        &stage.data,
-        &stage.signature,
-    )?;
-    let now = acquisition.sample()?.elapsed;
-    ensure!(
-        stage.data.origin_ns < stage.data.deadline_ns
-            && u128::from(stage.data.deadline_ns - stage.data.origin_ns)
-                <= purpose.limit().as_nanos()
-            && Duration::from_nanos(stage.data.origin_ns) <= now
-            && now < Duration::from_nanos(stage.data.deadline_ns),
-        "native_enrollment_stage_interval"
-    );
-    current.check(acquisition)?;
-    nonce_peer.bind(&certificate, policy, acquisition)?;
-    issuer.bind(&certificate, policy, acquisition)?;
-    nonce_peer.check_live(acquisition)?;
-    issuer.check_live(acquisition)?;
-    Ok((certificate, *stage, issuer, nonce_peer, channel))
+        let now = acquisition.sample()?.elapsed;
+        ensure!(
+            stage.data.origin_ns < stage.data.deadline_ns
+                && u128::from(stage.data.deadline_ns - stage.data.origin_ns)
+                    <= purpose.limit().as_nanos()
+                && Duration::from_nanos(stage.data.origin_ns) <= now
+                && now < Duration::from_nanos(stage.data.deadline_ns),
+            "native_enrollment_stage_interval"
+        );
+        current.check(acquisition)?;
+        nonce_peer.bind(&certificate, policy, acquisition)?;
+        issuer.bind(&certificate, policy, acquisition)?;
+        nonce_peer.check_live(acquisition)?;
+        issuer.check_live(acquisition)?;
+        Ok((certificate, *stage, issuer, nonce_peer, channel))
+    })();
+    work.finish(result.is_ok());
+    result
 }

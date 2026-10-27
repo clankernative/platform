@@ -5,7 +5,7 @@ use std::{cell::RefCell, io::Write, rc::Rc, time::Duration};
 
 const PREFIX: &str = "day2-native-issuer-cost ";
 const RECORD_LIMIT: u8 = 16;
-const RECORD_BYTES: usize = 4096;
+const RECORD_BYTES: usize = 8192;
 
 /// Keep bounded issuer records on the provisioner's private stderr. Startup
 /// and listener descriptors remain the birth protocol's separate stdin/stdout.
@@ -246,14 +246,23 @@ impl<W: Write> Recorder<W> {
             !self.failed && self.records < RECORD_LIMIT,
             "native_issuer_cost_closed"
         );
-        let result = self.emit_inner(costs, outcome);
+        let result = self.emit_inner(
+            costs,
+            outcome,
+            crate::security_epoch::admission_work::snapshot(),
+        );
         if result.is_err() {
             self.failed = true;
         }
         result
     }
 
-    fn emit_inner(&mut self, costs: &Costs, outcome: Outcome) -> anyhow::Result<()> {
+    fn emit_inner(
+        &mut self,
+        costs: &Costs,
+        outcome: Outcome,
+        admission_work: crate::security_epoch::admission_work::Snapshot,
+    ) -> anyhow::Result<()> {
         #[derive(Serialize)]
         struct Record {
             format: &'static str,
@@ -261,13 +270,15 @@ impl<W: Write> Recorder<W> {
             limit: u8,
             outcome: Outcome,
             rows: Vec<(Operation, Measurement)>,
+            admission_work: crate::security_epoch::admission_work::Snapshot,
         }
         let record = Record {
-            format: "day2_native_issuer_cost_v1",
+            format: "day2_native_issuer_cost_v2",
             sequence: self.records + 1,
             limit: RECORD_LIMIT,
             outcome,
             rows: costs.rows(),
+            admission_work,
         };
         let json = serde_json::to_string(&record)?;
         anyhow::ensure!(
@@ -298,6 +309,34 @@ pub(super) fn preserve_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn issuer_record_bound_covers_all_maximal_work_and_timing_rows() {
+        let costs = Costs::new();
+        *costs.0.as_ref().unwrap().borrow_mut() = [Measurement(
+            Some(u32::MAX),
+            Some(u64::MAX),
+            Some(u32::MAX),
+            Some(u32::MAX),
+        ); 20];
+        let mut recorder = Recorder::new(Vec::new());
+        recorder
+            .emit_inner(
+                &costs,
+                Outcome::Completed,
+                crate::security_epoch::admission_work::Snapshot::maximal_fixture(),
+            )
+            .unwrap();
+        assert!(recorder.output.len() < RECORD_BYTES);
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(text.strip_prefix(PREFIX).unwrap()).unwrap();
+        assert_eq!(
+            record["admission_work"]["rows"].as_array().unwrap().len(),
+            9
+        );
+        assert_eq!(record["rows"].as_array().unwrap().len(), 20);
+    }
+
     const STDERR_PROBE: &str =
         "security_epoch::native_enrollment::issuer_costs::tests::issuer_stderr_subprocess";
     const STDERR_STAGE: &str = "DAY2_NATIVE_ISSUER_STDERR_TEST_STAGE";
@@ -321,12 +360,34 @@ mod tests {
         assert!(stderr.ends_with('\n'));
         let lines: Vec<_> = stderr.lines().collect();
         assert_eq!(lines.len(), 1, "{stderr}");
-        let record: serde_json::Value =
+        let mut record: serde_json::Value =
             serde_json::from_str(lines[0].strip_prefix(PREFIX).unwrap()).unwrap();
+        let work = record
+            .as_object_mut()
+            .unwrap()
+            .remove("admission_work")
+            .unwrap();
+        assert_eq!(work["format"], "native_admission_work_v1");
+        assert_eq!(work["sequence"], 1);
+        assert_eq!(work["complete"], false);
+        assert_eq!(work["loss"], false);
+        assert_eq!(work["poisoned"], false);
+        let work_rows = work["rows"].as_array().unwrap();
+        assert_eq!(work_rows.len(), 9);
+        for (index, row) in work_rows.iter().enumerate() {
+            assert_eq!(row["covered"], index < 3);
+            if index < 3 {
+                assert_eq!(row["attempted"], 0);
+                assert_eq!(row["returned"], 0);
+                assert_eq!(row["in_flight"], 0);
+            } else {
+                assert!(row["attempted"].is_null() && row["returned"].is_null());
+            }
+        }
         assert_eq!(
             record,
             serde_json::json!({
-                "format": "day2_native_issuer_cost_v1",
+                "format": "day2_native_issuer_cost_v2",
                 "sequence": 1,
                 "limit": 16,
                 "outcome": "completed",

@@ -41,7 +41,10 @@ impl NativeProcessObservation {
                     identity.2 > 0 && identity.2 <= 512 * 1024 * 1024,
                     "epoch_native_executable_bound"
                 );
-                let code: Digest = costs.hash(|read_bytes| {
+                let mut work = crate::security_epoch::admission_work::begin(
+                    crate::security_epoch::admission_work::Work::ExecutableSha256,
+                );
+                let code: Result<Digest> = costs.hash(|read_bytes| {
                     let _profile = super::self_check_profile::enter(
                         super::self_check_profile::Category::SelfExecutableBytes,
                     );
@@ -51,6 +54,10 @@ impl NativeProcessObservation {
                     loop {
                         acquisition.remaining()?;
                         let count = executable.read(&mut buffer)?;
+                        work.bytes(
+                            crate::security_epoch::admission_work::Bytes::ShaRead,
+                            count as u64,
+                        );
                         if count == 0 {
                             break;
                         }
@@ -66,7 +73,9 @@ impl NativeProcessObservation {
                         "epoch_native_executable_changed"
                     );
                     format!("sha256:{}", crate::hex(hash.finish().as_ref())).try_into()
-                })?;
+                });
+                work.finish(code.is_ok());
+                let code = code?;
                 ensure!(
                     code == *expected_executable,
                     "epoch_native_executable_pin_mismatch"

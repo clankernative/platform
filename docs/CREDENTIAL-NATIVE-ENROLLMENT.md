@@ -464,12 +464,42 @@ guards and failure behavior remain; this diagnostic addition fixes no timeout.
 The issuer emits private stderr records prefixed with "day2-native-issuer-cost "
 for its first sixteen accepted connections through the provisioner's inherited
 stderr. Its startup channel and listener remain separate on stdin and stdout;
-records never enter either protocol. Each day2_native_issuer_cost_v1
-record has a sequence, the fixed limit, an outcome and fixed operation rows.
-Later connections disable diagnostic sampling and logging; the normal admission
+records never enter either protocol. Each day2_native_issuer_cost_v2
+record has a sequence, the fixed limit, an outcome, fixed timing rows and a
+historical admission-work snapshot. A complete record is bounded to 8192 bytes,
+including the largest numeric values in all timing and cumulative-work rows.
+Later connections disable detailed sampling and logging; the normal admission
 protocol and enrollment table continue unchanged. A partial/export failure is
 terminal and never retries a record or a native operation. A preexisting fatal
 native error retains its original cause.
+
+The separate `native_admission_work_v1` ledger counts actual production attempts
+across all threads in one process. It never resets with a request or stops at
+the detailed-record cap. Each closed kind records attempted, known returned
+(success or error), succeeded, abandoned and in-flight calls. Byte columns are
+actual executable-file bytes read, request-body bytes supplied to the HTTP
+client, and application response-body bytes actually read, including partial
+failed reads. Supplied bytes are not proof of socket/TLS transmission or delivery.
+The full-physical invocation kind is separate from each PVC/PV/Node/Disk/Instance
+request; five requests must not be inferred to be a completed five-read round.
+Metadata-token, TokenReview, selected workload identity and credential mint/tokeninfo
+requests have separate kinds. Fresh epoch reads and cheap handle checks are separate.
+
+Only the executable SHA, issuer-client exchange and accepted issuer-service
+admission leaves are covered in this change. The six storage/provider kinds are
+explicitly uncovered/null until their real production hooks and source guards
+land. Therefore this partial ledger cannot report complete all-producer coverage.
+Updates and snapshots use nonblocking access; a paused writer, poison, dropped
+unfinished attempt, checked-counter overflow or missing coverage is sticky unknown
+evidence, never zero work. A known transport error is a returned failure, never
+proof of rollback, exclusion or no transmission. No ledger value affects permission,
+refusal, a native clock, a timeout or the original result of any operation.
+
+The capped stderr detail stream alone cannot prove zero work after its last
+record. Qualification still requires complete start/end cumulative snapshots
+for every actual producer, bound to the actual admitted owner, independent
+request ordinal, original digest, stage and issuer/client correlation. Those
+exports and the two-warm-request native qualification remain separate work.
 
 Every row is [operation, [attempts, read_bytes, inclusive_total_us, max_us]].
 Only hash rows report bytes: these are counts actually returned by hash reads,
