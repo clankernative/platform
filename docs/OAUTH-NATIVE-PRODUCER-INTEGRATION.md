@@ -6,10 +6,11 @@ first-holder/storage, current writer and actual OAuth consumers. The selected
 is being ported in place. Existing native suppliers and earlier tests do not
 qualify that new composition or establish a completed live OAuth flow.
 
-Main already has the fixed enrollment/storage producers and, through PR 285,
-actual SQL consumer ownership. The remaining connection/request port belongs to
+Main already has the fixed enrollment/storage producers, actual SQL consumer
+ownership through PR 285 and retained Current physical owners through PR 287.
+The remaining connection/request port belongs to
 Credential's **Borrow fresh requests from the admitted enrolled connection**,
-G1's **Admit storage once and retain its actual physical owners** and **Retain
+G1's remaining bootstrap integration under **Admit storage once and retain its actual physical owners** and **Retain
 authenticated counter transport in the real storage connection**, and Product's
 **Port App/Shell consumers and SQL to the same request owner** plan rows. Root
 owns **Qualify the admitted-connection path on the real node** after composition.
@@ -41,9 +42,10 @@ must not substitute for an actual supplier. S3's startup
 actual Controller stage through a bounded operation, and an abandoned or
 refused phase permanently closes continuity. It is physical continuity, not
 current writer authority. Under the selected contract, full physical/provider
-admission must finish before the actual connection lends requests. Moving main's
-later checks to retained handles and fresh authority/counters rather than
-repeating that admission remains part of the pending G1 rows above.
+admission must finish before the actual connection lends requests. PR 287 moves
+Current physical checks to retained handles without repeated attachment/profile
+reads. Bootstrap integration and fresh retained counter transport remain the
+pending G1 work above.
 
 The stack also includes `InitialStoreMetadata`, which admits instance and
 artifact/schema inputs without opening or creating the serving database.
@@ -180,8 +182,8 @@ first-holder, activation, provider durability or current writer authority.
 
 The Controller's `CurrentPhysicalFilePhase` is distinct from the initial-file
 phase accepted by the first-holder exchange. It retains actual volume/file
-owners; G1's pending storage row moves its full provider validation to admission
-while retaining fresh mount, directory and file identity checks and allowing
+owners. PR 287 removes repeated Current provider/profile validation while
+retaining fresh mount, directory and file identity checks and allowing
 SQLite length/content to change after legitimate writes. Entry closes the parent continuation gate;
 abandonment or failure cannot reopen it. Known physical completion is still
 not a P3 or current-writer result.

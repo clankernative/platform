@@ -135,12 +135,12 @@ Current peer identity alone still supplies no P3, active epoch or writer.
 
 ## Retained boundaries
 
-Moving main's repeated Current physical/provider work to admission is pending
-G1's **Admit storage once and retain its actual physical owners** and **Retain
-authenticated counter transport in the real storage connection** plan rows.
-The following separation is the required contract, not a claim that those ports
-have landed. The [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status)
-separates them from the existing creation, first-holder and file-owner code.
+PR 287 implements retained Current physical owners under G1's **Admit storage
+once and retain its actual physical owners** plan row. Bootstrap integration
+and **Retain authenticated counter transport in the real storage connection**
+remain separate pending work. The following whole-connection separation is the
+required contract; the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status)
+distinguishes this landed physical primitive from the remaining ports.
 
 Under that contract, full physical/provider/durability-profile admission belongs
 to construction of the actual storage connection. It must complete before that
@@ -148,8 +148,8 @@ owner is usable.
 Later requests borrow its retained file, directory, mount/device, first holder,
 activated lineage, selected writer and authenticated counter transport.
 Required named-FD, process/thread, namespace, channel and clock checks stay fresh;
-the port must remove repeated provider attachment rounds and full physical
-composites.
+PR 287 removes Current attachment rounds and full durability-profile reads;
+the remaining request/transport port must preserve that separation.
 The trusted services maintain the admitted physical/content assumptions. A
 receipt or matching row cannot create the connection or substitute for current
 authority, a fresh counter, actual writer ownership or database durability.
@@ -457,8 +457,8 @@ release follows the App consumption acknowledgement and a fresh provider read.
 Unknown outcomes close the same retained continuation; a later stage cannot
 reopen it. The Controller path has no consumer callback.
 
-The fresh-request and admission-once replacements remain pending the Credential
-request row and G1 storage/transport rows named above. Product's **Port App/Shell
+The whole fresh-request composition remains pending the Credential request row
+and G1 bootstrap/transport work named above. Product's **Port App/Shell
 consumers and SQL to the same request owner** row owns the final caller port;
 main's existing serving borrow and SQL owner are not that completed composition.
 

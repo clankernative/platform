@@ -12,7 +12,7 @@ obligation, not a claim that current captures or their labels prove completion.
 
 ## Selected-contract implementation status
 
-This source snapshot covers main including PRs 286 and 291. PR 282 installed
+This source snapshot covers main including PRs 286, 287 and 291. PR 282 installed
 the selected contract in the native documents; the shared proposals also reference that
 contract. Specification changes did not implement or qualify it. The row names
 below are from the workspace option-3 implementation plan. Open PRs and private
@@ -22,7 +22,7 @@ compositions are not counted as landed implementation.
 | --- | --- | --- |
 | **Specify admitted connections and fresh requests** — Credential | PR 282 specifies admission, fresh requests, trusted ongoing content integrity and retained refusal/clock guarantees. | No runtime qualification follows from the specification. |
 | **Separate full process admission from retained-handle checks** — Credential | PR 284 separates full `MessageProcess` executable admission from later retained-descriptor checks; PR 286 retains the role's self snapshot and connection-clock anchors across bounded stages. | Remaining packet/caller ports. Retained self checks do not remove main's per-stage issuer exchange or qualify the complete request port. |
-| **Admit storage once and retain its actual physical owners** — G1 | Initial creation, first-holder/activation, real file owners and existing-file Runtime admission exist. | Moving repeated Current physical/provider-profile work to connection admission; preserving the actual file/mount/writer and durability barriers in that port. |
+| **Admit storage once and retain its actual physical owners** — G1 | PR 287 makes Current physical phases borrow the admitted volume and actual file/directory/device/mount/profile handles, removing repeated attachment rounds and the Current-only durability helper. Initial creation, first-holder/activation, real file owners and existing-file Runtime admission remain. | Bootstrap integration and the separate counter/request ports; this physical primitive does not qualify the complete warm path. Actual file/mount/writer and durability barriers remain required. |
 | **Borrow fresh requests from the admitted enrolled connection** — Credential | Native channels, purpose-bound transcripts, actual sender handles and original refusal rules exist. | The owned request/lexical borrow, retained sender reuse and warm peer protocol. Main still exchanges with the issuer in `begin_stage`. |
 | **Retain authenticated counter transport in the real storage connection** — G1 | Authenticated bounded coherent epoch reads and their actual owner checks exist. | Connection-retained authentication/expiry and the warm Current transport; existing Current acquisition still authenticates material. |
 | **Port App/Shell consumers and SQL to the same request owner** — Product, with G1 owning serving | PR 285 binds SQL units and protected subject reads to actual consumer owners, with arming, close/postchecks and one-shot final settlement. | Porting the App/Shell callbacks and serving composition to the new single request original. |
