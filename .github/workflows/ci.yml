@@ -127,6 +127,7 @@ jobs:
         run: |
           build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::birth::tests:: --nocapture --test-threads=1
           build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::tests:: --nocapture --test-threads=1
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_identity::tests:: --nocapture --test-threads=1
       - run: build-out/bin/xtask verify-fast
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
