@@ -5,7 +5,7 @@ use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::issuer_costs::{HashCosts, issuer_stderr};
 use crate::security_epoch::native_enrollment::{
     channel::{Channel, Listener},
-    policy::{EnrollmentPolicy, MAX_POLICY_BYTES, PolicyInterpretation},
+    policy::{EnrollmentPolicy, MAX_POLICY_BYTES},
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
     root_kms::RootKms,
@@ -23,71 +23,189 @@ const POLICY: &str = "/etc/day2/native-enrollment.json";
 const ISSUER: &str = "/usr/local/bin/day2-native-enrollment";
 
 pub(super) fn load_policy(acquisition: &mut NativeAcquisition) -> Result<EnrollmentPolicy> {
-    let bytes = selected_file(POLICY, MAX_POLICY_BYTES, acquisition)?;
-    let policy: EnrollmentPolicy = crate::json::decode(&bytes)?;
-    policy.validate()?;
-    acquisition.remaining()?;
+    let (policy, _file) = admit_policy(acquisition)?;
     Ok(policy)
 }
 
-pub(super) fn check_policy_interpretation(
+/// Full cold admission of the actual fixed policy file. No parsed policy or
+/// caller-supplied descriptor can construct its retained native file owner.
+pub(super) fn admit_policy(
     acquisition: &mut NativeAcquisition,
-    interpretation: &mut PolicyInterpretation,
-    expected: &EnrollmentPolicy,
-) -> Result<()> {
-    check_policy_file(POLICY, acquisition, interpretation, expected)
+) -> Result<(EnrollmentPolicy, PolicyFileOwner)> {
+    admit_policy_file(POLICY, acquisition)
 }
 
-// The producer has only the fixed POLICY entry above. This private atomic
-// loader also lets isolated root Linux tests exercise the exact same guards
-// with their own temporary files, without changing the host's /etc policy.
-fn check_policy_file(
-    path: &'static str,
-    acquisition: &mut NativeAcquisition,
-    interpretation: &mut PolicyInterpretation,
-    expected: &EnrollmentPolicy,
-) -> Result<()> {
-    let _profile = crate::security_epoch::self_check_profile::enter(
-        crate::security_epoch::self_check_profile::Category::Policy,
-    );
-    // The same fresh NOFOLLOW/open, metadata, bounded read and clock checks
-    // run even on an exact-byte hit. A failed read cannot use cached DATA.
-    interpretation.observe(selected_file(path, MAX_POLICY_BYTES, acquisition), expected)?;
-    acquisition.remaining()?;
-    Ok(())
+pub(super) struct PolicyFileOwner {
+    file: File,
+    stamp: PolicyFileStamp,
+    refused: bool,
+    local: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-fn selected_file(
-    path: &'static str,
-    limit: u64,
-    acquisition: &mut NativeAcquisition,
-) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+#[derive(PartialEq, Eq)]
+struct PolicyFileStamp {
+    device: u64,
+    inode: u64,
+    mount: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+const _: () = {
+    macro_rules! assert_not_impl {
+        ($bound:path) => {{
+            trait Ambiguous<T> {
+                fn check() {}
+            }
+            impl<T: ?Sized> Ambiguous<()> for T {}
+            impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
+            let _ = <PolicyFileOwner as Ambiguous<_>>::check;
+        }};
+    }
+    assert_not_impl!(Clone);
+    assert_not_impl!(Copy);
+    assert_not_impl!(Default);
+    assert_not_impl!(std::fmt::Debug);
+    assert_not_impl!(Send);
+    assert_not_impl!(Sync);
+    assert_not_impl!(serde::Serialize);
+    assert_not_impl!(serde::Deserialize<'static>);
+};
+
+fn open_policy_file(path: &'static str, acquisition: &mut NativeAcquisition) -> Result<File> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags};
     acquisition.remaining()?;
-    let file = File::from(rustix::fs::open(
+    let file = File::from(rustix::fs::openat2(
+        rustix::fs::CWD,
         path,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC
-            | rustix::fs::OFlags::NONBLOCK,
-        rustix::fs::Mode::empty(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )?);
+    acquisition.remaining()?;
+    Ok(file)
+}
+
+fn policy_file_stamp(file: &File, acquisition: &mut NativeAcquisition) -> Result<PolicyFileStamp> {
+    use rustix::fs::{AtFlags, StatxFlags};
+    acquisition.remaining()?;
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
             && metadata.uid() == 0
             && metadata.mode() & 0o022 == 0
             && metadata.len() > 0
-            && metadata.len() <= limit,
+            && metadata.len() <= MAX_POLICY_BYTES,
         "native_enrollment_operator_file"
     );
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    let mask = StatxFlags::INO | StatxFlags::MNT_ID;
+    let mounted = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, mask)?;
     ensure!(
-        !bytes.is_empty() && bytes.len() as u64 <= limit,
-        "native_enrollment_operator_file_bound"
+        mounted.stx_mask & mask.bits() == mask.bits()
+            && mounted.stx_ino == metadata.ino()
+            && mounted.stx_ino != 0
+            && mounted.stx_mnt_id != 0,
+        "native_enrollment_operator_file_mount"
     );
     acquisition.remaining()?;
-    Ok(bytes)
+    Ok(PolicyFileStamp {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mount: mounted.stx_mnt_id,
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.mode(),
+        length: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
+// Production selects only POLICY. Isolated Linux conformance tests use actual
+// temporary root-owned files through this same lower adapter, never a role.
+fn admit_policy_file(
+    path: &'static str,
+    acquisition: &mut NativeAcquisition,
+) -> Result<(EnrollmentPolicy, PolicyFileOwner)> {
+    let result = (|| {
+        let _profile = crate::security_epoch::self_check_profile::enter(
+            crate::security_epoch::self_check_profile::Category::Policy,
+        );
+        let mut file: File = open_policy_file(path, acquisition)?;
+        let stamp = policy_file_stamp(&file, acquisition)?;
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        let mut buffer = zeroize::Zeroizing::new([0_u8; 8192]);
+        loop {
+            acquisition.remaining()?;
+            let remaining = (MAX_POLICY_BYTES as usize + 1) - bytes.len();
+            let capacity = remaining.min(buffer.len());
+            let count = File::read(&mut file, &mut buffer[..capacity])?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            ensure!(
+                bytes.len() as u64 <= MAX_POLICY_BYTES,
+                "native_enrollment_operator_file_bound"
+            );
+        }
+        ensure!(
+            !bytes.is_empty() && bytes.len() as u64 == stamp.length,
+            "native_enrollment_operator_file_changed"
+        );
+        let policy: EnrollmentPolicy = crate::json::decode(&bytes)?;
+        policy.validate()?;
+        let mut owner = PolicyFileOwner {
+            file,
+            stamp,
+            refused: false,
+            local: std::marker::PhantomData,
+        };
+        owner.check_file(path, acquisition)?;
+        Ok((policy, owner))
+    })();
+    if result.is_err() {
+        acquisition.refuse();
+    }
+    result
+}
+
+impl PolicyFileOwner {
+    pub(super) fn check(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
+        self.check_file(POLICY, acquisition)
+    }
+
+    fn check_file(
+        &mut self,
+        path: &'static str,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.refused, "native_enrollment_operator_file_refused");
+            let _profile = crate::security_epoch::self_check_profile::enter(
+                crate::security_epoch::self_check_profile::Category::Policy,
+            );
+            acquisition.remaining()?;
+            let named = open_policy_file(path, acquisition)?;
+            let held = policy_file_stamp(&self.file, acquisition)?;
+            let current = policy_file_stamp(&named, acquisition)?;
+            ensure!(
+                held == self.stamp && current == self.stamp,
+                "native_enrollment_operator_file_changed"
+            );
+            acquisition.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refused = true;
+            acquisition.refuse();
+        }
+        result
+    }
 }
 
 struct IssuerBirthOwner {
@@ -377,88 +495,36 @@ impl IssuerOwner {
 mod tests {
     use super::*;
 
-    #[test]
-    #[ignore = "isolated root Linux cost fixture; no enrolled role or full Controller sample"]
-    fn profile_guarded_policy_cold_and_exact_byte_reads() -> Result<()> {
-        use crate::security_epoch::native_clock::boottime;
-
+    fn policy_fixture() -> Result<(tempfile::TempDir, &'static str, EnrollmentPolicy, Vec<u8>)> {
+        let directory = tempfile::tempdir()?;
+        ensure!(
+            std::fs::metadata(directory.path())?.uid() == 0,
+            "native_policy_fixture_requires_linux_root"
+        );
+        let selected = directory.path().join("native-enrollment.json");
+        let path = Box::leak(
+            selected
+                .to_str()
+                .context("native_policy_fixture_path")?
+                .to_owned()
+                .into_boxed_str(),
+        );
         let expected = super::super::tests::policy(&KeyOwner::generate()?);
-        expected.validate()?;
-        let encoded = serde_json::to_vec(&expected)?;
-        for length in [encoded.len(), MAX_POLICY_BYTES as usize] {
-            let directory = tempfile::tempdir()?;
-            ensure!(
-                std::fs::metadata(directory.path())?.uid() == 0,
-                "native_policy_file_test_requires_root_owned_linux_fixture"
-            );
-            let selected = directory.path().join("copied-policy.json");
-            let path: &'static str = Box::leak(
-                selected
-                    .to_str()
-                    .context("native_policy_profile_path")?
-                    .to_owned()
-                    .into_boxed_str(),
-            );
-            // The larger case adds JSON whitespace, not more policy rules.
-            let mut bytes = encoded.clone();
-            bytes.resize(length, b' ');
-            std::fs::write(&selected, &bytes)?;
-            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
-            let mut acquisition = NativeAcquisition::begin(5)?;
-            let mut warm = PolicyInterpretation::new();
-            check_policy_file(path, &mut acquisition, &mut warm, &expected)?;
-            assert_eq!(warm.decodes_for_fixture(), 1);
-            let mut rows = Vec::new();
-            for cold in [true, false] {
-                let mut total_ns = Some(0_u64);
-                let mut decodes = 0;
-                for _ in 0..8 {
-                    let mut empty = PolicyInterpretation::new();
-                    let interpretation = if cold { &mut empty } else { &mut warm };
-                    let prior = interpretation.decodes_for_fixture();
-                    let before = boottime().ok();
-                    let result =
-                        check_policy_file(path, &mut acquisition, interpretation, &expected);
-                    let after = boottime().ok();
-                    result?;
-                    let elapsed = before
-                        .zip(after)
-                        .and_then(|(a, b)| b.checked_sub(a))
-                        .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
-                    total_ns = total_ns.zip(elapsed).and_then(|(a, b)| a.checked_add(b));
-                    decodes += interpretation.decodes_for_fixture() - prior;
-                    // All measurements spend this SAME actual original clock.
-                    acquisition.remaining()?;
-                }
-                assert_eq!(decodes, if cold { 8 } else { 0 });
-                rows.push(serde_json::json!({
-                    "interpretation": if cold { "cold" } else { "exact_byte_hit" },
-                    "calls": 8,
-                    "decodes_during_measurement": decodes,
-                    "total_ns": total_ns,
-                }));
-            }
-            acquisition.remaining()?;
-            eprintln!(
-                "day2-native-policy-profile-fixture {}",
-                serde_json::json!({
-                    "scope": "generated_policy_guarded_file_read_only",
-                    "policy_bytes": length,
-                    "padding_bytes": length - encoded.len(),
-                    "rows": rows,
-                })
-            );
-        }
-        Ok(())
+        let bytes = serde_json::to_vec(&expected)?;
+        std::fs::write(&selected, &bytes)?;
+        std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
+        Ok((directory, path, expected, bytes))
     }
 
     #[test]
-    #[ignore = "requires isolated root-owned Linux fixture; run this exact test explicitly"]
-    fn policy_interpretation_rechecks_real_files_after_hits_and_refuses_restoration() -> Result<()>
+    fn admitted_policy_checks_actual_handles_without_reading_and_refuses_restoration() -> Result<()>
     {
-        use std::os::unix::fs::symlink;
-
+        use std::io::{Seek, SeekFrom};
+        // Actual Linux file/clock controls, not enrolled-role construction.
+        // The canonical Linux workspace shard runs in its root container.
         for change in [
+            "replacement",
+            "held_fd",
             "mode",
             "symlink",
             "missing",
@@ -466,73 +532,90 @@ mod tests {
             "semantic",
             "malformed",
         ] {
-            let directory = tempfile::tempdir()?;
-            ensure!(
-                std::fs::metadata(directory.path())?.uid() == 0,
-                "native_policy_file_test_requires_root_owned_linux_fixture"
-            );
-            let selected = directory.path().join("native-enrollment.json");
+            let (directory, path, expected, bytes) = policy_fixture()?;
+            let selected = std::path::Path::new(path);
             let saved = directory.path().join("saved-policy.json");
-            // selected_file already accepts static paths. Only this bounded
-            // test leaks one temporary path string per case; no production
-            // configuration, callback or path argument is exposed.
-            let path: &'static str = Box::leak(
-                selected
-                    .to_str()
-                    .context("native_policy_test_path")?
-                    .to_owned()
-                    .into_boxed_str(),
-            );
-            let expected = super::super::tests::policy(&KeyOwner::generate()?);
-            expected.validate()?;
-            let bytes = serde_json::to_vec(&expected)?;
-            std::fs::write(&selected, &bytes)?;
-            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
-
-            // A real original clock and real successful file reads establish
-            // both cold interpretation and an exact-byte hit. No native role
-            // or file authority is manufactured by this test.
             let mut acquisition = NativeAcquisition::begin(5)?;
-            let mut interpretation = PolicyInterpretation::new();
-            check_policy_file(path, &mut acquisition, &mut interpretation, &expected)?;
-            check_policy_file(path, &mut acquisition, &mut interpretation, &expected)?;
-
+            let (actual, mut owner) = admit_policy_file(path, &mut acquisition)?;
+            ensure!(actual == expected, "native_policy_fixture_selection");
+            owner.file.seek(SeekFrom::Start(1))?;
+            owner.check_file(path, &mut acquisition)?;
+            owner.check_file(path, &mut acquisition)?;
+            assert_eq!(owner.file.stream_position()?, 1);
+            let mut original_fd = None;
             match change {
-                "mode" => {
-                    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o666))?;
-                }
-                "symlink" => {
-                    std::fs::rename(&selected, &saved)?;
-                    symlink(&saved, &selected)?;
-                }
-                "missing" => std::fs::rename(&selected, &saved)?,
-                "oversize" => {
-                    std::fs::write(&selected, vec![b' '; MAX_POLICY_BYTES as usize + 1])?;
-                }
-                "semantic" => {
-                    let original = std::fs::metadata(&selected)?;
-                    let mut changed = expected.clone();
-                    changed.runtime.node_name = "node-two".into();
-                    changed.validate()?;
-                    let encoded = serde_json::to_vec(&changed)?;
-                    ensure!(encoded.len() == bytes.len(), "native_policy_test_same_size");
-                    std::fs::write(&selected, &encoded)?;
-                    File::open(&selected)?
-                        .set_times(std::fs::FileTimes::new().set_modified(original.modified()?))?;
-                    let observed = std::fs::metadata(&selected)?;
-                    ensure!(
-                        observed.ino() == original.ino()
-                            && observed.len() == original.len()
-                            && observed.modified()? == original.modified()?,
-                        "native_policy_test_preserved_metadata"
+                "replacement" => {
+                    std::fs::rename(selected, &saved)?;
+                    std::fs::write(selected, &bytes)?;
+                    std::fs::set_permissions(selected, std::fs::Permissions::from_mode(0o600))?;
+                    assert_ne!(
+                        std::fs::metadata(selected)?.ino(),
+                        owner.file.metadata()?.ino()
                     );
                 }
-                "malformed" => std::fs::write(&selected, b"{")?,
+                "held_fd" => {
+                    std::fs::write(&saved, &bytes)?;
+                    original_fd = Some(std::mem::replace(&mut owner.file, File::open(&saved)?));
+                }
+                "mode" => {
+                    std::fs::set_permissions(selected, std::fs::Permissions::from_mode(0o666))?
+                }
+                "symlink" => {
+                    std::fs::rename(selected, &saved)?;
+                    std::os::unix::fs::symlink(&saved, selected)?;
+                }
+                "missing" => std::fs::rename(selected, &saved)?,
+                "oversize" => std::fs::write(selected, vec![b' '; MAX_POLICY_BYTES as usize + 1])?,
+                "semantic" => {
+                    let metadata = std::fs::metadata(selected)?;
+                    let mut changed = expected.clone();
+                    changed.runtime.node_name = "node-two".into();
+                    let encoded = serde_json::to_vec(&changed)?;
+                    assert_eq!(encoded.len(), bytes.len());
+                    let file = File::open(selected)?;
+                    let mut visible_change = false;
+                    // Some Linux filesystems update ctime on a coarse tick.
+                    // This control requires OBSERVABLE metadata drift, not a
+                    // content check that the retained profile does not promise.
+                    // Spend this same original; never reset or widen its bound.
+                    for _ in 0..250 {
+                        std::fs::write(selected, &encoded)?;
+                        file.set_times(
+                            std::fs::FileTimes::new().set_modified(metadata.modified()?),
+                        )?;
+                        let observed = file.metadata()?;
+                        if (observed.ctime(), observed.ctime_nsec()) != owner.stamp.changed {
+                            visible_change = true;
+                            break;
+                        }
+                        acquisition.remaining()?;
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    ensure!(
+                        visible_change,
+                        "native_policy_fixture_ctime_did_not_advance"
+                    );
+                    assert_eq!(
+                        std::fs::metadata(selected)?.modified()?,
+                        metadata.modified()?
+                    );
+                }
+                "malformed" => std::fs::write(selected, b"{")?,
                 _ => unreachable!(),
             }
-
-            let error = check_policy_file(path, &mut acquisition, &mut interpretation, &expected)
-                .unwrap_err();
+            let error = match owner.check_file(path, &mut acquisition) {
+                Err(error) => error,
+                Ok(()) => {
+                    let observed = owner.file.metadata()?;
+                    anyhow::bail!(
+                        "native policy fixture accepted {change}; inode unchanged={}, length unchanged={}, modified unchanged={}, changed unchanged={}",
+                        observed.ino() == owner.stamp.inode,
+                        observed.len() == owner.stamp.length,
+                        (observed.mtime(), observed.mtime_nsec()) == owner.stamp.modified,
+                        (observed.ctime(), observed.ctime_nsec()) == owner.stamp.changed,
+                    );
+                }
+            };
             match change {
                 "mode" | "oversize" => {
                     assert_eq!(error.to_string(), "native_enrollment_operator_file")
@@ -545,37 +628,152 @@ mod tests {
                     error.downcast_ref::<rustix::io::Errno>(),
                     Some(&rustix::io::Errno::NOENT)
                 ),
-                "semantic" => assert_eq!(
-                    error.to_string(),
-                    "native_enrollment_operator_selection_changed"
-                ),
-                "malformed" => assert!(error.to_string().contains("EOF")),
-                _ => unreachable!(),
+                _ => assert_eq!(error.to_string(), "native_enrollment_operator_file_changed"),
             }
-
-            // Restore a genuinely valid regular file, prove the unchanged
-            // native loader can read it, then require sticky interpretation
-            // refusal on the same original clock. No fresh stage or retry.
-            match std::fs::symlink_metadata(&selected) {
-                Ok(_) => std::fs::remove_file(&selected)?,
+            assert!(owner.refused);
+            assert!(acquisition.remaining().is_err());
+            if let Some(file) = original_fd {
+                owner.file = file;
+            }
+            match std::fs::symlink_metadata(selected) {
+                Ok(_) => std::fs::remove_file(selected)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            std::fs::write(&selected, &bytes)?;
-            std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o600))?;
-            assert_eq!(
-                selected_file(path, MAX_POLICY_BYTES, &mut acquisition)?.as_slice(),
-                bytes
+            std::fs::write(selected, &bytes)?;
+            std::fs::set_permissions(selected, std::fs::Permissions::from_mode(0o600))?;
+            let mut later = NativeAcquisition::begin(5)?;
+            let (restored, _) = admit_policy_file(path, &mut later)?;
+            ensure!(
+                restored == expected,
+                "native_policy_fixture_restored_selection"
             );
-            let restored =
-                check_policy_file(path, &mut acquisition, &mut interpretation, &expected)
-                    .unwrap_err();
-            assert_eq!(
-                restored.to_string(),
-                "native_enrollment_policy_interpretation_refused"
-            );
-            acquisition.remaining()?;
+            let error = owner.check_file(path, &mut later).unwrap_err();
+            assert_eq!(error.to_string(), "native_enrollment_operator_file_refused");
+            assert!(later.remaining().is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cold_policy_file_still_requires_bounded_strict_and_valid_selected_data() -> Result<()> {
+        for change in [
+            "empty",
+            "oversize",
+            "malformed",
+            "unknown",
+            "duplicate",
+            "invalid_key",
+            "invalid_selection",
+            "deep",
+        ] {
+            let (_directory, path, expected, _) = policy_fixture()?;
+            let mut value = serde_json::to_value(&expected)?;
+            let bytes = match change {
+                "empty" => vec![],
+                "oversize" => vec![b' '; MAX_POLICY_BYTES as usize + 1],
+                "malformed" => b"{".to_vec(),
+                "unknown" => {
+                    value["unexpected"] = true.into();
+                    serde_json::to_vec(&value)?
+                }
+                "duplicate" => b"{\"root\":null,\"root\":null}".to_vec(),
+                "invalid_key" => {
+                    value["root"]["public_key"] = "!".repeat(43).into();
+                    serde_json::to_vec(&value)?
+                }
+                "invalid_selection" => {
+                    value["runtime"]["node_name"] = "".into();
+                    serde_json::to_vec(&value)?
+                }
+                "deep" => format!("{}0{}", "[".repeat(129), "]".repeat(129)).into_bytes(),
+                _ => unreachable!(),
+            };
+            std::fs::write(path, bytes)?;
+            let mut acquisition = NativeAcquisition::begin(5)?;
+            assert!(
+                admit_policy_file(path, &mut acquisition).is_err(),
+                "case {change}"
+            );
+            assert!(acquisition.remaining().is_err(), "case {change}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn policy_named_remount_refuses_even_with_the_same_inode_and_after_restoration() -> Result<()> {
+        // One isolated subprocess mount namespace; no host policy, database,
+        // runtime role, selected node resource or other test mount is touched.
+        let status = Command::new("unshare")
+            .args(["--mount", "--propagation", "private"])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "security_epoch::native_enrollment::birth::tests::policy_remount_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DAY2_NATIVE_POLICY_REMOUNT_CHILD", "1")
+            .status()?;
+        ensure!(status.success(), "native_policy_remount_child_refused");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "isolated actual Linux mount-namespace child, invoked by the remount conformance control"]
+    fn policy_remount_child() -> Result<()> {
+        ensure!(
+            std::env::var_os("DAY2_NATIVE_POLICY_REMOUNT_CHILD").is_some(),
+            "native_policy_remount_child_only"
+        );
+        let (_directory, path, expected, _) = policy_fixture()?;
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let (_, mut owner) = admit_policy_file(path, &mut acquisition)?;
+        ensure!(
+            Command::new("mount")
+                .args(["--bind", path, path])
+                .status()?
+                .success(),
+            "native_policy_fixture_mount_refused"
+        );
+        struct Mounted(&'static str, bool);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                if self.1 {
+                    let _ = Command::new("umount").arg(self.0).status();
+                }
+            }
+        }
+        let mut mounted = Mounted(path, true);
+        let named = open_policy_file(path, &mut acquisition)?;
+        let mut changed = policy_file_stamp(&named, &mut acquisition)?;
+        assert_eq!(changed.inode, owner.stamp.inode);
+        assert_ne!(changed.mount, owner.stamp.mount);
+        changed.mount = owner.stamp.mount;
+        assert!(
+            changed == owner.stamp,
+            "this control changes only the actual named mount identity"
+        );
+        // Release the inspection FD on the new bind mount before unmounting.
+        // The admitted owner retains its original pre-mount descriptor.
+        drop(named);
+        let error = owner.check_file(path, &mut acquisition).unwrap_err();
+        assert_eq!(error.to_string(), "native_enrollment_operator_file_changed");
+        assert!(acquisition.remaining().is_err());
+        ensure!(
+            Command::new("umount").arg(path).status()?.success(),
+            "native_policy_fixture_unmount_refused"
+        );
+        mounted.1 = false;
+        let mut later = NativeAcquisition::begin(5)?;
+        let (restored, _) = admit_policy_file(path, &mut later)?;
+        ensure!(
+            restored == expected,
+            "native_policy_fixture_selection_changed"
+        );
+        let error = owner.check_file(path, &mut later).unwrap_err();
+        assert_eq!(error.to_string(), "native_enrollment_operator_file_refused");
+        assert!(later.remaining().is_err());
         Ok(())
     }
 

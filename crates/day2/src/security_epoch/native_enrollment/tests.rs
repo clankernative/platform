@@ -244,6 +244,275 @@ fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_requ
     }
 }
 
+fn actual_policy_file_wiring(birth: &str, owner: &str) -> bool {
+    use syn::visit::Visit;
+    fn fields(expression: &syn::Expr, expected: &[&str]) -> bool {
+        match (expression, expected.split_last()) {
+            (syn::Expr::Path(path), Some((name, []))) => path.path.is_ident(name),
+            (syn::Expr::Field(field), Some((name, rest))) => {
+                matches!(&field.member, syn::Member::Named(actual) if actual == name)
+                    && fields(&field.base, rest)
+            }
+            _ => false,
+        }
+    }
+
+    fn linux(statement: &syn::Stmt) -> Option<&syn::Block> {
+        let syn::Stmt::Expr(syn::Expr::Block(block), _) = statement else {
+            return None;
+        };
+        (block.attrs.len() == 1
+            && matches!(&block.attrs[0].meta, syn::Meta::List(meta)
+            if meta.path.is_ident("cfg") && meta.tokens.to_string() == "target_os = \"linux\""))
+        .then_some(&block.block)
+    }
+
+    fn result_body(body: &syn::Block) -> Option<&syn::Block> {
+        for statement in &body.stmts {
+            if let Some(nested) = linux(statement)
+                && let Some(result) = result_body(nested)
+            {
+                return Some(result);
+            }
+            if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "result")
+                && let Some(initializer) = &local.init
+                && let syn::Expr::Call(call) = &*initializer.expr
+                && let syn::Expr::Paren(parenthesized) = &*call.func
+                && let syn::Expr::Closure(closure) = &*parenthesized.expr
+                && let syn::Expr::Block(block) = &*closure.body
+            {
+                return Some(&block.block);
+            }
+        }
+        None
+    }
+
+    fn direct_check(body: &syn::Block, receiver: &[&str], clock: &[&str]) -> usize {
+        body.stmts.iter().map(|statement| {
+            if let Some(body) = linux(statement) { return direct_check(body, receiver, clock); }
+            usize::from(matches!(statement, syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
+                if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                    if call.method == "check" && fields(&call.receiver, receiver) && call.args.len() == 1
+                    && matches!(&call.args[0], syn::Expr::Reference(reference)
+                        if reference.mutability.is_some() && fields(&reference.expr, clock)))))
+        }).sum()
+    }
+
+    fn method(source: &syn::File, owner: &str, name: &str) -> Option<syn::ImplItemFn> {
+        source.items.iter().find_map(|item| {
+            let syn::Item::Impl(implementation) = item else {
+                return None;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|name| name.ident == owner))
+            {
+                return None;
+            }
+            implementation.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == name => Some(function.clone()),
+                _ => None,
+            })
+        })
+    }
+
+    fn stamp_local(body: &syn::Block, name: &str, input: &[&str]) -> bool {
+        body.stmts.iter().any(|statement| {
+            let syn::Stmt::Local(local) = statement else { return false; };
+            if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == name) { return false; }
+            let Some(initializer) = &local.init else { return false; };
+            let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
+            let syn::Expr::Call(call) = &*attempt.expr else { return false; };
+            matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("policy_file_stamp"))
+                && call.args.len() == 2
+                && matches!(&call.args[0], syn::Expr::Reference(reference) if fields(&reference.expr, input))
+                && fields(&call.args[1], &["acquisition"])
+        })
+    }
+
+    let cold_source = birth.split("#[cfg(test)]").next().unwrap();
+    let visible_cold_read =
+        cold_source.matches("File::read(").count() == 1 && !cold_source.contains("read_to_end(");
+    let owner = syn::parse_file(owner).unwrap();
+    let birth = syn::parse_file(birth).unwrap();
+    let Some(enroll) = method(&owner, "EnrolledProcessRoleOwner", "enroll_current_thread") else {
+        return false;
+    };
+    let Some(enroll) = enroll.block.stmts.iter().find_map(linux) else {
+        return false;
+    };
+    let captured = enroll.stmts.iter().any(|statement| {
+        let syn::Stmt::Local(local) = statement else { return false; };
+        let syn::Pat::Tuple(tuple) = &local.pat else { return false; };
+        if tuple.elems.len() != 2
+            || !matches!(&tuple.elems[0], syn::Pat::Ident(binding) if binding.ident == "policy")
+            || !matches!(&tuple.elems[1], syn::Pat::Ident(binding) if binding.ident == "policy_file" && binding.mutability.is_some()) { return false; }
+        let Some(initializer) = &local.init else { return false; };
+        let syn::Expr::Try(attempt) = &*initializer.expr else { return false; };
+        let syn::Expr::Call(call) = &*attempt.expr else { return false; };
+        matches!(&*call.func, syn::Expr::Path(path)
+            if path.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>() == ["super", "birth", "admit_policy"])
+            && call.args.len() == 1
+            && matches!(&call.args[0], syn::Expr::Reference(reference)
+                if reference.mutability.is_some() && fields(&reference.expr, &["acquisition"]))
+    });
+    let retained = matches!(enroll.stmts.last(), Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
+        if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("Ok")) && call.args.len() == 1
+        && matches!(&call.args[0], syn::Expr::Struct(value)
+            if value.path.is_ident("Self") && value.fields.iter().any(|field|
+                matches!(&field.member, syn::Member::Named(name) if name == "policy_file")
+                && fields(&field.expr, &["policy_file"]))));
+    let Some(begin) = method(&owner, "EnrolledProcessRoleOwner", "begin_stage") else {
+        return false;
+    };
+    let Some(stage) = method(&owner, "EnrolledRoleStage", "check") else {
+        return false;
+    };
+    let Some(begin) = result_body(&begin.block) else {
+        return false;
+    };
+    let Some(stage) = result_body(&stage.block) else {
+        return false;
+    };
+    let Some(check) = method(&birth, "PolicyFileOwner", "check_file") else {
+        return false;
+    };
+    let Some(check) = result_body(&check.block) else {
+        return false;
+    };
+    #[derive(Default)]
+    struct FullRead(bool);
+    impl<'ast> Visit<'ast> for FullRead {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                self.0 |= path.path.segments.last().is_some_and(|name| {
+                    name.ident.to_string().starts_with("read")
+                        || [
+                            "load_policy",
+                            "admit_policy",
+                            "admit_policy_file",
+                            "decode",
+                            "begin",
+                        ]
+                        .iter()
+                        .any(|candidate| name.ident == candidate)
+                });
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.0 |= call.method.to_string().starts_with("read") || call.method == "seek";
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut full = FullRead::default();
+    full.visit_block(check);
+    let joins = check.stmts.iter().any(|statement| matches!(statement, syn::Stmt::Macro(statement)
+        if statement.mac.path.is_ident("ensure")
+        && statement.mac.tokens.to_string().replace(' ', "").starts_with("held==self.stamp&&current==self.stamp,")));
+    let same_clock = check.stmts.iter().filter(|statement| matches!(statement,
+        syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
+        if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+            if call.method == "remaining" && fields(&call.receiver, &["acquisition"]) && call.args.is_empty()))).count();
+    visible_cold_read
+        && captured
+        && retained
+        && !full.0
+        && direct_check(enroll, &["policy_file"], &["acquisition"]) == 1
+        && direct_check(begin, &["self", "policy_file"], &["authentication"]) == 1
+        && direct_check(
+            stage,
+            &["self", "owner", "policy_file"],
+            &["self", "acquisition"],
+        ) == 1
+        && stamp_local(check, "held", &["self", "file"])
+        && stamp_local(check, "current", &["named"])
+        && joins
+        && same_clock == 2
+}
+
+#[test]
+fn actual_enrolled_checks_borrow_the_admitted_policy_file_and_original_clock() {
+    assert!(actual_policy_file_wiring(
+        include_str!("birth.rs"),
+        include_str!("owner.rs")
+    ));
+    let source = include_str!("birth.rs");
+    assert_eq!(
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+            .matches("File::read(")
+            .count(),
+        1
+    );
+    assert!(!include_str!("policy.rs").contains("PolicyInterpretation"));
+}
+
+#[test]
+fn policy_file_guard_rejects_conditional_checks_and_substituted_actual_handles() {
+    let birth = include_str!("birth.rs");
+    let owner = include_str!("owner.rs");
+    for call in [
+        "self.policy_file.check(&mut authentication)?;",
+        "self.owner.policy_file.check(&mut self.acquisition)?;",
+    ] {
+        for replacement in [
+            format!("if false {{ {call} }}"),
+            call.replace("?;", ";"),
+            call.replace("&mut authentication", "&mut unrelated"),
+            call.replace("&mut self.acquisition", "&mut unrelated"),
+        ] {
+            if replacement == call {
+                continue;
+            }
+            let changed = owner.replacen(call, &replacement, 1);
+            assert_ne!(changed, owner);
+            assert!(!actual_policy_file_wiring(birth, &changed));
+        }
+    }
+    for (before, after) in [
+        (
+            "super::birth::admit_policy(&mut acquisition)?",
+            "super::birth::metadata_only_policy(&mut acquisition)?",
+        ),
+        (
+            "                policy_file,",
+            "                policy_file: unrelated,",
+        ),
+    ] {
+        let changed = owner.replacen(before, after, 1);
+        assert_ne!(changed, owner);
+        assert!(!actual_policy_file_wiring(birth, &changed));
+    }
+    for (before, after) in [
+        (
+            "let held = policy_file_stamp(&self.file, acquisition)?;",
+            "let held = if false { policy_file_stamp(&self.file, acquisition)? } else { unrelated };",
+        ),
+        (
+            "policy_file_stamp(&self.file, acquisition)?",
+            "policy_file_stamp(&foreign, acquisition)?",
+        ),
+        (
+            "policy_file_stamp(&named, acquisition)?",
+            "policy_file_stamp(&self.file, acquisition)?",
+        ),
+        ("held == self.stamp && current == self.stamp", "true"),
+        ("File::read(", "std::io::Read::read("),
+        (
+            "let named = open_policy_file(path, acquisition)?;",
+            "let _ = admit_policy_file(path, acquisition)?; let named = open_policy_file(path, acquisition)?;",
+        ),
+    ] {
+        let changed = birth.replacen(before, after, 1);
+        assert_ne!(changed, birth);
+        assert!(!actual_policy_file_wiring(&changed, owner));
+    }
+}
+
 pub(super) fn policy(root: &KeyOwner) -> EnrollmentPolicy {
     let store = crate::security_epoch::tests::selection();
     let bootstrap = crate::security_epoch::control_slot_tests::policy(&store);
