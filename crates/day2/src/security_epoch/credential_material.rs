@@ -246,12 +246,15 @@ impl CredentialMaterial {
         acquisition: &mut NativeAcquisition,
     ) -> Result<Self> {
         let body = br#"{"scope":["https://www.googleapis.com/auth/datastore"],"lifetime":"300s"}"#;
-        let mut bytes = Zeroizing::new(http.request(
-            Route::GoogleMint(selected),
-            &source.authorization()?,
-            Some(body),
-            acquisition,
-        ).map_err(|error| PreparationFailure::at(PreparationStep::CounterIamMint, error))?);
+        let mut bytes = Zeroizing::new(
+            http.request(
+                Route::GoogleMint(selected),
+                &source.authorization()?,
+                Some(body),
+                acquisition,
+            )
+            .map_err(|error| PreparationFailure::at(PreparationStep::CounterIamMint, error))?,
+        );
         let result = Self::mint_reply(&bytes);
         bytes.zeroize();
         if result.is_err() {
