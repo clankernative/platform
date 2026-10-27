@@ -115,6 +115,80 @@ impl MessageProcess {
         )
     }
 
+    /// Retain the actual first sender's native resources for this channel.
+    /// This duplicates owned descriptors, never a PID lookup or parsed proof.
+    /// It grants no role or request authority; those checks stay with Peer.
+    pub(super) fn retain_message_anchor(
+        &mut self,
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<Self> {
+        let result = (|| {
+            self.check_identity(acquisition, costs)?;
+            let mut retained = Self {
+                pidfd: File::try_clone(&self.pidfd)?,
+                proc: File::try_clone(&self.proc)?,
+                process: File::try_clone(&self.process)?,
+                executable: File::try_clone(&self.executable)?,
+                executable_stamp: self.executable_stamp.clone(),
+                namespaces: self
+                    .namespaces
+                    .iter()
+                    .map(|(name, file)| File::try_clone(file).map(|file| (name.clone(), file)))
+                    .collect::<std::io::Result<BTreeMap<_, _>>>()?,
+                data: self.data.clone(),
+                local_process: self.local_process,
+                thread: self.thread,
+                refused: false,
+                local: PhantomData,
+            };
+            Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?;
+            Ok(retained)
+        })();
+        if result.is_err() {
+            self.refused = true;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    /// Every later packet still contributes its ORIGINAL received SCM_PIDFD.
+    /// Join it to the same live admitted sender and original native anchors;
+    /// a transferred socket, reused PID or changed path/namespace cannot borrow
+    /// the selected executable admission from another actor.
+    pub(super) fn receive_admitted(
+        packet: ReceivedPidfdPacket,
+        admitted: &mut Self,
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<Self> {
+        let result = (|| {
+            let process = match packet.credentials.process {
+                KernelPidVisibility::Visible(pid) => pid.get(),
+                KernelPidVisibility::NotVisible => {
+                    anyhow::bail!("native_enrollment_pid_not_visible")
+                }
+            };
+            ensure!(
+                process == admitted.data.process,
+                "native_enrollment_packet_actor_changed"
+            );
+            let pidfd = File::from(packet.process);
+            live(&pidfd, acquisition)?;
+            let mut received = admitted.retain_message_anchor(acquisition, costs)?;
+            // Drop the duplicate of the admission packet's pidfd and retain
+            // THIS packet's actual kernel-installed descriptor instead.
+            received.pidfd = pidfd;
+            Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?;
+            Ok(received)
+        })();
+        if result.is_err() {
+            admitted.refused = true;
+            acquisition.refuse();
+        }
+        result
+    }
+
     /// Only the fixed runtime adapter calls this on its newly connected socket.
     /// Connection identity has deliberately different provenance from a packet.
     pub(super) fn runtime_peer(
@@ -472,6 +546,48 @@ mod tests {
             owners.push(owner);
         }
         Ok(owners)
+    }
+
+    #[test]
+    fn admitted_packet_retains_this_messages_original_kernel_pidfd() -> Result<()> {
+        use rustix::net::{self, AddressFamily, SocketFlags, SocketType};
+        use std::{io::IoSliceMut, os::fd::AsRawFd};
+        // Real kernel sender/FD conformance only, without role or peer grants.
+        let code = Digest::new(&std::fs::read("/proc/self/exe")?);
+        let (receiver, sender) = net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        net::sockopt::set_socket_passcred(&receiver, true)?;
+        net::sockopt::set_socket_passpidfd(&receiver, true)?;
+        let receive = || -> Result<ReceivedPidfdPacket> {
+            net::send(&sender, b"public kernel sender", net::SendFlags::NOSIGNAL)?;
+            let mut bytes = [0_u8; 64];
+            Ok(net::recv_pidfd_packet(
+                &receiver,
+                &mut [IoSliceMut::new(&mut bytes)],
+            )?)
+        };
+        let mut acquisition = NativeAcquisition::begin(5)?;
+        let mut admitted =
+            MessageProcess::receive(receive()?, &code, &mut acquisition, &HashCosts::disabled())?;
+        for _ in 0..2 {
+            let mut acquisition = NativeAcquisition::begin(5)?;
+            let packet = receive()?;
+            let actual_message_pidfd = packet.process.as_raw_fd();
+            let mut received = MessageProcess::receive_admitted(
+                packet,
+                &mut admitted,
+                &mut acquisition,
+                &HashCosts::disabled(),
+            )?;
+            assert_eq!(received.pidfd.as_raw_fd(), actual_message_pidfd);
+            assert_ne!(received.pidfd.as_raw_fd(), admitted.pidfd.as_raw_fd());
+            received.check_identity(&mut acquisition, &HashCosts::disabled())?;
+        }
+        Ok(())
     }
 
     struct ChildOwner(std::process::Child);

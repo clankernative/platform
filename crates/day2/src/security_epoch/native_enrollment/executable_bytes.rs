@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::MetadataExt,
 };
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Stamp {
     device: u64,
     inode: u64,
@@ -592,6 +592,221 @@ mod tests {
             assert_ne!(mutated, source);
             assert!(!actual_process_capture_and_check_shape(&mutated));
         }
+    }
+
+    fn packet_calls(
+        source: &str,
+        owner: &str,
+        method: &str,
+    ) -> std::collections::BTreeMap<String, usize> {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Calls(std::collections::BTreeMap<String, usize>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    let name = path
+                        .path
+                        .segments
+                        .iter()
+                        .map(|part| part.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    *self.0.entry(name).or_default() += 1;
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                *self.0.entry(call.method.to_string()).or_default() += 1;
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
+                if matches!(&*assignment.left, syn::Expr::Field(field)
+                    if matches!(&field.member, syn::Member::Named(name) if name == "pidfd")
+                    && matches!(&*field.base, syn::Expr::Path(path) if path.path.is_ident("received")))
+                    && matches!(&*assignment.right, syn::Expr::Path(path) if path.path.is_ident("pidfd"))
+                {
+                    *self
+                        .0
+                        .entry("retain_actual_packet_pidfd".into())
+                        .or_default() += 1;
+                }
+                syn::visit::visit_expr_assign(self, assignment);
+            }
+        }
+        let source = syn::parse_file(source).unwrap();
+        let mut calls = Calls::default();
+        for item in source.items {
+            if let syn::Item::Impl(implementation) = item
+                && matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident(owner))
+            {
+                for item in implementation.items {
+                    if let syn::ImplItem::Fn(function) = item
+                        && function.sig.ident == method
+                    {
+                        calls.visit_block(&function.block);
+                        return calls.0;
+                    }
+                }
+            }
+        }
+        calls.0
+    }
+
+    fn packet_direct_joins(source: &str, method: &str, original: &str, received: &str) -> bool {
+        let source = syn::parse_file(source).unwrap();
+        for item in source.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("MessageProcess"))
+            {
+                continue;
+            }
+            for item in implementation.items {
+                let syn::ImplItem::Fn(function) = item else {
+                    continue;
+                };
+                if function.sig.ident != method {
+                    continue;
+                }
+                let Some(body) = native_result_body(&function) else {
+                    return false;
+                };
+                let joins = body.stmts.iter().filter(|statement| {
+                    let syn::Stmt::Expr(expression, Some(_)) = statement else { return false; };
+                    let Some(args) = native_fallible_call(expression, &["Self", "check_same_actor"]) else { return false; };
+                    if args.len() != 3 || !native_path(&args[1], "acquisition") || !native_path(&args[2], "costs") { return false; }
+                    let syn::Expr::Reference(reference) = &args[0] else { return false; };
+                    let syn::Expr::Array(actors) = &*reference.expr else { return false; };
+                    reference.mutability.is_some() && actors.elems.len() == 2
+                        && matches!(&actors.elems[0], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some()
+                            && matches!(&*reference.expr, syn::Expr::Unary(unary)
+                                if matches!(unary.op, syn::UnOp::Deref(_)) && native_path(&unary.expr, original)))
+                        && matches!(&actors.elems[1], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some() && native_path(&reference.expr, received))
+                }).count();
+                let assignment = body.stmts.iter().filter(|statement| {
+                    matches!(statement, syn::Stmt::Expr(syn::Expr::Assign(assignment), Some(_))
+                        if native_field(&assignment.left, "received", "pidfd") && native_path(&assignment.right, "pidfd"))
+                }).count();
+                return joins == 1 && (method != "receive_admitted" || assignment == 1);
+            }
+        }
+        false
+    }
+
+    fn actual_packet_reborrow_shape(
+        channel: &str,
+        process: &str,
+        storage: &str,
+        serving: &str,
+    ) -> bool {
+        let receive = packet_calls(channel, "Channel", "receive_unprivileged_sender");
+        let current = packet_calls(process, "MessageProcess", "receive_admitted");
+        let anchor = packet_calls(process, "MessageProcess", "retain_message_anchor");
+        let count = |calls: &std::collections::BTreeMap<String, usize>, name: &str| {
+            calls.get(name).copied().unwrap_or(0)
+        };
+        packet_direct_joins(process, "retain_message_anchor", "self", "retained")
+            && packet_direct_joins(process, "receive_admitted", "admitted", "received")
+            && count(&receive, "MessageProcess::receive") == 1
+            && count(&receive, "MessageProcess::receive_admitted") == 1
+            && count(&receive, "retain_message_anchor") == 1
+            && count(&current, "retain_message_anchor") == 1
+            && count(&current, "Self::check_same_actor") == 1
+            && count(&current, "retain_actual_packet_pidfd") == 1
+            && count(&current, "executable_bytes::admit") == 0
+            && count(&current, "Self::observe") == 0
+            && count(&anchor, "check_identity") == 1
+            && count(&anchor, "Self::check_same_actor") == 1
+            && count(&anchor, "File::try_clone") == 5
+            && count(&anchor, "executable_bytes::admit") == 0
+            && [(storage, "receive_storage"), (serving, "receive_serving")]
+                .iter()
+                .all(|(source, method)| {
+                    let calls = packet_calls(source, "Channel", method);
+                    count(&calls, "net::recv_pidfd_packet") == 1
+                        && count(&calls, "receive_unprivileged_sender") == 1
+                        && count(&calls, "MessageProcess::receive") == 0
+                })
+    }
+
+    #[test]
+    fn actual_storage_and_serving_receivers_join_each_packet_to_the_channel_sender() {
+        assert!(actual_packet_reborrow_shape(
+            include_str!("channel.rs"),
+            include_str!("process.rs"),
+            include_str!("channel/storage.rs"),
+            include_str!("channel/serving.rs")
+        ));
+    }
+
+    #[test]
+    fn packet_guard_rejects_restored_scans_or_lost_actual_pidfd_and_sender_checks() {
+        let channel = include_str!("channel.rs");
+        let process = include_str!("process.rs");
+        let storage = include_str!("channel/storage.rs");
+        let serving = include_str!("channel/serving.rs");
+        for (before, after) in [
+            (
+                "MessageProcess::receive_admitted(",
+                "MessageProcess::receive(",
+            ),
+            (
+                "MessageProcess::receive(packet,",
+                "MessageProcess::skip_capture(packet,",
+            ),
+        ] {
+            let mutated = channel.replacen(before, after, 1);
+            assert_ne!(mutated, channel);
+            assert!(!actual_packet_reborrow_shape(
+                &mutated, process, storage, serving
+            ));
+        }
+        for (before, after) in [
+            ("received.pidfd = pidfd;", ""),
+            (
+                "received.pidfd = pidfd;",
+                "if false { received.pidfd = pidfd; }",
+            ),
+            (
+                "Self::check_same_actor(&mut [&mut *admitted, &mut received]",
+                "Self::skip_sender_join(&mut [&mut *admitted, &mut received]",
+            ),
+            (
+                "Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?;",
+                "if false { Self::check_same_actor(&mut [&mut *admitted, &mut received], acquisition, costs)?; }",
+            ),
+            (
+                "Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?;",
+                "if false { Self::check_same_actor(&mut [&mut *self, &mut retained], acquisition, costs)?; }",
+            ),
+            ("File::try_clone(&self.pidfd)", "self.pidfd.try_clone()"),
+            ("File::try_clone(&self.proc)", "self.proc.try_clone()"),
+            ("File::try_clone(&self.process)", "self.process.try_clone()"),
+            (
+                "File::try_clone(&self.executable)",
+                "self.executable.try_clone()",
+            ),
+            ("File::try_clone(file)", "file.try_clone()"),
+        ] {
+            let mutated = process.replacen(before, after, 1);
+            assert_ne!(mutated, process);
+            assert!(!actual_packet_reborrow_shape(
+                channel, &mutated, storage, serving
+            ));
+        }
+        let mutated = storage.replacen(
+            "self.receive_unprivileged_sender(",
+            "MessageProcess::receive(",
+            1,
+        );
+        assert_ne!(mutated, storage);
+        assert!(!actual_packet_reborrow_shape(
+            channel, process, &mutated, serving
+        ));
     }
 
     #[test]

@@ -3,7 +3,6 @@
 
 use super::{Actor, Channel, Direction, Protocol, Transcript, Transport, configure, wait};
 use crate::security_epoch::native_clock::NativeAcquisition;
-use crate::security_epoch::native_enrollment::issuer_costs::HashCosts;
 use crate::security_epoch::native_enrollment::{
     EnrolledRoleStage, NativeRole,
     process::MessageProcess,
@@ -73,6 +72,7 @@ impl Channel {
             Ok(Self {
                 socket: File::from(socket),
                 refused: false,
+                unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialStorage, Actor::App)),
                 local: PhantomData,
             })
@@ -174,12 +174,9 @@ impl Channel {
                 &bytes[..received.bytes],
             )?;
             let process = match stage.storage()?.storage_peer_role()? {
-                NativeRole::AppHost => StorageSender::App(Box::new(MessageProcess::receive(
-                    received,
-                    &expected_code,
-                    acquisition,
-                    &HashCosts::disabled(),
-                )?)),
+                NativeRole::AppHost => StorageSender::App(Box::new(
+                    self.receive_unprivileged_sender(received, &expected_code, acquisition)?,
+                )),
                 NativeRole::EpochController => {
                     StorageSender::Controller(ControllerReceipt::receive(received, acquisition)?)
                 }
@@ -275,6 +272,7 @@ impl StorageListener {
             Ok(Channel {
                 socket: File::from(socket),
                 refused: false,
+                unprivileged_sender: None,
                 transcript: Some(Transcript::new(Protocol::InitialStorage, Actor::Controller)),
                 local: PhantomData,
             })
