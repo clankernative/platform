@@ -144,7 +144,7 @@ During `NativeAppStartup::prepare` and native web construction, an unfinished
 phase emits `day2-native-app-startup-refusal` with a
 closed `stage` label and `outcome: not_completed`. The outer startup and inner
 web builder can each report their boundary. These records contain no error
-chain, path, actor, provider value or serving permission. Successful construction
+chain, path, actor, raw provider value or serving permission. Successful construction
 emits no refusal record. A phase label localizes a failure; it does not prove its
 underlying cause or turn an earlier completed scope into whole-App readiness.
 
@@ -154,4 +154,9 @@ acquisition and cold counter admission. The same outer observation is borrowed
 by this startup call; no new logger, clock, error text or authority is supplied.
 Controller bootstrap completion does not establish that the App's matching
 advance/postcheck or either side's later cold counter admission completed.
-The existing three-field refusal schema and 256-byte record bound are unchanged.
+An App cold-counter failure can also include a `counter` object with closed
+`producer` and `category` values projected from that App call's actual typed
+error. The observer never receives an error object. Unknown or unrelated errors
+add no detail, and a later stage clears it. The Controller observes its own error
+independently; matching outer phases do not establish a shared cause. Completion
+still emits nothing, and the complete App record remains bounded to 256 bytes.

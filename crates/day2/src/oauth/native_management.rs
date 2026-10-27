@@ -342,6 +342,7 @@ pub(crate) fn prepare_initial_app_storage(
 ) -> Result<()> {
     use crate::security_epoch::{
         AppInitialStorageContinuity, AppPreparedFile, AppStorageBootstrap,
+        CounterAdmissionResponseRefusal,
         native_enrollment::AuthenticatedInitialHolderOffer,
     };
     use crate::web::NativeStartupStep;
@@ -427,7 +428,10 @@ pub(crate) fn prepare_initial_app_storage(
                     let mut role = owners.role.try_borrow_mut()?;
                     let mut stage = role.begin_current_stage()?;
                     observed.enter(NativeStartupStep::InitialStorageColdCounter);
-                    let participant = ServingParticipant::app(storage, &mut stage)?;
+                    let participant = ServingParticipant::app(storage, &mut stage)
+                        .inspect_err(|error| {
+                            observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error));
+                        })?;
                     owners.storage = AppStorage::Participant(Box::new(participant));
                     Ok(())
                 }
