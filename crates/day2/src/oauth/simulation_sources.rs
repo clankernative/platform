@@ -48,6 +48,10 @@ pub(super) const SOURCES: &[(&str, &str)] = &[
     ("native_management", ""),
     ("native_management.rs", include_str!("native_management.rs")),
     (
+        "native_management/request.rs",
+        include_str!("native_management/request.rs"),
+    ),
+    (
         "native_management/response.rs",
         include_str!("native_management/response.rs"),
     ),
@@ -433,7 +437,7 @@ fn every_oauth_module_uses_the_controlled_effect_boundary() -> Result<()> {
             &["app.rs", "app_native_lifecycle.rs", "shell.rs"][..],
         ),
         ("native_http", &["response_io.rs"][..]),
-        ("native_management", &["response.rs"][..]),
+        ("native_management", &["request.rs", "response.rs"][..]),
     ] {
         let mut children = std::fs::read_dir(directory.join(name))?
             .map(|entry| {

@@ -761,6 +761,10 @@ impl NativeResponse {
         }
     }
 
+    pub(crate) fn is_literal_health(&self) -> bool {
+        self.literal_health
+    }
+
     pub(crate) fn response(&self) -> &Response {
         &self.response
     }
@@ -786,10 +790,10 @@ pub(crate) fn literal_health_fixture(method: &Method, ready: bool) -> NativeResp
     NativeResponse::health(method, ready)
 }
 
-fn literal_health_request(
+fn literal_health_request<B>(
     enabled: bool,
     admitting: &AtomicBool,
-    request: &Request,
+    request: &axum::http::Request<B>,
 ) -> Option<NativeResponse> {
     if !enabled || !matches!(request.uri().path(), "/health/live" | "/health/ready") {
         return None;
@@ -831,13 +835,20 @@ pub(crate) async fn native_pump(
     .await
 }
 
+/// The same sealed literal classifier runs before native request capture. It
+/// examines only routing DATA, never a body, cookie, identity or application.
+pub(crate) fn native_literal_health<B>(
+    host: &Host,
+    request: &axum::http::Request<B>,
+) -> Option<NativeResponse> {
+    literal_health_request(host.health_endpoints, &host.admitting, request)
+}
+
 pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeResponse {
     host.credential_effects
         .clone()
         .run_async(async move {
-            if let Some(response) =
-                literal_health_request(host.health_endpoints, &host.admitting, &request)
-            {
+            if let Some(response) = native_literal_health(&host, &request) {
                 return response;
             }
             NativeResponse::application(handle_inner(host, request).await)

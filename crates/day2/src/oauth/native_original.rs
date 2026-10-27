@@ -10,8 +10,8 @@ use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Duration};
 const ORIGINAL: Duration = Duration::from_secs(300);
 
 /// Private composition seam implemented by the enrolled role adapter. Each
-/// sample must acquire/recheck a NEW <=5s stage against the retained enrollment;
-/// it may not replace the clock domain or restart the original. No production
+/// sample reborrows the SAME accepted request against the retained enrollment;
+/// it may not replace either clock domain or restart either original. No production
 /// scalar/trait-object factory or caller-supplied clock implementation exists.
 pub(super) trait Clock {
     fn origin(&self) -> Duration;

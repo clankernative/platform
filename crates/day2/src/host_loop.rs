@@ -167,43 +167,47 @@ struct NativeWork {
 
 impl Work for NativeWork {
     fn execute(&self, pump: Pump) -> Completion {
-        let result = match pump {
-            Pump::Commands => crate::invocations::drain(&self.runtime, COMMAND_BUDGET).map(|_| ()),
-            Pump::Schedules => (|| -> Result<()> {
-                let ticks = crate::schedules::tick(
-                    &self.runtime,
-                    self.clock.wall_time()?.as_millis().try_into()?,
-                )?;
-                let mut reported = self
-                    .reported
-                    .lock()
-                    .expect("schedule refusal lock poisoned");
-                for tick in ticks {
-                    // A refusal is a condition, reported only when it changes.
-                    if reported.should_report(&tick.schedule, tick.skipped.as_ref()) {
-                        eprintln!("schedule_not_offered {} {:?}", tick.schedule, tick.skipped);
-                    }
-                    for (occurrence, outcome) in tick.offered {
-                        if outcome.status == "failure" {
-                            eprintln!(
-                                "schedule_run_failed {} {occurrence} {}",
-                                tick.schedule, outcome.error
-                            );
+        let result =
+            crate::oauth::native_management::with_runtime_operation(&self.runtime, || match pump {
+                Pump::Commands => {
+                    crate::invocations::drain(&self.runtime, COMMAND_BUDGET).map(|_| ())
+                }
+                Pump::Schedules => (|| -> Result<()> {
+                    let ticks = crate::schedules::tick(
+                        &self.runtime,
+                        self.clock.wall_time()?.as_millis().try_into()?,
+                    )?;
+                    let mut reported = self
+                        .reported
+                        .lock()
+                        .expect("schedule refusal lock poisoned");
+                    for tick in ticks {
+                        // A refusal is a condition, reported only when it changes.
+                        if reported.should_report(&tick.schedule, tick.skipped.as_ref()) {
+                            eprintln!("schedule_not_offered {} {:?}", tick.schedule, tick.skipped);
+                        }
+                        for (occurrence, outcome) in tick.offered {
+                            if outcome.status == "failure" {
+                                eprintln!(
+                                    "schedule_run_failed {} {occurrence} {}",
+                                    tick.schedule, outcome.error
+                                );
+                            }
                         }
                     }
-                }
-                Ok(())
-            })(),
-            Pump::Journal => compact_batches(|batch| {
-                crate::journal::compact(
-                    &self.runtime,
-                    self.clock.wall_time()?.as_secs().try_into()?,
-                    batch,
-                )
-            }),
-        };
+                    Ok(())
+                })(),
+                Pump::Journal => compact_batches(|batch| {
+                    crate::journal::compact(
+                        &self.runtime,
+                        self.clock.wall_time()?.as_secs().try_into()?,
+                        batch,
+                    )
+                }),
+            });
         match result {
-            Ok(()) => Completion::Finished,
+            Ok(Some(())) => Completion::Finished,
+            Ok(None) => Completion::Refused,
             Err(error) => {
                 let diagnostic = crate::error::diagnostic(&error);
                 match pump {

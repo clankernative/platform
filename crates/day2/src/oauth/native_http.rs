@@ -248,6 +248,50 @@ impl Endpoint {
         }
     }
 
+    /// Capture on the final executor before body/cookie parsing or operation
+    /// entropy/I/O. Headers select no permission; actual suppliers are borrowed.
+    fn capture_request<B>(
+        &self,
+        sink: &super::native_management::Sink,
+        request: &axum::http::Request<B>,
+    ) -> Result<Option<crate::web::NativeResponse>> {
+        if let Self::App(host) = self
+            && let Some(response) = crate::web::native_literal_health(host, request)
+        {
+            sink.capture_literal_health(&response)?;
+            return Ok(Some(response));
+        }
+        #[cfg(test)]
+        if super::native_management::simulation_installed() || matches!(self, Self::Test(_)) {
+            sink.capture_model_request()?;
+            return Ok(None);
+        }
+        match self {
+            Self::Shell(shell) => {
+                if shell.native_selections().is_empty() {
+                    sink.capture_non_native_request()?;
+                } else {
+                    sink.capture_shell_request()?;
+                }
+            }
+            // None means the immutable Runtime does not use native storage.
+            // A native Runtime with no current owner returns Err, never None.
+            Self::App(host) => match crate::web::native_runtime_response_scope(host)? {
+                Some(scope) => sink.capture_app_request(&scope)?,
+                None => sink.capture_non_native_request()?,
+            },
+            Self::Receiver(receiver) => match receiver.native_runtime_response_scope()? {
+                Some(scope) => sink.capture_app_request(&scope)?,
+                None => sink.capture_non_native_request()?,
+            },
+            #[cfg(test)]
+            Self::Test(_) | Self::Prepared(_, _) => {
+                anyhow::bail!("native request endpoint unavailable")
+            }
+        }
+        Ok(None)
+    }
+
     fn prepare_response(
         &self,
         sink: &super::native_management::Sink,
@@ -469,8 +513,16 @@ async fn run(
                     let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                         let admitted = admitted.clone();
                         let sink = sink.clone();
+                        let captured = endpoint.capture_request(&sink, &request);
                         async move {
-                            let response = sink.scope(endpoint.handle(request.map(Body::new), admitted)).await;
+                            let response = match captured {
+                                Ok(Some(literal)) => literal,
+                                Ok(None) => sink.scope(endpoint.handle(request.map(Body::new), admitted)).await,
+                                Err(_) => {
+                                    sink.abort();
+                                    return Err(io::Error::other("native request authority unavailable"));
+                                }
+                            };
                             let finite = finite_app_body_candidate(response.response());
                             if endpoint.prepare_response(&sink, &response, finite).is_err() {
                                 sink.abort();
@@ -744,6 +796,7 @@ mod finite_response_tests {
                 assert!(scope.is_none());
                 assert_eq!(called.get(), 0);
                 let sink = super::super::native_management::Sink::new();
+                sink.capture_literal_health(&response)?;
                 sink.prepare_response(scope, false)?;
                 let response = prepare_finite_app_body(response.into_response(), &sink).await?;
                 assert!(!sink.uses_retained_app_io());
@@ -767,6 +820,8 @@ mod finite_response_tests {
             raw.headers_mut()
                 .insert("x-native-health", "true".parse().unwrap());
             let response = crate::web::NativeResponse::application(raw);
+            let sink = super::super::native_management::Sink::new();
+            assert!(sink.capture_literal_health(&response).is_err());
             let called = Cell::new(0);
             assert!(
                 response

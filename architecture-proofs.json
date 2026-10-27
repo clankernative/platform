@@ -8,6 +8,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/oauth/native_management/request.rs",
+      "scope": "const",
+      "fingerprint": "sha256:d96c005c4fe41705aeb5b48ef015116d8fee4a0ac58f6ef4dd9a896776a7bc1e",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/authenticated_reads/connection.rs",
       "scope": "const",
       "fingerprint": "sha256:d720145b2ad5b62d1f97db043deb84a47ede7efdf0984b906ac6f498ffe44df7",
@@ -315,6 +321,13 @@
       "type_name": "AppCreator",
       "owning_children": [
         {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
@@ -352,6 +365,13 @@
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "Consumer",
       "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
         {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
@@ -466,6 +486,13 @@
       "type_name": "OriginalPhase",
       "owning_children": [
         {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
@@ -533,6 +560,13 @@
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "PendingWriter",
       "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
         {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
@@ -618,6 +652,13 @@
       "type_name": "RoleStage",
       "owning_children": [
         {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
@@ -687,6 +728,13 @@
       "source": "crates/day2/src/oauth/native_management.rs",
       "type_name": "RuntimeConsumer",
       "owning_children": [
+        {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
         {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
@@ -840,12 +888,49 @@
       "proof_uses": [],
       "owning_children": [
         {
+          "source": "crates/day2/src/oauth/native_management/request.rs",
+          "registration": {
+            "source": "crates/day2/src/oauth/native_management.rs",
+            "module": "request"
+          }
+        },
+        {
           "source": "crates/day2/src/oauth/native_management/response.rs",
           "registration": {
             "source": "crates/day2/src/oauth/native_management.rs",
             "module": "response"
           }
         }
+      ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/request.rs",
+      "type_name": "Lease",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn borrow < 'a > (& 'a mut self , role : & 'a mut EnrolledProcessRoleOwner) -> Result < EnrolledRoleStage < 'a > >",
+        "pub (super) fn finish (mut self , role : & mut EnrolledProcessRoleOwner) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "Request",
+          "signature": "pub (super) fn take (& self , scope : & AuthorityScope , kind : NativeRole) -> Result < Lease >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Lease",
+          "signature": "pub (super) fn borrow < 'a > (& 'a mut self , role : & 'a mut EnrolledProcessRoleOwner) -> Result < EnrolledRoleStage < 'a > >"
+        },
+        {
+          "owner": "Lease",
+          "signature": "pub (super) fn finish (mut self , role : & mut EnrolledProcessRoleOwner) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "finish"
       ]
     },
     {
