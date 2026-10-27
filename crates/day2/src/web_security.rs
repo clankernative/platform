@@ -1,7 +1,4 @@
-use crate::{
-    digest,
-    store::{Runtime, open},
-};
+use crate::{digest, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -20,8 +17,7 @@ pub(crate) fn secret(
     runtime: &Runtime,
     entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<Vec<u8>> {
-    let db = open(runtime.db())?;
-    secret_in(&db, entropy)
+    runtime.sql_write(|db| secret_in(db, entropy))
 }
 
 fn secret_in(
@@ -74,9 +70,10 @@ pub(crate) fn session(
 }
 /// The live session a token names.
 pub(crate) fn session_for_token(runtime: &Runtime, token: &str, now: i64) -> Result<Session> {
-    let db = open(runtime.db())?;
-    runtime.check_binding(&db)?;
-    session_for_token_in(&db, token, now)
+    runtime.sql_read(|db| {
+        runtime.check_binding(db)?;
+        session_for_token_in(db, token, now)
+    })
 }
 
 pub(crate) fn session_for_token_in(
@@ -111,8 +108,7 @@ pub(crate) fn create_session(
     entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<String> {
     let token = random(entropy)?;
-    let db = open(runtime.db())?;
-    create_session_in(&db, actor, now, token)
+    runtime.sql_write(|db| create_session_in(db, actor, now, token))
 }
 
 fn create_session_in(

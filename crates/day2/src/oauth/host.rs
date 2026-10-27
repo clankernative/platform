@@ -126,10 +126,8 @@ pub(crate) fn app_receiver(
     )?);
     // Serving admitted the store, including this app's private OAuth schema,
     // in `deployment::admit_store` before it builds the receiver.
-    let backend = Arc::new(approval_registry::StoredAppApprovals::new(
+    let backend = Arc::new(approval_registry::UnavailableAppApprovals::new(
         runtime.app().into(),
-        runtime.db().to_path_buf(),
-        authority.clone(),
     )?);
     let receiver = shell_transport::AppApprovalReceiver::from_instance(&instance, backend)?;
     let receiver = match &providers.registrations {

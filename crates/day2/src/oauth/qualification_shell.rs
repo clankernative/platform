@@ -614,6 +614,7 @@ mod tests {
             _: &day2_capabilities::oauth::OutboundConnectionBinding,
             _: &day2_capabilities::oauth::ConnectionSlotKey,
             _: i64,
+            _: &mut crate::oauth::admission::SubjectReader<'_, '_, '_, '_>,
         ) -> Result<Option<super::super::profiles::OutboundInstanceEvidence>> {
             Ok(Some(self.0.clone()))
         }
@@ -1157,7 +1158,14 @@ mod tests {
         assert!(server.requests.lock().unwrap().is_empty());
         assert!(
             readiness
-                .current(&fixture.binding, &fixture.slot, now)?
+                .current(
+                    &fixture.binding,
+                    &fixture.slot,
+                    now,
+                    &mut crate::oauth::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite",
+                    )),
+                )?
                 .is_none()
         );
         let (path, query) = callback(&location, "private-code-3")?;
@@ -1185,7 +1193,14 @@ mod tests {
         assert_eq!(server.requests.lock().unwrap().len(), 9);
         assert_eq!(published.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
-            readiness.current(&fixture.binding, &fixture.slot, time_now())?,
+            readiness.current(
+                &fixture.binding,
+                &fixture.slot,
+                time_now(),
+                &mut crate::oauth::admission::SubjectReader::fixture(std::path::Path::new(
+                    "/fixture/unused.sqlite"
+                )),
+            )?,
             Some(fixture.evidence)
         );
         assert!(
@@ -1265,7 +1280,14 @@ mod tests {
         assert_eq!(published.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(
             readiness
-                .current(&fixture.binding, &fixture.slot, time_now())?
+                .current(
+                    &fixture.binding,
+                    &fixture.slot,
+                    time_now(),
+                    &mut crate::oauth::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite",
+                    )),
+                )?
                 .is_none()
         );
         Ok(())
@@ -1579,7 +1601,14 @@ mod tests {
         assert_eq!(server.requests.lock().unwrap().len(), 9);
         assert!(
             readiness
-                .current(&fixture.binding, &fixture.slot, now)?
+                .current(
+                    &fixture.binding,
+                    &fixture.slot,
+                    now,
+                    &mut crate::oauth::admission::SubjectReader::fixture(std::path::Path::new(
+                        "/fixture/unused.sqlite",
+                    )),
+                )?
                 .is_none()
         );
         Ok(())

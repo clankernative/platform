@@ -42,6 +42,47 @@ struct SqliteWork {
 }
 
 #[tokio::test(start_paused = true)]
+async fn owner_sql_failure_closes_admission_without_a_later_timer_retry() -> Result<()> {
+    struct Refused {
+        attempts: std::sync::atomic::AtomicUsize,
+        admitting: Arc<AtomicBool>,
+        owner: std::thread::ThreadId,
+    }
+    impl Work for Refused {
+        fn execute(&self, _pump: Pump) -> Completion {
+            assert_eq!(self.owner, std::thread::current().id());
+            // Bound the counterexample too: restoring the retry must fail the
+            // assertions after a second call rather than hang this test.
+            if self.attempts.fetch_add(1, Ordering::Relaxed) > 0 {
+                self.admitting.store(false, Ordering::Release);
+            }
+            Completion::Failed
+        }
+    }
+    let admitting = Arc::new(AtomicBool::new(true));
+    let work = Arc::new(Refused {
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        admitting: admitting.clone(),
+        owner: std::thread::current().id(),
+    });
+    let (_stop, stopped) = watch::channel(false);
+    let error = drive_mode(
+        work.clone(),
+        Arc::new(TokioTicks),
+        admitting.clone(),
+        stopped,
+        true,
+        Execution::OwnerThread,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "native_owner_pump_failed");
+    assert_eq!(work.attempts.load(Ordering::Relaxed), 1);
+    assert!(!admitting.load(Ordering::Acquire));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn selected_native_pump_commits_on_its_owner_thread_and_drains() -> Result<()> {
     struct Owned {
         work: Arc<SqliteWork>,

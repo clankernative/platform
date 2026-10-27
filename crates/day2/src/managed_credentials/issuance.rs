@@ -5,10 +5,7 @@ use super::{
     lifecycle::{self, Intent},
     store,
 };
-use crate::{
-    authority_state, protocol,
-    store::{Runtime, open},
-};
+use crate::{authority_state, protocol, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
@@ -765,9 +762,7 @@ impl Runtime {
         &self,
         invocation: &str,
     ) -> Result<Option<PreparedCredential>> {
-        let (record, active, now) = {
-            let mut db = open(self.db())?;
-            let read = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let prepared = self.sql_read(|read| {
             let (operation, pending): (String, bool) = read.query_row(
                 "SELECT operation,status='pending' FROM day2_invocations WHERE id=?1",
                 [invocation],
@@ -775,20 +770,19 @@ impl Runtime {
             )?;
             if !access(self, &operation)?.interactive {
                 ensure!(
-                    load(&read, invocation)?.is_none(),
+                    load(read, invocation)?.is_none(),
                     "unexpected credential confirmation"
                 );
                 return Ok(None);
             }
             // Final selected role and exact owning invocation are checked even for
             // terminal reuse, before returning None or calling any key provider.
-            let record = require_runtime_record(&read, self, invocation)?;
+            let record = require_runtime_record(read, self, invocation)?;
             if !pending {
                 return Ok(None);
             }
             let proof = &record.confirmation;
-            let active =
-                authority_state::authorize_in(&read, self, &proof.operation, &proof.actor)?;
+            let active = authority_state::authorize_in(read, self, &proof.operation, &proof.actor)?;
             let selected = active
                 .document
                 .credentials
@@ -802,8 +796,10 @@ impl Runtime {
                     && now < proof.expires_at,
                 "credential confirmation expired"
             );
-            read.commit()?;
-            (record, active, now)
+            Ok(Some((record, active, now)))
+        })?;
+        let Some((record, active, now)) = prepared else {
+            return Ok(None);
         };
         let proof = &record.confirmation;
         let selected = active
@@ -1088,6 +1084,7 @@ pub(crate) fn validate_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::open;
     use crate::store::{Fault, replay};
     use std::path::PathBuf;
 

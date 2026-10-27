@@ -163,7 +163,8 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     // source. Orphan files remain inspected, so moving code out of the module
     // graph cannot make it disappear from the ratchet.
     let test_only = test_only_sources(&parsed);
-    require_canonical_html_crate(&parsed, &test_only)?;
+    require_canonical_external_crates(&parsed, &test_only)?;
+    require_sql_callback_controls(root, &parsed, &test_only)?;
     let ambient_names = ambient_import_names(&parsed, &test_only)?;
     let mut findings = BTreeMap::new();
     for (source, syntax) in &parsed {
@@ -185,6 +186,307 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     })
 }
 
+/// Shared SQLite borrows cannot expose connection-control authority. SQLite's
+/// authorizer fences SQL, but safe hook setters would replace that fence or its
+/// lifetime progress hook without executing SQL. Reserve their explicit Rust
+/// spellings, including function references and macro tokens, in the runtime
+/// crate. This is a finite source boundary, not general Rust type resolution.
+fn require_sql_callback_controls(
+    root: &Path,
+    parsed: &BTreeMap<String, syn::File>,
+    test_only: &BTreeSet<String>,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    for (source, syntax) in parsed {
+        if !source.starts_with("crates/day2/src/")
+            || test_only.contains(source)
+            || definitely_test_only(&syntax.attrs)
+        {
+            continue;
+        }
+        if let Some(expected) = sql_control_core_pin(source) {
+            let bytes = read_regular(&root.join(source), MAX_SOURCE_BYTES)?;
+            ensure!(
+                day2::digest(&bytes) == expected,
+                "SQL callback control core requires exact source review: {source}"
+            );
+            continue;
+        }
+        if source == "crates/day2/src/budget.rs" {
+            let functions = syntax
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Fn(function)
+                        if function.sig.ident == "atomic"
+                            && !definitely_test_only(&function.attrs) =>
+                    {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                functions.len() == 1,
+                "SQL accounting wrapper requires one fixed function"
+            );
+            let actual = day2::digest(functions[0].to_token_stream().to_string().as_bytes());
+            ensure!(
+                sql_control_function_reviewed(source, &actual),
+                "SQL accounting wrapper requires exact source review: {actual}"
+            );
+        }
+        let mut controls = SqlCallbackControls {
+            source,
+            admitted_function: false,
+            function: None,
+            errors: BTreeSet::new(),
+        };
+        controls.visit_file(syntax);
+        if !controls.errors.is_empty() {
+            errors.push(format!(
+                "{source}: {}",
+                controls.errors.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    ensure!(
+        errors.is_empty(),
+        "SQL callback connection control refused: {}",
+        errors.join("; ")
+    );
+    Ok(())
+}
+
+fn sql_control_core_pin(source: &str) -> Option<&'static str> {
+    match source {
+        // The only authorizer owner, and the raw schema installer's private
+        // hooks. The latter first executes foreign_keys=true before touching
+        // the progress hook; a guarded callback denies/latches that entry.
+        // No module-name exemption: any byte change requires explicit review.
+        "crates/day2/src/store/native_storage.rs" => {
+            Some("sha256:2c6539f7ec2d028644b1961758bec38801d2c8b3b9417aa80f28ac7c023b2c9a")
+        }
+        "crates/day2/src/oauth/schema.rs" => {
+            Some("sha256:bbe7e34f8f8b5802705c3ec26959a23eaa825a5926c985cc81fd16a6413c3a6e")
+        }
+        // Closed control construction only, not the large accounting module.
+        "crates/day2/src/budget/atomic_control.rs" => {
+            Some("sha256:1defd4e183f7aa6a91f27081145b89dc972b75be9f29dd42cad4d021ae83e478")
+        }
+        _ => None,
+    }
+}
+
+fn sql_control_name(name: &str) -> bool {
+    matches!(
+        name,
+        "authorizer"
+            | "progress_handler"
+            | "wal_hook"
+            | "commit_hook"
+            | "rollback_hook"
+            | "update_hook"
+            | "preupdate_hook"
+            | "set_limit"
+            | "set_db_config"
+            | "busy_handler"
+            | "busy_timeout"
+            | "cache_flush"
+            | "release_memory"
+            | "blob_open"
+            | "serialize"
+            | "backup"
+            | "create_scalar_function"
+            | "create_aggregate_function"
+            | "create_window_function"
+            | "remove_function"
+            | "create_collation"
+            | "remove_collation"
+            | "collation_needed"
+            | "load_extension"
+            | "load_extension_enable"
+            | "load_extension_disable"
+            | "budget_atomic"
+            | "atomic_control"
+    )
+}
+
+// Exact preexisting functions whose connection-control operations act only on
+// their own fresh/raw connection, or are Serde's unrelated serialize method.
+// Pin the entire function, not the call: moving an identical setter into a
+// borrowed callback is not admitted. New/changed sites have no allowance path.
+fn sql_control_function_reviewed(source: &str, digest: &str) -> bool {
+    const REVIEWED: &[(&str, &str)] = &[
+        // The sole fixed accounting wrapper delegates to the closed module;
+        // it cannot choose SQL, a role, a connection factory or a ticket.
+        (
+            "crates/day2/src/budget.rs",
+            "sha256:a45b3501e871e84e2964f788c49dba285a4b0ca3994727d2f68e915e615a6019",
+        ),
+        // Existing synthetic/live provider and delegated-journal adapters set
+        // the fixed two-second busy timeout on a connection they just opened.
+        // These pins do not establish native SQL ownership or admit a callback.
+        (
+            "crates/day2/src/carta.rs",
+            "sha256:bf05f4c05e391c7efd0f0176e4e7b47bc09fa4e78f4b8081bf46ee57e2761584",
+        ),
+        (
+            "crates/day2/src/carta_live.rs",
+            "sha256:d0c13c2ba2a523b1a316256b49697b08e3562e879b5d41b4884f42690a560258",
+        ),
+        (
+            "crates/day2/src/people_providers.rs",
+            "sha256:f1b6a0eac6d467e0cb30e81e655aa57d8f1d13d1515419dc2df67a664095be34",
+        ),
+        (
+            "crates/day2/src/release_binding.rs",
+            "sha256:903a5c5da43e15b2f1edb2fc6ee33f3c55aeeffd14fc535dc361f8cd6fa346e6",
+        ),
+        // The sole permanent hook initializer takes an OWNED &mut Connection;
+        // callbacks receive only shared borrows and cannot call it on theirs.
+        (
+            "crates/day2/src/store.rs",
+            "sha256:225e881e7720016ca18026b2fca5777f244f099e11f3a566c699b912e21f7f69",
+        ),
+        // Immutable memory-image DATA only: current acquisition checks and
+        // memory/path/attached-db/image bounds precede serialize and copying.
+        (
+            "crates/day2/src/security_epoch/preparation_image.rs",
+            "sha256:ef460385d60ac63ff2e48de9bd43a5d69a35c8b6b4a2fdc021c567bae9f9d668",
+        ),
+        // Serde wire serialization, unrelated to SQLite Connection::serialize.
+        (
+            "crates/day2/src/managed_credentials/issuance.rs",
+            "sha256:08ca2dd33535e9af80d71113eeaf363652f32913bfc20676023a980547a93e83",
+        ),
+        (
+            "crates/day2/src/workspace_directory.rs",
+            "sha256:91dc48687c67a48b8413f5e62a268a6b465a51d25d6022023a6e4c37ef05ee6f",
+        ),
+    ];
+    REVIEWED.contains(&(source, digest))
+}
+
+struct SqlCallbackControls<'a> {
+    source: &'a str,
+    admitted_function: bool,
+    function: Option<String>,
+    errors: BTreeSet<String>,
+}
+
+impl SqlCallbackControls<'_> {
+    fn reference(&mut self, name: &str) {
+        if !self.admitted_function && sql_control_name(name) {
+            self.errors.insert(format!(
+                "{name} ({})",
+                self.function.as_deref().unwrap_or("outside function")
+            ));
+        }
+    }
+
+    fn macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(name) => self.reference(&identifier_name(&name)),
+                proc_macro2::TokenTree::Group(group) => self.macro_tokens(group.stream()),
+                _ => {}
+            }
+        }
+    }
+
+    fn enter_function(
+        &mut self,
+        function: impl ToTokens,
+        name: &syn::Ident,
+    ) -> (bool, Option<String>) {
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        let previous = (self.admitted_function, self.function.take());
+        self.admitted_function = sql_control_function_reviewed(self.source, &digest);
+        self.function = Some(format!("{} {digest}", identifier_name(name)));
+        previous
+    }
+}
+
+impl<'ast> Visit<'ast> for SqlCallbackControls<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        // Only this nominal type reexport is admitted, not an alias for the
+        // constructor/delegate or an exemption for other accounting code.
+        if self.source == "crates/day2/src/budget.rs"
+            && item.to_token_stream().to_string()
+                == "pub (crate) use atomic_control :: AtomicControl ;"
+        {
+            return;
+        }
+        if self.source == "crates/day2/src/store.rs"
+            && item.to_token_stream().to_string()
+                == "pub (crate) use native_storage :: { RuntimeSql , SqlDecision , budget_atomic } ;"
+        {
+            return;
+        }
+        visit::visit_item_use(self, item);
+    }
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !definitely_test_only(item_attributes(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &'ast Expr) {
+        if !definitely_test_only(expression_attributes(expression)) {
+            visit::visit_expr(self, expression);
+        }
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        let previous = self.enter_function(function, &function.sig.ident);
+        visit::visit_item_fn(self, function);
+        (self.admitted_function, self.function) = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        if definitely_test_only(&function.attrs) {
+            return;
+        }
+        let previous = self.enter_function(function, &function.sig.ident);
+        visit::visit_impl_item_fn(self, function);
+        (self.admitted_function, self.function) = previous;
+    }
+
+    fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+        if !definitely_test_only(&function.attrs) {
+            visit::visit_trait_item_fn(self, function);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.reference(&identifier_name(&call.method));
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        for segment in &expression.path.segments {
+            self.reference(&identifier_name(&segment.ident));
+        }
+        visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_use_tree(&mut self, tree: &'ast UseTree) {
+        match tree {
+            UseTree::Name(name) => self.reference(&identifier_name(&name.ident)),
+            UseTree::Rename(name) => self.reference(&identifier_name(&name.ident)),
+            UseTree::Path(path) => self.reference(&identifier_name(&path.ident)),
+            _ => {}
+        }
+        visit::visit_use_tree(self, tree);
+    }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        self.macro_tokens(invocation.tokens.clone());
+        visit::visit_macro(self, invocation);
+    }
+}
+
 pub fn check(root: &Path) -> Result<()> {
     let bytes = read_regular(&root.join(RULES_FILE), MAX_CONFIG_BYTES)?;
     let rules: Rules =
@@ -204,7 +506,7 @@ pub fn check(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_canonical_html_crate(
+fn require_canonical_external_crates(
     parsed: &BTreeMap<String, syn::File>,
     test_only: &BTreeSet<String>,
 ) -> Result<()> {
@@ -213,6 +515,7 @@ fn require_canonical_html_crate(
     // already bounded authored-source inventory; do not resolve module graphs.
     struct CrateBindings {
         invalid: bool,
+        invalid_sqlite: bool,
     }
     impl<'ast> Visit<'ast> for CrateBindings {
         fn visit_item(&mut self, item: &'ast Item) {
@@ -247,17 +550,30 @@ fn require_canonical_html_crate(
             {
                 self.invalid = true;
             }
+            if binding.unraw() == "rusqlite"
+                && (item.ident.unraw() != "rusqlite" || !unconditional_scope(&item.attrs))
+            {
+                self.invalid_sqlite = true;
+            }
         }
     }
     for (source, syntax) in parsed {
         if test_only.contains(source) || definitely_test_only(&syntax.attrs) {
             continue;
         }
-        let mut bindings = CrateBindings { invalid: false };
+        let mut bindings = CrateBindings {
+            invalid: false,
+            invalid_sqlite: false,
+        };
         bindings.visit_file(syntax);
         ensure!(
             !bindings.invalid,
             "noncanonical Maud extern-crate binding in {}",
+            source.chars().take(256).collect::<String>()
+        );
+        ensure!(
+            !bindings.invalid_sqlite,
+            "noncanonical SQLite extern-crate binding in {}",
             source.chars().take(256).collect::<String>()
         );
     }
@@ -8280,13 +8596,260 @@ mod tests {
 
     fn scan_syntax(syntax: syn::File) -> Vec<Finding> {
         let parsed = BTreeMap::from([("crates/fixture/src/lib.rs".to_owned(), syntax)]);
-        require_canonical_html_crate(&parsed, &BTreeSet::new()).unwrap();
+        require_canonical_external_crates(&parsed, &BTreeSet::new()).unwrap();
         let ambient_names = ambient_import_names(&parsed, &BTreeSet::new()).unwrap();
         let mut findings = BTreeMap::new();
         let mut scanner = Scanner::new("crates/fixture/src/lib.rs", &mut findings, &ambient_names);
         scanner.visit_file(&parsed["crates/fixture/src/lib.rs"]);
         scanner.require_resolved_parent_effects().unwrap();
         findings.into_values().collect()
+    }
+
+    fn sql_callback_source(source: &str) -> Result<()> {
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/callback_fixture.rs".to_owned(),
+            syn::parse_file(source).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+    }
+
+    #[test]
+    fn sql_callback_controls_reject_hooks_aliases_ufcs_macros_and_raw_names() {
+        for source in [
+            "fn f(db: &Connection) { db.authorizer(None); }",
+            "fn f(db: &Connection) { db.r#progress_handler(0, None); }",
+            "fn f(db: &Connection) { Connection::wal_hook(db, None); }",
+            "fn f(db: &Connection) { let clear = Connection::authorizer; clear(db, None); }",
+            "use Connection::progress_handler as clear; fn f(db: &Connection) { clear(db, 0, None); }",
+            "macro_rules! clear { ($db:expr) => { $db.progress_handler(0, None) }; }",
+            "fn f(db: &Connection) { wrapper!(db.authorizer(None)); }",
+            "fn configure_connection(db: &mut Connection) { db.progress_handler(0, None); }",
+            "fn f(db: &Connection, control: Control) { crate::store::budget_atomic(db, control, || Ok(())); }",
+            "use crate::store::budget_atomic as bypass; fn f(db: &Connection, control: Control) { bypass(db, control, || Ok(())); }",
+            "use crate::budget::atomic_control as bypass; fn f(db: &Connection) { bypass::atomic(db, || Ok(())); }",
+            "fn f(db: &Connection) { wrapper!(atomic_control::atomic(db, || Ok(()))); }",
+        ] {
+            let error = sql_callback_source(source).unwrap_err().to_string();
+            assert!(
+                error.contains("SQL callback connection control refused"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_reserve_every_declared_connection_escape() {
+        for name in [
+            "authorizer",
+            "progress_handler",
+            "wal_hook",
+            "commit_hook",
+            "rollback_hook",
+            "update_hook",
+            "preupdate_hook",
+            "set_limit",
+            "set_db_config",
+            "busy_handler",
+            "busy_timeout",
+            "cache_flush",
+            "release_memory",
+            "blob_open",
+            "serialize",
+            "backup",
+            "create_scalar_function",
+            "create_aggregate_function",
+            "create_window_function",
+            "remove_function",
+            "create_collation",
+            "remove_collation",
+            "collation_needed",
+            "load_extension",
+            "load_extension_enable",
+            "load_extension_disable",
+        ] {
+            let source = format!("fn f(db: &Connection) {{ db.{name}(); }}");
+            assert!(sql_callback_source(&source).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_allow_queries_and_skip_actual_test_only_code() {
+        sql_callback_source(
+            "fn read(db: &Connection) { db.query_row(\"SELECT 1\", [], |row| row.get(0)); }
+             #[cfg(test)] fn control(db: &Connection) { db.progress_handler(0, None); }
+             #[cfg(test)] mod controls { fn clear(db: &Connection) { db.authorizer(None); } }",
+        )
+        .unwrap();
+        // An exact old function fingerprint does not admit a copied setter in
+        // another file, a newly appended branch, or a same-named helper.
+        assert!(!sql_control_function_reviewed(
+            "crates/day2/src/callback_fixture.rs",
+            "sha256:foreign"
+        ));
+    }
+
+    #[test]
+    fn sql_callback_controls_require_exact_core_bytes_even_without_hook_calls() {
+        for source in [
+            "crates/day2/src/store/native_storage.rs",
+            "crates/day2/src/budget/atomic_control.rs",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::create_dir_all(directory.path().join(source).parent().unwrap()).unwrap();
+            fs::write(directory.path().join(source), "pub fn replacement() {}\n").unwrap();
+            let parsed = BTreeMap::from([(
+                source.to_owned(),
+                syn::parse_file("pub fn replacement() {}").unwrap(),
+            )]);
+            let error = require_sql_callback_controls(directory.path(), &parsed, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("SQL callback control core requires exact source review"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_require_the_fixed_accounting_wrapper_before_any_call() {
+        // Frozen independent fixture, not a digest computed from production.
+        let wrapper = r#"
+            /// Internal savepoints prevent partial multi-account mutation even if the caller
+            /// catches an admission failure and commits other work in its outer transaction.
+            fn atomic<T>(connection: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
+                atomic_control::atomic(connection, body)
+            }
+        "#;
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/budget.rs".to_owned(),
+            syn::parse_file(wrapper).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new()).unwrap();
+        for source in [
+            "pub fn atomic() {}",
+            "pub fn unrelated() {}",
+            "pub fn atomic() {} pub fn atomic() {}",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/budget.rs".to_owned(),
+                syn::parse_file(source).unwrap(),
+            )]);
+            let error =
+                require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("SQL accounting wrapper"), "{error}");
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_allow_only_the_exact_owned_store_reexport() {
+        let declaration =
+            "pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic};";
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/store.rs".to_owned(),
+            syn::parse_file(declaration).unwrap(),
+        )]);
+        require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new()).unwrap();
+        assert!(
+            sql_callback_source(declaration).is_err(),
+            "copied exports grant nothing"
+        );
+        for declaration in [
+            "pub(crate) use native_storage::budget_atomic as bypass;",
+            "pub(crate) use native_storage::{RuntimeSql, SqlDecision, budget_atomic as bypass};",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/store.rs".to_owned(),
+                syn::parse_file(declaration).unwrap(),
+            )]);
+            assert!(
+                require_sql_callback_controls(Path::new("unused"), &parsed, &BTreeSet::new())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn sql_callback_controls_pin_owned_configure_function_not_its_name_or_call() {
+        // Frozen positive fixture for the exact reviewed function. The normal
+        // inventory independently compares actual production function tokens;
+        // this fixture cannot approve a changed production implementation.
+        let function: syn::ItemFn = syn::parse_str(r#"
+            /// The same bounded SQLite execution settings apply to an owned fresh memory
+            /// database. Configuring a connection supplies no storage or epoch authority.
+            pub(crate) fn configure_connection(connection: &mut ::rusqlite::Connection) -> Result<()> {
+                connection.busy_timeout(Duration::from_secs(2))?;
+                connection.pragma_update(None, "foreign_keys", true)?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
+                connection.pragma_update(None, "trusted_schema", false)?;
+                let ticks = Arc::new(AtomicUsize::new(0));
+                connection.progress_handler(
+                    1_000,
+                    Some(move || {
+                        let runtime_exhausted = ticks.fetch_add(1, Ordering::Relaxed) > 10_000;
+                        crate::oauth::schema::admission_step(1_000) || runtime_exhausted
+                    }),
+                )?;
+                Ok(())
+            }
+        "#).unwrap();
+        let source = "crates/day2/src/store.rs";
+        let digest = day2::digest(function.to_token_stream().to_string().as_bytes());
+        assert!(
+            sql_control_function_reviewed(source, &digest),
+            "{digest}: {}",
+            function.to_token_stream()
+        );
+        let mut checker = SqlCallbackControls {
+            source,
+            admitted_function: false,
+            function: None,
+            errors: BTreeSet::new(),
+        };
+        checker.visit_item_fn(&function);
+        assert!(checker.errors.is_empty());
+        let mut changed = function.clone();
+        changed
+            .block
+            .stmts
+            .push(syn::parse_quote! { connection.authorizer(None); });
+        checker.visit_item_fn(&changed);
+        assert!(
+            !checker.errors.is_empty(),
+            "an appended setter must require review"
+        );
+        assert!(!sql_control_function_reviewed(
+            "crates/day2/src/impostor.rs",
+            &digest
+        ));
+    }
+
+    #[test]
+    fn sql_callback_controls_require_canonical_sqlite_extern_crate() {
+        for source in [
+            "extern crate fake as rusqlite;",
+            "#[cfg(unix)] extern crate rusqlite;",
+            "extern crate fake as r#rusqlite;",
+        ] {
+            let parsed = BTreeMap::from([(
+                "crates/day2/src/alias.rs".to_owned(),
+                syn::parse_file(source).unwrap(),
+            )]);
+            let error = require_canonical_external_crates(&parsed, &BTreeSet::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("noncanonical SQLite extern-crate binding"),
+                "{source}: {error}"
+            );
+        }
+        let parsed = BTreeMap::from([(
+            "crates/day2/src/alias.rs".to_owned(),
+            syn::parse_file("extern crate rusqlite;").unwrap(),
+        )]);
+        require_canonical_external_crates(&parsed, &BTreeSet::new()).unwrap();
     }
 
     fn fixture(source: &str) -> tempfile::TempDir {

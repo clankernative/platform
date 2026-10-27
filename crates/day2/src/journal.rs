@@ -88,12 +88,22 @@ pub fn compact(runtime: &crate::store::Runtime, now: i64, batch: usize) -> Resul
         .get(runtime.app())
         .and_then(|binding| binding.journal);
     let hours = policy.map_or(DEFAULT_TRACE_HOURS, |policy| policy.trace_hours);
-    compact_before(runtime.db(), now - i64::from(hours) * 3_600, batch)
+    let cutoff = now - i64::from(hours) * 3_600;
+    runtime.sql_write(|tx| compact_in(tx, cutoff, batch))
 }
 
+#[cfg(test)]
 pub(crate) fn compact_before(db: &std::path::Path, cutoff: i64, batch: usize) -> Result<usize> {
     let mut connection = crate::store::open(db)?;
     let tx = crate::write_queue::immediate(&mut connection)?;
+    let count = compact_in(&tx, cutoff, batch)?;
+    tx.commit()?;
+    Ok(count)
+}
+
+// The transaction's owner commits and settles the actual SQL unit. No
+// connection or transaction may survive into the next compaction batch.
+fn compact_in(tx: &rusqlite::Connection, cutoff: i64, batch: usize) -> Result<usize> {
     let rows: Vec<(String, String, String, Option<String>)> = tx
         .prepare(
             "SELECT id,input,trace,outcome FROM day2_invocations
@@ -109,7 +119,7 @@ pub(crate) fn compact_before(db: &std::path::Path, cutoff: i64, batch: usize) ->
         let receipt = Receipt {
             format: 1,
             input: crate::digest(input.as_bytes()),
-            policy: reusable_policy(&tx, id, &trace, outcome.as_deref())?,
+            policy: reusable_policy(tx, id, &trace, outcome.as_deref())?,
         };
         ensure!(
             tx.execute(
@@ -135,7 +145,6 @@ pub(crate) fn compact_before(db: &std::path::Path, cutoff: i64, batch: usize) ->
             [id],
         )?;
     }
-    tx.commit()?;
     Ok(rows.len())
 }
 

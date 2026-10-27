@@ -171,7 +171,7 @@ impl RefreshInputs for NativeRefreshInputs<'_> {
     }
 
     fn revision(&self) -> Result<i64> {
-        crate::live::revision(&open(self.host.runtime.db())?)
+        self.host.runtime.sql_read(crate::live::revision)
     }
 
     fn render(&self, session: &Session, wall: i64) -> Result<RenderedPage> {
@@ -281,7 +281,7 @@ impl Host {
             .stamp;
         // Sample BEFORE querying. A commit while we render forces another pass;
         // using a revision sampled afterwards would lose that change forever.
-        let revision = crate::live::revision(&open(self.runtime.db())?)?;
+        let revision = self.runtime.sql_read(crate::live::revision)?;
         let content = self.page(&page, &input, session, at, None, None)?;
         let markup = content.into_string();
         let regions = web_templates::live_regions(&markup)?;
@@ -600,9 +600,7 @@ impl Runtime {
         operation: &str,
         actor: &str,
     ) -> Result<crate::authority_state::ActiveAuthority> {
-        let mut db = open(self.db())?;
-        let tx = db.transaction()?;
-        crate::authority_state::authorize_in(&tx, self, operation, actor)
+        self.sql_read(|tx| crate::authority_state::authorize_in(tx, self, operation, actor))
     }
 }
 

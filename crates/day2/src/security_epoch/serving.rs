@@ -105,6 +105,8 @@ pub(crate) enum RuntimeServingUse {
     Registration,
     Read,
     Refresh,
+    SqlRead,
+    SqlWrite,
     Response,
     ResponseComplete,
 }
@@ -936,6 +938,8 @@ mod response_tests {
             RuntimeServingUse::Registration,
             RuntimeServingUse::Read,
             RuntimeServingUse::Refresh,
+            RuntimeServingUse::SqlRead,
+            RuntimeServingUse::SqlWrite,
         ] {
             require_runtime_operation(purpose).unwrap();
         }
