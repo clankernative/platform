@@ -3454,10 +3454,28 @@ mod tests {
                 "destructor": format!("sha256:{}", "0".repeat(64)),
             })
         });
-        let policy = serde_json::json!({
+        let mut policy = serde_json::json!({
             "version": 1,
             "proofs": entries,
         });
+        fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
+        ensure!(
+            trait_check_inventory(root)
+                .err()
+                .context("unordered proof registrations admitted")?
+                .to_string()
+                .contains("proof entries must be sorted"),
+            "public inventory must require ordered registrations"
+        );
+        policy["proofs"]
+            .as_array_mut()
+            .context("fixture proofs")?
+            .sort_by(|left, right| {
+                left["source"]
+                    .as_str()
+                    .unwrap()
+                    .cmp(right["source"].as_str().unwrap())
+            });
         let before = serde_json::to_vec(&policy)?;
         fs::write(root.join(POLICY), &before)?;
         let first = trait_check_inventory(root)?;
@@ -4153,14 +4171,20 @@ mod tests {
         );
         let mut at_limit = policy;
         let template = at_limit["buffer_destructors"][0].clone();
-        at_limit["buffer_destructors"] = (0..128)
+        let mut buffers = (0..128)
             .map(|index| {
                 let mut buffer = template.clone();
                 buffer["type_name"] = format!("WireBuffer_{index}").into();
                 buffer
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>();
+        buffers.sort_by(|left, right| {
+            left["type_name"]
+                .as_str()
+                .unwrap()
+                .cmp(right["type_name"].as_str().unwrap())
+        });
+        at_limit["buffer_destructors"] = buffers.into();
         validate_policy(&serde_json::from_value(at_limit.clone())?)?;
         fs::write(
             root.join("crates/example/src/buffers.rs"),
@@ -4739,6 +4763,12 @@ mod tests {
                 "fingerprint": reviewed.fingerprint, "registration": null }),
             );
         }
+        trait_checks.sort_by(|left, right| {
+            left["source"]
+                .as_str()
+                .unwrap()
+                .cmp(right["source"].as_str().unwrap())
+        });
         Ok(serde_json::json!({ "version": 1, "proofs": [{
             "source": "crates/example/src/proofs.rs", "type_name": "Permit", "kind": "consuming",
             "consuming_methods": ["send"], "methods": ["pub fn send(self)"], "factories": []
