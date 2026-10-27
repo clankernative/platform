@@ -242,6 +242,7 @@ impl CredentialMaterial {
         selected: &EpochIam,
         acquisition: &mut NativeAcquisition,
     ) -> Result<CounterMaterial> {
+        let mut work = None;
         let result = (|| {
             let before = acquisition.sample()?.elapsed;
             let mut profile =
@@ -266,10 +267,12 @@ impl CredentialMaterial {
                 .build()
                 .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_transport"))?;
             let remaining = acquisition.remaining()?.min(Duration::from_secs(5));
-            let response = client
+            let request = client
                 .post(address)
                 .header(reqwest::header::CACHE_CONTROL, "no-store")
-                .timeout(remaining)
+                .timeout(remaining);
+            work = Some(admission_work::begin(Work::CredentialAdmission));
+            let response = request
                 .send()
                 .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_unavailable"))?;
             acquisition.remaining()?;
@@ -281,10 +284,14 @@ impl CredentialMaterial {
                 "epoch_counter_tokeninfo_status_or_bound"
             );
             let mut bytes = Zeroizing::new(Vec::new());
-            response
+            let read = response
                 .take(16_385)
                 .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_unavailable"))?;
+                .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_unavailable"));
+            if let Some(work) = &mut work {
+                work.bytes(Bytes::ResponseBody, bytes.len() as u64);
+            }
+            read?;
             profile.finish();
             acquisition.remaining()?;
             let seconds = counter_token_remaining(&bytes, selected)?;
@@ -302,6 +309,9 @@ impl CredentialMaterial {
         })();
         if result.is_err() {
             acquisition.refuse();
+        }
+        if let Some(mut work) = work {
+            work.finish(result.is_ok());
         }
         result
     }
