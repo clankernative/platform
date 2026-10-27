@@ -527,6 +527,21 @@ fn admitted_failure_principals_are_atomic_replayable_and_simulation_only() -> Re
     assert!(evidence.verification_complete);
     assert_eq!(evidence.generated, 4);
     assert_eq!(evidence.error_traces.len(), 4);
+    // exercise uses the runtime clock. Error cases continue that clock after
+    // every success step, strictly increasing across all failure targets.
+    let latest_success = evidence
+        .traces
+        .iter()
+        .map(|trace| trace.request.context.now)
+        .max()
+        .context("success traces")?;
+    let error_times: Vec<_> = evidence
+        .error_traces
+        .iter()
+        .map(|trace| trace.request.context.now)
+        .collect();
+    assert!(error_times[0] > latest_success);
+    assert!(error_times.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(evidence.obligations.len(), 4);
     assert!(evidence.obligations.values().all(|count| *count == 2));
     let after = runtime.inspect()?;

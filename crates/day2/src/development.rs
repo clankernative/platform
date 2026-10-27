@@ -21,6 +21,12 @@ pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 256;
 const VERIFICATION_TIME: i64 = 1_700_000_000;
+/// Error cases run on the campaign clock after every bounded success step and
+/// beyond provider cache lifetimes, so no error case observes later state.
+const ERROR_PHASE_OFFSET_SECONDS: i64 = 100_000;
+const _: () = assert!(
+    ERROR_PHASE_OFFSET_SECONDS > MAX_STEPS as i64 + crate::workspace_directory::SOURCE_TTL_SECONDS
+);
 
 #[cfg(test)]
 #[path = "development/verification_failure_tests.rs"]
@@ -4336,7 +4342,11 @@ impl Campaign {
                                     },
                                 )?;
                                 let input: Value = serde_json::from_str(&input)?;
-                                let id = format!("failure-{}", self.evidence.error_traces.len());
+                                let ordinal = self.evidence.error_traces.len();
+                                let id = format!("failure-{ordinal}");
+                                let now = self.provider_clock
+                                    + ERROR_PHASE_OFFSET_SECONDS
+                                    + ordinal as i64;
                                 // Error cases may select only an artifact-declared host
                                 // fixture. Direct cases remain direct; no input field can
                                 // select the caller or authentication path.
@@ -4351,7 +4361,7 @@ impl Campaign {
                                         &target.operation,
                                         &id,
                                         &input,
-                                        1_700_100_000 + index as i64,
+                                        now,
                                         crate::store::Cause::delegated(
                                             verification_actor,
                                             &delegation.application,
@@ -4364,7 +4374,7 @@ impl Campaign {
                                         verification_actor,
                                         &id,
                                         &input,
-                                        1_700_100_000 + index as i64,
+                                        now,
                                         crate::audit::Trigger::Request,
                                     )?;
                                 }
@@ -4393,7 +4403,7 @@ impl Campaign {
                                         &target.operation,
                                         &id,
                                         &input,
-                                        1_700_100_000 + index as i64,
+                                        now,
                                         crate::store::Cause::delegated(
                                             verification_actor,
                                             &delegation.application,
@@ -4406,7 +4416,7 @@ impl Campaign {
                                         verification_actor,
                                         &id,
                                         &input,
-                                        1_700_100_000 + index as i64,
+                                        now,
                                         crate::audit::Trigger::Request,
                                     )?;
                                 }
