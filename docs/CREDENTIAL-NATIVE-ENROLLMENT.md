@@ -271,9 +271,9 @@ runtime or physical admission. Failed acquisition, required recheck or expiry
 permanently refuses the actual affected owner. Lost initial replies cannot
 rekey the same process; a full enrollment table refuses rather than evicting.
 
-The enrolled-request core supplies the following contract. Wiring App and Shell
-HTTP/SQL/response consumers to this owner remains pending in the option 3
-consumer plan row; these APIs alone do not qualify that end-to-end path.
+The enrolled-request core supplies the following contract. App and Shell HTTP,
+SQL and response consumers share these actual owners. Source and local tests
+do not qualify the end-to-end native path; that qualification remains separate.
 
 One accepted HTTP operation owns one `EnrolledCurrentRequest`, captured before
 entropy or I/O. SQL and response callbacks borrow that same original and live
