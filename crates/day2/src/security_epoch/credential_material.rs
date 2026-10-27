@@ -515,10 +515,10 @@ mod tests {
         impl<'ast> Visit<'ast> for Calls {
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
                 syn::visit::visit_expr_call(self, call);
-                if let syn::Expr::Path(path) = &*call.func {
-                    if let Some(name) = path.path.get_ident() {
-                        self.0.push(name.to_string());
-                    }
+                if let syn::Expr::Path(path) = &*call.func
+                    && let Some(name) = path.path.get_ident()
+                {
+                    self.0.push(name.to_string());
                 }
             }
             fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
