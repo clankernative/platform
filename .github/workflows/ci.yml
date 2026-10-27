@@ -140,6 +140,9 @@ jobs:
         run: |
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture::tests:: --nocapture --test-threads=1
           build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_proofs::tests:: --nocapture --test-threads=1
+      - name: Compile the existing main library harness before fast verification
+        if: ${{ inputs.profile == 'architecture' }}
+        run: build-out/bin/xtask build-rust-test //crates/day2:unit_lib
       - run: build-out/bin/xtask verify-fast
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
