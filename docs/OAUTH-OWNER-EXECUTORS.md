@@ -88,3 +88,17 @@ Initial storage, ordinary read and refresh consumers borrow a current App role f
 authority scope through `with_current_app_role`. They do not borrow a human
 management original or acquire another 300 seconds. Their current epoch, writer
 and response-disposition checks remain S3's consuming boundary.
+
+Native web-host construction uses the actual Current SQL owner to admit its
+existing binding, current audit schema, activated artifact and security contract.
+It never calls the ordinary initializer or repairs native state. A native path
+or simulated role cannot supply that owner; the later session-secret write also
+retains its own real SQL scope.
+
+During `NativeAppStartup::prepare` and native web construction, an unfinished
+phase emits `day2-native-app-startup-refusal` with a
+closed `stage` label and `outcome: not_completed`. The outer startup and inner
+web builder can each report their boundary. These records contain no error
+chain, path, actor, provider value or serving permission. Successful construction
+emits no refusal record. A phase label localizes a failure; it does not prove its
+underlying cause or turn an earlier completed scope into whole-App readiness.

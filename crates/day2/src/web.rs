@@ -286,6 +286,138 @@ fn validate_ingress_credentials(runtime: &Runtime) -> Result<()> {
     Ok(())
 }
 
+/// Diagnostic DATA only. These fixed labels grant no storage or serving
+/// authority and never accept an error, path, provider value or request data.
+#[derive(Clone, Copy)]
+pub(crate) enum NativeStartupStep {
+    Selection,
+    InitialStorage,
+    RuntimeAdmission,
+    RuntimePostcheck,
+    Configuration,
+    Providers,
+    Receiver,
+    Edge,
+    Verifier,
+    Host,
+    Contracts,
+    ListenerStore,
+    Ingress,
+    Presentation,
+    Routes,
+    Appearance,
+    SessionSecret,
+    Mount,
+    HostParts,
+}
+
+impl NativeStartupStep {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Selection => "selection",
+            Self::InitialStorage => "initial_storage",
+            Self::RuntimeAdmission => "runtime_admission",
+            Self::RuntimePostcheck => "runtime_postcheck",
+            Self::Configuration => "configuration",
+            Self::Providers => "providers",
+            Self::Receiver => "receiver",
+            Self::Edge => "edge",
+            Self::Verifier => "verifier",
+            Self::Host => "host",
+            Self::Contracts => "contracts",
+            Self::ListenerStore => "listener_store",
+            Self::Ingress => "ingress",
+            Self::Presentation => "presentation",
+            Self::Routes => "routes",
+            Self::Appearance => "appearance",
+            Self::SessionSecret => "session_secret",
+            Self::Mount => "mount",
+            Self::HostParts => "host_parts",
+        }
+    }
+}
+
+pub(crate) struct NativeStartupObservation {
+    enabled: bool,
+    completed: bool,
+    step: NativeStartupStep,
+}
+
+impl NativeStartupObservation {
+    pub(crate) fn new(enabled: bool, step: NativeStartupStep) -> Self {
+        Self {
+            enabled,
+            completed: false,
+            step,
+        }
+    }
+
+    pub(crate) fn enter(&mut self, step: NativeStartupStep) {
+        self.step = step;
+    }
+
+    pub(crate) fn complete(&mut self) {
+        self.completed = true;
+    }
+
+    fn line(&self) -> Option<Vec<u8>> {
+        if !self.enabled || self.completed {
+            return None;
+        }
+        let mut line = b"day2-native-app-startup-refusal ".to_vec();
+        line.extend(
+            serde_json::to_vec(&serde_json::json!({
+                "format":"day2_native_app_startup_refusal_v1",
+                "stage":self.step.code(),
+                "outcome":"not_completed",
+            }))
+            .ok()?,
+        );
+        line.push(b'\n');
+        (line.len() <= 256).then_some(line)
+    }
+}
+
+impl Drop for NativeStartupObservation {
+    fn drop(&mut self) {
+        use std::io::Write;
+        if let Some(line) = self.line() {
+            let _ = std::io::stderr().lock().write_all(&line);
+        }
+    }
+}
+
+/// Native Runtime metadata cannot authorize this admission. Its existing SQL
+/// facade must obtain the real Current App owner BEFORE opening the file and
+/// retain it through this snapshot's close and postchecks. No native DDL,
+/// initializer, schema repair or alternate opener is introduced here.
+pub(crate) fn admit_listener_storage(runtime: &Runtime) -> Result<()> {
+    if !runtime.uses_native_storage() {
+        return runtime.initialize();
+    }
+    runtime.sql_read(|db| validate_listener_snapshot(runtime, db))
+}
+
+/// Read-only predicates, not a native admission witness. Only the facade above
+/// can supply the actual owned snapshot used by host construction.
+pub(crate) fn validate_listener_snapshot(
+    runtime: &Runtime,
+    db: &rusqlite::Connection,
+) -> Result<()> {
+    runtime.check_binding(db)?;
+    crate::audit::require_current_schema(db)?;
+    let active = crate::authority_state::current(db)?;
+    ensure!(
+        active.artifact_id == runtime.artifact().id(),
+        "native_listener_artifact_changed"
+    );
+    active.document.validate(runtime.artifact())?;
+    if let Some(requirements) = &active.document.security {
+        requirements.require_runtime()?;
+    }
+    Ok(())
+}
+
 impl LocalServer {
     /// Deliberately not a production authentication adapter. This API cannot bind
     /// a public address or trust identity headers from a caller/reverse proxy.
@@ -403,9 +535,15 @@ impl LocalServer {
         sign_in: SignIn,
         options: ListenerOptions,
     ) -> Result<Self> {
+        let mut observed = NativeStartupObservation::new(
+            runtime.uses_native_storage(),
+            NativeStartupStep::Contracts,
+        );
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
-        runtime.initialize()?;
+        observed.enter(NativeStartupStep::ListenerStore);
+        admit_listener_storage(&runtime)?;
+        observed.enter(NativeStartupStep::Ingress);
         validate_ingress_credentials(&runtime)?;
         // `__Host-` makes the browser refuse the cookie unless it is Secure,
         // host-only and path `/`, so no sibling subdomain at the edge can set or
@@ -417,6 +555,7 @@ impl LocalServer {
         };
         let inputs = runtime.inputs().clone();
         let entropy = inputs.entropy.clone();
+        observed.enter(NativeStartupStep::Presentation);
         let declarations =
             crate::web_templates::presentation_catalog(&runtime.artifact().contract().templates)?;
         let presentation = match options.presentation {
@@ -434,12 +573,21 @@ impl LocalServer {
             credential_effects: crate::managed_credentials::effects::capture(),
             presentation,
             api,
-            routes: (runtime.artifact().contract().format >= 7)
-                .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
-                .transpose()?,
+            routes: {
+                observed.enter(NativeStartupStep::Routes);
+                (runtime.artifact().contract().format >= 7)
+                    .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
+                    .transpose()?
+            },
             redirects: crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?,
-            appearance: Appearance::load(&runtime)?,
-            secret: security::secret(&runtime, entropy.as_ref())?,
+            appearance: {
+                observed.enter(NativeStartupStep::Appearance);
+                Appearance::load(&runtime)?
+            },
+            secret: {
+                observed.enter(NativeStartupStep::SessionSecret);
+                security::secret(&runtime, entropy.as_ref())?
+            },
             cookie_name: format!(
                 "{prefix}day2_{}_{}",
                 runtime.app(),
@@ -459,6 +607,7 @@ impl LocalServer {
             admitting: Arc::new(AtomicBool::new(true)),
             health_endpoints: options.health_endpoints,
         });
+        observed.complete();
         Ok(Self {
             listener,
             host,
@@ -3006,6 +3155,212 @@ mod deployment_health_tests {
                 serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
             assert_eq!(body["error"]["code"], "invalid_identity_assertion");
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_startup_tests {
+    use super::*;
+
+    fn native_admission_is_preserved(body: &syn::Block) -> bool {
+        let [
+            syn::Stmt::Expr(syn::Expr::If(branch), _),
+            syn::Stmt::Expr(syn::Expr::MethodCall(current), _),
+        ] = body.stmts.as_slice()
+        else {
+            return false;
+        };
+        let syn::Expr::Unary(condition) = &*branch.cond else {
+            return false;
+        };
+        let syn::Expr::MethodCall(selected) = &*condition.expr else {
+            return false;
+        };
+        let [syn::Stmt::Expr(syn::Expr::Return(returned), _)] = branch.then_branch.stmts.as_slice()
+        else {
+            return false;
+        };
+        let Some(returned) = &returned.expr else {
+            return false;
+        };
+        let syn::Expr::MethodCall(initializer) = &**returned else {
+            return false;
+        };
+        matches!(condition.op, syn::UnOp::Not(_))
+            && branch.else_branch.is_none()
+            && selected.method == "uses_native_storage"
+            && selected.args.is_empty()
+            && matches!(&*selected.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
+            && initializer.method == "initialize"
+            && initializer.args.is_empty()
+            && matches!(&*initializer.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
+            && current.method == "sql_read"
+            && current.args.len() == 1
+            && matches!(&*current.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
+            && matches!(&current.args[0], syn::Expr::Closure(closure)
+                if closure.inputs.len() == 1
+                && matches!(&closure.inputs[0], syn::Pat::Ident(input) if input.ident == "db")
+                && matches!(&*closure.body, syn::Expr::Call(call)
+                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("validate_listener_snapshot"))
+                    && call.args.len() == 2
+                    && matches!(&call.args[0], syn::Expr::Path(path) if path.path.is_ident("runtime"))
+                    && matches!(&call.args[1], syn::Expr::Path(path) if path.path.is_ident("db"))))
+    }
+
+    #[test]
+    fn native_listener_requires_the_actual_current_sql_owner_instead_of_an_initializer_or_noop() {
+        let source = syn::parse_file(include_str!("web.rs")).unwrap();
+        let admission = source
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "admit_listener_storage" => {
+                    Some(&*item.block)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(native_admission_is_preserved(admission));
+        let mut skipped = admission.clone();
+        *skipped.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
+        assert!(!native_admission_is_preserved(&skipped));
+        let mut initializer = admission.clone();
+        *initializer.stmts.last_mut().unwrap() =
+            syn::Stmt::Expr(syn::parse_quote!(runtime.initialize()), None);
+        assert!(!native_admission_is_preserved(&initializer));
+        let mut noop = admission.clone();
+        *noop.stmts.last_mut().unwrap() =
+            syn::Stmt::Expr(syn::parse_quote!(runtime.sql_read(|_| Ok(()))), None);
+        assert!(!native_admission_is_preserved(&noop));
+        let mut ignored = admission.clone();
+        *ignored.stmts.last_mut().unwrap() = syn::Stmt::Expr(
+            syn::parse_quote!(runtime.sql_read(|db| {
+                let _ = validate_listener_snapshot(runtime, db);
+                Ok(())
+            })),
+            None,
+        );
+        assert!(!native_admission_is_preserved(&ignored));
+
+        let binder = source.items.iter().find_map(|item| match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("LocalServer")) => {
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(item) if item.sig.ident == "bind_listener" => Some(&item.block),
+                    _ => None,
+                })
+            }, _ => None,
+        }).unwrap();
+        fn calls_admission(body: &syn::Block) -> bool {
+            use syn::visit::Visit;
+            #[derive(Default)]
+            struct Calls {
+                admission: usize,
+                initializer: usize,
+            }
+            impl<'ast> Visit<'ast> for Calls {
+                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
+                    {
+                        self.admission += 1;
+                    }
+                    syn::visit::visit_expr_call(self, call);
+                }
+                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                    if call.method == "initialize" {
+                        self.initializer += 1;
+                    }
+                    syn::visit::visit_expr_method_call(self, call);
+                }
+            }
+            let mut calls = Calls::default();
+            calls.visit_block(body);
+            let direct: Vec<_> = body.stmts.iter().enumerate().filter_map(|(index, statement)| {
+                let syn::Stmt::Expr(syn::Expr::Try(propagated), _) = statement else { return None; };
+                let syn::Expr::Call(call) = &*propagated.expr else { return None; };
+                (matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
+                    && call.args.len() == 1
+                    && matches!(&call.args[0], syn::Expr::Reference(reference)
+                        if reference.mutability.is_none()
+                        && matches!(&*reference.expr, syn::Expr::Path(path) if path.path.is_ident("runtime"))))
+                    .then_some(index)
+            }).collect();
+            let host = body.stmts.iter().position(|statement| matches!(statement,
+                syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "host")));
+            calls.admission == 1
+                && calls.initializer == 0
+                && direct.len() == 1
+                && host.is_some_and(|host| direct[0] < host)
+        }
+        assert!(calls_admission(binder));
+        let mut restored = binder.clone();
+        restored
+            .stmts
+            .insert(0, syn::parse_quote!(runtime.initialize()?;));
+        assert!(!calls_admission(&restored));
+        let position = binder.stmts.iter().position(|statement| matches!(statement,
+            syn::Stmt::Expr(syn::Expr::Try(tried), _)
+                if matches!(&*tried.expr, syn::Expr::Call(call)
+                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))))).unwrap();
+        for replacement in [
+            syn::parse_quote!(if false {
+                admit_listener_storage(&runtime)?;
+            }),
+            syn::parse_quote!(let _ = admit_listener_storage(&runtime);),
+        ] {
+            let mut skipped = binder.clone();
+            skipped.stmts[position] = replacement;
+            assert!(!calls_admission(&skipped));
+        }
+        let mut late = binder.clone();
+        let admission = late.stmts.remove(position);
+        late.stmts.push(admission);
+        assert!(!calls_admission(&late));
+    }
+
+    #[test]
+    fn startup_refusal_has_only_closed_labels_and_known_completion_emits_nothing() -> Result<()> {
+        let stages = [
+            NativeStartupStep::Selection,
+            NativeStartupStep::InitialStorage,
+            NativeStartupStep::RuntimeAdmission,
+            NativeStartupStep::RuntimePostcheck,
+            NativeStartupStep::Configuration,
+            NativeStartupStep::Providers,
+            NativeStartupStep::Receiver,
+            NativeStartupStep::Edge,
+            NativeStartupStep::Verifier,
+            NativeStartupStep::Host,
+            NativeStartupStep::Contracts,
+            NativeStartupStep::ListenerStore,
+            NativeStartupStep::Ingress,
+            NativeStartupStep::Presentation,
+            NativeStartupStep::Routes,
+            NativeStartupStep::Appearance,
+            NativeStartupStep::SessionSecret,
+            NativeStartupStep::Mount,
+            NativeStartupStep::HostParts,
+        ];
+        let mut codes = std::collections::BTreeSet::new();
+        for stage in stages {
+            let mut observed = NativeStartupObservation::new(true, stage);
+            let line = observed.line().context("refusal line")?;
+            assert!(line.len() <= 256);
+            let text = std::str::from_utf8(&line)?;
+            let data: Value = serde_json::from_str(
+                text.strip_prefix("day2-native-app-startup-refusal ")
+                    .unwrap(),
+            )?;
+            assert_eq!(data.as_object().unwrap().len(), 3);
+            assert_eq!(data["format"], "day2_native_app_startup_refusal_v1");
+            assert_eq!(data["outcome"], "not_completed");
+            assert!(codes.insert(data["stage"].as_str().unwrap().to_owned()));
+            observed.complete();
+            assert!(observed.line().is_none());
+        }
+        let mut inactive = NativeStartupObservation::new(false, NativeStartupStep::Providers);
+        inactive.enter(NativeStartupStep::SessionSecret);
+        assert!(inactive.line().is_none());
         Ok(())
     }
 }
