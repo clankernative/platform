@@ -991,7 +991,9 @@ fn actual_current_read_cap_caller(source: &str) -> bool {
 fn actual_retained_current_sample_meets_its_joined_view_into_the_release_stage() {
     let source = include_str!("../authenticated_reads/retained.rs");
     assert!(actual_current_read_cap_caller(source));
-    let actual = "self.owner.meet_current_read_view(stage, &mut self.acquisition)?;";
+    let actual =
+        "self.owner\n                    .meet_current_read_view(stage, &mut self.acquisition)?;";
+    assert_eq!(source.matches(actual).count(), 1, "unique actual cap meet");
     for (before, after) in [
         (actual, ""),
         (
@@ -1013,7 +1015,7 @@ fn actual_retained_current_sample_meets_its_joined_view_into_the_release_stage()
         ),
     ] {
         let changed = source.replacen(before, after, 1);
-        assert_ne!(changed, source);
+        assert!(changed != source, "ineffective cap mutant: {before}");
         assert!(!actual_current_read_cap_caller(&changed));
     }
 }
