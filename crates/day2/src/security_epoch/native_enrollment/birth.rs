@@ -572,9 +572,29 @@ mod tests {
                     changed.runtime.node_name = "node-two".into();
                     let encoded = serde_json::to_vec(&changed)?;
                     assert_eq!(encoded.len(), bytes.len());
-                    std::fs::write(selected, encoded)?;
-                    File::open(selected)?
-                        .set_times(std::fs::FileTimes::new().set_modified(metadata.modified()?))?;
+                    let file = File::open(selected)?;
+                    let mut visible_change = false;
+                    // Some Linux filesystems update ctime on a coarse tick.
+                    // This control requires OBSERVABLE metadata drift, not a
+                    // content check that the retained profile does not promise.
+                    // Spend this same original; never reset or widen its bound.
+                    for _ in 0..250 {
+                        std::fs::write(selected, &encoded)?;
+                        file.set_times(
+                            std::fs::FileTimes::new().set_modified(metadata.modified()?),
+                        )?;
+                        let observed = file.metadata()?;
+                        if (observed.ctime(), observed.ctime_nsec()) != owner.stamp.changed {
+                            visible_change = true;
+                            break;
+                        }
+                        acquisition.remaining()?;
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    ensure!(
+                        visible_change,
+                        "native_policy_fixture_ctime_did_not_advance"
+                    );
                     assert_eq!(
                         std::fs::metadata(selected)?.modified()?,
                         metadata.modified()?
@@ -583,7 +603,19 @@ mod tests {
                 "malformed" => std::fs::write(selected, b"{")?,
                 _ => unreachable!(),
             }
-            let error = owner.check_file(path, &mut acquisition).unwrap_err();
+            let error = match owner.check_file(path, &mut acquisition) {
+                Err(error) => error,
+                Ok(()) => {
+                    let observed = owner.file.metadata()?;
+                    anyhow::bail!(
+                        "native policy fixture accepted {change}; inode unchanged={}, length unchanged={}, modified unchanged={}, changed unchanged={}",
+                        observed.ino() == owner.stamp.inode,
+                        observed.len() == owner.stamp.length,
+                        (observed.mtime(), observed.mtime_nsec()) == owner.stamp.modified,
+                        (observed.ctime(), observed.ctime_nsec()) == owner.stamp.changed,
+                    );
+                }
+            };
             match change {
                 "mode" | "oversize" => {
                     assert_eq!(error.to_string(), "native_enrollment_operator_file")
