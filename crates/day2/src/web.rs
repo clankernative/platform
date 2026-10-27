@@ -3468,7 +3468,6 @@ mod native_startup_tests {
         assert!(actual_counter_refusal_capture(source));
         for (before, after) in [
             (".inspect_err(|error|", ".map_err(|error|"),
-            ("observed.counter_refusal(", "foreign.counter_refusal("),
             (
                 "CounterAdmissionResponseRefusal::observe(error)",
                 "CounterAdmissionResponseRefusal::observe(&foreign)",
@@ -3478,15 +3477,23 @@ mod native_startup_tests {
                 "ServingParticipant::app(storage, &mut stage)",
                 "ServingParticipant::app(storage, &mut foreign)",
             ),
-            (
-                "observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error));",
-                "if false { observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error)); }",
-            ),
         ] {
             let changed = source.replacen(before, after, 1);
             assert_ne!(source, changed);
             assert!(!actual_counter_refusal_capture(&changed));
         }
+        // Locate the actual receiver and call independent of native formatter
+        // line wrapping. The original parameter and other uses stay intact.
+        let method = source.find(".counter_refusal(").unwrap();
+        let receiver = source[..method].rfind("observed").unwrap();
+        let receiver_end = receiver + "observed".len();
+        assert!(source[receiver_end..method].chars().all(char::is_whitespace));
+        let foreign = format!("{}foreign{}", &source[..receiver], &source[receiver_end..]);
+        assert!(!actual_counter_refusal_capture(&foreign));
+        let call_end = method + source[method..].find(");").unwrap() + 2;
+        let call = &source[receiver..call_end];
+        let conditional = source.replacen(call, &format!("if false {{ {call} }}"), 1);
+        assert!(!actual_counter_refusal_capture(&conditional));
     }
 
     #[test]
