@@ -225,7 +225,7 @@ the actual minted token), `counter_material` (remaining owner/material setup),
 `counter_stage_postcheck` and `counter_original_postcheck`. Earlier specific
 inner annotations still win. A tokeninfo status refusal exports only one closed
 category: bad request (400), unauthorized (401), forbidden (403), not found
-(404), method not allowed (405), request timeout (408), rate limited (429),
+(404), method not allowed (405), request timeout (408), length required (411), rate limited (429),
 server error (5xx), or other non-success status. These use the
 `response_` prefix. A successful status whose declared response length exceeds
 the unchanged bound has category `response_declared_length_bound` instead.
@@ -247,6 +247,20 @@ step; unannotated, unrelated or `other` errors provide no projection. This
 read-only DATA does not serialize the underlying error or construct authority.
 An App refusal must be attributed to its own error; another executor's category
 does not establish that both failed at the same producer.
+
+Token introspection retains the fixed
+[`oauth2:v2` POST endpoint and query parameters](https://www.googleapis.com/discovery/v1/apis/oauth2/v2/rest).
+Its body is empty and is explicitly framed with `Content-Length: 0` on that
+request only. The pinned blocking client does not add the header for `body=None`
+on its HTTP/1 path. [RFC 9110 section 8.6](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6)
+recommends the length on POST even when zero;
+[section 15.5.12](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.12)
+defines length-required refusal. This does not add token bytes to the body,
+change the recipient/method/field selection, enable redirects/retries, or alter
+the original interval and expiry checks. `response_length_required` identifies
+a newly observed 411 only. A historical `response_other_status` does not prove
+411 or establish that missing framing caused that native refusal. Loopback
+dummy-client tests qualify framing only, not provider or token admission.
 
 The fixed Compute instance GET requests only
 `id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's

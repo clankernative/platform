@@ -301,6 +301,10 @@ impl CredentialMaterial {
             let request = client
                 .post(address)
                 .header(reqwest::header::CACHE_CONTROL, "no-store")
+                // This query-only POST has no body. The pinned blocking
+                // client does not frame body=None itself; explicitly send
+                // its true zero length (RFC 9110 sections 8.6 and 15.5.12).
+                .header(reqwest::header::CONTENT_LENGTH, "0")
                 .timeout(remaining);
             work = Some(admission_work::begin(Work::CredentialAdmission));
             let response = request
@@ -493,6 +497,7 @@ mod tests {
             (404, CounterResponseRefusal::NotFound),
             (405, CounterResponseRefusal::MethodNotAllowed),
             (408, CounterResponseRefusal::RequestTimeout),
+            (411, CounterResponseRefusal::LengthRequired),
             (429, CounterResponseRefusal::RateLimited),
             (500, CounterResponseRefusal::ServerError),
             (599, CounterResponseRefusal::ServerError),
@@ -562,6 +567,31 @@ mod tests {
                 Some(&block.block)
             })
             .unwrap();
+        let framed_request = actual.stmts.iter().any(|statement| {
+            fn variable(value: &syn::Expr, name: &str) -> bool {
+                matches!(value,syn::Expr::Path(path) if path.path.is_ident(name))
+            }
+            fn header(value: &syn::Expr, name: &str, expected: &str) -> bool {
+                matches!(value,syn::Expr::MethodCall(call)
+                    if call.method=="header" && call.args.len()==2
+                        && matches!(&call.args[0],syn::Expr::Path(path)
+                            if path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>() == ["reqwest","header",name])
+                        && matches!(&call.args[1],syn::Expr::Lit(lit)
+                            if matches!(&lit.lit,syn::Lit::Str(text) if text.value()==expected)))
+            }
+            let syn::Stmt::Local(local)=statement else { return false; };
+            if !matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="request") { return false; }
+            let Some(init)=&local.init else { return false; };
+            let syn::Expr::MethodCall(timeout)=&*init.expr else { return false; };
+            if timeout.method!="timeout" || timeout.args.len()!=1 || !variable(&timeout.args[0],"remaining")
+                || !header(&timeout.receiver,"CONTENT_LENGTH","0") { return false; }
+            let syn::Expr::MethodCall(length)=&*timeout.receiver else { return false; };
+            if !header(&length.receiver,"CACHE_CONTROL","no-store") { return false; }
+            let syn::Expr::MethodCall(cache)=&*length.receiver else { return false; };
+            matches!(&*cache.receiver,syn::Expr::MethodCall(post)
+                if post.method=="post" && post.args.len()==1 && variable(&post.args[0],"address")
+                    && variable(&post.receiver,"client"))
+        });
         let checked = |name: &str, receiver_method: &str| {
             actual.stmts.iter().position(|statement| {
                 let syn::Stmt::Expr(syn::Expr::Try(attempt),Some(_))=statement else { return false; };
@@ -601,7 +631,8 @@ mod tests {
             })
             .map(String::as_str)
             .collect::<Vec<_>>();
-        matches!((checked("check_counter_response_status","status"),
+        framed_request
+            && matches!((checked("check_counter_response_status","status"),
             checked("check_counter_response_length","content_length"),read),
             (Some(status),Some(length),Some(read)) if status<length && length<read)
             && selected
@@ -652,6 +683,98 @@ mod tests {
             1,
         );
         assert!(!counter_response_guards_precede_body_read(&changed));
+    }
+
+    #[test]
+    fn actual_tokeninfo_post_requires_truthful_zero_framing_and_original_method() {
+        let source = include_str!("credential_material.rs");
+        assert!(counter_response_guards_precede_body_read(source));
+        for (from, to) in [
+            (".header(reqwest::header::CONTENT_LENGTH, \"0\")", ""),
+            (
+                ".header(reqwest::header::CONTENT_LENGTH, \"0\")",
+                ".header(reqwest::header::CONTENT_LENGTH, \"1\")",
+            ),
+            (".post(address)", ".get(address)"),
+        ] {
+            let changed = source.replacen(from, to, 1);
+            assert_ne!(source, changed);
+            assert!(!counter_response_guards_precede_body_read(&changed));
+        }
+    }
+
+    #[test]
+    fn pinned_bodyless_post_wire_distinguishes_absent_length_from_explicit_zero() -> Result<()> {
+        use std::{io::Write, net::TcpListener, time::Instant};
+        // Local public dummy only. This exercises the pinned client's HTTP/1
+        // framing, not TLS, a provider, an enrolled owner or token validity.
+        for framed in [false, true] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            let address = listener.local_addr()?;
+            listener.set_nonblocking(true)?;
+            let client = Client::builder()
+                .no_proxy()
+                .http1_only()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .connect_timeout(Duration::from_secs(2))
+                .build()?;
+            std::thread::scope(|threads| -> Result<()> {
+                let server=threads.spawn(move || -> Result<(bool,bool)> {
+                    let deadline=Instant::now()+Duration::from_secs(5);
+                    let mut socket=loop {
+                        match listener.accept() {
+                            Ok((socket,_)) => break socket,
+                            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock && Instant::now()<deadline => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    };
+                    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+                    let mut header=Vec::new();
+                    let mut byte=[0u8;1];
+                    while !header.ends_with(b"\r\n\r\n") && header.len()<4096 {
+                        ensure!(socket.read(&mut byte)?==1,"dummy request incomplete");
+                        header.push(byte[0]);
+                    }
+                    ensure!(header.ends_with(b"\r\n\r\n"),"dummy header bound");
+                    let header=std::str::from_utf8(&header)?;
+                    let lengths=header.lines().filter_map(|line| {
+                        let (name,value)=line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                    }).collect::<Vec<_>>();
+                    let zero=lengths==["0"];
+                    let transfer=header.lines().any(|line| line.split_once(':')
+                        .is_some_and(|(name,_)|name.eq_ignore_ascii_case("transfer-encoding")));
+                    let reply=if zero {
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                    } else {
+                        b"HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                    };
+                    socket.write_all(reply)?;
+                    Ok((zero,transfer))
+                });
+                let request=client.post(format!("http://{address}/oauth2/v2/tokeninfo?access_token=public-wire-fixture-not-a-credential"))
+                    .header(reqwest::header::CACHE_CONTROL,"no-store").timeout(Duration::from_secs(5));
+                let request = if framed {
+                    request.header(reqwest::header::CONTENT_LENGTH, "0")
+                } else {
+                    request
+                };
+                let response = request.send();
+                let (zero, transfer) = server
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("dummy server panicked"))??;
+                let response = response?;
+                assert_eq!(zero, framed);
+                assert!(!transfer);
+                assert_eq!(response.status().as_u16(), if framed { 400 } else { 411 });
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn selected_counter_account() -> EpochIam {
