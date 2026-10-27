@@ -1767,10 +1767,7 @@ fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
     let (prefix, body) = source.split_once("fn meet_current_read_view").unwrap();
     for (before, after) in [
         ("self.check(stage)?;", "let _ = self.check(stage);"),
-        (
-            "stage.require_current_role()?;",
-            "stage.check()?;",
-        ),
+        ("stage.require_current_role()?;", "stage.check()?;"),
         (
             "stage.acquisition.as_mut().exchange_current_views(actual)?;",
             "if false { stage.acquisition.as_mut().exchange_current_views(actual)?; }",
