@@ -3487,7 +3487,11 @@ mod native_startup_tests {
         let method = source.find(".counter_refusal(").unwrap();
         let receiver = source[..method].rfind("observed").unwrap();
         let receiver_end = receiver + "observed".len();
-        assert!(source[receiver_end..method].chars().all(char::is_whitespace));
+        assert!(
+            source[receiver_end..method]
+                .chars()
+                .all(char::is_whitespace)
+        );
         let foreign = format!("{}foreign{}", &source[..receiver], &source[receiver_end..]);
         assert!(!actual_counter_refusal_capture(&foreign));
         let call_end = method + source[method..].find(");").unwrap() + 2;
