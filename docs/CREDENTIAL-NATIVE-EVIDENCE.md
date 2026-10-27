@@ -259,8 +259,10 @@ defines length-required refusal. This does not add token bytes to the body,
 change the recipient/method/field selection, enable redirects/retries, or alter
 the original interval and expiry checks. `response_length_required` identifies
 a newly observed 411 only. A historical `response_other_status` does not prove
-411 or establish that missing framing caused that native refusal. Loopback
-dummy-client tests qualify framing only, not provider or token admission.
+411 or establish that missing framing caused that native refusal. Native34's
+actual HTTP status is unknown; both its App and Controller records retain
+`response_other_status`. The local loopback dummy-client tests qualify framing
+only, not provider or token admission or a successful native rerun.
 
 The fixed Compute instance GET requests only
 `id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
