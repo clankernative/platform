@@ -55,6 +55,8 @@ pub(crate) struct EnrolledProcessRoleOwner {
     #[cfg(target_os = "linux")]
     self_data: super::protocol::ProcessData,
     #[cfg(target_os = "linux")]
+    policy_file: super::birth::PolicyFileOwner,
+    #[cfg(target_os = "linux")]
     current: SelfSnapshot,
     #[cfg(target_os = "linux")]
     clock: crate::security_epoch::native_clock::NativeConnectionClock,
@@ -72,8 +74,6 @@ pub(crate) struct EnrolledRoleStage<'a> {
     purpose: StagePurpose,
     acquisition: StageAcquisition<'a>,
     deadline: Duration,
-    #[cfg(target_os = "linux")]
-    policy_interpretation: super::policy::PolicyInterpretation,
 }
 
 /// Exclusive, short borrow of an actual enrolled stage for storage work.
@@ -257,7 +257,7 @@ impl EnrolledProcessRoleOwner {
         let mut acquisition = NativeAcquisition::begin(5)?;
         #[cfg(target_os = "linux")]
         {
-            let policy = super::birth::load_policy(&mut acquisition)?;
+            let (policy, mut policy_file) = super::birth::admit_policy(&mut acquisition)?;
             ensure!(
                 policy.bootstrap.scope == *scope,
                 "native_enrollment_scope_mismatch"
@@ -282,6 +282,7 @@ impl EnrolledProcessRoleOwner {
                 &grant.data.runtime,
             ))?;
             acquisition.remaining()?;
+            policy_file.check(&mut acquisition)?;
             Ok(Self {
                 policy,
                 role,
@@ -298,6 +299,7 @@ impl EnrolledProcessRoleOwner {
                 issuer,
                 binding: grant.data.runtime.clone(),
                 self_data: grant.data.process.clone(),
+                policy_file,
                 current,
                 clock: acquisition.into_connection_clock()?,
                 admission: grant,
@@ -428,8 +430,6 @@ impl EnrolledProcessRoleOwner {
             purpose: StagePurpose::CurrentRole,
             acquisition: StageAcquisition::borrowed(&mut request.acquisition),
             deadline,
-            #[cfg(target_os = "linux")]
-            policy_interpretation: super::policy::PolicyInterpretation::new(),
         };
         stage.check()?;
         Ok(stage)
@@ -484,12 +484,7 @@ impl EnrolledProcessRoleOwner {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let mut policy_interpretation = super::policy::PolicyInterpretation::new();
-                    super::birth::check_policy_interpretation(
-                        &mut acquisition,
-                        &mut policy_interpretation,
-                        &self.policy,
-                    )?;
+                    self.policy_file.check(&mut acquisition)?;
                     self.issuer.check_live(&mut acquisition)?;
                     self.certificate.verify(&self.policy)?;
                     self.current.check(&mut acquisition)?;
@@ -498,7 +493,7 @@ impl EnrolledProcessRoleOwner {
                         "native_enrollment_self_changed"
                     );
                     let (_, deadline) = acquisition.interval_data()?;
-                    Ok((acquisition, deadline, policy_interpretation))
+                    Ok((acquisition, deadline))
                 }
             })();
             if result.is_err() {
@@ -506,13 +501,12 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (acquisition, deadline, policy_interpretation) = result?;
+                let (acquisition, deadline) = result?;
                 let mut stage = EnrolledRoleStage {
                     owner: self,
                     purpose,
                     acquisition: StageAcquisition::owned(acquisition),
                     deadline,
-                    policy_interpretation,
                 };
                 stage.check()?;
                 Ok(stage)
@@ -917,11 +911,7 @@ impl EnrolledRoleStage<'_> {
             );
             #[cfg(target_os = "linux")]
             {
-                super::birth::check_policy_interpretation(
-                    self.acquisition.as_mut(),
-                    &mut self.policy_interpretation,
-                    &self.owner.policy,
-                )?;
+                self.owner.policy_file.check(self.acquisition.as_mut())?;
                 self.owner.current.check(self.acquisition.as_mut())?;
                 self.owner.issuer.check_live(self.acquisition.as_mut())?;
                 ensure!(

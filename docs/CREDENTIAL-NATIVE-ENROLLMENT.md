@@ -162,6 +162,18 @@ single source of role, workload, container, image, native code and profile.
 Unknown fields refuse. Configuration must not be writable by group or others.
 These inputs are DATA; validating them grants no enrollment.
 
+Cold enrollment reads and validates the bounded policy through its actual
+fixed file, then retains that descriptor in the enrolled owner. Later checks
+reopen the fixed named entry without following symlinks and join both held and
+named descriptors to the admitted device, inode, mount, ownership, mode, size
+and timestamps. A visible replacement, remount or metadata change permanently
+refuses that actual owner and original, including after restoration. They do
+not reread or decode the policy at each request boundary. File metadata is an
+identity check, not an immutable-content version; ongoing integrity remains
+the trusted-service/node assumption above. No policy DATA or supplied FD can
+construct this retained owner, and configuration changes require full new
+admission rather than adoption by an existing connection.
+
 The root is a software-protected Ed25519 key generated inside Cloud KMS.
 `root.version` is the complete numeric CryptoKeyVersion resource name;
 `root.public_key` pins its canonical base64url public key. There is no private
