@@ -150,8 +150,8 @@ This join is pending CI's **Compose the independent connection/request failure
 campaign** plan row, using Credential's **Borrow fresh requests from the admitted
 enrolled connection**, G1's retained storage/transport rows and Product's consumer
 row. Root's **Qualify the admitted-connection path on the real node** is separate.
-PR 284's retained-process primitives and PR 291's partial work ledger do not
-turn these reference histories into production-request or native qualification.
+The retained-process primitives in PRs 284 and 286, and PR 291's partial work
+ledger, do not turn these reference histories into production-request or native qualification.
 See the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status).
 
 Histories replay twice with complete bounded reference states. Unexpected

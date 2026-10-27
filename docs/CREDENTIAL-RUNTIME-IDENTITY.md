@@ -12,10 +12,12 @@ Full executable/runtime admission and later handle checks have distinct roles
 under the selected [S1 connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests).
 This contract is being ported; it is not a new native qualification result.
 Main separates full `MessageProcess` capture from later retained-descriptor
-checks (PR 284), but its role `begin_stage` still captures a new self snapshot.
-Completing **Separate full process admission from retained-handle checks** and
-**Borrow fresh requests from the admitted enrolled connection** is Credential's
-pending plan work. Provider/transport reuse remains G1's pending counter row;
+checks (PR 284). PR 286 also retains the role's self snapshot and actual
+connection-clock anchors across bounded stages; `begin_stage` still exchanges
+with the issuer. The remaining packet/caller work under **Separate full process
+admission from retained-handle checks** and **Borrow fresh requests from the
+admitted enrolled connection** is Credential's pending plan work.
+Provider/transport reuse remains G1's pending counter row;
 see the [implementation status](CREDENTIAL-NATIVE-EVIDENCE.md#selected-contract-implementation-status).
 Executable bytes and selected runtime/provider joins are admitted before an
 owner escapes. Later request checks retain the actual process/task/proc and
