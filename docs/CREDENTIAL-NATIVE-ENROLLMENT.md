@@ -271,6 +271,31 @@ runtime or physical admission. Failed acquisition, required recheck or expiry
 permanently refuses the actual affected owner. Lost initial replies cannot
 rekey the same process; a full enrollment table refuses rather than evicting.
 
+One accepted HTTP operation owns one `EnrolledCurrentRequest`, captured before
+entropy or I/O. SQL and response callbacks borrow that same original and live
+enrolled owner; they cannot start another clock. Each stage borrows the stored
+acquisition itself, so every narrower counter or peer
+ceiling remains on the request after the lexical borrow ends. A later callback
+cannot recover the earlier wider ceiling or detach a borrowed acquisition.
+This does not merge an authentication work child's separate bound into its
+completed bootstrap parent. Separate closed Current
+exchanges may serve those callbacks without rearming a completed phase. On an
+actual retained peer, the same request domain and exact origin are valid only
+with a nonincreasing deadline, the next sequence, new nonces, a signed closed
+purpose and operation binding, fresh counters, actual handles and shared
+clock/refusal checks. New HTTP requests still use distinct, later originals.
+The finite response keeps its one response phase across Pending polls. Unknown
+settlement cannot begin another exchange or revive an owner.
+
+Shell selection may follow bounded body/cookie parsing. An actual
+`UnselectedShellRequest` captures the clock and task/namespace anchors first,
+without app permission. Binding consumes it once into the selected actual
+SecurityShell owner while preserving the original origin and earlier bounds.
+Plain transport can complete it without choosing an app. An intervening
+observation of the selected connection may conservatively refuse late binding;
+there is no weaker concurrency join. Final completion consumes the owned
+original after settlement and response postchecks; unfinished Drop refuses it.
+
 `EnrolledOriginalClock` captures its first BOOTTIME sample at the actual creator
 entry before entropy/I/O and retains original self-task/namespace anchors.
 Sampling requires a fresh stage from the same enrollment, role, process and

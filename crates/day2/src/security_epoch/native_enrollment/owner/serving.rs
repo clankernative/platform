@@ -79,12 +79,13 @@ impl EnrolledRoleStage<'_> {
             anyhow::bail!("serving_peer_platform_unsupported");
             #[cfg(target_os = "linux")]
             {
-                let (origin, deadline) = self.acquisition.interval_data()?;
+                let (origin, deadline) = self.acquisition.as_mut().interval_data()?;
                 let statement = Statement {
                     certificate: self.owner.certificate.clone(),
-                    stage: self.current_grant.clone(),
+                    stage: self.owner.admission.clone(),
                     original: OriginalInterval {
-                        domain: self.acquisition.sample()?.domain,
+                        purpose: self.purpose,
+                        domain: self.acquisition.as_mut().sample()?.domain,
                         origin_ns: origin.as_nanos().try_into()?,
                         deadline_ns: deadline.min(self.deadline).as_nanos().try_into()?,
                     },
@@ -188,6 +189,30 @@ impl EnrolledRoleStage<'_> {
         self.check_serving_statement(statement, pid, None, acquisition)
     }
 
+    /// Validate request DATA only after its caller checks the actual admitted
+    /// peer. No signature or historical statement supplies that native owner.
+    pub(in crate::security_epoch::native_enrollment) fn check_admitted_serving_statement(
+        &mut self,
+        statement: &Statement,
+        admitted: &Statement,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_serving_acquisition(acquisition)?;
+            ensure!(
+                statement.stage.data.role == self.serving_peer_role()?,
+                "serving_peer_request_role_changed"
+            );
+            statement.validate_request(admitted, acquisition.sample()?.elapsed)?;
+            self.check_serving_acquisition(acquisition)
+        })();
+        if result.is_err() {
+            self.refuse_serving();
+            acquisition.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn check_serving_shell_statement(
         &mut self,
         statement: &Statement,
@@ -199,6 +224,6 @@ impl EnrolledRoleStage<'_> {
 
     pub(in crate::security_epoch::native_enrollment) fn refuse_serving(&mut self) {
         self.owner.refused = true;
-        self.acquisition.refuse();
+        self.acquisition.as_mut().refuse();
     }
 }

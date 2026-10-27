@@ -425,9 +425,42 @@ impl ControllerReceipt {
         crate::security_epoch::native_enrollment::process::live(&self.pidfd, acquisition)
     }
 
-    /// A retained original sender handle is identity/liveness continuity only;
-    /// it does not make the old grant current. Fresh phases verify a newly
-    /// signed role statement and nonce exchange separately.
+    /// Join this packet to an actual already-bound Controller receipt. Parsed
+    /// statements and kernel PIDs alone cannot supply the original admission.
+    pub(in crate::security_epoch::native_enrollment) fn bind_admitted(
+        &mut self,
+        statement: &StageStatement,
+        original: &mut Self,
+        admitted: &StageStatement,
+        stage: &mut EnrolledRoleStage<'_>,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            original.check_continuity(admitted, stage, acquisition)?;
+            self.check_received(acquisition)?;
+            ensure!(
+                self.kernel_process == original.kernel_process
+                    && statement.same_enrollment(admitted),
+                "storage_peer_controller_admission_changed"
+            );
+            let digest = statement.digest()?;
+            ensure!(
+                self.statement.as_ref().is_none_or(|old| old == &digest),
+                "storage_peer_controller_statement_changed"
+            );
+            self.statement = Some(digest);
+            self.check_continuity(statement, stage, acquisition)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            original.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    /// Identity/liveness continuity only. A fresh request must separately
+    /// verify its signed interval, purpose and nonce exchange.
     pub(in crate::security_epoch::native_enrollment) fn check_continuity(
         &mut self,
         statement: &StageStatement,
@@ -469,12 +502,7 @@ impl ControllerReceipt {
                 self.statement.as_ref() == Some(&statement.digest()?),
                 "storage_peer_controller_not_bound"
             );
-            stage.storage()?.check_storage_controller_statement(
-                statement,
-                self.kernel_process,
-                acquisition,
-            )?;
-            self.check_received(acquisition)
+            self.check_continuity(statement, stage, acquisition)
         })();
         if result.is_err() {
             self.valid = false;
