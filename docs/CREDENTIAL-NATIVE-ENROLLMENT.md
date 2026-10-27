@@ -482,13 +482,14 @@ client, and application response-body bytes actually read, including partial
 failed reads. Supplied bytes are not proof of socket/TLS transmission or delivery.
 The full-physical invocation kind is separate from each PVC/PV/Node/Disk/Instance
 request; five requests must not be inferred to be a completed five-read round.
-Metadata-token, TokenReview, selected workload identity and credential mint/tokeninfo
+Metadata-token, TokenReview, selected workload identity and credential mint
 requests have separate kinds. Fresh epoch reads and cheap handle checks are separate.
 
-Only the executable SHA, issuer-client exchange and accepted issuer-service
-admission leaves are covered in this change. The six storage/provider kinds are
-explicitly uncovered/null until their real production hooks and source guards
-land. Therefore this partial ledger cannot report complete all-producer coverage.
+This source union covers both real executable-hash loops, issuer-client and
+accepted issuer-service admissions, and the six actual storage/provider kinds.
+Each coverage bit corresponds to its compiled production leaf and wiring guards.
+Numeric ledger completeness still does not establish actual producer/owner/request
+provenance, a complete capture interval or successful native admission.
 Updates and snapshots use nonblocking access; a paused writer, poison, dropped
 unfinished attempt, checked-counter overflow or missing coverage is sticky unknown
 evidence, never zero work. A known transport error is a returned failure, never

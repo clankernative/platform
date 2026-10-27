@@ -816,3 +816,46 @@ remain separate. A list query's two handler scopes are not folded into its one
 delivery scope. Local protocol-model counts do not qualify native exchange cost;
 that requires the joined native run. These records prove neither browser receipt
 nor human acknowledgement, continued readiness, or a durable product connection.
+
+## Cumulative admission-work observations
+
+The private admission-work ledger is process-cumulative diagnostic DATA. It is
+separate from the bounded timing records above and never resets at a request
+boundary. A cold snapshot followed by two warm start/end snapshots must be
+joined to the actual producer and same admitted owner, with independent request
+ordinals. A historical snapshot does not construct or renew that owner.
+
+Storage instrumentation uses these closed leaves:
+
+| Leaf | Counted operation |
+| --- | --- |
+| `physical_admission` | An invocation of the complete five-read physical-profile validator, including partial refusal. |
+| `physical_profile` | Each actual PVC, PV, Node, Compute disk or instance request. Five individual calls alone do not prove a successful complete round. |
+| `metadata_admission` | The fixed metadata-service access-token request. |
+| `token_review` | The selected Kubernetes TokenReview request. |
+| `workload_admission` | Selected project, cluster, namespace, service-account, Pod, workload-owner, GSA and database identity requests. |
+| `credential_admission` | The UID-target credential-mint request. |
+
+Attempts are recorded at the actual provider send path after its original
+guards. Returned calls include successful and failed returns; an HTTP adapter's
+success is not proof that later identity validation or native admission passed.
+The outer physical-validation row records its own validation result separately.
+Unfinished attempts, dropped observations, contention, poison, overflow or missing
+leaf coverage make the corresponding evidence unknown. In-flight work must not
+be reported as a completed zero-work interval. These diagnostic conditions do
+not clear native refusal, grant permission or change the enforcement clocks.
+
+Request-body counts mean bytes supplied to the HTTP client, not bytes proved
+sent on a socket. Response-body counts are application bytes actually consumed,
+including partial bytes before a read error; they exclude headers and TLS.
+An unsuccessful send remains possibly sent. No body, URL, token or provider
+value is recorded. Fresh Firestore epoch reads/rollback/commit and cheap retained
+handle checks stay outside these admission rows and retain their own guards.
+
+This reviewed source union includes the common enrollment producers and all six
+actual storage leaves with their production wiring controls. Their coverage bits
+describe numeric instrumentation only. They do not establish actual producer,
+owner or request identity, complete capture intervals or native success.
+Missing/null rows or missing producer records are never interpreted as zero.
+Actual same-owner cold/warm qualification, complete producer collection and
+final consumer settlement remain required.

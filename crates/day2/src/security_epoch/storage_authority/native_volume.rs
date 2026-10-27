@@ -7,6 +7,7 @@ use crate::security_epoch::controller::bootstrap_timing::BootstrapTiming;
 use crate::security_epoch::controller::evidence::{PreparationFailure, PreparationStep};
 use crate::security_epoch::controller::preparation_timing::{Operation, Timings};
 use crate::security_epoch::{
+    admission_work::{self, Work},
     authenticated_reads::{
         ControllerEpochReads, ProviderEpochReads, RefusalGuard, StorageMetadataRead,
     },
@@ -650,55 +651,63 @@ impl<'role> ProviderReader<'role> {
     }
 
     fn observe_provider_inner(&mut self) -> Result<String> {
-        let guard = self.refusal_guard()?;
-        // Clone only desired DATA so no self-borrow is held during actual I/O.
-        let profile = self.profile.clone();
-        let policy = self.policy.clone();
-        let claim = self
-            .get(StorageMetadataRead::Claim)
-            .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
-        profile
-            .claim(&policy, &claim)
-            .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
-        let volume = self
-            .get(StorageMetadataRead::Volume)
-            .map_err(|error| PreparationFailure::at(PreparationStep::VolumeBinding, error))?;
-        profile
-            .volume(&policy, &volume)
-            .map_err(|error| PreparationFailure::at(PreparationStep::VolumeBinding, error))?;
-        self.check()?;
-        let boot = read_fixed(
-            "/proc/sys/kernel/random/boot_id",
-            128,
-            &mut self.acquisition,
-        )
-        .map_err(|error| PreparationFailure::at(PreparationStep::NodeBoot, error))?;
-        let boot = std::str::from_utf8(&boot)
-            .map_err(|error| PreparationFailure::at(PreparationStep::NodeBoot, error.into()))?
-            .trim_end_matches('\n');
-        let node = self
-            .get(StorageMetadataRead::Node)
-            .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
-        profile
-            .node(&policy, boot, &node)
-            .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
-        let disk = self
-            .get(StorageMetadataRead::Disk)
-            .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
-        profile
-            .disk(&policy, &disk)
-            .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
-        let instance = self
-            .get(StorageMetadataRead::Instance)
-            .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
-        let device = profile
-            .instance(&policy, &instance)
-            .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
-        self.check()?;
-        if let Some(guard) = guard {
-            guard.complete()?;
-        }
-        Ok(device)
+        // One complete physical-profile validation invocation. Its five
+        // provider requests have separate PhysicalProfile call/body rows;
+        // partial refusal here never becomes a completed five-read round.
+        let mut work = admission_work::begin(Work::PhysicalAdmission);
+        let result = (|| {
+            let guard = self.refusal_guard()?;
+            // Clone only desired DATA so no self-borrow is held during actual I/O.
+            let profile = self.profile.clone();
+            let policy = self.policy.clone();
+            let claim = self
+                .get(StorageMetadataRead::Claim)
+                .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
+            profile
+                .claim(&policy, &claim)
+                .map_err(|error| PreparationFailure::at(PreparationStep::ClaimBinding, error))?;
+            let volume = self
+                .get(StorageMetadataRead::Volume)
+                .map_err(|error| PreparationFailure::at(PreparationStep::VolumeBinding, error))?;
+            profile
+                .volume(&policy, &volume)
+                .map_err(|error| PreparationFailure::at(PreparationStep::VolumeBinding, error))?;
+            self.check()?;
+            let boot = read_fixed(
+                "/proc/sys/kernel/random/boot_id",
+                128,
+                &mut self.acquisition,
+            )
+            .map_err(|error| PreparationFailure::at(PreparationStep::NodeBoot, error))?;
+            let boot = std::str::from_utf8(&boot)
+                .map_err(|error| PreparationFailure::at(PreparationStep::NodeBoot, error.into()))?
+                .trim_end_matches('\n');
+            let node = self
+                .get(StorageMetadataRead::Node)
+                .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
+            profile
+                .node(&policy, boot, &node)
+                .map_err(|error| PreparationFailure::at(PreparationStep::NodeBinding, error))?;
+            let disk = self
+                .get(StorageMetadataRead::Disk)
+                .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
+            profile
+                .disk(&policy, &disk)
+                .map_err(|error| PreparationFailure::at(PreparationStep::DiskBinding, error))?;
+            let instance = self
+                .get(StorageMetadataRead::Instance)
+                .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
+            let device = profile
+                .instance(&policy, &instance)
+                .map_err(|error| PreparationFailure::at(PreparationStep::InstanceBinding, error))?;
+            self.check()?;
+            if let Some(guard) = guard {
+                guard.complete()?;
+            }
+            Ok(device)
+        })();
+        work.finish(result.is_ok());
+        result
     }
 }
 
@@ -1483,6 +1492,74 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn physical_admission_capture(source: &str) -> bool {
+        fn path(expression: &syn::Expr, names: &[&str]) -> bool {
+            matches!(expression,syn::Expr::Path(p)
+                if p.path.segments.iter().map(|s|s.ident.to_string()).collect::<Vec<_>>()==names)
+        }
+        let file = syn::parse_file(source).unwrap();
+        let Some(body) = file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if !matches!(&*item.self_ty,syn::Type::Path(p)
+                if p.path.segments.last().is_some_and(|s|s.ident=="ProviderReader"))
+            {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == "observe_provider_inner" => {
+                    Some(&function.block)
+                }
+                _ => None,
+            })
+        }) else {
+            return false;
+        };
+        if body.stmts.len() != 4 {
+            return false;
+        }
+        let started = matches!(&body.stmts[0],syn::Stmt::Local(local)
+            if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="work")
+            && local.init.as_ref().is_some_and(|init| matches!(&*init.expr,syn::Expr::Call(call)
+                if path(&call.func,&["admission_work","begin"]) && call.args.len()==1
+                && path(&call.args[0],&["Work","PhysicalAdmission"]))));
+        let captured = matches!(&body.stmts[1],syn::Stmt::Local(local)
+            if matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="result")
+            && local.init.as_ref().is_some_and(|init| matches!(&*init.expr,syn::Expr::Call(call)
+                if call.args.is_empty() && matches!(&*call.func,syn::Expr::Paren(p)
+                    if matches!(&*p.expr,syn::Expr::Closure(c) if matches!(&*c.body,syn::Expr::Block(_)))))));
+        let finished = matches!(&body.stmts[2],syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+            if call.method=="finish" && path(&call.receiver,&["work"]) && call.args.len()==1
+            && matches!(&call.args[0],syn::Expr::MethodCall(ok)
+                if ok.method=="is_ok" && ok.args.is_empty() && path(&ok.receiver,&["result"])));
+        started
+            && captured
+            && finished
+            && matches!(&body.stmts[3],syn::Stmt::Expr(value,None) if path(value,&["result"]))
+    }
+
+    #[test]
+    fn storage_admission_counts_full_physical_validation_even_on_refusal() {
+        let source = include_str!("native_volume.rs");
+        assert!(physical_admission_capture(source));
+        for (before, after) in [
+            (
+                "admission_work::begin(Work::PhysicalAdmission)",
+                "admission_work::begin(Work::PhysicalProfile)",
+            ),
+            ("work.finish(result.is_ok());", "work.finish(true);"),
+            (
+                "let mut work = admission_work::begin(Work::PhysicalAdmission);",
+                "let mut work = if false { admission_work::begin(Work::PhysicalAdmission) } else { unrelated };",
+            ),
+        ] {
+            let changed = source.replacen(before, after, 1);
+            assert_ne!(source, changed);
+            assert!(!physical_admission_capture(&changed));
+        }
+    }
 
     #[test]
     fn storage_request_profile_requires_initial_operator_ownership_and_read_only_mode() {

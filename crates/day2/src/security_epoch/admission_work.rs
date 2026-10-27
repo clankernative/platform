@@ -42,10 +42,10 @@ const WORK: [Work; 9] = [
     Work::CredentialAdmission,
 ];
 
-// These three production leaves are instrumented in this change. Storage's
-// separately owned actual leaves must land before their coverage becomes true.
-// This is evidence metadata, never a runtime switch or an admission policy.
-const COVERED: [bool; 9] = [true, true, true, false, false, false, false, false, false];
+// This source union contains all nine actual enrollment/storage leaves and
+// their production wiring guards. Numeric ledger completeness is evidence
+// metadata, never a native producer/owner join, runtime switch or permission.
+const COVERED: [bool; 9] = [true; 9];
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -739,9 +739,9 @@ mod tests {
         assert_eq!(after.rows[0].sha_bytes_read, Some(20));
         assert_eq!(after.rows[1].attempted, Some(40));
         assert_eq!(ledger.snapshot().rows[1].attempted, Some(40));
-        assert!(!after.complete); // Uninstrumented storage is explicitly missing.
-        assert!(!after.rows[3].covered);
-        assert_eq!(after.rows[3].attempted, None);
+        assert!(after.complete);
+        assert!(after.rows.iter().all(|row| row.covered));
+        assert_eq!(after.rows[3].attempted, Some(0));
     }
 
     #[test]
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(ledger.snapshot().rows[0].attempted, None);
         let json = serde_json::to_value(overflowed).unwrap();
         assert!(json["rows"][0]["attempted"].is_null());
-        assert!(json["rows"][3]["attempted"].is_null());
+        assert_eq!(json["rows"][3]["attempted"], 0);
     }
 
     #[test]

@@ -369,20 +369,16 @@ mod tests {
             .unwrap();
         assert_eq!(work["format"], "native_admission_work_v1");
         assert_eq!(work["sequence"], 1);
-        assert_eq!(work["complete"], false);
+        assert_eq!(work["complete"], true);
         assert_eq!(work["loss"], false);
         assert_eq!(work["poisoned"], false);
         let work_rows = work["rows"].as_array().unwrap();
         assert_eq!(work_rows.len(), 9);
-        for (index, row) in work_rows.iter().enumerate() {
-            assert_eq!(row["covered"], index < 3);
-            if index < 3 {
-                assert_eq!(row["attempted"], 0);
-                assert_eq!(row["returned"], 0);
-                assert_eq!(row["in_flight"], 0);
-            } else {
-                assert!(row["attempted"].is_null() && row["returned"].is_null());
-            }
+        for row in work_rows {
+            assert_eq!(row["covered"], true);
+            assert_eq!(row["attempted"], 0);
+            assert_eq!(row["returned"], 0);
+            assert_eq!(row["in_flight"], 0);
         }
         assert_eq!(
             record,

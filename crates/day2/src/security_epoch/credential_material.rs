@@ -2,6 +2,7 @@
 //! proof. UID-target minting must retain its authenticated request provenance.
 
 use super::{
+    admission_work::{self, Bytes, Work},
     native_clock::NativeAcquisition,
     transport::{NativeHttp, Route},
 };
@@ -85,6 +86,7 @@ impl CredentialMaterial {
     pub(super) fn metadata_source(acquisition: &mut NativeAcquisition) -> Result<Self> {
         let mut profile =
             super::self_check_profile::enter(super::self_check_profile::Category::ProviderHttp);
+        let mut work = None;
         let result = (|| {
             acquisition.remaining()?;
             let client = Client::builder()
@@ -92,9 +94,12 @@ impl CredentialMaterial {
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
                 .build()?;
-            let response = client.get("http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token")
-                .header("Metadata-Flavor","Google").timeout(acquisition.remaining()?)
-                .send().map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"))?;
+            let request = client.get("http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token")
+                .header("Metadata-Flavor","Google").timeout(acquisition.remaining()?);
+            work = Some(admission_work::begin(Work::MetadataAdmission));
+            let response = request
+                .send()
+                .map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"))?;
             acquisition.remaining()?;
             ensure!(
                 response.status().is_success()
@@ -108,10 +113,14 @@ impl CredentialMaterial {
                 "epoch_native_metadata_status_or_bound"
             );
             let mut bytes = Zeroizing::new(Vec::new());
-            response
+            let read = response
                 .take(12_289)
                 .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"))?;
+                .map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"));
+            if let Some(work) = &mut work {
+                work.bytes(Bytes::ResponseBody, bytes.len() as u64);
+            }
+            read?;
             profile.finish();
             acquisition.remaining()?;
             ensure!(bytes.len() <= 12_288, "epoch_native_metadata_bound");
@@ -119,6 +128,9 @@ impl CredentialMaterial {
         })();
         if result.is_err() {
             acquisition.refuse();
+        }
+        if let Some(mut work) = work {
+            work.finish(result.is_ok());
         }
         result
     }
