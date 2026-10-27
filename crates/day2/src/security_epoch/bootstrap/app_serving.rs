@@ -43,7 +43,7 @@ impl ActiveAppStorageContinuity {
                 binding,
             ))?,
         };
-        let evidence = crate::security_epoch::serving::ConsumerScopeEvidence::app(
+        let mut evidence = crate::security_epoch::serving::ConsumerScopeEvidence::app(
             Digest::of(&(
                 "day2-controller-evidence-selection-v1",
                 &self.policy,
@@ -52,6 +52,10 @@ impl ActiveAppStorageContinuity {
             stage.incarnation_data()?,
             request.binding.clone(),
             purpose,
+            stage
+                .diagnostic_progress()
+                .historical_request_binding_data()
+                .ok(),
         );
         // The admitted credential's fixed ceiling meets the actual stage
         // BEFORE a peer statement/signature captures its immutable interval.
@@ -62,6 +66,7 @@ impl ActiveAppStorageContinuity {
             day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
         )?;
         let mut physical = self.storage.begin_current(stage, request)?;
+        evidence.peer_data(physical.historical_peer_data());
         physical.await_known(stage)?;
         let names = request_names(&self.store, &self.completion)?;
         let observed = reads.read(stage, &self.store, &names)?;

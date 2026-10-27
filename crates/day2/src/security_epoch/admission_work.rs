@@ -3,6 +3,7 @@
 //! update releases its lock before native work. Poison, loss, overflow, missing
 //! leaf coverage and unfinished work are UNKNOWN, never evidence of zero work.
 
+use day2_capabilities::Digest;
 use serde::Serialize;
 use std::sync::{
     Mutex, TryLockError,
@@ -93,6 +94,9 @@ struct Ledger {
     rows: [Counts; 9],
     sequence: Option<u64>,
     loss: bool,
+    producer: Option<Digest>,
+    producer_process: Option<u32>,
+    owner_ordinal: Option<u64>,
 }
 
 impl Ledger {
@@ -100,7 +104,31 @@ impl Ledger {
         rows: [Counts::ZERO; 9],
         sequence: Some(0),
         loss: false,
+        producer: None,
+        producer_process: None,
+        owner_ordinal: Some(0),
     };
+
+    fn bind_producer(&mut self, domain: &Digest, process: u32) {
+        if let Some(prior) = self.producer_process {
+            if prior != process {
+                self.loss = true;
+                self.producer = None;
+            }
+        } else {
+            self.producer_process = Some(process);
+            self.producer =
+                Digest::of(&("day2-native-producer-diagnostic-v1", domain, process)).ok();
+            if self.producer.is_none() {
+                self.loss = true;
+            }
+        }
+    }
+
+    fn register_owner(&mut self) -> (Option<Digest>, Option<u64>) {
+        self.owner_ordinal = self.owner_ordinal.and_then(|value| value.checked_add(1));
+        (self.producer.clone(), self.owner_ordinal)
+    }
 
     fn start(&mut self, work: Work) {
         let row = &mut self.rows[work as usize];
@@ -132,12 +160,19 @@ impl Ledger {
 
     fn snapshot(&mut self) -> Snapshot {
         self.sequence = self.sequence.and_then(|n| n.checked_add(1));
-        let overflowed = self.sequence.is_none() || self.rows.iter().any(|row| !row.known());
+        let overflowed = self.sequence.is_none()
+            || self.owner_ordinal.is_none()
+            || self.rows.iter().any(|row| !row.known());
         let in_flight = self.rows.iter().any(|row| row.in_flight != Some(0));
         Snapshot {
             format: "native_admission_work_v1",
             sequence: self.sequence,
-            complete: !overflowed && !in_flight && !self.loss && COVERED.into_iter().all(|v| v),
+            producer_incarnation: self.producer.clone(),
+            complete: !overflowed
+                && !in_flight
+                && !self.loss
+                && self.producer.is_some()
+                && COVERED.into_iter().all(|v| v),
             overflowed: Some(overflowed),
             in_flight: Some(in_flight),
             loss: self.loss,
@@ -186,9 +221,10 @@ pub(super) struct Row {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct Snapshot {
+pub(crate) struct Snapshot {
     format: &'static str,
     sequence: Option<u64>,
+    producer_incarnation: Option<Digest>,
     complete: bool,
     overflowed: Option<bool>,
     in_flight: Option<bool>,
@@ -199,6 +235,26 @@ pub(super) struct Snapshot {
 
 static LEDGER: Mutex<Ledger> = Mutex::new(Ledger::ZERO);
 static LOST: AtomicBool = AtomicBool::new(false);
+
+/// Seed once from the first real acquisition's existing domain; no new entropy,
+/// clock sample or counter reset. Inherited state in another process is unknown.
+pub(super) fn bind_producer(domain: &Digest, process: u32) {
+    if let Ok(mut ledger) = LEDGER.try_lock() {
+        ledger.bind_producer(domain, process);
+    } else {
+        LOST.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Labels only, assigned at real owner publication; never native constructors.
+pub(super) fn register_owner() -> (Option<Digest>, Option<u64>) {
+    if let Ok(mut ledger) = LEDGER.try_lock() {
+        ledger.register_owner()
+    } else {
+        LOST.store(true, Ordering::Relaxed);
+        (None, None)
+    }
+}
 
 /// Owns only a diagnostic attempt label; it cannot grant or refuse native work.
 pub(super) struct Attempt {
@@ -302,9 +358,10 @@ fn snapshot_ledger(ledger: &Mutex<Ledger>, lost: &AtomicBool) -> Snapshot {
 
 impl Snapshot {
     #[cfg(test)]
-    pub(super) fn maximal_fixture() -> Self {
+    pub(crate) fn maximal_fixture() -> Self {
         let mut empty = Ledger::ZERO;
         let mut data = empty.snapshot();
+        data.producer_incarnation = Some(Digest::new(b"maximum diagnostic fixture only"));
         data.sequence = Some(u64::MAX);
         for row in &mut data.rows {
             row.covered = true;
@@ -324,6 +381,31 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn producer_and_owner_labels_do_not_reset_or_survive_inherited_state_as_known() {
+        let mut ledger = Ledger::ZERO;
+        assert!(!ledger.snapshot().complete);
+        assert!(ledger.snapshot().producer_incarnation.is_none());
+        ledger.bind_producer(&Digest::new(b"first actual original DATA fixture"), 7);
+        let first = ledger.register_owner();
+        ledger.bind_producer(&Digest::new(b"later actual original DATA fixture"), 7);
+        let second = ledger.register_owner();
+        assert!(first.0.is_some());
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, Some(1));
+        assert_eq!(second.1, Some(2));
+        ledger.owner_ordinal = Some(u64::MAX);
+        assert_eq!(ledger.register_owner().1, None);
+        assert_eq!(ledger.register_owner().1, None);
+        assert!(ledger.snapshot().overflowed.unwrap());
+        assert!(!ledger.snapshot().complete);
+        ledger.bind_producer(&Digest::new(b"inherited state DATA fixture"), 8);
+        assert!(ledger.loss && ledger.producer.is_none());
+        ledger.bind_producer(&Digest::new(b"returning old PID DATA fixture"), 7);
+        assert!(ledger.loss && ledger.producer.is_none());
+        assert!(!ledger.snapshot().complete);
+    }
 
     #[test]
     fn production_global_updates_and_paused_writer_run_in_an_isolated_process() {
@@ -526,13 +608,18 @@ mod tests {
             return false;
         };
         let statements = &body.body.stmts;
-        if !statements
-            .get(1)
-            .is_some_and(|statement| begin_shape(statement, "IssuerServiceAdmission"))
+        let captured = matches!(statements.get(1), Some(syn::Stmt::Local(local))
+            if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "capture")
+            && matches!(&local.init, Some(init) if matches!(&*init.expr, syn::Expr::MethodCall(call)
+                if call.method == "begin_work_capture" && path(&call.receiver, &["recorder"]) && call.args.is_empty())));
+        if !captured
+            || !statements
+                .get(2)
+                .is_some_and(|statement| begin_shape(statement, "IssuerServiceAdmission"))
         {
             return false;
         }
-        let Some(syn::Stmt::Expr(syn::Expr::If(failed), _)) = statements.get(4) else {
+        let Some(syn::Stmt::Expr(syn::Expr::If(failed), _)) = statements.get(5) else {
             return false;
         };
         let Some(syn::Stmt::Expr(syn::Expr::MethodCall(finish), Some(_))) =
@@ -721,6 +808,7 @@ mod tests {
     #[test]
     fn ledger_counts_failed_partial_work_and_never_resets_at_a_snapshot() {
         let mut ledger = Ledger::ZERO;
+        ledger.bind_producer(&Digest::new(b"actual-producer DATA fixture"), 7);
         let before = ledger.snapshot();
         ledger.start(Work::ExecutableSha256);
         ledger.bytes(Work::ExecutableSha256, Bytes::ShaRead, 13);

@@ -235,17 +235,116 @@ pub(super) fn clear() {
     OWNERS.with(|owners| owners.borrow_mut().clear());
 }
 
+/// One-shot readiness DATA from an already published credential. Neither the
+/// scope nor this delay can admit a request or construct an idle original.
+pub(super) struct IdleCredentialWake {
+    pub(super) scope: AuthorityScope,
+    pub(super) delay: Duration,
+}
+
+pub(super) enum IdleReadmission {
+    Published,
+    Busy,
+}
+
+pub(super) fn take_idle_credential_wakes() -> Result<Vec<IdleCredentialWake>> {
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        let mut wakes = Vec::new();
+        for owner in owners.values_mut() {
+            if owner.kind != NativeRole::AppHost {
+                continue;
+            }
+            let AppStorage::Participant(participant) = &mut owner.storage else {
+                anyhow::bail!("native idle credential participant unavailable");
+            };
+            if let Some(delay) = participant.take_counter_readmission_delay()? {
+                wakes.push(IdleCredentialWake {
+                    scope: owner.selection.scope().clone(),
+                    delay,
+                });
+            }
+        }
+        Ok(wakes)
+    })
+}
+
+/// Runs only on the final owner executor, with HTTP/background admission
+/// paused. Queue emptiness is not authority: the actual role must exclude all
+/// live requests before the lower supplier can perform any replacement I/O.
+pub(super) fn readmit_idle_credential(wake: &IdleCredentialWake) -> Result<IdleReadmission> {
+    ensure!(
+        ACTIVE_SINK.with(|slot| slot.try_borrow().map(|slot| slot.is_none()))?,
+        "native idle credential entered from a request"
+    );
+    OWNERS.with(|owners| {
+        let mut owners = owners.try_borrow_mut()?;
+        if owners.excludes_unstarted_operation(wake.scope.app.as_str())? {
+            return Ok(IdleReadmission::Busy);
+        }
+        let owner = owners
+            .get_mut(wake.scope.app.as_str())
+            .context("native idle credential owner missing")?;
+        ensure!(
+            owner.kind == NativeRole::AppHost && owner.selection.scope() == &wake.scope,
+            "native idle credential owner changed"
+        );
+        // Only actual RefCell borrow contention is scheduling Busy. Missing
+        // or retired/leased role slots retain their existing closed errors.
+        // This precedes the replacement refusal path, clocks and provider I/O.
+        let mut role = match owner.role.try_borrow_mut() {
+            Ok(role) => role,
+            Err(error) if error.downcast_ref::<std::cell::BorrowMutError>().is_some() => {
+                return Ok(IdleReadmission::Busy);
+            }
+            Err(error) => return Err(error),
+        };
+        let AppStorage::Participant(participant) = &mut owner.storage else {
+            anyhow::bail!("native idle credential participant unavailable");
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut stage, publication) = match role.begin_idle_credential_admission() {
+                Ok(admission) => admission,
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::security_epoch::native_enrollment::IdleCredentialBusy>()
+                        .is_some() =>
+                {
+                    return Ok(IdleReadmission::Busy);
+                }
+                Err(error) => return Err(error),
+            };
+            stage.check_selection(&owner.selection.policy, &owner.selection.store, owner.kind)?;
+            participant.readmit_counter_idle(stage, publication)?;
+            Ok(IdleReadmission::Published)
+        }));
+        match result {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => {
+                participant.refuse();
+                Err(error)
+            }
+            Err(panic) => {
+                participant.refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
+    })
+}
+
 /// Called on the final enrolled App executor, before any Runtime or serving
 /// database open. Selection and metadata are DATA; the real channel, first
 /// holder and original file are supplied only by the native S1/S3 exchange.
 pub(crate) fn prepare_initial_app_storage(
     metadata: &crate::store::InitialStoreMetadata,
     instance: &crate::artifact::Instance,
+    observed: &mut crate::web::NativeStartupObservation,
 ) -> Result<()> {
     use crate::security_epoch::{
         AppInitialStorageContinuity, AppPreparedFile, AppStorageBootstrap,
         native_enrollment::AuthenticatedInitialHolderOffer,
     };
+    use crate::web::NativeStartupStep;
     let control = instance
         .control
         .as_ref()
@@ -300,6 +399,7 @@ pub(crate) fn prepare_initial_app_storage(
             // serving never selects this purpose. A failed or incomplete step
             // cannot restart this once-only startup attempt.
             for _ in 0..6 {
+                observed.enter(NativeStartupStep::InitialStorageBootstrapPreparation);
                 let AppStorage::Bootstrapping(storage) = &mut owners.storage else {
                     anyhow::bail!("native App bootstrap owner unavailable")
                 };
@@ -307,9 +407,12 @@ pub(crate) fn prepare_initial_app_storage(
                 let mut role = owners.role.try_borrow_mut()?;
                 let mut stage = role.begin_storage_bootstrap_stage()?;
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
+                observed.enter(NativeStartupStep::InitialStorageBootstrapAdvance);
                 storage.advance(&mut stage)?;
+                observed.enter(NativeStartupStep::InitialStorageBootstrapPostcheck);
                 stage.check_selection(policy, store, NativeRole::AppHost)?;
             }
+            observed.enter(NativeStartupStep::InitialStorageActiveConversion);
             let storage = std::mem::replace(&mut owners.storage, AppStorage::Refused);
             let AppStorage::Bootstrapping(storage) = storage else {
                 owners.storage = storage;
@@ -320,8 +423,10 @@ pub(crate) fn prepare_initial_app_storage(
                     // Connection admission completes before any HTTP original
                     // can borrow this participant. Warm requests cannot mint
                     // provider credentials or enter this cold constructor.
+                    observed.enter(NativeStartupStep::InitialStorageColdRole);
                     let mut role = owners.role.try_borrow_mut()?;
                     let mut stage = role.begin_current_stage()?;
+                    observed.enter(NativeStartupStep::InitialStorageColdCounter);
                     let participant = ServingParticipant::app(storage, &mut stage)?;
                     owners.storage = AppStorage::Participant(Box::new(participant));
                     Ok(())
@@ -400,7 +505,8 @@ pub(crate) fn with_app_request<T>(
         return operation();
     }
     let sink = Sink::new();
-    sink.capture_app_request(scope)?;
+    sink.request
+        .capture_app(scope, request::Entry::Autonomous)?;
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.scope_sync(operation)));
     match result {
@@ -2250,7 +2356,7 @@ impl Sink {
     }
 
     pub(super) fn capture_app_request(&self, scope: &AuthorityScope) -> Result<()> {
-        self.request.capture_app(scope)
+        self.request.capture_app(scope, request::Entry::Http)
     }
 
     pub(super) fn capture_shell_request(&self) -> Result<()> {
@@ -2756,6 +2862,33 @@ pub(super) fn check(intent: &FreshIntent, phase: Phase, wall: i64) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wakeup_data_and_simulated_roles_cannot_supply_a_native_admission() -> Result<()> {
+        let scope = AuthorityScope {
+            installation: "example".to_owned().try_into()?,
+            environment: "development".to_owned().try_into()?,
+            app: "reports".to_owned().try_into()?,
+        };
+        let wake = IdleCredentialWake {
+            scope,
+            delay: Duration::ZERO,
+        };
+        let world = super::super::simulation::World::new(780);
+        super::super::effects::scope(world, || -> Result<()> {
+            assert!(take_idle_credential_wakes()?.is_empty());
+            assert!(matches!(readmit_idle_credential(&wake), Err(error)
+                if error.to_string() == "native idle credential owner missing"));
+            // Entering from an actual HTTP sink is refused before even the
+            // missing-owner lookup. A timer cannot borrow that request's work.
+            let sink = Sink::new();
+            let result = sink.run(|| readmit_idle_credential(&wake));
+            assert!(matches!(result, Err(error)
+                if error.to_string() == "native idle credential entered from a request"));
+            assert!(take_idle_credential_wakes()?.is_empty());
+            Ok(())
+        })
+    }
 
     #[test]
     fn prerequisite_only_selection_cannot_capture_or_consume_an_original() -> Result<()> {

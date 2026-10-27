@@ -8,6 +8,455 @@ use super::{
 };
 use day2_capabilities::Digest;
 
+fn diagnostic_expression(expression: &syn::Expr) -> Option<String> {
+    Some(match expression {
+        syn::Expr::Path(value) => value
+            .path
+            .segments
+            .iter()
+            .map(|part| part.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+        syn::Expr::Field(value) => {
+            let syn::Member::Named(member) = &value.member else {
+                return None;
+            };
+            format!("{}.{}", diagnostic_expression(&value.base)?, member)
+        }
+        syn::Expr::Reference(value) if value.mutability.is_none() => {
+            format!("&{}", diagnostic_expression(&value.expr)?)
+        }
+        syn::Expr::Call(value) => format!(
+            "{}({})",
+            diagnostic_expression(&value.func)?,
+            value
+                .args
+                .iter()
+                .map(diagnostic_expression)
+                .collect::<Option<Vec<_>>>()?
+                .join(",")
+        ),
+        syn::Expr::MethodCall(value) => format!(
+            "{}.{}({})",
+            diagnostic_expression(&value.receiver)?,
+            value.method,
+            value
+                .args
+                .iter()
+                .map(diagnostic_expression)
+                .collect::<Option<Vec<_>>>()?
+                .join(",")
+        ),
+        syn::Expr::Closure(value) if value.inputs.len() == 1 => {
+            let syn::Pat::Ident(input) = &value.inputs[0] else {
+                return None;
+            };
+            format!("|{}|{}", input.ident, diagnostic_expression(&value.body)?)
+        }
+        syn::Expr::Block(value) if value.block.stmts.len() == 1 => {
+            let syn::Stmt::Expr(value, None) = &value.block.stmts[0] else {
+                return None;
+            };
+            diagnostic_expression(value)?
+        }
+        _ => return None,
+    })
+}
+
+fn actual_peer_diagnostic_fields(source: &str, storage: bool) -> bool {
+    let syntax = syn::parse_file(source).unwrap();
+    let Some(function) = syntax.items.iter().find_map(|item| {
+        let syn::Item::Impl(implementation) = item else {
+            return None;
+        };
+        implementation.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(function) if function.sig.ident == "historical_peer_data" => {
+                Some(function)
+            }
+            _ => None,
+        })
+    }) else {
+        return false;
+    };
+    if function.sig.inputs.len() != 1
+        || function.sig.asyncness.is_some()
+        || !matches!(&function.sig.inputs[0], syn::FnArg::Receiver(receiver)
+            if receiver.reference.is_some() && receiver.mutability.is_none())
+    {
+        return false;
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::Struct(data), None)) = function.block.stmts.last() else {
+        return false;
+    };
+    let prefix = if storage { "super::super" } else { "super" };
+    let remote = if storage { "statement" } else { "self.remote" };
+    let remote_incarnation = format!(
+        "{prefix}::peer_enrollment_diagnostic_commitment(&{remote}.certificate,&{remote}.stage)"
+    );
+    let remote_original = format!("request_diagnostic_commitment(&{remote}.original.domain).ok()");
+    let expected = [
+        ("local_role", "Some(self.local.stage.data.role)".to_owned()),
+        (
+            "remote_role",
+            if storage {
+                "remote.map(|statement|statement.stage.data.role)".into()
+            } else {
+                "Some(self.remote.stage.data.role)".into()
+            },
+        ),
+        (
+            "local_enrolled_incarnation",
+            format!(
+                "{prefix}::peer_enrollment_diagnostic_commitment(&self.local.certificate,&self.local.stage)"
+            ),
+        ),
+        (
+            "local_request_original",
+            "request_diagnostic_commitment(&self.local.original.domain).ok()".to_owned(),
+        ),
+        (
+            "remote_enrolled_incarnation",
+            if storage {
+                format!("remote.and_then(|statement|{remote_incarnation})")
+            } else {
+                remote_incarnation
+            },
+        ),
+        (
+            "remote_request_original",
+            if storage {
+                format!("remote.and_then(|statement|{remote_original})")
+            } else {
+                remote_original
+            },
+        ),
+        (
+            "exchange_commitment",
+            "self.exchange.digest().ok()".to_owned(),
+        ),
+        (
+            "exchange_sequence",
+            "Some(self.exchange.sequence)".to_owned(),
+        ),
+    ];
+    let fields_match = data.fields.len() == expected.len()
+        && data
+            .fields
+            .iter()
+            .zip(expected)
+            .all(|(field, (name, value))| {
+                matches!(&field.member, syn::Member::Named(member) if member == name)
+                    && diagnostic_expression(&field.expr).as_deref() == Some(value.as_str())
+            });
+    let preceding = &function.block.stmts[..function.block.stmts.len() - 1];
+    fields_match
+        && if storage {
+            matches!(preceding, [syn::Stmt::Item(syn::Item::Use(_)), syn::Stmt::Local(linux), syn::Stmt::Local(unsupported)]
+            if linux.init.as_ref().and_then(|value| diagnostic_expression(&value.expr)).as_deref() == Some("Some(self.peer.statement())")
+            && unsupported.init.as_ref().and_then(|value| diagnostic_expression(&value.expr)).as_deref() == Some("None"))
+        } else {
+            matches!(preceding, [syn::Stmt::Item(syn::Item::Use(_))])
+        }
+}
+
+#[test]
+fn historical_peer_records_use_the_actual_verified_phase_originals_and_exchange() {
+    for (source, storage) in [
+        (include_str!("storage_peer/continuation.rs"), true),
+        (include_str!("serving_peer.rs"), false),
+    ] {
+        assert!(actual_peer_diagnostic_fields(source, storage));
+        let (prefix, body) = source.split_once("fn historical_peer_data(").unwrap();
+        for (before, after) in [
+            (
+                "self.local.original.domain",
+                "self.owner.local.original.domain",
+            ),
+            ("self.local.stage", "self.owner.local.stage"),
+            (
+                "self.exchange.digest()",
+                "self.exchange.request.binding.clone()",
+            ),
+            ("self.exchange.sequence", "self.owner.disposition"),
+            (
+                if storage {
+                    "self.peer.statement()"
+                } else {
+                    "self.remote.original.domain"
+                },
+                if storage {
+                    "self.owner.peer.statement()"
+                } else {
+                    "self.local.original.domain"
+                },
+            ),
+        ] {
+            let changed = body.replacen(before, after, 1);
+            assert_ne!(changed, body);
+            assert!(!actual_peer_diagnostic_fields(
+                &format!("{prefix}fn historical_peer_data({changed}"),
+                storage
+            ));
+        }
+        let changed = body.replacen("use crate::", "self.check()?; use crate::", 1);
+        assert!(!actual_peer_diagnostic_fields(
+            &format!("{prefix}fn historical_peer_data({changed}"),
+            storage
+        ));
+    }
+}
+
+#[test]
+fn peer_record_maximum_fixture_is_bounded_history_only() {
+    let record = serde_json::to_value(super::PeerRequestDiagnosticData::maximal_fixture()).unwrap();
+    assert_eq!(record["exchange_sequence"], u64::MAX);
+    for name in [
+        "local_enrolled_incarnation",
+        "remote_enrolled_incarnation",
+        "local_request_original",
+        "remote_request_original",
+        "exchange_commitment",
+    ] {
+        assert!(record[name].is_string());
+    }
+    assert!(serde_json::to_vec(&record).unwrap().len() < 1024);
+}
+
+#[test]
+fn peer_enrollment_commitment_joins_owner_identity_without_using_request_timestamps() {
+    use super::{
+        NativeRole,
+        protocol::{RuntimeBinding, SignedStage, StageData, StagePurpose},
+    };
+    // Serialized protocol DATA only; this constructs no actual enrolled owner.
+    let key = KeyOwner::generate().unwrap();
+    let certificate = IssuerCertificate {
+        data: IssuerData {
+            policy: Digest::new(b"peer diagnostic policy"),
+            root_version: "root-one".into(),
+            nonce: Digest::new(b"issuer nonce"),
+            public_key: key.public(),
+            process: process(Digest::new(b"issuer code")),
+            provisioner: process(Digest::new(b"provisioner code")),
+        },
+        signature: "historical fixture data only".into(),
+    };
+    let stage = SignedStage {
+        data: StageData {
+            issuer: certificate.digest().unwrap(),
+            policy: certificate.data.policy.clone(),
+            role: NativeRole::AppHost,
+            purpose: StagePurpose::CurrentRole,
+            public_key: key.public(),
+            challenge: Digest::new(b"challenge"),
+            request: Digest::new(b"request"),
+            process: process(Digest::new(b"app code")),
+            runtime: RuntimeBinding {
+                container: crate::security_epoch::runtime_profile::ContainerFacts {
+                    pod_name: "app".into(),
+                    pod_uid: "pod-one".into(),
+                    node_name: "node".into(),
+                    container_name: "app".into(),
+                    container_id: "a".repeat(64),
+                    image: Digest::new(b"admitted image"),
+                    restart_count: 0,
+                },
+                node_uid: "node-one".into(),
+                boot: "boot-one".into(),
+            },
+            origin_ns: 1,
+            deadline_ns: 5,
+        },
+        signature: "historical fixture data only".into(),
+    };
+    let expected = Digest::of(&(
+        "day2-native-enrollment-owner-v1",
+        certificate.digest().unwrap(),
+        NativeRole::AppHost,
+        key.public(),
+        &stage.data.process,
+        &stage.data.runtime,
+    ))
+    .unwrap();
+    assert_eq!(
+        super::peer_enrollment_diagnostic_commitment(&certificate, &stage),
+        Some(expected.clone())
+    );
+    let mut later_request = stage.clone();
+    later_request.data.request = Digest::new(b"another request");
+    later_request.data.challenge = Digest::new(b"another challenge");
+    later_request.data.origin_ns += 10;
+    later_request.data.deadline_ns += 10;
+    assert_eq!(
+        super::peer_enrollment_diagnostic_commitment(&certificate, &later_request),
+        Some(expected.clone())
+    );
+    for change in 0..4 {
+        let mut changed = stage.clone();
+        match change {
+            0 => changed.data.role = NativeRole::EpochController,
+            1 => changed.data.public_key = "different admitted key".into(),
+            2 => changed.data.process.start_ticks += 1,
+            3 => changed.data.runtime.container.pod_uid = "replacement pod".into(),
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            super::peer_enrollment_diagnostic_commitment(&certificate, &changed),
+            Some(expected.clone())
+        );
+    }
+    let mut changed = certificate;
+    changed.data.nonce = Digest::new(b"replacement issuer");
+    assert_ne!(
+        super::peer_enrollment_diagnostic_commitment(&changed, &stage),
+        Some(expected)
+    );
+}
+
+fn actual_diagnostic_binding(source: &str) -> bool {
+    fn fields(expression: &syn::Expr, names: &[&str]) -> bool {
+        match (expression, names.split_last()) {
+            (syn::Expr::Path(path), Some((name, []))) => path.path.is_ident(name),
+            (syn::Expr::Field(field), Some((name, rest))) => {
+                matches!(&field.member,
+                syn::Member::Named(actual) if actual == name)
+                    && fields(&field.base, rest)
+            }
+            _ => false,
+        }
+    }
+    let syntax = syn::parse_file(source).unwrap();
+    let Some(function) = syntax.items.iter().find_map(|item| {
+        let syn::Item::Impl(implementation) = item else {
+            return None;
+        };
+        if !matches!(&*implementation.self_ty, syn::Type::Path(path)
+            if path.path.segments.len() == 1 && path.path.segments[0].ident == "EnrolledRoleStage")
+        {
+            return None;
+        }
+        implementation.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(function) if function.sig.ident == "diagnostic_progress" => {
+                Some(function)
+            }
+            _ => None,
+        })
+    }) else {
+        return false;
+    };
+    let [
+        syn::Stmt::Local(first),
+        syn::Stmt::Local(issuer),
+        syn::Stmt::Expr(last, None),
+    ] = function.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    if !matches!(&first.pat, syn::Pat::Ident(name) if name.ident == "progress")
+        || !first.attrs.is_empty()
+        || !matches!(last, syn::Expr::Path(path) if path.path.is_ident("progress"))
+        || !matches!(&issuer.pat, syn::Pat::Ident(name) if name.ident == "progress")
+        || issuer.attrs.len() != 1
+    {
+        return false;
+    }
+    let Some(first) = &first.init else {
+        return false;
+    };
+    let syn::Expr::MethodCall(bind) = &*first.expr else {
+        return false;
+    };
+    let Some(issuer) = &issuer.init else {
+        return false;
+    };
+    let syn::Expr::MethodCall(join) = &*issuer.expr else {
+        return false;
+    };
+    if join.method != "with_issuer_admission_data"
+        || join.args.len() != 1
+        || !matches!(&*join.receiver, syn::Expr::Path(path) if path.path.is_ident("progress"))
+    {
+        return false;
+    }
+    let syn::Expr::MethodCall(known) = &join.args[0] else {
+        return false;
+    };
+    let syn::Expr::Call(digest) = &*known.receiver else {
+        return false;
+    };
+    if known.method != "ok"
+        || !known.args.is_empty()
+        || !matches!(&*digest.func, syn::Expr::Path(path)
+            if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["Digest", "of"])
+        || digest.args.len() != 1
+        || !matches!(&digest.args[0], syn::Expr::Reference(value)
+            if value.mutability.is_none() && fields(&value.expr, &["self", "owner", "admission"]))
+    {
+        return false;
+    }
+    if bind.method != "with_enrollment_data" || bind.args.len() != 6 {
+        return false;
+    }
+    for (index, field, cloned) in [
+        (0, &["self", "owner", "incarnation"][..], true),
+        (1, &["self", "owner", "diagnostic_producer"][..], true),
+        (2, &["self", "owner", "diagnostic_owner_ordinal"][..], false),
+        (3, &["self", "diagnostic_request_ordinal"][..], false),
+        (4, &["self", "owner", "role"][..], false),
+        (5, &["self", "purpose"][..], false),
+    ] {
+        let actual = &bind.args[index];
+        let valid = if cloned {
+            matches!(actual, syn::Expr::MethodCall(call) if call.method == "clone"
+                && call.args.is_empty() && fields(&call.receiver, field))
+        } else {
+            fields(actual, field)
+        };
+        if !valid {
+            return false;
+        }
+    }
+    let syn::Expr::MethodCall(progress) = &*bind.receiver else {
+        return false;
+    };
+    let syn::Expr::MethodCall(borrow) = &*progress.receiver else {
+        return false;
+    };
+    progress.method == "diagnostic_progress"
+        && progress.args.is_empty()
+        && borrow.method == "as_ref"
+        && borrow.args.is_empty()
+        && fields(&borrow.receiver, &["self", "acquisition"])
+}
+
+#[test]
+fn historical_diagnostics_join_the_actual_owner_and_saved_request_ordinal() {
+    let source = include_str!("owner.rs");
+    assert!(actual_diagnostic_binding(source));
+    let (prefix, body) = source.split_once("fn diagnostic_progress(").unwrap();
+    for (before, after) in [
+        ("self.owner.incarnation.clone()", "unrelated.clone()"),
+        ("self.owner.diagnostic_producer.clone()", "None"),
+        (
+            "self.owner.diagnostic_owner_ordinal",
+            "self.owner.diagnostic_request_counter",
+        ),
+        (
+            "self.diagnostic_request_ordinal",
+            "self.owner.diagnostic_request_counter",
+        ),
+        ("self.owner.role", "NativeRole::EpochController"),
+        ("self.purpose", "StagePurpose::CurrentRole"),
+        ("self.owner.admission", "self.owner.certificate"),
+    ] {
+        let changed = body.replacen(before, after, 1);
+        assert_ne!(changed, body);
+        assert!(!actual_diagnostic_binding(&format!(
+            "{prefix}fn diagnostic_progress({changed}"
+        )));
+    }
+}
+
 fn enrolled_self_reborrow_shape(source: &str) -> bool {
     use syn::visit::Visit;
 
@@ -391,6 +840,9 @@ fn owned_request_borrow_shape(source: &str) -> bool {
                 && matches!(&call.args[0], syn::Expr::Reference(reference)
                     if reference.mutability.is_some() && field(&reference.expr, "acquisition"))
         })
+        && stage.fields.iter().any(|value|
+            matches!(&value.member, syn::Member::Named(name) if name == "diagnostic_request_ordinal")
+            && field(&value.expr, "diagnostic_request_ordinal"))
     });
     #[derive(Default)]
     struct CopiedOriginal(bool);
@@ -467,6 +919,10 @@ fn http_request_guard_rejects_new_clocks_weaker_lifetimes_and_skipped_postchecks
         ("request.role == self.role", "true"),
         ("request.process == std::process::id()", "true"),
         ("request.thread == std::thread::current().id()", "true"),
+        (
+            "diagnostic_request_ordinal: request.diagnostic_request_ordinal",
+            "diagnostic_request_ordinal: self.diagnostic_request_counter",
+        ),
     ] {
         let changed = source.replacen(before, after, 1);
         assert_ne!(changed, source);

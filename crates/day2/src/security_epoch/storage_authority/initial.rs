@@ -343,6 +343,7 @@ impl InitialStorageContinuity {
         let peer = trace.measure(ServingStep::PeerAccept, || {
             rendezvous.accept_current(file.controller_stage_after_check()?, None)
         })?;
+        trace.bind_peer_data(peer.historical_peer_data());
         let phase = CurrentControllerStoragePhase {
             file,
             peer: PeerFence::Current(Box::new(peer)),
@@ -862,6 +863,12 @@ impl CurrentAppStorageBootstrapPhase<'_> {
 }
 
 impl CurrentAppStoragePhase<'_> {
+    pub(in crate::security_epoch) fn historical_peer_data(
+        &self,
+    ) -> super::super::native_enrollment::PeerRequestDiagnosticData {
+        self.peer.historical_peer_data()
+    }
+
     pub(in crate::security_epoch) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -909,6 +916,15 @@ impl CurrentAppStoragePhase<'_> {
 }
 
 impl<'role> CurrentControllerStoragePhase<'_, 'role> {
+    pub(in crate::security_epoch) fn historical_peer_data(
+        &self,
+    ) -> Option<super::super::native_enrollment::PeerRequestDiagnosticData> {
+        match &self.peer {
+            PeerFence::Current(peer) => Some(peer.historical_peer_data()),
+            PeerFence::Retained(_) => None,
+        }
+    }
+
     pub(in crate::security_epoch) fn check(&mut self) -> Result<()> {
         use crate::security_epoch::self_check_profile::{self, PhysicalStep};
         let _profile = self_check_profile::enter(self_check_profile::Category::PhysicalLocal);

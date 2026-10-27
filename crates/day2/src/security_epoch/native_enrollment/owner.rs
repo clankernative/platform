@@ -28,8 +28,11 @@ use std::{
     time::Duration,
 };
 
+mod request_exclusion;
 mod serving;
 mod storage;
+pub(crate) use request_exclusion::{IdleCredentialAdmission, IdleCredentialPublication};
+use request_exclusion::{LiveRequest, RequestRegistry};
 
 struct OwnerIdentity;
 
@@ -39,7 +42,11 @@ pub(crate) struct EnrolledProcessRoleOwner {
     key: KeyOwner,
     certificate: IssuerCertificate,
     incarnation: Digest,
+    diagnostic_producer: Option<Digest>,
+    diagnostic_owner_ordinal: Option<u64>,
+    diagnostic_request_counter: Option<u64>,
     identity: Rc<OwnerIdentity>,
+    requests: Rc<RequestRegistry>,
     process: u32,
     thread: ThreadId,
     refused: bool,
@@ -74,6 +81,7 @@ pub(crate) struct EnrolledRoleStage<'a> {
     purpose: StagePurpose,
     acquisition: StageAcquisition<'a>,
     deadline: Duration,
+    diagnostic_request_ordinal: Option<u64>,
 }
 
 /// Exclusive, short borrow of an actual enrolled stage for storage work.
@@ -88,12 +96,15 @@ pub(crate) struct EnrolledStorageStage<'stage, 'role> {
 /// permission: every use must borrow the SAME live enrolled owner below.
 pub(crate) struct EnrolledCurrentRequest {
     identity: Weak<OwnerIdentity>,
+    live_request: LiveRequest,
     incarnation: Digest,
     role: NativeRole,
     process: u32,
     thread: ThreadId,
     acquisition: NativeAcquisition,
+    diagnostic_request_ordinal: Option<u64>,
     finished: bool,
+    diagnostic_data: super::EnrolledRequestDiagnosticData,
     local: PhantomData<Rc<()>>,
 }
 
@@ -197,12 +208,18 @@ const _: () = {
 impl Drop for EnrolledCurrentRequest {
     fn drop(&mut self) {
         if !self.finished {
+            self.live_request.refuse();
             self.acquisition.refuse();
         }
     }
 }
 
 impl EnrolledCurrentRequest {
+    /// Historical labels from this actual constructor, never a current check.
+    pub(crate) fn historical_diagnostic_data(&self) -> super::EnrolledRequestDiagnosticData {
+        self.diagnostic_data.clone()
+    }
+
     /// The enclosing driver calls this only after its actual known settlement,
     /// finite response and final postchecks. No child borrow can survive this
     /// consuming call. An error or cancellation keeps shared refusal terminal.
@@ -216,6 +233,7 @@ impl EnrolledCurrentRequest {
     }
 
     pub(crate) fn refuse(&mut self) {
+        self.live_request.refuse();
         self.acquisition.refuse();
     }
 }
@@ -283,13 +301,19 @@ impl EnrolledProcessRoleOwner {
             ))?;
             acquisition.remaining()?;
             policy_file.check(&mut acquisition)?;
+            let (diagnostic_producer, diagnostic_owner_ordinal) =
+                crate::security_epoch::admission_work::register_owner();
             Ok(Self {
                 policy,
                 role,
                 key,
                 certificate,
                 incarnation,
+                diagnostic_producer,
+                diagnostic_owner_ordinal,
+                diagnostic_request_counter: Some(0),
                 identity: Rc::new(OwnerIdentity),
+                requests: RequestRegistry::new(),
                 process: std::process::id(),
                 thread: std::thread::current().id(),
                 refused: false,
@@ -326,14 +350,22 @@ impl EnrolledProcessRoleOwner {
     /// original. The live enrolled process/role is never moved into this value.
     pub(crate) fn begin_current_request(&mut self) -> Result<EnrolledCurrentRequest> {
         let stage = self.begin_current_stage()?;
+        let live_request = stage.owner.requests.start()?;
+        let diagnostic_data = stage
+            .diagnostic_progress()
+            .historical_request_binding_data()
+            .unwrap_or_else(|_| super::EnrolledRequestDiagnosticData::unknown());
         Ok(EnrolledCurrentRequest {
             identity: Rc::downgrade(&stage.owner.identity),
+            live_request,
             incarnation: stage.owner.incarnation.clone(),
             role: stage.owner.role,
             process: stage.owner.process,
             thread: stage.owner.thread,
             acquisition: stage.acquisition.into_owned()?,
+            diagnostic_request_ordinal: stage.diagnostic_request_ordinal,
             finished: false,
+            diagnostic_data,
             local: PhantomData,
         })
     }
@@ -342,6 +374,7 @@ impl EnrolledProcessRoleOwner {
         &mut self,
         mut start: UnselectedShellRequest,
     ) -> Result<EnrolledCurrentRequest> {
+        self.requests.allow_request()?;
         let result = (|| {
             self.check_local()?;
             ensure!(
@@ -370,19 +403,33 @@ impl EnrolledProcessRoleOwner {
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("native_enrollment_request_already_bound"))?;
                 let acquisition = self.clock.bind_captured_current(original)?;
+                let diagnostic_request_ordinal = self
+                    .diagnostic_request_counter
+                    .and_then(|n| n.checked_add(1));
+                self.diagnostic_request_counter = diagnostic_request_ordinal;
                 let mut request = EnrolledCurrentRequest {
                     identity: Rc::downgrade(&self.identity),
+                    live_request: self.requests.start()?,
                     incarnation: self.incarnation.clone(),
                     role: self.role,
                     process: self.process,
                     thread: self.thread,
                     acquisition,
+                    diagnostic_request_ordinal,
                     finished: false,
+                    diagnostic_data: super::EnrolledRequestDiagnosticData::unknown(),
                     local: PhantomData,
                 };
                 // This checks actual retained task/namespace/process and issuer
                 // handles before any caller can map expiry or use the request.
-                self.borrow_current_request(&mut request)?.check()?;
+                request.diagnostic_data = {
+                    let mut stage = self.borrow_current_request(&mut request)?;
+                    stage.check()?;
+                    stage
+                        .diagnostic_progress()
+                        .historical_request_binding_data()
+                        .unwrap_or_else(|_| super::EnrolledRequestDiagnosticData::unknown())
+                };
                 Ok(request)
             }
         })();
@@ -399,6 +446,7 @@ impl EnrolledProcessRoleOwner {
         &'request mut self,
         request: &'request mut EnrolledCurrentRequest,
     ) -> Result<EnrolledRoleStage<'request>> {
+        self.requests.allow_request()?;
         let result = (|| {
             self.check_local()?;
             ensure!(!request.finished, "native_enrollment_request_finished");
@@ -430,6 +478,7 @@ impl EnrolledProcessRoleOwner {
             purpose: StagePurpose::CurrentRole,
             acquisition: StageAcquisition::borrowed(&mut request.acquisition),
             deadline,
+            diagnostic_request_ordinal: request.diagnostic_request_ordinal,
         };
         stage.check()?;
         Ok(stage)
@@ -456,6 +505,7 @@ impl EnrolledProcessRoleOwner {
     }
 
     fn begin_stage(&mut self, purpose: StagePurpose) -> Result<EnrolledRoleStage<'_>> {
+        self.requests.allow_request()?;
         #[cfg(not(target_os = "linux"))]
         {
             let _ = purpose;
@@ -493,7 +543,11 @@ impl EnrolledProcessRoleOwner {
                         "native_enrollment_self_changed"
                     );
                     let (_, deadline) = acquisition.interval_data()?;
-                    Ok((acquisition, deadline))
+                    let diagnostic_request_ordinal = self
+                        .diagnostic_request_counter
+                        .and_then(|n| n.checked_add(1));
+                    self.diagnostic_request_counter = diagnostic_request_ordinal;
+                    Ok((acquisition, deadline, diagnostic_request_ordinal))
                 }
             })();
             if result.is_err() {
@@ -501,12 +555,13 @@ impl EnrolledProcessRoleOwner {
             }
             #[cfg(target_os = "linux")]
             {
-                let (acquisition, deadline) = result?;
+                let (acquisition, deadline, diagnostic_request_ordinal) = result?;
                 let mut stage = EnrolledRoleStage {
                     owner: self,
                     purpose,
                     acquisition: StageAcquisition::owned(acquisition),
                     deadline,
+                    diagnostic_request_ordinal,
                 };
                 stage.check()?;
                 Ok(stage)
@@ -518,7 +573,9 @@ impl EnrolledProcessRoleOwner {
         &mut self,
         expected: NativeRole,
     ) -> Result<EnrolledOriginalClock> {
-        // Must remain the first operation, including before role/owner checks.
+        // A busy idle admission rejects before observing its actual winner.
+        // For an accepted original, capture still precedes role/owner checks.
+        self.requests.allow_request()?;
         let origin = boottime().inspect_err(|_| self.refused = true)?;
         let result = (|| {
             self.check_local()?;
@@ -554,7 +611,17 @@ impl EnrolledProcessRoleOwner {
         result
     }
 
+    fn require_role_data(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
+        let selected = self.policy.bootstrap.scope == *scope && self.role == role;
+        if !selected {
+            self.refused = true;
+            anyhow::bail!("native_enrollment_stage_selection_changed");
+        }
+        Ok(())
+    }
+
     fn check_local(&mut self) -> Result<()> {
+        self.requests.require_not_refused()?;
         ensure!(!self.refused, "native_enrollment_owner_refused");
         ensure!(
             self.process == std::process::id() && self.thread == std::thread::current().id(),
@@ -616,13 +683,22 @@ impl EnrolledRoleStage<'_> {
     }
 
     /// Historical sample DATA only; no clock read or new check/permission.
-    pub(in crate::security_epoch) fn diagnostic_progress(
-        &self,
-    ) -> crate::security_epoch::native_clock::AcquisitionProgress {
-        self.acquisition
+    pub(crate) fn diagnostic_progress(&self) -> super::AcquisitionProgress {
+        let progress = self
+            .acquisition
             .as_ref()
             .diagnostic_progress()
-            .with_enrollment_data(self.owner.incarnation.clone())
+            .with_enrollment_data(
+                self.owner.incarnation.clone(),
+                self.owner.diagnostic_producer.clone(),
+                self.owner.diagnostic_owner_ordinal,
+                self.diagnostic_request_ordinal,
+                self.owner.role,
+                self.purpose,
+            );
+        #[cfg(target_os = "linux")]
+        let progress = progress.with_issuer_admission_data(Digest::of(&self.owner.admission).ok());
+        progress
     }
 
     /// Closed ordinary-consumer gate. No caller-selected purpose or timeout.
@@ -867,7 +943,9 @@ impl EnrolledRoleStage<'_> {
             self.acquisition.as_mut().refuse();
             anyhow::bail!("native_enrollment_full_selection_changed");
         }
-        self.require_role_data(&policy.scope, role)
+        self.owner
+            .require_role_data(&policy.scope, role)
+            .inspect_err(|_| self.acquisition.as_mut().refuse())
     }
 
     /// DATA from this actual checked executor, never a current grant factory.
@@ -877,18 +955,10 @@ impl EnrolledRoleStage<'_> {
     }
 
     pub(crate) fn check_for(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
-        self.require_role_data(scope, role)?;
+        self.owner
+            .require_role_data(scope, role)
+            .inspect_err(|_| self.acquisition.as_mut().refuse())?;
         self.check()
-    }
-
-    fn require_role_data(&mut self, scope: &AuthorityScope, role: NativeRole) -> Result<()> {
-        let selected = self.owner.policy.bootstrap.scope == *scope && self.owner.role == role;
-        if !selected {
-            self.owner.refused = true;
-            self.acquisition.as_mut().refuse();
-            anyhow::bail!("native_enrollment_stage_selection_changed");
-        }
-        Ok(())
     }
 
     pub(crate) fn check(&mut self) -> Result<()> {

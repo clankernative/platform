@@ -29,6 +29,8 @@ mod controller_serving;
 pub(super) struct ServingObservation {
     pub(super) binding: Digest,
     pub(super) snapshot: Digest,
+    pub(super) request: Option<super::native_enrollment::EnrolledRequestDiagnosticData>,
+    pub(super) peer: Option<super::native_enrollment::PeerRequestDiagnosticData>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -585,6 +587,38 @@ impl AppStorageBootstrap {
 }
 
 impl ActiveAppStorageContinuity {
+    pub(in crate::security_epoch) fn take_counter_readmission_delay(
+        &mut self,
+    ) -> Result<Option<std::time::Duration>> {
+        ensure!(self.valid, "active_app_storage_refused");
+        self.counter.take_readmission_delay()
+    }
+
+    pub(in crate::security_epoch) fn readmit_counter_idle(
+        &mut self,
+        mut stage: super::native_enrollment::EnrolledRoleStage<'_>,
+        mut publication: super::native_enrollment::IdleCredentialPublication,
+    ) -> Result<()> {
+        ensure!(self.valid, "active_app_storage_refused");
+        let result = (|| {
+            self.storage.check_counter_admission(&mut stage)?;
+            let idle = publication.borrow_stage(&mut stage)?;
+            let pending = self.counter.prepare_readmission(
+                idle,
+                &self.policy,
+                &self.store,
+                day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
+            )?;
+            self.storage.check_counter_admission(&mut stage)?;
+            pending.publish(publication)
+        })();
+        if result.is_err() {
+            self.refuse();
+            self.counter.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn admit_counter(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -795,19 +829,34 @@ pub(super) fn activate_controller(
         let snapshot = activated.context("native_activation_observation_missing")?;
         let activation = super::journal::snapshot_digest(&snapshot)?;
         evidence.activated(&complete, &activation)?;
+        evidence.enter(super::controller::evidence::FailurePhase::CounterAdmission);
         // Cold provider admission is completed before the active Controller
         // escapes into its listener/request loop. It never spends an App or
         // Shell request's packet/physical waiting time or renews that request.
         let mut counter = super::authenticated_reads::CounterConnectionSlot::new();
-        let stage = owner.begin_current_stage()?;
-        let mut physical = storage.begin_pending_current_controller()?.acquire(stage)?;
-        counter.admit(
-            physical.controller_stage()?,
-            policy,
-            selection,
-            day2_capabilities::security_epoch::bootstrap::NativeRole::EpochController,
-        )?;
-        physical.finish_controller_known()?;
+        let stage = owner
+            .begin_current_stage()
+            .map_err(|error| PreparationFailure::at(PreparationStep::CounterRoleStage, error))?;
+        let mut physical = storage
+            .begin_pending_current_controller()
+            .map_err(|error| PreparationFailure::at(PreparationStep::CounterPendingFile, error))?
+            .acquire(stage)
+            .map_err(|error| {
+                PreparationFailure::at(PreparationStep::CounterPhysicalAcquire, error)
+            })?;
+        counter
+            .admit(
+                physical.controller_stage().map_err(|error| {
+                    PreparationFailure::at(PreparationStep::CounterStage, error)
+                })?,
+                policy,
+                selection,
+                day2_capabilities::security_epoch::bootstrap::NativeRole::EpochController,
+            )
+            .map_err(|error| PreparationFailure::at(PreparationStep::CounterAdmit, error))?;
+        physical.finish_controller_known().map_err(|error| {
+            PreparationFailure::at(PreparationStep::CounterPhysicalFinish, error)
+        })?;
         Ok((complete, activation, counter))
     })();
     match result {

@@ -29,6 +29,12 @@ pub(super) struct CounterMaterial {
     valid: bool,
 }
 
+// Dispatch pacing DATA only. Leave time for the existing 30-second socket
+// delivery bound and a separate five-second authentication operation. This
+// does not extend either bound or the actual credential expiry; delayed drain,
+// suspension or an earlier cap still makes re-admission refuse.
+const COUNTER_READMISSION_LEAD: Duration = Duration::from_secs(45);
+
 const _: () = {
     macro_rules! assert_not_impl {
         ($bound:path) => {{
@@ -51,6 +57,15 @@ const _: () = {
 };
 
 impl CounterMaterial {
+    /// Issue this hint once after successful admission, never on a request.
+    /// A runtime timer may wake maintenance from it, but only the actual idle
+    /// owner, original and old expiry checks can authorize re-admission.
+    pub(super) fn readmission_delay(&self, now: Duration) -> Duration {
+        self.deadline
+            .saturating_sub(COUNTER_READMISSION_LEAD)
+            .saturating_sub(now)
+    }
+
     pub(super) fn check(
         &mut self,
         acquisition: &mut NativeAcquisition,
@@ -511,6 +526,52 @@ mod tests {
             assert!(counter_deadline(Duration::from_secs(10), seconds).is_err());
         }
         assert!(counter_deadline(Duration::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn readmission_pacing_is_non_authorizing_and_never_moves_the_actual_expiry() {
+        // Lower material/clock DATA only; no idle native admission is forged.
+        for (latest, now, expected) in [
+            (100, 100, 255),
+            (100, 350, 5),
+            (100, 355, 0),
+            (355, 356, 0),
+            (355, 401, 0),
+        ] {
+            let material = CounterMaterial {
+                material: CredentialMaterial::from_bytes(b"controlled-secret".to_vec()).unwrap(),
+                deadline: Duration::from_secs(400),
+                latest: Duration::from_secs(latest),
+                valid: true,
+            };
+            for _ in 0..3 {
+                assert_eq!(
+                    material.readmission_delay(Duration::from_secs(now)),
+                    Duration::from_secs(expected)
+                );
+                assert_eq!(material.deadline, Duration::from_secs(400));
+                assert_eq!(material.latest, Duration::from_secs(latest));
+            }
+        }
+        let mut material = CounterMaterial {
+            material: CredentialMaterial::from_bytes(b"controlled-secret".to_vec()).unwrap(),
+            deadline: Duration::from_secs(400),
+            latest: Duration::from_secs(355),
+            valid: true,
+        };
+        assert_eq!(
+            material.readmission_delay(Duration::from_secs(355)),
+            Duration::ZERO
+        );
+        let mut expired = NativeAcquisition::fixture(
+            Digest::new(b"expired admission attempt"),
+            std::process::id(),
+            Duration::from_secs(400),
+            Duration::from_secs(5),
+        );
+        assert!(material.check(&mut expired, 5).is_err());
+        assert!(expired.remaining().is_err());
+        assert!(!material.valid);
     }
 
     #[test]

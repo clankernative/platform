@@ -3,15 +3,110 @@
 
 use super::{NativeSelection, OWNERS};
 use crate::security_epoch::native_enrollment::{
-    EnrolledCurrentRequest, EnrolledProcessRoleOwner, EnrolledRoleStage, NativeRole,
-    UnselectedShellRequest,
+    AdmissionWorkSnapshotData, EnrolledCurrentRequest, EnrolledProcessRoleOwner,
+    EnrolledRequestDiagnosticData, EnrolledRoleStage, NativeRole, UnselectedShellRequest,
+    cumulative_admission_work_data,
 };
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::security_epoch::AuthorityScope;
+use serde::Serialize;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Entry {
+    Http,
+    Autonomous,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Boundary {
+    Captured,
+    ShellBound,
+    CallbackBorrowed,
+    CallbackReturned,
+    ResponseLeased,
+    ResponseBorrowed,
+    Completed,
+    Refused,
+}
+
+struct Diagnostic {
+    entry: Entry,
+    native: EnrolledRequestDiagnosticData,
+    baseline: AdmissionWorkSnapshotData,
+}
+
+const JOIN_BYTES: usize = 8192;
+static JOIN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_join_sequence(sequence: &std::sync::atomic::AtomicU64) -> Option<u64> {
+    use std::sync::atomic::Ordering;
+    sequence
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+            previous.checked_add(1)
+        })
+        .ok()
+        .and_then(|previous| previous.checked_add(1))
+}
+
+// Pure serialization also serves DATA-only tests. Only emit_join below supplies
+// production material, obtained directly from the actual enrolled request/stage.
+fn join_line(
+    entry: Entry,
+    boundary: Boundary,
+    sequence: Option<u64>,
+    native: &impl Serialize,
+    before: &impl Serialize,
+    now: &impl Serialize,
+) -> Option<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Record<'a, T, B, A> {
+        format: &'static str,
+        sequence: Option<u64>,
+        entry: Entry,
+        boundary: Boundary,
+        native: &'a T,
+        admission_before: &'a B,
+        admission_now: &'a A,
+    }
+    let record = Record {
+        format: "day2_native_request_join_v1",
+        sequence,
+        entry,
+        boundary,
+        native,
+        admission_before: before,
+        admission_now: now,
+    };
+    let json = serde_json::to_string(&record).ok()?;
+    let line = format!("day2-native-request-join {json}\n");
+    (line.len() <= JOIN_BYTES).then(|| line.into_bytes())
+}
+
+fn emit_join(
+    entry: Entry,
+    boundary: Boundary,
+    native: Option<&EnrolledRequestDiagnosticData>,
+    baseline: &AdmissionWorkSnapshotData,
+) {
+    use std::io::Write;
+    let mut output = std::io::stderr().lock();
+    let now = cumulative_admission_work_data();
+    let sequence = next_join_sequence(&JOIN_SEQUENCE);
+    let Some(line) = join_line(entry, boundary, sequence, &native, baseline, &now) else {
+        return;
+    };
+    // Historical DATA, never a permission or successful-delivery oracle. Loss,
+    // overflow, missing joins and null native fields remain UNKNOWN to readers.
+    // Export does not check/sample authority, replace an original or alter its
+    // result. No actor, HTTP path, provider value or token enters this record.
+    let _ = output.write_all(&line);
+}
 
 // Capturing is already an attempt. Failure or unwind cannot return to Empty
 // and obtain a later origin for the same accepted operation.
@@ -71,9 +166,14 @@ enum Original {
     Selected {
         scope: AuthorityScope,
         kind: NativeRole,
+        entry: Entry,
+        baseline: AdmissionWorkSnapshotData,
         current: EnrolledCurrentRequest,
     },
-    Shell(UnselectedShellRequest),
+    Shell {
+        start: UnselectedShellRequest,
+        baseline: AdmissionWorkSnapshotData,
+    },
     // A sealed literal producer supplies no application or native authority.
     LiteralHealth,
     // An explicitly non-native profile has no enrolled role to borrow. This
@@ -101,6 +201,23 @@ impl Original {
     }
 }
 
+fn refuse_with_evidence(slot: &mut Slot<Original>) {
+    match std::mem::replace(slot, Slot::Refused) {
+        Slot::Live(Original::Selected {
+            entry,
+            current,
+            baseline,
+            ..
+        }) => {
+            let native = current.historical_diagnostic_data();
+            drop(current);
+            emit_join(entry, Boundary::Refused, Some(&native), &baseline);
+        }
+        Slot::Complete => *slot = Slot::Complete,
+        _ => {}
+    }
+}
+
 /// A routing handle to one slot, never a clone of its actual native original.
 /// A second callback cannot take an original held by the response lease.
 pub(super) struct Request {
@@ -125,10 +242,11 @@ impl Request {
         }
     }
 
-    pub(super) fn capture_app(&self, scope: &AuthorityScope) -> Result<()> {
+    pub(super) fn capture_app(&self, scope: &AuthorityScope, entry: Entry) -> Result<()> {
         ensure!(!self.refused.get(), "native request refused");
         let mut slot = self.slot.try_borrow_mut()?;
         slot.begin()?;
+        let baseline = cumulative_admission_work_data();
         let acquired = OWNERS.with(|owners| {
             let mut owners = owners.try_borrow_mut()?;
             let owners = owners
@@ -142,11 +260,28 @@ impl Request {
             role.begin_current_request()
         });
         match acquired {
-            Ok(current) => slot.install(Original::Selected {
-                scope: scope.clone(),
-                kind: NativeRole::AppHost,
-                current,
-            }),
+            Ok(current) => {
+                slot.install(Original::Selected {
+                    scope: scope.clone(),
+                    kind: NativeRole::AppHost,
+                    entry,
+                    baseline,
+                    current,
+                })?;
+                let Slot::Live(Original::Selected {
+                    current, baseline, ..
+                }) = &*slot
+                else {
+                    unreachable!("exclusive installed request")
+                };
+                emit_join(
+                    entry,
+                    Boundary::Captured,
+                    Some(&current.historical_diagnostic_data()),
+                    baseline,
+                );
+                Ok(())
+            }
             Err(error) => {
                 slot.refuse();
                 Err(error)
@@ -158,8 +293,9 @@ impl Request {
         ensure!(!self.refused.get(), "native request refused");
         let mut slot = self.slot.try_borrow_mut()?;
         slot.begin()?;
+        let baseline = cumulative_admission_work_data();
         match UnselectedShellRequest::capture() {
-            Ok(start) => slot.install(Original::Shell(start)),
+            Ok(start) => slot.install(Original::Shell { start, baseline }),
             Err(error) => {
                 slot.refuse();
                 Err(error)
@@ -197,12 +333,12 @@ impl Request {
     ) -> Result<T> {
         ensure!(!self.refused.get(), "native request refused");
         let mut slot = self.slot.try_borrow_mut()?;
-        if matches!(*slot, Slot::Live(Original::Shell(_))) {
+        if matches!(*slot, Slot::Live(Original::Shell { .. })) {
             ensure!(
                 kind == NativeRole::SecurityShell,
                 "native Shell request role changed"
             );
-            let Original::Shell(start) = slot.take()? else {
+            let Original::Shell { start, baseline } = slot.take()? else {
                 unreachable!("exclusive checked Shell original")
             };
             let current = match role.bind_shell_request(start) {
@@ -215,19 +351,51 @@ impl Request {
             *slot = Slot::Live(Original::Selected {
                 scope: selection.scope().clone(),
                 kind,
+                entry: Entry::Http,
+                baseline,
                 current,
             });
+            if let Slot::Live(Original::Selected {
+                current,
+                entry,
+                baseline,
+                ..
+            }) = &*slot
+            {
+                emit_join(
+                    *entry,
+                    Boundary::ShellBound,
+                    Some(&current.historical_diagnostic_data()),
+                    baseline,
+                );
+            }
         }
         let Slot::Live(original) = &mut *slot else {
             anyhow::bail!("native request unavailable")
         };
         // Exclude a foreign caller before observing or poisoning the winner.
         original.require(selection.scope(), kind)?;
-        let Original::Selected { current, .. } = original else {
+        let Original::Selected {
+            current,
+            entry,
+            baseline,
+            ..
+        } = original
+        else {
             unreachable!("checked selected request")
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut stage = role.borrow_current_request(current)?;
+            emit_join(
+                *entry,
+                Boundary::CallbackBorrowed,
+                stage
+                    .diagnostic_progress()
+                    .historical_request_binding_data()
+                    .ok()
+                    .as_ref(),
+                baseline,
+            );
             stage.check_selection(&selection.policy, &selection.store, kind)?;
             let value = operation(stage)?;
             ensure!(
@@ -236,6 +404,12 @@ impl Request {
             );
             // Reborrow the SAME original for final identity/clock checks. The
             // prior callback's actual stage has ended; no new clock is begun.
+            emit_join(
+                *entry,
+                Boundary::CallbackReturned,
+                Some(&current.historical_diagnostic_data()),
+                baseline,
+            );
             role.borrow_current_request(current)?.check_selection(
                 &selection.policy,
                 &selection.store,
@@ -246,12 +420,12 @@ impl Request {
         match result {
             Ok(result) => {
                 if result.is_err() {
-                    slot.refuse();
+                    refuse_with_evidence(&mut slot);
                 }
                 result
             }
             Err(panic) => {
-                slot.refuse();
+                refuse_with_evidence(&mut slot);
                 std::panic::resume_unwind(panic)
             }
         }
@@ -264,45 +438,87 @@ impl Request {
             anyhow::bail!("native request unavailable")
         };
         original.require(scope, kind)?;
-        let Original::Selected { current, .. } = slot.take()? else {
+        let Original::Selected {
+            current,
+            entry,
+            baseline,
+            ..
+        } = slot.take()?
+        else {
             unreachable!("checked selected request")
         };
-        Ok(Lease {
+        let native = current.historical_diagnostic_data();
+        let lease = Lease {
             held: Held {
                 slot: self.slot.clone(),
                 refused: self.refused.clone(),
                 current: Some(current),
+                diagnostic: Some(Diagnostic {
+                    entry,
+                    native,
+                    baseline,
+                }),
             },
-        })
+        };
+        if let Some(data) = &lease.held.diagnostic {
+            emit_join(
+                data.entry,
+                Boundary::ResponseLeased,
+                Some(&data.native),
+                &data.baseline,
+            );
+        }
+        Ok(lease)
     }
 
     pub(super) fn finish(&self) -> Result<()> {
         ensure!(!self.refused.get(), "native request refused");
         let original = self.slot.try_borrow_mut()?.take()?;
-        let result = match original {
-            Original::LiteralHealth | Original::NonNative => Ok(()),
-            Original::Shell(start) => start.finish(),
+        let (result, diagnostic) = match original {
+            Original::LiteralHealth | Original::NonNative => (Ok(()), None),
+            Original::Shell { start, .. } => (start.finish(), None),
             Original::Selected {
                 scope,
                 kind,
+                entry,
+                baseline,
                 current,
-            } => OWNERS.with(|owners| {
-                let mut owners = owners.try_borrow_mut()?;
-                let owners = owners
-                    .get_mut(scope.app.as_str())
-                    .context("native request owner missing")?;
-                ensure!(
-                    owners.kind == kind && owners.selection.scope() == &scope,
-                    "native request final owner changed"
-                );
-                let mut role = owners.role.try_borrow_mut()?;
-                current.finish(&mut role)
-            }),
+            } => {
+                let native = current.historical_diagnostic_data();
+                let result = OWNERS.with(|owners| {
+                    let mut owners = owners.try_borrow_mut()?;
+                    let owners = owners
+                        .get_mut(scope.app.as_str())
+                        .context("native request owner missing")?;
+                    ensure!(
+                        owners.kind == kind && owners.selection.scope() == &scope,
+                        "native request final owner changed"
+                    );
+                    let mut role = owners.role.try_borrow_mut()?;
+                    current.finish(&mut role)
+                });
+                (
+                    result,
+                    Some(Diagnostic {
+                        entry,
+                        native,
+                        baseline,
+                    }),
+                )
+            }
             #[cfg(test)]
-            Original::Model(mut model) => model.check(),
+            Original::Model(mut model) => (model.check(), None),
         };
         let mut slot = self.slot.try_borrow_mut()?;
         if let Err(error) = result {
+            if let Some(data) = &diagnostic {
+                emit_join(
+                    data.entry,
+                    Boundary::Refused,
+                    Some(&data.native),
+                    &data.baseline,
+                );
+            }
             slot.refuse();
             return Err(error);
         }
@@ -310,7 +526,16 @@ impl Request {
             !self.refused.get(),
             "native request refused during completion"
         );
-        slot.complete()
+        slot.complete()?;
+        if let Some(data) = &diagnostic {
+            emit_join(
+                data.entry,
+                Boundary::Completed,
+                Some(&data.native),
+                &data.baseline,
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn refuse(&self) {
@@ -318,7 +543,7 @@ impl Request {
         // actual original's RefCell borrow and catches an inner abort error.
         self.refused.set(true);
         if let Ok(mut slot) = self.slot.try_borrow_mut() {
-            slot.refuse();
+            refuse_with_evidence(&mut slot);
         }
     }
 
@@ -394,6 +619,7 @@ struct Held<S, T> {
     slot: Rc<RefCell<Slot<S>>>,
     refused: Rc<Cell<bool>>,
     current: Option<T>,
+    diagnostic: Option<Diagnostic>,
 }
 
 impl<S, T> Held<S, T> {
@@ -419,12 +645,25 @@ impl Lease {
         role: &'a mut EnrolledProcessRoleOwner,
     ) -> Result<EnrolledRoleStage<'a>> {
         self.held.check()?;
-        role.borrow_current_request(
+        let stage = role.borrow_current_request(
             self.held
                 .current
                 .as_mut()
                 .context("native request consumed")?,
-        )
+        )?;
+        if let Some(data) = &self.held.diagnostic {
+            emit_join(
+                data.entry,
+                Boundary::ResponseBorrowed,
+                stage
+                    .diagnostic_progress()
+                    .historical_request_binding_data()
+                    .ok()
+                    .as_ref(),
+                &data.baseline,
+            );
+        }
+        Ok(stage)
     }
 
     pub(super) fn finish(mut self, role: &mut EnrolledProcessRoleOwner) -> Result<()> {
@@ -434,19 +673,39 @@ impl Lease {
             .take()
             .context("native request consumed")?
             .finish(role)?;
-        self.held.complete()
+        self.held.complete()?;
+        if let Some(data) = self.held.diagnostic.take() {
+            emit_join(
+                data.entry,
+                Boundary::Completed,
+                Some(&data.native),
+                &data.baseline,
+            );
+        }
+        Ok(())
     }
 }
 
 impl<S, T> Drop for Held<S, T> {
     fn drop(&mut self) {
+        let mut incomplete = true;
         if let Ok(mut slot) = self.slot.try_borrow_mut() {
+            incomplete = !matches!(*slot, Slot::Complete);
             if !matches!(*slot, Slot::Complete) {
                 self.refused.set(true);
             }
             slot.refuse();
         } else {
             self.refused.set(true);
+        }
+        drop(self.current.take());
+        if incomplete && let Some(data) = self.diagnostic.take() {
+            emit_join(
+                data.entry,
+                Boundary::Refused,
+                Some(&data.native),
+                &data.baseline,
+            );
         }
     }
 }
@@ -535,6 +794,462 @@ mod tests {
         }
     }
 
+    #[test]
+    fn diagnostic_sequence_never_wraps_or_turns_overflow_into_zero() {
+        let sequence = std::sync::atomic::AtomicU64::new(u64::MAX - 1);
+        assert_eq!(next_join_sequence(&sequence), Some(u64::MAX));
+        assert_eq!(next_join_sequence(&sequence), None);
+        assert_eq!(next_join_sequence(&sequence), None);
+        let line = join_line(
+            Entry::Http,
+            Boundary::Captured,
+            None,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(line.strip_prefix(b"day2-native-request-join ").unwrap())
+                .unwrap();
+        assert!(record["sequence"].is_null());
+        assert!(record["native"].is_null());
+        assert!(record["admission_before"].is_null());
+        assert!(record["admission_now"].is_null());
+    }
+
+    #[test]
+    fn request_join_frames_are_bounded_data_and_preserve_unknown_fields_as_null() {
+        // Serialization DATA cannot construct an enrolled request or stage.
+        let native = serde_json::json!({"owner_ordinal": null, "request_ordinal": null});
+        let before = serde_json::json!({"sequence": 2, "complete": false, "loss": true});
+        let now = serde_json::json!({"sequence": 3, "complete": false, "loss": true});
+        for (entry, expected) in [(Entry::Http, "http"), (Entry::Autonomous, "autonomous")] {
+            let line =
+                join_line(entry, Boundary::Refused, Some(17), &native, &before, &now).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_slice(line.strip_prefix(b"day2-native-request-join ").unwrap())
+                    .unwrap();
+            assert_eq!(record["format"], "day2_native_request_join_v1");
+            assert_eq!(record["entry"], expected);
+            assert_eq!(record["boundary"], "refused");
+            assert_eq!(record["sequence"], 17);
+            assert_eq!(record["native"], native);
+            assert_eq!(record["admission_before"], before);
+            assert_eq!(record["admission_now"], now);
+            assert_eq!(record.as_object().unwrap().len(), 7);
+            assert!(line.len() <= JOIN_BYTES);
+        }
+        assert!(
+            join_line(
+                Entry::Http,
+                Boundary::Captured,
+                Some(1),
+                &"x".repeat(JOIN_BYTES),
+                &before,
+                &now,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn maximal_actual_counter_and_identity_schemas_fit_without_truncation() {
+        let native = EnrolledRequestDiagnosticData::maximal_fixture();
+        let before = AdmissionWorkSnapshotData::maximal_fixture();
+        let now = AdmissionWorkSnapshotData::maximal_fixture();
+        let expected = serde_json::json!({
+            "format": "day2_native_request_join_v1",
+            "sequence": u64::MAX,
+            "entry": "autonomous",
+            "boundary": "completed",
+            "native": &native,
+            "admission_before": &before,
+            "admission_now": &now,
+        });
+        let expected_bytes =
+            b"day2-native-request-join ".len() + serde_json::to_vec(&expected).unwrap().len() + 1;
+        let smallest_reviewed_bound = [8192, 12288]
+            .into_iter()
+            .find(|bound| *bound >= expected_bytes)
+            .expect("diagnostic schema exceeds reviewed bounds");
+        assert_eq!(
+            JOIN_BYTES, smallest_reviewed_bound,
+            "maximal actual frame is {expected_bytes} bytes"
+        );
+        let line = join_line(
+            Entry::Autonomous,
+            Boundary::Completed,
+            Some(u64::MAX),
+            &native,
+            &before,
+            &now,
+        )
+        .expect("complete actual counter schemas must not be truncated or silently omitted");
+        assert_eq!(line.len(), expected_bytes);
+        let record: serde_json::Value =
+            serde_json::from_slice(line.strip_prefix(b"day2-native-request-join ").unwrap())
+                .unwrap();
+        assert_eq!(record, expected);
+    }
+
+    fn direct_join_uses_actual_getter(body: &syn::Block, boundary: &str, receiver: &str) -> bool {
+        use syn::visit::Visit;
+        struct Joins<'a> {
+            boundary: &'a str,
+            receiver: &'a str,
+            count: usize,
+            valid: bool,
+        }
+        impl<'ast> Visit<'ast> for Joins<'_> {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("emit_join"))
+                    && call.args.len() == 4
+                    && matches!(&call.args[1], syn::Expr::Path(path)
+                        if path.path.segments.last().is_some_and(|part| part.ident == self.boundary))
+                {
+                    self.count += 1;
+                    if self.receiver == "stage" {
+                        let mut expression = &call.args[2];
+                        for expected in [
+                            "as_ref",
+                            "ok",
+                            "historical_request_binding_data",
+                            "diagnostic_progress",
+                        ] {
+                            let syn::Expr::MethodCall(getter) = expression else {
+                                self.valid = false;
+                                return;
+                            };
+                            self.valid &= getter.method == expected && getter.args.is_empty();
+                            expression = &getter.receiver;
+                        }
+                        self.valid &= matches!(expression, syn::Expr::Path(path) if path.path.is_ident("stage"));
+                    } else {
+                        self.valid &= matches!(&call.args[2], syn::Expr::Call(some)
+                            if matches!(&*some.func, syn::Expr::Path(path) if path.path.is_ident("Some"))
+                            && some.args.len() == 1
+                            && matches!(&some.args[0], syn::Expr::Reference(reference)
+                                if matches!(&*reference.expr, syn::Expr::MethodCall(getter)
+                                    if getter.method == "historical_diagnostic_data" && getter.args.is_empty()
+                                    && matches!(&*getter.receiver, syn::Expr::Path(path) if path.path.is_ident(self.receiver)))));
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut joins = Joins {
+            boundary,
+            receiver,
+            count: 0,
+            valid: true,
+        };
+        joins.visit_block(body);
+        joins.count == 1 && joins.valid
+    }
+
+    #[test]
+    fn capture_and_callback_joins_use_the_actual_current_request_and_stage() {
+        let source = include_str!("request.rs");
+        for (method, boundary, receiver) in [
+            ("capture_app", "Captured", "current"),
+            ("with_stage", "CallbackBorrowed", "stage"),
+            ("with_stage", "CallbackReturned", "current"),
+        ] {
+            let body = selected_body(source, Some("Request"), method);
+            assert!(direct_join_uses_actual_getter(&body, boundary, receiver));
+            let rendered: proc_macro2::TokenStream = syn::parse_quote!(#body);
+            let tokens = rendered.to_string();
+            let getter = if receiver == "stage" {
+                "diagnostic_progress"
+            } else {
+                "historical_diagnostic_data"
+            };
+            let wrong = tokens.replace(
+                &format!("{receiver} . {getter}"),
+                &format!("foreign . {getter}"),
+            );
+            assert_ne!(tokens, wrong);
+            assert!(!direct_join_uses_actual_getter(
+                &syn::parse_str(&wrong).unwrap(),
+                boundary,
+                receiver
+            ));
+            let removed = tokens.replace("emit_join", "ignore_join");
+            assert_ne!(tokens, removed);
+            assert!(!direct_join_uses_actual_getter(
+                &syn::parse_str(&removed).unwrap(),
+                boundary,
+                receiver
+            ));
+        }
+    }
+
+    fn callback_check_order(body: &syn::Block) -> Vec<String> {
+        use syn::visit::Visit;
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                // Runtime evaluates the receiver/arguments before the call.
+                syn::visit::visit_expr_method_call(self, call);
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "borrow_current_request" | "check_selection"
+                ) {
+                    self.0.push(call.method.to_string());
+                }
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                syn::visit::visit_expr_call(self, call);
+                if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("operation")) {
+                    self.0.push("operation".into());
+                } else if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("emit_join"))
+                    && let Some(syn::Expr::Path(path)) = call.args.iter().nth(1)
+                    && let Some(name) = path.path.segments.last()
+                    && matches!(
+                        name.ident.to_string().as_str(),
+                        "CallbackBorrowed" | "CallbackReturned"
+                    )
+                {
+                    self.0.push(name.ident.to_string());
+                }
+            }
+        }
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(body);
+        calls.0
+    }
+
+    #[test]
+    fn diagnostic_io_precedes_existing_checks_before_operation_and_return() {
+        let body = selected_body(include_str!("request.rs"), Some("Request"), "with_stage");
+        let expected = [
+            "borrow_current_request",
+            "CallbackBorrowed",
+            "check_selection",
+            "operation",
+            "CallbackReturned",
+            "borrow_current_request",
+            "check_selection",
+        ];
+        assert_eq!(callback_check_order(&body), expected);
+        use syn::visit::Visit;
+        struct Pairs<'a> {
+            boundary: &'a str,
+            pairs: Vec<(syn::Stmt, syn::Stmt)>,
+        }
+        impl<'ast> Visit<'ast> for Pairs<'_> {
+            fn visit_block(&mut self, block: &'ast syn::Block) {
+                for pair in block.stmts.windows(2) {
+                    if matches!(&pair[0], syn::Stmt::Expr(syn::Expr::Call(call), _)
+                        if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("emit_join"))
+                        && call.args.iter().nth(1).is_some_and(|argument|
+                            matches!(argument, syn::Expr::Path(path)
+                                if path.path.segments.last().is_some_and(|part| part.ident == self.boundary))))
+                    {
+                        self.pairs.push((pair[0].clone(), pair[1].clone()));
+                    }
+                }
+                syn::visit::visit_block(self, block);
+            }
+        }
+        for boundary in ["CallbackBorrowed", "CallbackReturned"] {
+            let mut pairs = Pairs {
+                boundary,
+                pairs: Vec::new(),
+            };
+            pairs.visit_block(&body);
+            assert_eq!(pairs.pairs.len(), 1);
+            let (export, check) = pairs.pairs.pop().unwrap();
+            let rendered: proc_macro2::TokenStream = syn::parse_quote!(#body);
+            let before: proc_macro2::TokenStream = syn::parse_quote!(#export #check);
+            let after: proc_macro2::TokenStream = syn::parse_quote!(#check #export);
+            let tokens = rendered.to_string();
+            let stale = tokens.replace(&before.to_string(), &after.to_string());
+            assert_ne!(tokens, stale);
+            assert_ne!(
+                callback_check_order(&syn::parse_str(&stale).unwrap()),
+                expected
+            );
+        }
+    }
+
+    fn response_owner_precedes_join(body: &syn::Block) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Order {
+            owned: bool,
+            joins: usize,
+            valid: bool,
+        }
+        impl<'ast> Visit<'ast> for Order {
+            fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+                // The initializer must finish before its destructor protects
+                // the actual moved request against diagnostic I/O/unwinding.
+                syn::visit::visit_stmt(self, statement);
+                if matches!(statement, syn::Stmt::Local(local)
+                    if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "lease")
+                    && local.init.as_ref().is_some_and(|init|
+                        matches!(&*init.expr, syn::Expr::Struct(value) if value.path.is_ident("Lease"))))
+                {
+                    self.owned = true;
+                }
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("emit_join"))
+                    && call.args.len() == 4
+                    && matches!(&call.args[1], syn::Expr::Path(path)
+                        if path.path.segments.last().is_some_and(|part| part.ident == "ResponseLeased"))
+                {
+                    self.joins += 1;
+                    self.valid &= self.owned;
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut order = Order {
+            valid: true,
+            ..Order::default()
+        };
+        order.visit_block(body);
+        order.valid && order.joins == 1
+    }
+
+    #[test]
+    fn response_lease_owns_cancellation_before_any_diagnostic_export() {
+        let body = selected_body(include_str!("request.rs"), Some("Request"), "take");
+        assert!(response_owner_precedes_join(&body));
+        let rendered: proc_macro2::TokenStream = syn::parse_quote!(#body);
+        let removed = rendered.to_string().replace("emit_join", "ignore_join");
+        let mut early: syn::Block = syn::parse_str(&removed).unwrap();
+        assert!(!response_owner_precedes_join(&early));
+        let position = early
+            .stmts
+            .iter()
+            .position(|statement| {
+                matches!(statement, syn::Stmt::Local(local)
+                if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "lease"))
+            })
+            .unwrap();
+        early.stmts.insert(
+            position,
+            syn::parse_quote!(emit_join(entry, Boundary::ResponseLeased, &native, &baseline);),
+        );
+        assert!(!response_owner_precedes_join(&early));
+    }
+
+    fn evidence_order(body: &syn::Block) -> Vec<String> {
+        use syn::visit::Visit;
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                syn::visit::visit_expr_method_call(self, call);
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "begin_current_request" | "finish" | "complete" | "write_all"
+                ) {
+                    self.0.push(call.method.to_string());
+                }
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                syn::visit::visit_expr_call(self, call);
+                let syn::Expr::Path(path) = &*call.func else {
+                    return;
+                };
+                if path.path.is_ident("cumulative_admission_work_data") {
+                    self.0.push("snapshot".into());
+                } else if path.path.is_ident("join_line") {
+                    let fresh = call.args.len() == 6
+                        && matches!(&call.args[5], syn::Expr::Reference(reference)
+                        if matches!(&*reference.expr, syn::Expr::Path(path) if path.path.is_ident("now")));
+                    self.0
+                        .push(if fresh { "fresh_frame" } else { "cached_frame" }.into());
+                } else if path.path.is_ident("drop") {
+                    self.0.push("drop".into());
+                } else if path.path.is_ident("emit_join") {
+                    if let Some(syn::Expr::Path(path)) = call.args.iter().nth(1)
+                        && let Some(name) = path.path.segments.last()
+                    {
+                        self.0.push(format!("emit:{}", name.ident));
+                    }
+                } else if path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    == ["UnselectedShellRequest", "capture"]
+                {
+                    self.0.push("capture".into());
+                }
+            }
+        }
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(body);
+        calls.0
+    }
+
+    #[test]
+    fn baseline_precedes_capture_and_terminal_frames_sample_after_actual_finish_or_drop() {
+        let source = include_str!("request.rs");
+        for (owner, method, expected) in [
+            (
+                Some("Request"),
+                "capture_app",
+                vec!["snapshot", "begin_current_request", "emit:Captured"],
+            ),
+            (
+                Some("Request"),
+                "capture_shell",
+                vec!["snapshot", "capture"],
+            ),
+            (
+                None,
+                "emit_join",
+                vec!["snapshot", "fresh_frame", "write_all"],
+            ),
+            (
+                Some("Lease"),
+                "finish",
+                vec!["finish", "complete", "emit:Completed"],
+            ),
+            (Some("Held"), "drop", vec!["drop", "emit:Refused"]),
+            (None, "refuse_with_evidence", vec!["drop", "emit:Refused"]),
+        ] {
+            assert_eq!(
+                evidence_order(&selected_body(source, owner, method)),
+                expected,
+                "{method}"
+            );
+        }
+        let mut late = selected_body(source, Some("Request"), "capture_app");
+        let local = |body: &syn::Block, name: &str| {
+            body.stmts
+                .iter()
+                .position(|statement| {
+                    matches!(statement, syn::Stmt::Local(local)
+                if matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == name))
+                })
+                .unwrap()
+        };
+        let before = local(&late, "baseline");
+        let after = local(&late, "acquired");
+        late.stmts.swap(before, after);
+        assert_ne!(
+            evidence_order(&late),
+            ["snapshot", "begin_current_request", "emit:Captured"]
+        );
+        let emit = selected_body(source, None, "emit_join");
+        let rendered: proc_macro2::TokenStream = syn::parse_quote!(#emit);
+        let tokens = rendered.to_string();
+        let cached = tokens.replace("& now", "baseline");
+        assert_ne!(tokens, cached);
+        assert_ne!(
+            evidence_order(&syn::parse_str(&cached).unwrap()),
+            ["snapshot", "fresh_frame", "write_all"]
+        );
+    }
+
     fn absent_scope() -> AuthorityScope {
         AuthorityScope {
             installation: "unenrolled-test".to_owned().try_into().unwrap(),
@@ -551,7 +1266,7 @@ mod tests {
             for role in [NativeRole::AppHost, NativeRole::SecurityShell] {
                 assert!(request.take(&absent_scope(), role).is_err());
             }
-            assert!(request.capture_app(&absent_scope()).is_err());
+            assert!(request.capture_app(&absent_scope(), Entry::Http).is_err());
             assert!(request.capture_shell().is_err());
             assert!(request.capture_model().is_err());
             if abort {
@@ -569,7 +1284,7 @@ mod tests {
     #[test]
     fn missing_native_supplier_cannot_downgrade_to_non_native_transport() {
         let request = Request::new();
-        assert!(request.capture_app(&absent_scope()).is_err());
+        assert!(request.capture_app(&absent_scope(), Entry::Http).is_err());
         assert!(request.capture_non_native().is_err());
         assert!(request.capture_model().is_err());
         assert!(request.finish().is_err());
@@ -678,6 +1393,7 @@ mod tests {
             slot: slot.clone(),
             refused: Rc::new(Cell::new(false)),
             current: Some(actual),
+            diagnostic: None,
         };
         let mut pending = Box::pin(async move {
             held.check().unwrap();
@@ -718,6 +1434,7 @@ mod tests {
             slot: slot.clone(),
             refused: Rc::new(Cell::new(false)),
             current: Some(actual),
+            diagnostic: None,
         };
         assert!(held.complete().is_err());
         held.current.take().unwrap().finish();

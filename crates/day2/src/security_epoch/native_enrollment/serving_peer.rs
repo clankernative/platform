@@ -913,6 +913,28 @@ enum Completion {
 }
 
 impl CurrentServingPeerPhase<'_> {
+    /// History from this verified local/remote exchange, never current authority.
+    pub(crate) fn historical_peer_data(&self) -> super::PeerRequestDiagnosticData {
+        use crate::security_epoch::native_clock::request_diagnostic_commitment;
+        super::PeerRequestDiagnosticData {
+            local_role: Some(self.local.stage.data.role),
+            remote_role: Some(self.remote.stage.data.role),
+            local_enrolled_incarnation: super::peer_enrollment_diagnostic_commitment(
+                &self.local.certificate,
+                &self.local.stage,
+            ),
+            local_request_original: request_diagnostic_commitment(&self.local.original.domain).ok(),
+            remote_enrolled_incarnation: super::peer_enrollment_diagnostic_commitment(
+                &self.remote.certificate,
+                &self.remote.stage,
+            ),
+            remote_request_original: request_diagnostic_commitment(&self.remote.original.domain)
+                .ok(),
+            exchange_commitment: self.exchange.digest().ok(),
+            exchange_sequence: Some(self.exchange.sequence),
+        }
+    }
+
     pub(crate) fn request_binding(&self) -> &Digest {
         // Native constructors guarantee current sequence/binding shape.
         self.exchange

@@ -73,11 +73,83 @@ pub(crate) enum StoragePeerPurpose {
     CurrentServing,
 }
 
+pub(crate) use crate::security_epoch::admission_work::Snapshot as AdmissionWorkSnapshotData;
+pub(crate) use crate::security_epoch::native_clock::AcquisitionProgress;
+pub(crate) use crate::security_epoch::native_clock::EnrolledRequestDiagnosticData;
 pub(crate) use day2_capabilities::security_epoch::bootstrap::NativeRole;
+
+/// Cumulative process DATA only; this does not sample or check native authority.
+pub(crate) fn cumulative_admission_work_data() -> AdmissionWorkSnapshotData {
+    crate::security_epoch::admission_work::snapshot()
+}
+
+/// A scheduling refusal from the actual owner before a new original begins.
+/// Catching this error grants no idle scope, stage or permission.
+#[derive(Debug)]
+pub(crate) struct IdleCredentialBusy {
+    _private: (),
+}
+
+impl std::fmt::Display for IdleCredentialBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native_enrollment_actual_owner_busy")
+    }
+}
+
+impl std::error::Error for IdleCredentialBusy {}
+
+/// Historical DATA copied only from an actual authenticated native peer phase.
+/// These commitments cannot construct a peer, request, role or permission.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct PeerRequestDiagnosticData {
+    local_role: Option<NativeRole>,
+    remote_role: Option<NativeRole>,
+    local_enrolled_incarnation: Option<day2_capabilities::Digest>,
+    local_request_original: Option<day2_capabilities::Digest>,
+    remote_enrolled_incarnation: Option<day2_capabilities::Digest>,
+    remote_request_original: Option<day2_capabilities::Digest>,
+    exchange_commitment: Option<day2_capabilities::Digest>,
+    exchange_sequence: Option<u64>,
+}
+
+impl PeerRequestDiagnosticData {
+    #[cfg(test)]
+    pub(crate) fn maximal_fixture() -> Self {
+        let digest = day2_capabilities::Digest::new(b"maximum historical peer DATA fixture only");
+        Self {
+            local_role: Some(NativeRole::EpochController),
+            remote_role: Some(NativeRole::EpochController),
+            local_enrolled_incarnation: Some(digest.clone()),
+            local_request_original: Some(digest.clone()),
+            remote_enrolled_incarnation: Some(digest.clone()),
+            remote_request_original: Some(digest.clone()),
+            exchange_commitment: Some(digest),
+            exchange_sequence: Some(u64::MAX),
+        }
+    }
+}
+
+fn peer_enrollment_diagnostic_commitment(
+    certificate: &protocol::IssuerCertificate,
+    stage: &protocol::SignedStage,
+) -> Option<day2_capabilities::Digest> {
+    day2_capabilities::Digest::of(&(
+        "day2-native-enrollment-owner-v1",
+        certificate.digest().ok()?,
+        stage.data.role,
+        &stage.data.public_key,
+        &stage.data.process,
+        &stage.data.runtime,
+    ))
+    .ok()
+}
 pub(crate) use owner::{
     EnrolledCurrentRequest, EnrolledOriginalClock, EnrolledProcessRoleOwner, EnrolledRoleStage,
     EnrolledStorageStage, SameEnrolledOwner, UnselectedShellRequest,
 };
+pub(crate) type IdleCredentialPublication = owner::IdleCredentialPublication;
+pub(crate) type IdleCredentialAdmission<'stage, 'role> =
+    owner::IdleCredentialAdmission<'stage, 'role>;
 pub(in crate::security_epoch) use protocol::StagePurpose;
 
 pub(crate) fn run(issuer: bool) -> anyhow::Result<()> {

@@ -1,4 +1,6 @@
-use super::issuer_costs::{Costs, Operation, Outcome, Recorder, Subject, preserve_error};
+use super::issuer_costs::{
+    Costs, Operation, Outcome, Recorder, Subject, WorkCapture, preserve_error,
+};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     birth::IssuerOwner,
@@ -23,6 +25,7 @@ pub(super) fn run() -> Result<()> {
     let mut recorder = Recorder::new(std::io::stderr());
     loop {
         let (mut channel, mut acquisition) = issuer.listener.next()?;
+        let mut capture = recorder.begin_work_capture();
         let mut work = crate::security_epoch::admission_work::begin(
             crate::security_epoch::admission_work::Work::IssuerServiceAdmission,
         );
@@ -40,7 +43,7 @@ pub(super) fn run() -> Result<()> {
             drop(acquisition);
             return preserve_error(
                 Err(error),
-                recorder.emit(&costs, Outcome::ParentBeforeError),
+                recorder.emit_connection(&costs, capture, Outcome::ParentBeforeError),
             );
         }
         let served = costs.measure(Operation::Serve, || {
@@ -50,6 +53,7 @@ pub(super) fn run() -> Result<()> {
                 &mut channel,
                 &mut acquisition,
                 &costs,
+                &mut capture,
             )
         });
         let checked = (|| {
@@ -72,7 +76,7 @@ pub(super) fn run() -> Result<()> {
             Outcome::Completed
         };
         work.finish(served.is_ok() && checked.is_ok());
-        let exported = recorder.emit(&costs, outcome);
+        let exported = recorder.emit_connection(&costs, capture, outcome);
         if checked.is_err() {
             return preserve_error(checked, exported);
         }
@@ -90,6 +94,7 @@ fn serve(
     channel: &mut Channel,
     acquisition: &mut NativeAcquisition,
     costs: &Costs,
+    capture: &mut WorkCapture,
 ) -> Result<()> {
     ensure!(
         super::birth::load_policy(acquisition)? == issuer.policy,
@@ -230,6 +235,7 @@ fn serve(
         signature: issuer.key.sign("role-stage", &data)?,
         data,
     };
+    capture.bind_grant(&stage);
     // Bind before the ambiguous send. Losing a reply never enables a new key
     // or reconstructs the lost native owner from a stored row.
     enrolled.entry(identity).or_insert_with(|| Enrollment {

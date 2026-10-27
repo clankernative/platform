@@ -199,6 +199,18 @@ pub(crate) enum Endpoint {
 }
 
 impl Endpoint {
+    fn take_idle_credential_wakes(
+        &self,
+    ) -> Result<Vec<super::native_management::IdleCredentialWake>> {
+        #[cfg(test)]
+        if let Self::Test(exchange) = self {
+            // Readiness DATA only. Tests still reach the real idle factory;
+            // a scripted wake cannot publish a credential or supply an owner.
+            return Ok(exchange.idle_wakes.lock().unwrap().drain(..).collect());
+        }
+        super::native_management::take_idle_credential_wakes()
+    }
+
     async fn pump(&self, stopped: tokio::sync::watch::Receiver<bool>) -> Result<()> {
         match self {
             Self::App(host) => crate::web::native_pump(host.clone(), stopped).await,
@@ -422,6 +434,84 @@ async fn launch(launch: Launch, shutdown: impl Future<Output = ()> + Send + 'sta
     completion.await.context("native HTTP owner terminated")?
 }
 
+/// Local readiness only. Each timer is armed once from a fresh projection of
+/// the actual material's fixed BOOTTIME due time. Requests never re-arm it.
+/// Neither a fired timer nor empty queues can supply native idle permission.
+#[derive(Default)]
+struct IdleSchedule {
+    waiting: Vec<(
+        super::native_management::IdleCredentialWake,
+        super::effects::ReadinessTimer,
+    )>,
+    due: Option<super::native_management::IdleCredentialWake>,
+    retry: Option<super::effects::ReadinessTimer>,
+}
+
+impl IdleSchedule {
+    fn extend(
+        &mut self,
+        wakes: Vec<super::native_management::IdleCredentialWake>,
+        anchor: super::effects::ReadinessInstant,
+    ) -> Result<()> {
+        for wake in wakes {
+            ensure!(
+                self.due.as_ref().is_none_or(|due| due.scope != wake.scope)
+                    && self.waiting.iter().all(|(old, _)| old.scope != wake.scope),
+                "native idle credential wake repeated"
+            );
+            ensure!(
+                self.waiting.len() < 128,
+                "native idle credential wake capacity"
+            );
+            let deadline = anchor
+                .checked_add(wake.delay)
+                .context("native idle credential timer overflow")?;
+            let sleep = super::effects::ReadinessTimer::at(deadline);
+            self.waiting.push((wake, sleep));
+        }
+        self.waiting.sort_by_key(|(_, sleep)| sleep.deadline());
+        Ok(())
+    }
+
+    fn paused(&self) -> bool {
+        self.due.is_some()
+    }
+
+    fn ready(&self) -> Option<&super::native_management::IdleCredentialWake> {
+        self.due.as_ref().filter(|_| self.retry.is_none())
+    }
+
+    async fn wait(&mut self) {
+        if let Some(retry) = &mut self.retry {
+            retry.await;
+            self.retry = None;
+        } else if let Some((_, sleep)) = self.waiting.first_mut() {
+            sleep.await;
+            self.due = Some(self.waiting.remove(0).0);
+        } else {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    fn defer_busy(&mut self) {
+        // Only a pre-clock/pre-I/O actual-owner Busy may defer. This timer
+        // changes no credential, original, expiry, due time or admission latch.
+        self.retry = Some(super::effects::ReadinessTimer::after(
+            std::time::Duration::from_millis(10),
+        ));
+    }
+
+    fn published(
+        &mut self,
+        wakes: Vec<super::native_management::IdleCredentialWake>,
+        anchor: super::effects::ReadinessInstant,
+    ) -> Result<()> {
+        self.due.take();
+        self.retry.take();
+        self.extend(wakes, anchor)
+    }
+}
+
 async fn run(
     endpoint: Endpoint,
     listener: TcpListener,
@@ -462,10 +552,49 @@ async fn run(
     let mut live = FuturesUnordered::new();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut draining = false;
+    let mut idle = IdleSchedule::default();
+    // Capture BEFORE taking the fresh BOOTTIME-derived delays. Collection or
+    // postprocessing cannot push a timer later by starting its duration again.
+    let anchor = super::effects::ReadinessInstant::now();
+    if let Err(error) = endpoint
+        .take_idle_credential_wakes()
+        .and_then(|wakes| idle.extend(wakes, anchor))
+    {
+        admission.store(false, Ordering::Release);
+        return Err(error);
+    }
     loop {
         if draining && connections.is_empty() && live.is_empty() && pump_finished {
             return Ok(());
         }
+        if !draining
+            && admission.load(Ordering::Acquire)
+            && connections.is_empty()
+            && live.is_empty()
+            && live_receiver.is_empty()
+            && let Some(wake) = idle.ready()
+        {
+            let result = super::native_management::readmit_idle_credential(wake);
+            match result {
+                Ok(super::native_management::IdleReadmission::Busy) => idle.defer_busy(),
+                Ok(super::native_management::IdleReadmission::Published) => {
+                    let anchor = super::effects::ReadinessInstant::now();
+                    if let Err(error) = endpoint
+                        .take_idle_credential_wakes()
+                        .and_then(|wakes| idle.published(wakes, anchor))
+                    {
+                        admission.store(false, Ordering::Release);
+                        return Err(error);
+                    }
+                }
+                Err(error) => {
+                    admission.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            }
+        }
+        let idle_paused = idle.paused();
+        let idle_retry = idle.retry.is_some();
         tokio::select! {
             biased;
             _ = &mut shutdown, if !draining => {
@@ -475,7 +604,13 @@ async fn run(
                 live_receiver.close();
                 while live_receiver.try_recv().is_ok() {} // Not-started work owns no external send.
             }
-            result = &mut pump, if !pump_finished => {
+            _ = idle.wait(), if !draining && admission.load(Ordering::Acquire) && (!idle_paused || idle_retry) => {
+                #[cfg(test)]
+                if let Endpoint::Test(exchange) = endpoint {
+                    exchange.idle_paused.notify_one();
+                }
+            }
+            result = &mut pump, if !pump_finished && (!idle_paused || draining || !admission.load(Ordering::Acquire)) => {
                 result?;
                 pump_finished = true;
                 ensure!(!admission.load(Ordering::Acquire), "native App pump completed with admission open");
@@ -490,7 +625,7 @@ async fn run(
             }
             _ = live.next(), if !live.is_empty() => {}
             _ = connections.next(), if !connections.is_empty() => {}
-            accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && connections.len() < capacity => {
+            accepted = futures_util::future::poll_fn(|cx| timer(|| listener.poll_accept(cx))), if !draining && !idle_paused && connections.len() < capacity => {
                 let (stream, _) = accepted?;
                 let sink = super::native_management::Sink::new();
                 let driver = std::rc::Rc::new(RefCell::new(None));
@@ -543,7 +678,14 @@ async fn run(
                         .timer(OwnerTimer)
                         .header_read_timeout(std::time::Duration::from_secs(3))
                         .serve_connection(connection_io, service);
-                    if let Ok(Ok(())) = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection)).await {
+                    #[cfg(test)]
+                    let original_not_before = super::effects::ReadinessInstant::now().checked_add(std::time::Duration::from_secs(30)).expect("test transport deadline overflow");
+                    let bounded = timer(|| tokio::time::timeout(std::time::Duration::from_secs(30), connection));
+                    #[cfg(test)]
+                    if let Endpoint::Test(exchange) = endpoint {
+                        exchange.connection_deadlines.lock().unwrap().push(original_not_before);
+                    }
+                    if let Ok(Ok(())) = bounded.await {
                         // Known local transport completion only. This is not
                         // evidence that a browser/human received the bytes.
                         // Hyper may already have dropped OwnerIo. The retained
@@ -1142,6 +1284,116 @@ mod tests {
     use std::thread;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn idle_wake(app: &str, seconds: u64) -> super::super::native_management::IdleCredentialWake {
+        super::super::native_management::IdleCredentialWake {
+            scope: day2_capabilities::security_epoch::AuthorityScope {
+                installation: "example".to_owned().try_into().unwrap(),
+                environment: "development".to_owned().try_into().unwrap(),
+                app: app.to_owned().try_into().unwrap(),
+            },
+            delay: std::time::Duration::from_secs(seconds),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_wakes_keep_distinct_fixed_due_times_across_busy_and_publication() -> Result<()> {
+        use futures_util::FutureExt;
+        let start = super::super::effects::ReadinessInstant::now();
+        let mut idle = IdleSchedule::default();
+        idle.extend(vec![idle_wake("later", 40), idle_wake("first", 20)], start)?;
+        assert!(!idle.paused());
+        tokio::time::advance(std::time::Duration::from_secs(19)).await;
+        assert!(idle.wait().now_or_never().is_none());
+        assert!(!idle.paused());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        idle.wait().await;
+        assert_eq!(idle.ready().unwrap().scope.app.as_str(), "first");
+        idle.defer_busy();
+        assert!(idle.paused());
+        assert!(idle.ready().is_none());
+        tokio::time::advance(std::time::Duration::from_secs(7)).await;
+        idle.wait().await;
+        assert_eq!(idle.ready().unwrap().scope.app.as_str(), "first");
+        idle.published(
+            vec![idle_wake("first", 60)],
+            super::super::effects::ReadinessInstant::now(),
+        )?;
+        assert!(!idle.paused());
+        // Publishing one owner at t=27 cannot renew another owner's t=40
+        // readiness projection, nor reuse the completed owner's old wake.
+        assert_eq!(
+            idle.waiting[0].1.deadline(),
+            start
+                .checked_add(std::time::Duration::from_secs(40))
+                .unwrap()
+        );
+        assert_eq!(
+            idle.waiting[1].1.deadline(),
+            start
+                .checked_add(std::time::Duration::from_secs(87))
+                .unwrap()
+        );
+        tokio::time::advance(std::time::Duration::from_secs(13)).await;
+        idle.wait().await;
+        assert_eq!(idle.ready().unwrap().scope.app.as_str(), "later");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_wake_cancellation_and_duplicate_hints_cannot_rearm_due_work() -> Result<()> {
+        use futures_util::FutureExt;
+        let mut idle = IdleSchedule::default();
+        idle.extend(
+            vec![idle_wake("reports", 5)],
+            super::super::effects::ReadinessInstant::now(),
+        )?;
+        let deadline = idle.waiting[0].1.deadline();
+        for _ in 0..4 {
+            assert!(idle.wait().now_or_never().is_none());
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            assert_eq!(idle.waiting[0].1.deadline(), deadline);
+        }
+        assert!(
+            idle.extend(
+                vec![idle_wake("reports", 60)],
+                super::super::effects::ReadinessInstant::now()
+            )
+            .is_err()
+        );
+        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        idle.wait().await;
+        assert!(idle.paused());
+        assert!(
+            idle.extend(
+                vec![idle_wake("reports", 60)],
+                super::super::effects::ReadinessInstant::now()
+            )
+            .is_err()
+        );
+        assert_eq!(idle.ready().unwrap().scope.app.as_str(), "reports");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_projection_collection_cannot_start_a_fresh_late_relative_timer() -> Result<()> {
+        let anchor = super::super::effects::ReadinessInstant::now();
+        tokio::time::advance(std::time::Duration::from_secs(7)).await;
+        let mut idle = IdleSchedule::default();
+        idle.extend(vec![idle_wake("reports", 20)], anchor)?;
+        assert_eq!(
+            idle.waiting[0].1.deadline(),
+            anchor
+                .checked_add(std::time::Duration::from_secs(20))
+                .unwrap()
+        );
+        // A caller-supplied impossible DATA duration is an error, not a panic
+        // or a deadline wrapping into a new future interval.
+        let mut overflow = idle_wake("other", 0);
+        overflow.delay = std::time::Duration::MAX;
+        assert!(idle.extend(vec![overflow], anchor).is_err());
+        Ok(())
+    }
+
     #[test]
     fn terminal_close_joins_tls_teardown_and_permanently_refuses_new_launches() -> Result<()> {
         struct ExitGate {
@@ -1202,6 +1454,9 @@ mod tests {
         pub(super) writes: Mutex<Vec<ThreadId>>,
         pub(super) background: Mutex<Vec<ThreadId>>,
         entered: tokio::sync::Notify,
+        pub(super) idle_wakes: Mutex<Vec<super::super::native_management::IdleCredentialWake>>,
+        pub(super) idle_paused: tokio::sync::Notify,
+        pub(super) connection_deadlines: Mutex<Vec<super::super::effects::ReadinessInstant>>,
         release: (Mutex<bool>, Condvar),
         large: bool,
     }
@@ -1214,6 +1469,9 @@ mod tests {
                 writes: Mutex::new(Vec::new()),
                 background: Mutex::new(Vec::new()),
                 entered: tokio::sync::Notify::new(),
+                idle_wakes: Mutex::new(Vec::new()),
+                idle_paused: tokio::sync::Notify::new(),
+                connection_deadlines: Mutex::new(Vec::new()),
                 release: (Mutex::new(false), Condvar::new()),
                 large,
             })
@@ -1226,6 +1484,14 @@ mod tests {
             );
             self.calls.lock().unwrap().push(thread::current().id());
             self.entered.notify_one();
+            if request.uri().path() == "/idle-stream" {
+                return Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(futures_util::stream::pending::<
+                        Result<Bytes, Infallible>,
+                    >()))
+                    .unwrap();
+            }
             if request.uri().path() == "/live" {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let work = NativeLiveWork {
@@ -1270,6 +1536,63 @@ mod tests {
             ));
             Response::new(body)
         }
+    }
+
+    #[tokio::test]
+    async fn idle_due_drains_actual_sse_timeout_before_attempting_real_owner_admission()
+    -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let exchange = Exchange::new(false);
+        exchange
+            .idle_wakes
+            .lock()
+            .unwrap()
+            .push(idle_wake("reports", 1));
+        let admission = Arc::new(AtomicBool::new(true));
+        let server = tokio::spawn(serve(
+            Endpoint::Test(exchange.clone()),
+            listener,
+            2,
+            admission.clone(),
+            std::future::pending(),
+        ));
+        let mut streaming = tokio::net::TcpStream::connect(address).await?;
+        streaming
+            .write_all(b"GET /idle-stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            exchange.entered.notified(),
+        )
+        .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            exchange.idle_paused.notified(),
+        )
+        .await?;
+        // A real pending SSE connection is not queue-empty proof. A second
+        // ready socket must not dispatch while the old connection drains.
+        let mut queued = tokio::net::TcpStream::connect(address).await?;
+        queued
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        assert!(!server.is_finished());
+        assert_eq!(exchange.calls.lock().unwrap().len(), 1);
+        assert!(admission.load(Ordering::Acquire));
+        // Only the EXISTING socket timeout ends the stream. Readmission then
+        // reaches the actual factory and refuses the absent native supplier.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(35), server).await??;
+        let original_deadline = exchange.connection_deadlines.lock().unwrap()[0];
+        assert!(
+            super::super::effects::ReadinessInstant::now() >= original_deadline,
+            "maintenance cancelled the accepted SSE before its original timeout"
+        );
+        assert!(matches!(result, Err(error)
+            if error.to_string() == "native idle credential owner missing"));
+        assert_eq!(exchange.calls.lock().unwrap().len(), 1);
+        assert!(!admission.load(Ordering::Acquire));
+        Ok(())
     }
 
     #[tokio::test]

@@ -138,6 +138,15 @@ it does not cache permission to use private credential material. Every request
 still needs current role-specific authority, fresh counters, actual owned
 handles, original clocks and permanent refusal. Custody remains bound to the
 exact role/owner/material/recipient and database commit-before-permit boundary.
+The retained counter credential has an explicit pre-expiry idle admission path.
+A one-shot due hint paces maintenance; it grants no idle state or permission.
+The actual enrolled owner excludes all live request originals and retains that
+exclusion through full five-second provider authentication, old and new token
+caps, same-owner physical postchecks and final atomic material installation.
+The existing transport and storage owners remain installed. Busy work delays
+maintenance without creating a new original; expiry, cancellation or any other
+refusal is terminal and never triggers request-time authentication fallback.
+Delayed scheduling or draining can still miss expiry; no margin is qualified.
 Outside-backup epochs and old-writer/restore fencing are unchanged. The native
 port and composed qualification are in progress; no SDK family or OAuth protocol
 semantics change because of this trust-model decision.

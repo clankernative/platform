@@ -742,6 +742,35 @@ enum Completion {
 }
 
 impl CurrentStoragePeerPhase<'_> {
+    /// Actual authenticated phase history only; no clock sample, check or I/O.
+    pub(crate) fn historical_peer_data(&self) -> super::super::PeerRequestDiagnosticData {
+        use crate::security_epoch::native_clock::request_diagnostic_commitment;
+        #[cfg(target_os = "linux")]
+        let remote = Some(self.peer.statement());
+        #[cfg(not(target_os = "linux"))]
+        let remote: Option<&StageStatement> = None;
+        super::super::PeerRequestDiagnosticData {
+            local_role: Some(self.local.stage.data.role),
+            remote_role: remote.map(|statement| statement.stage.data.role),
+            local_enrolled_incarnation: super::super::peer_enrollment_diagnostic_commitment(
+                &self.local.certificate,
+                &self.local.stage,
+            ),
+            local_request_original: request_diagnostic_commitment(&self.local.original.domain).ok(),
+            remote_enrolled_incarnation: remote.and_then(|statement| {
+                super::super::peer_enrollment_diagnostic_commitment(
+                    &statement.certificate,
+                    &statement.stage,
+                )
+            }),
+            remote_request_original: remote.and_then(|statement| {
+                request_diagnostic_commitment(&statement.original.domain).ok()
+            }),
+            exchange_commitment: self.exchange.digest().ok(),
+            exchange_sequence: Some(self.exchange.sequence),
+        }
+    }
+
     /// Close before the actual packet operation. An uncertain send/receive
     /// cannot be repeated or converted into a completion by time or DATA.
     fn completion_packet(

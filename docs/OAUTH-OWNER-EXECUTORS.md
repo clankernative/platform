@@ -147,3 +147,11 @@ web builder can each report their boundary. These records contain no error
 chain, path, actor, provider value or serving permission. Successful construction
 emits no refusal record. A phase label localizes a failure; it does not prove its
 underlying cause or turn an earlier completed scope into whole-App readiness.
+
+Initial storage keeps separate fixed labels for bootstrap preparation, advance
+and its final enrollment postcheck, active-owner conversion, fresh cold-role
+acquisition and cold counter admission. The same outer observation is borrowed
+by this startup call; no new logger, clock, error text or authority is supplied.
+Controller bootstrap completion does not establish that the App's matching
+advance/postcheck or either side's later cold counter admission completed.
+The existing three-field refusal schema and 256-byte record bound are unchanged.

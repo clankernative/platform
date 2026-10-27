@@ -668,6 +668,7 @@ impl NativeAppStartup {
                 crate::oauth::native_management::prepare_initial_app_storage(
                     &metadata,
                     &self.declared,
+                    &mut observed,
                 )?;
                 observed.enter(NativeStartupStep::RuntimeAdmission);
                 crate::oauth::native_management::load_initial_app_runtime(scope, *metadata)?

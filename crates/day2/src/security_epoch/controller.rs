@@ -11,7 +11,10 @@ use crate::security_epoch::{
     storage_authority::{self, InitialStorageContinuity, InitialStorageOutcome},
 };
 use anyhow::{Context, Result, ensure};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub(in crate::security_epoch) mod bootstrap_timing;
 pub(in crate::security_epoch) mod evidence;
@@ -152,6 +155,10 @@ fn run_inner(
     // Cache both outcomes without logging or returning a permission here.
     evidence.preparation_timings(timings.summary());
     let mut holder_listener = result?;
+    // The actual bind/file phase has completed. This separate, once-only
+    // scheduling DATA lets deployment start App without spending an action
+    // while it waits. It grants no peer, holder, P3 or serving permission.
+    evidence.holder_listener_bound()?;
     while !holder_listener.idle_ready()? {
         // No role/file permission remains live while waiting for Kubernetes
         // startup. Start a fresh same-owner phase only after actual pending DATA.
@@ -192,9 +199,43 @@ fn run_inner(
     evidence.enter(FailurePhase::Health);
     let health = health::Health::bind()?;
     let result = (|| -> Result<()> {
+        // Dispatch DATA only. The material supplies a fixed BOOTTIME due
+        // projection; sampling this timer BEFORE taking it is conservative.
+        // Actual owner/original/old-expiry checks authorize every admission.
+        let mut counter_readmission_due: Option<Instant> = None;
         loop {
-            // Only acquire a role after actual pending work. An idle wait must
-            // not renew or silently spend a previously issued five-second stage.
+            if counter_readmission_due.is_none() {
+                evidence.enter(FailurePhase::CounterReadmission);
+                let now = Instant::now();
+                if let Some(delay) = active.take_counter_readmission_delay()? {
+                    counter_readmission_due = Some(
+                        now.checked_add(delay)
+                            .context("counter readmission dispatch timer overflow")?,
+                    );
+                }
+            }
+            if counter_readmission_due.is_some_and(|due| Instant::now() >= due) {
+                evidence.enter(FailurePhase::CounterReadmission);
+                match role.begin_idle_credential_admission() {
+                    Ok((stage, publication)) => {
+                        active.readmit_counter_idle(stage, publication)?;
+                        counter_readmission_due = None;
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<super::native_enrollment::IdleCredentialBusy>()
+                            .is_some() =>
+                    {
+                        // Actual early owner preflight observed live work. No
+                        // new original exists and the same due stays latched.
+                        std::thread::park_timeout(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // Serving still acquires an original only for actual pending
+            // work. Maintenance never enters or renews a serving request.
             evidence.enter(FailurePhase::AppPending);
             if active.app_pending()? {
                 evidence.enter(FailurePhase::AppServing);
@@ -237,7 +278,8 @@ fn run_inner(
             evidence.enter(FailurePhase::Health);
             health.serve_one()?;
             // Dispatch pacing only; no expiry cleanup, permit regrant, retry,
-            // provider polling, role refresh or holder change happens here.
+            // hidden provider polling, role refresh or holder change happens
+            // here. The explicit pre-expiry idle operation above is separate.
             std::thread::park_timeout(Duration::from_millis(5));
         }
     })();

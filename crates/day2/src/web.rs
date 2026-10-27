@@ -292,6 +292,12 @@ fn validate_ingress_credentials(runtime: &Runtime) -> Result<()> {
 pub(crate) enum NativeStartupStep {
     Selection,
     InitialStorage,
+    InitialStorageBootstrapPreparation,
+    InitialStorageBootstrapAdvance,
+    InitialStorageBootstrapPostcheck,
+    InitialStorageActiveConversion,
+    InitialStorageColdRole,
+    InitialStorageColdCounter,
     RuntimeAdmission,
     RuntimePostcheck,
     Configuration,
@@ -316,6 +322,12 @@ impl NativeStartupStep {
         match self {
             Self::Selection => "selection",
             Self::InitialStorage => "initial_storage",
+            Self::InitialStorageBootstrapPreparation => "initial_storage_bootstrap_preparation",
+            Self::InitialStorageBootstrapAdvance => "initial_storage_bootstrap_advance",
+            Self::InitialStorageBootstrapPostcheck => "initial_storage_bootstrap_postcheck",
+            Self::InitialStorageActiveConversion => "initial_storage_active_conversion",
+            Self::InitialStorageColdRole => "initial_storage_cold_role",
+            Self::InitialStorageColdCounter => "initial_storage_cold_counter",
             Self::RuntimeAdmission => "runtime_admission",
             Self::RuntimePostcheck => "runtime_postcheck",
             Self::Configuration => "configuration",
@@ -3174,6 +3186,176 @@ mod deployment_health_tests {
 mod native_startup_tests {
     use super::*;
 
+    fn initial_storage_diagnostics_follow_operations(source: &str) -> bool {
+        use syn::visit::Visit;
+
+        fn expression(statement: &syn::Stmt) -> Option<&syn::Expr> {
+            let mut value = match statement {
+                syn::Stmt::Expr(value, _) => value,
+                syn::Stmt::Local(local) => &local.init.as_ref()?.expr,
+                _ => return None,
+            };
+            while let syn::Expr::Try(attempt) = value {
+                value = &attempt.expr;
+            }
+            Some(value)
+        }
+
+        fn method(statement: &syn::Stmt, receiver: &str, name: &str) -> bool {
+            matches!(expression(statement),Some(syn::Expr::MethodCall(call))
+                if call.method==name && matches!(&*call.receiver,syn::Expr::Path(path)
+                    if path.path.is_ident(receiver)))
+        }
+
+        fn marker(statement: &syn::Stmt, name: &str) -> bool {
+            matches!(expression(statement),Some(syn::Expr::MethodCall(call))
+                if call.method=="enter" && call.args.len()==1
+                    && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("observed"))
+                    && matches!(call.args.first(),Some(syn::Expr::Path(path))
+                        if path.path.segments.len()==2 && path.path.segments[0].ident=="NativeStartupStep"
+                            && path.path.segments[1].ident==name))
+        }
+
+        fn local(statement: &syn::Stmt, name: &str) -> bool {
+            matches!(statement,syn::Stmt::Local(local)
+                if matches!(&local.pat,syn::Pat::Ident(pattern) if pattern.ident==name))
+        }
+
+        #[derive(Default)]
+        struct Wiring {
+            preparation: usize,
+            advance: usize,
+            conversion: usize,
+            cold: usize,
+        }
+
+        impl<'ast> Visit<'ast> for Wiring {
+            fn visit_block(&mut self, block: &'ast syn::Block) {
+                for statements in block.stmts.windows(3) {
+                    self.preparation += usize::from(
+                        marker(&statements[0], "InitialStorageBootstrapPreparation")
+                            && matches!(&statements[1],syn::Stmt::Local(local)
+                                if local.init.as_ref().is_some_and(|init| init.diverge.is_some()))
+                            && method(&statements[2], "storage", "prepare_current"),
+                    );
+                }
+                for statements in block.stmts.windows(4) {
+                    self.advance += usize::from(
+                        marker(&statements[0], "InitialStorageBootstrapAdvance")
+                            && method(&statements[1], "storage", "advance")
+                            && marker(&statements[2], "InitialStorageBootstrapPostcheck")
+                            && method(&statements[3], "stage", "check_selection"),
+                    );
+                }
+                for statements in block.stmts.windows(2) {
+                    self.conversion += usize::from(
+                        marker(&statements[0], "InitialStorageActiveConversion")
+                            && local(&statements[1], "storage")
+                            && matches!(expression(&statements[1]),Some(syn::Expr::Call(call))
+                                if matches!(&*call.func,syn::Expr::Path(path)
+                                    if path.path.segments.iter().map(|segment|segment.ident.to_string()).collect::<Vec<_>>()==["std","mem","replace"])),
+                    );
+                }
+                for statements in block.stmts.windows(5) {
+                    self.cold += usize::from(
+                        marker(&statements[0], "InitialStorageColdRole")
+                            && local(&statements[1], "role")
+                            && matches!(expression(&statements[1]),Some(syn::Expr::MethodCall(call)) if call.method=="try_borrow_mut")
+                            && local(&statements[2], "stage")
+                            && method(&statements[2], "role", "begin_current_stage")
+                            && marker(&statements[3], "InitialStorageColdCounter")
+                            && local(&statements[4], "participant")
+                            && matches!(expression(&statements[4]),Some(syn::Expr::Call(call))
+                                if matches!(&*call.func,syn::Expr::Path(path)
+                                    if path.path.segments.iter().map(|segment|segment.ident.to_string()).collect::<Vec<_>>()==["ServingParticipant","app"])),
+                    );
+                }
+                syn::visit::visit_block(self, block);
+            }
+        }
+
+        let parsed = syn::parse_file(source).unwrap();
+        let Some(body) = parsed.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "prepare_initial_app_storage" => {
+                Some(&function.block)
+            }
+            _ => None,
+        }) else {
+            return false;
+        };
+        let mut wiring = Wiring::default();
+        wiring.visit_block(body);
+        wiring.preparation == 1 && wiring.advance == 1 && wiring.conversion == 1 && wiring.cold == 1
+    }
+
+    #[test]
+    fn initial_storage_failure_labels_bracket_the_actual_fallible_boundaries() {
+        let source = include_str!("oauth/native_management.rs");
+        assert!(initial_storage_diagnostics_follow_operations(source));
+        for label in [
+            "InitialStorageBootstrapPreparation",
+            "InitialStorageBootstrapAdvance",
+            "InitialStorageBootstrapPostcheck",
+            "InitialStorageActiveConversion",
+            "InitialStorageColdRole",
+            "InitialStorageColdCounter",
+        ] {
+            let marker = format!("observed.enter(NativeStartupStep::{label});");
+            for replacement in [
+                String::new(),
+                format!("if false {{ {marker} }}"),
+                marker.replace("observed", "foreign"),
+            ] {
+                let changed = source.replacen(&marker, &replacement, 1);
+                assert_ne!(source, changed);
+                assert!(!initial_storage_diagnostics_follow_operations(&changed));
+            }
+        }
+        let advance = "observed.enter(NativeStartupStep::InitialStorageBootstrapAdvance);";
+        let changed = source.replacen(advance, "", 1).replacen(
+            "storage.advance(&mut stage)?;",
+            &format!("storage.advance(&mut stage)?; {advance}"),
+            1,
+        );
+        assert_ne!(source, changed);
+        assert!(!initial_storage_diagnostics_follow_operations(&changed));
+    }
+
+    #[test]
+    fn initial_storage_uses_the_same_outer_startup_observation() {
+        use syn::visit::Visit;
+
+        fn forwarded(source: &str) -> usize {
+            struct Calls(usize);
+            impl<'ast> Visit<'ast> for Calls {
+                fn visit_expr_try(&mut self, expression: &'ast syn::ExprTry) {
+                    self.0 += usize::from(matches!(&*expression.expr,syn::Expr::Call(call)
+                        if matches!(&*call.func,syn::Expr::Path(path)
+                            if path.path.segments.last().is_some_and(|segment|segment.ident=="prepare_initial_app_storage"))
+                        && call.args.len()==3
+                        && matches!(call.args.last(),Some(syn::Expr::Reference(reference))
+                            if reference.mutability.is_some()
+                                && matches!(&*reference.expr,syn::Expr::Path(path) if path.path.is_ident("observed")))));
+                    syn::visit::visit_expr_try(self, expression);
+                }
+            }
+            let mut calls = Calls(0);
+            calls.visit_file(&syn::parse_file(source).unwrap());
+            calls.0
+        }
+
+        let source = include_str!("deployment.rs");
+        assert_eq!(forwarded(source), 1);
+        for replacement in [
+            "&mut foreign,",
+            "&mut NativeStartupObservation::new(false, NativeStartupStep::InitialStorage),",
+        ] {
+            let changed = source.replacen("&mut observed,", replacement, 1);
+            assert_ne!(source, changed);
+            assert_eq!(forwarded(&changed), 0);
+        }
+    }
+
     fn native_admission_is_preserved(body: &syn::Block) -> bool {
         let [
             syn::Stmt::Expr(syn::Expr::If(branch), _),
@@ -3334,6 +3516,12 @@ mod native_startup_tests {
         let stages = [
             NativeStartupStep::Selection,
             NativeStartupStep::InitialStorage,
+            NativeStartupStep::InitialStorageBootstrapPreparation,
+            NativeStartupStep::InitialStorageBootstrapAdvance,
+            NativeStartupStep::InitialStorageBootstrapPostcheck,
+            NativeStartupStep::InitialStorageActiveConversion,
+            NativeStartupStep::InitialStorageColdRole,
+            NativeStartupStep::InitialStorageColdCounter,
             NativeStartupStep::RuntimeAdmission,
             NativeStartupStep::RuntimePostcheck,
             NativeStartupStep::Configuration,

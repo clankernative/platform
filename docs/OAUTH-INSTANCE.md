@@ -29,6 +29,22 @@ cannot clear or refuse the rightful hold. Successful local transport completion
 does not prove human receipt. Approval and credential enrollment remain
 unsupported by this management producer.
 
+App and Controller counter credentials have a separate pre-expiry idle admission.
+The App owner pauses new connections and background pump dispatch, drains accepted
+HTTP and live continuations under their existing bounds, then acquires the actual
+enrolled owner's idle-exclusion guard. A wakeup or empty queue supplies no native
+permission. Live work keeps its original request, including during response waits;
+maintenance does not cancel, restart or renew it. The Controller performs the same
+explicit admission between serving operations.
+
+Replacement must complete full authentication, physical postchecks and the final
+old-credential expiry check on the same original before atomic publication. The
+publication guard excludes new requests through installation. Busy before any
+admission work may defer the fixed wakeup; failure after admission starts is
+terminal. Refusal latches never reopen. This replaces the platform's counter
+credential, independently of the provider OAuth token refreshed by a Calendar
+read; it grants no human authentication, new provider scope or longer request.
+
 Source checks and offline replay do not qualify the actual provider/kernel
 profile. Initial/current serving and the live connect/read/refresh/disconnect
 campaign must pass separately before claiming a qualified native deployment.

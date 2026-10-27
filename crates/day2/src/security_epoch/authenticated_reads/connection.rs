@@ -7,7 +7,9 @@ use crate::security_epoch::{
     credential_material::CounterMaterial,
     firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
-    native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
+    native_enrollment::{
+        EnrolledRoleStage, IdleCredentialAdmission, IdleCredentialPublication, SameEnrolledOwner,
+    },
     transport::{NativeHttp, Route},
 };
 use anyhow::{Result, ensure};
@@ -40,12 +42,31 @@ pub(in crate::security_epoch) struct CounterConnection {
     selection: Digest,
     http: NativeHttp,
     credential: CounterMaterial,
+    readmission_hint: bool,
     valid: Rc<Cell<bool>>,
 }
 
 pub(in crate::security_epoch) struct CounterRequest<'connection> {
     connection: &'connection mut CounterConnection,
     request: CounterUseGuard,
+}
+
+/// Prepared material is not eligible for a request. The actual exclusion
+/// capability stays with the caller across its physical postchecks, then must
+/// be consumed by publish on this same original. Any earlier exit is terminal.
+pub(in crate::security_epoch) struct CounterReadmission<'connection> {
+    slot: &'connection mut CounterConnectionSlot,
+    connection: Option<Box<CounterConnection>>,
+    replacement: Option<CounterMaterial>,
+    completion: CounterReadmissionCompletion,
+}
+
+// Keep cancellation refusal owned and nongeneric independently of the slot
+// borrow. The slot was already closed before this guard is constructed.
+struct CounterReadmissionCompletion {
+    acquisition: Option<NativeAcquisition>,
+    valid: Rc<Cell<bool>>,
+    completed: bool,
 }
 
 // Own the actual request acquisition independently of the lexical connection
@@ -63,17 +84,22 @@ impl AuthenticatedReads<'_, '_> {
             "epoch_counter_connection_purpose"
         );
         self.sample()?;
-        let owner = self.stage.capture_same_owner()?;
+        let mut owner = self.stage.capture_same_owner()?;
         let selected = super::reader_selection(&self.policy, self.purpose)?;
-        let credential = self.credential.admit_counter(
+        let mut credential = self.credential.admit_counter(
             &selected.workload.google_service_account,
             &mut self.acquisition,
         )?;
+        credential.check(&mut self.acquisition, self.store.max_lease_seconds)?;
+        owner.meet_current_read_view(self.stage, &mut self.acquisition)?;
         // The full caller still owns the same actual role/process and its
         // admission interval. Do not publish on a tokeninfo-only success.
         self.process.check(&mut self.acquisition)?;
         self.scope
             .check_selection(self.stage, &self.policy, &self.store, self.purpose)?;
+        credential.check(&mut self.acquisition, self.store.max_lease_seconds)?;
+        owner.meet_current_read_view(self.stage, &mut self.acquisition)?;
+        self.acquisition.remaining()?;
         Ok(CounterConnection {
             owner,
             policy: self.policy,
@@ -82,6 +108,7 @@ impl AuthenticatedReads<'_, '_> {
             selection: self.selection,
             http: self.http,
             credential,
+            readmission_hint: true,
             valid: Rc::new(Cell::new(true)),
         })
         // The short-lived source/Kubernetes projections and old admission
@@ -94,6 +121,125 @@ impl CounterConnectionSlot {
         Self {
             state: CounterConnectionState::Vacant,
         }
+    }
+
+    /// One-shot scheduling DATA. Taking a later request cannot move or reset
+    /// this hint, and a missing/refused connection is never treated as idle.
+    pub(in crate::security_epoch) fn take_readmission_delay(&mut self) -> Result<Option<Duration>> {
+        let CounterConnectionState::Admitted(connection) = &mut self.state else {
+            anyhow::bail!("epoch_counter_connection_refused");
+        };
+        ensure!(connection.valid.get(), "epoch_counter_connection_refused");
+        if !connection.readmission_hint {
+            return Ok(None);
+        }
+        // Fresh dispatch DATA from BOOTTIME. Use the fixed material deadline,
+        // not an old relative duration that late startup could reschedule.
+        let now = crate::security_epoch::native_clock::boottime()?;
+        connection.readmission_hint = false;
+        Ok(Some(connection.credential.readmission_delay(now)))
+    }
+
+    /// A full provider admission on the SAME healthy, genuinely idle native
+    /// owner. This is never called from request/failure/expiry fallback.
+    pub(in crate::security_epoch) fn prepare_readmission<'connection>(
+        &'connection mut self,
+        mut idle: IdleCredentialAdmission<'_, '_>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        purpose: NativeRole,
+    ) -> Result<CounterReadmission<'connection>> {
+        let state = std::mem::replace(&mut self.state, CounterConnectionState::Refused);
+        let CounterConnectionState::Admitted(connection) = state else {
+            anyhow::bail!("epoch_counter_readmission_connection_refused");
+        };
+        let valid = Rc::clone(&connection.valid);
+        let mut pending = CounterReadmission {
+            slot: self,
+            connection: Some(connection),
+            replacement: None,
+            completion: CounterReadmissionCompletion {
+                acquisition: None,
+                valid,
+                completed: false,
+            },
+        };
+        let stage = idle.stage()?;
+        pending.completion.acquisition =
+            Some(stage.narrow_io_acquisition(store.max_lease_seconds)?);
+        {
+            let connection = pending.connection.as_mut().unwrap();
+            let acquisition = pending.completion.acquisition.as_mut().unwrap();
+            ensure!(
+                connection.valid.get()
+                    && connection.policy == *policy
+                    && connection.store == *store
+                    && connection.purpose == purpose
+                    && connection.selection == Digest::of(store)?,
+                "epoch_counter_readmission_selection_changed"
+            );
+            connection.owner.check(stage)?;
+            stage.check_current_selection(policy, store, purpose)?;
+            // OLD expiry narrows the actual new admission original BEFORE
+            // any full provider authentication. It can only become shorter.
+            connection
+                .credential
+                .check(acquisition, store.max_lease_seconds)?;
+            connection
+                .owner
+                .meet_current_read_view(stage, acquisition)?;
+            acquisition.remaining()?;
+        }
+        let mut replacement = AuthenticatedReads::acquire(policy, store, purpose, idle.stage()?)?
+            .into_counter_connection()?;
+        ensure!(
+            replacement.policy == *policy
+                && replacement.store == *store
+                && replacement.purpose == purpose
+                && replacement.selection == Digest::of(store)?,
+            "epoch_counter_readmission_recipient_changed"
+        );
+        replacement.owner.check(idle.stage()?)?;
+        // Retain the admitted connection's actual transport/owner. The full
+        // authentication's temporary clients/projections drop while its
+        // original/exclusion are still live, BEFORE the final postchecks.
+        let CounterConnection {
+            owner,
+            policy: checked_policy,
+            purpose: _,
+            store: checked_store,
+            selection,
+            http,
+            credential,
+            readmission_hint: _,
+            valid,
+        } = replacement;
+        drop((owner, checked_policy, checked_store, selection, http, valid));
+        pending.replacement = Some(credential);
+        {
+            let stage = idle.stage()?;
+            let connection = pending.connection.as_mut().unwrap();
+            let acquisition = pending.completion.acquisition.as_mut().unwrap();
+            let actual = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+            acquisition.join_current_view(actual)?;
+            connection
+                .credential
+                .check(acquisition, store.max_lease_seconds)?;
+            pending
+                .replacement
+                .as_mut()
+                .unwrap()
+                .check(acquisition, store.max_lease_seconds)?;
+            connection
+                .owner
+                .meet_current_read_view(stage, acquisition)?;
+            connection.owner.check(stage)?;
+            acquisition.remaining()?;
+        }
+        // Only the temporary borrow is completed. The caller's owned
+        // publication capability STILL excludes all request construction.
+        idle.finish_known()?;
+        Ok(pending)
     }
 
     /// Cold setup only, before this participant enters its request loop. A
@@ -195,6 +341,65 @@ impl CounterConnectionSlot {
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.state = CounterConnectionState::Refused;
+    }
+}
+
+impl CounterReadmission<'_> {
+    /// Call only after the same actual physical phase's final checked close.
+    /// A different original's publication capability cannot settle this one.
+    pub(in crate::security_epoch) fn publish(
+        mut self,
+        mut publication: IdleCredentialPublication,
+    ) -> Result<()> {
+        let acquisition = self
+            .completion
+            .acquisition
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("epoch_counter_readmission_original_missing"))?;
+        publication.check_acquisition(acquisition)?;
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("epoch_counter_readmission_owner_missing"))?;
+        ensure!(
+            connection.valid.get(),
+            "epoch_counter_readmission_connection_refused"
+        );
+        connection
+            .credential
+            .check(acquisition, connection.store.max_lease_seconds)?;
+        let replacement = self
+            .replacement
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("epoch_counter_readmission_material_missing"))?;
+        // Install into the still-INELIGIBLE owned box. Old secret zeroization
+        // and every fallible postcheck precede publication into the slot.
+        let previous = std::mem::replace(&mut connection.credential, replacement);
+        drop(previous);
+        connection
+            .credential
+            .check(acquisition, connection.store.max_lease_seconds)?;
+        publication.check_acquisition(acquisition)?;
+        acquisition.remaining()?;
+        connection.readmission_hint = true;
+        let connection = self.connection.take().unwrap();
+        self.slot.state = CounterConnectionState::Admitted(connection);
+        // Infallible completion releases actual exclusion only AFTER install.
+        // Until this function returns, the Rust slot borrow also stays held.
+        publication.finish_published();
+        self.completion.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for CounterReadmissionCompletion {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.valid.set(false);
+            if let Some(acquisition) = &mut self.acquisition {
+                acquisition.refuse();
+            }
+        }
     }
 }
 
@@ -411,6 +616,8 @@ const _: () = {
     local_owner!(CounterConnectionSlot);
     local_owner!(CounterConnection);
     local_owner!(CounterRequest<'static>);
+    local_owner!(CounterReadmission<'static>);
+    local_owner!(CounterReadmissionCompletion);
     local_owner!(CounterUseGuard);
 };
 
@@ -443,12 +650,56 @@ impl Port for CounterReadPort<'_, '_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CounterUseGuard, Route, counter_read_route};
+    use super::{
+        CounterConnectionSlot, CounterConnectionState, CounterReadmission,
+        CounterReadmissionCompletion, CounterUseGuard, Route, counter_read_route,
+    };
     use crate::security_epoch::native_clock::NativeAcquisition;
     use day2_capabilities::Digest;
     use std::{cell::Cell, rc::Rc, time::Duration};
     use syn::parse::Parser;
     use syn::visit::Visit;
+
+    #[test]
+    fn unpublished_replacement_drop_and_unwind_keep_slot_and_original_refused() {
+        // Terminal lower state/clock control only. No actual enrolled owner,
+        // credential admission, publication capability or connection is forged.
+        for has_original in [false, true] {
+            for unwind in [false, true] {
+                let mut original = NativeAcquisition::fixture(
+                    Digest::new(b"unfinished-counter-readmission"),
+                    std::process::id(),
+                    Duration::from_secs(10),
+                    Duration::from_secs(5),
+                );
+                let valid = Rc::new(Cell::new(true));
+                let mut slot = CounterConnectionSlot {
+                    state: CounterConnectionState::Refused,
+                };
+                let pending = CounterReadmission {
+                    slot: &mut slot,
+                    connection: None,
+                    replacement: None,
+                    completion: CounterReadmissionCompletion {
+                        acquisition: has_original
+                            .then(|| original.narrow(5, Duration::from_secs(15)).unwrap()),
+                        valid: Rc::clone(&valid),
+                        completed: false,
+                    },
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _pending = pending;
+                    if unwind {
+                        panic!("controlled unpublished replacement cancellation");
+                    }
+                }));
+                assert_eq!(result.is_err(), unwind);
+                assert!(!valid.get());
+                assert!(matches!(slot.state, CounterConnectionState::Refused));
+                assert_eq!(original.sample().is_err(), has_original);
+            }
+        }
+    }
 
     #[test]
     fn counter_request_drop_and_unwind_refuse_the_same_actual_clock_and_gate() {
@@ -579,6 +830,401 @@ mod tests {
         calls.0
     }
 
+    fn idle_wrapper_keeps_terminal_validity_monotonic(source: &str, owner: &str) -> bool {
+        fn is_self(expression: &syn::Expr) -> bool {
+            matches!(expression, syn::Expr::Path(path) if path.path.is_ident("self"))
+        }
+        let parsed = syn::parse_file(source).unwrap();
+        let body = parsed.items.iter().find_map(|item| {
+            let syn::Item::Impl(implementation) = item else { return None; };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident(owner)) { return None; }
+            implementation.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == "readmit_counter_idle" => Some(&function.block),
+                _ => None,
+            })
+        }).unwrap();
+        #[derive(Default)]
+        struct Audit {
+            invalid: bool,
+            opening_guards: usize,
+        }
+        impl<'ast> Visit<'ast> for Audit {
+            fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+                if is_self(&field.base)
+                    && matches!(&field.member, syn::Member::Named(name) if name == "valid")
+                {
+                    self.invalid = true;
+                }
+                syn::visit::visit_expr_field(self, field);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if is_self(&call.receiver) && call.method != "refuse" {
+                    self.invalid = true;
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                // Inspect the actual macro input, rather than trusting its
+                // name: a block/helper/setter inside ensure! must not reopen
+                // terminal validity while escaping this syntax visitor.
+                let arguments =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(mac.tokens.clone());
+                let valid = arguments.is_ok_and(|arguments| {
+                    arguments.len() == 2
+                        && matches!(&arguments[0], syn::Expr::Field(field)
+                            if is_self(&field.base)
+                            && matches!(&field.member, syn::Member::Named(name) if name == "valid"))
+                        && matches!(&arguments[1], syn::Expr::Lit(literal)
+                            if matches!(&literal.lit, syn::Lit::Str(value)
+                                if ["active_app_storage_refused", "active_controller_storage_refused"].contains(&value.value().as_str())))
+                });
+                if !mac.path.is_ident("ensure") || !valid {
+                    self.invalid = true;
+                }
+                self.opening_guards += 1;
+            }
+        }
+        let mut audit = Audit::default();
+        audit.visit_block(body);
+        let terminal = body.stmts.iter().any(|statement| {
+            let syn::Stmt::Expr(syn::Expr::If(branch), _) = statement else { return false; };
+            matches!(&*branch.cond, syn::Expr::MethodCall(call)
+                if call.method == "is_err" && call.args.is_empty()
+                && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("result")))
+                && matches!(branch.then_branch.stmts.first(),Some(syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_)))
+                    if is_self(&call.receiver) && call.method == "refuse" && call.args.is_empty())
+                && branch.else_branch.is_none()
+        });
+        !audit.invalid && audit.opening_guards == 1 && terminal
+    }
+
+    #[test]
+    fn idle_material_replacement_never_reopens_terminal_app_or_controller_validity() {
+        // Real-wrapper restoration control only; no native permission, owner
+        // or successful material publication is manufactured by this test.
+        for (source, owner) in [
+            (
+                include_str!("../bootstrap.rs"),
+                "ActiveAppStorageContinuity",
+            ),
+            (
+                include_str!("../bootstrap/controller_serving.rs"),
+                "ActiveControllerStorageContinuity",
+            ),
+        ] {
+            assert!(idle_wrapper_keeps_terminal_validity_monotonic(
+                source, owner
+            ));
+            let (prefix, body) = source.split_once("fn readmit_counter_idle(").unwrap();
+            for changed in [
+                body.replacen("let result =", "self.valid = false; let result =", 1),
+                body.replacen(
+                    "if result.is_err()",
+                    "if result.is_ok() { self.valid = true; } if result.is_err()",
+                    1,
+                ),
+                body.replacen("self.refuse();", "if false { self.refuse(); }", 1),
+                body.replacen("self.refuse();", "self.restore_valid();", 1),
+                body.replacen("self.valid,", "{ self.valid = true; true },", 1),
+                body.replacen("self.valid,", "{ self.restore_valid(); true },", 1),
+                body.replacen("self.valid,", "true,", 1),
+            ] {
+                assert_ne!(body, changed);
+                assert!(!idle_wrapper_keeps_terminal_validity_monotonic(
+                    &format!("{prefix}fn readmit_counter_idle({changed}"),
+                    owner
+                ));
+            }
+        }
+    }
+
+    fn selected_body(source: &str, owner: &str, method: &str) -> syn::Block {
+        syn::parse_file(source)
+            .unwrap()
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Impl(item) = item else {
+                    return None;
+                };
+                if !matches!(&*item.self_ty, syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|name| name.ident == owner))
+                {
+                    return None;
+                }
+                item.items.into_iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(function) if function.sig.ident == method => {
+                        Some(function.block)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap()
+    }
+
+    fn expression_path(expression: &syn::Expr) -> String {
+        match expression {
+            syn::Expr::Path(path) => path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
+            syn::Expr::Field(field) => format!(
+                "{}.{}",
+                expression_path(&field.base),
+                match &field.member {
+                    syn::Member::Named(name) => name.to_string(),
+                    syn::Member::Unnamed(_) => return String::new(),
+                }
+            ),
+            _ => String::new(),
+        }
+    }
+
+    fn direct_checked(
+        statement: &syn::Stmt,
+        receiver: &str,
+        method: &str,
+        arguments: &[&str],
+    ) -> bool {
+        let syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_)) = statement else {
+            return false;
+        };
+        let syn::Expr::MethodCall(call) = &*attempt.expr else {
+            return false;
+        };
+        expression_path(&call.receiver) == receiver
+            && call.method == method
+            && call.args.iter().map(expression_path).collect::<Vec<_>>() == arguments
+    }
+
+    fn local_value<'a>(statement: &'a syn::Stmt, name: &str) -> Option<&'a syn::Expr> {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == name) {
+            return None;
+        }
+        Some(&*local.init.as_ref()?.expr)
+    }
+
+    fn idle_prepare_keeps_old_cap_before_full_authentication(source: &str) -> bool {
+        let body = selected_body(source, "CounterConnectionSlot", "prepare_readmission");
+        let Some(index) = body
+            .stmts
+            .iter()
+            .position(|statement| local_value(statement, "replacement").is_some())
+        else {
+            return false;
+        };
+        let Some(syn::Stmt::Expr(syn::Expr::Block(before), _)) =
+            index.checked_sub(1).and_then(|index| body.stmts.get(index))
+        else {
+            return false;
+        };
+        let statements = &before.block.stmts;
+        let Some(tail) = statements
+            .len()
+            .checked_sub(3)
+            .map(|index| &statements[index..])
+        else {
+            return false;
+        };
+        if !direct_checked(
+            &tail[0],
+            "connection.credential",
+            "check",
+            &["acquisition", "store.max_lease_seconds"],
+        ) || !direct_checked(
+            &tail[1],
+            "connection.owner",
+            "meet_current_read_view",
+            &["stage", "acquisition"],
+        ) || !direct_checked(&tail[2], "acquisition", "remaining", &[])
+        {
+            return false;
+        }
+        let Some(syn::Expr::Try(attempt)) = local_value(&body.stmts[index], "replacement") else {
+            return false;
+        };
+        let syn::Expr::MethodCall(into) = &*attempt.expr else {
+            return false;
+        };
+        let syn::Expr::Try(acquire) = &*into.receiver else {
+            return false;
+        };
+        let syn::Expr::Call(acquire) = &*acquire.expr else {
+            return false;
+        };
+        into.method == "into_counter_connection"
+            && into.args.is_empty()
+            && expression_path(&acquire.func) == "AuthenticatedReads::acquire"
+            && acquire.args.len() == 4
+            && acquire
+                .args
+                .iter()
+                .take(3)
+                .map(expression_path)
+                .collect::<Vec<_>>()
+                == ["policy", "store", "purpose"]
+            && matches!(&acquire.args[3], syn::Expr::Try(stage)
+                if matches!(&*stage.expr,syn::Expr::MethodCall(call)
+                    if expression_path(&call.receiver)=="idle" && call.method=="stage" && call.args.is_empty()))
+    }
+
+    fn idle_publication_keeps_final_caps_before_atomic_install(source: &str) -> bool {
+        let body = selected_body(source, "CounterReadmission", "publish");
+        let positions = |receiver, method, args: &[&str]| {
+            body.stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, statement)| {
+                    direct_checked(statement, receiver, method, args).then_some(index)
+                })
+                .collect::<Vec<_>>()
+        };
+        let publications = positions("publication", "check_acquisition", &["acquisition"]);
+        let credentials = positions(
+            "connection.credential",
+            "check",
+            &["acquisition", "connection.store.max_lease_seconds"],
+        );
+        let remaining = positions("acquisition", "remaining", &[]);
+        if publications.len() != 2 || credentials.len() != 2 || remaining.len() != 1 {
+            return false;
+        }
+        let Some(replace) = body.stmts.iter().position(|statement| matches!(local_value(statement,"previous"),Some(syn::Expr::Call(call))
+            if expression_path(&call.func)=="std::mem::replace" && call.args.len()==2
+                && matches!(&call.args[0],syn::Expr::Reference(reference)
+                    if reference.mutability.is_some() && expression_path(&reference.expr)=="connection.credential")
+                && expression_path(&call.args[1])=="replacement")) else { return false; };
+        let Some(drop_old) = body.stmts.iter().position(|statement| matches!(statement,syn::Stmt::Expr(syn::Expr::Call(call),Some(_))
+            if expression_path(&call.func)=="drop" && call.args.len()==1 && expression_path(&call.args[0])=="previous")) else { return false; };
+        let Some(install) = body.stmts.iter().position(|statement| matches!(statement,syn::Stmt::Expr(syn::Expr::Assign(assign),Some(_))
+            if expression_path(&assign.left)=="self.slot.state"
+                && matches!(&*assign.right,syn::Expr::Call(call) if expression_path(&call.func)=="CounterConnectionState::Admitted"
+                    && call.args.len()==1 && expression_path(&call.args[0])=="connection"))) else { return false; };
+        let Some(finish) = body.stmts.iter().position(|statement| matches!(statement,syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+            if expression_path(&call.receiver)=="publication" && call.method=="finish_published" && call.args.is_empty())) else { return false; };
+        let order = [
+            publications[0],
+            credentials[0],
+            replace,
+            drop_old,
+            credentials[1],
+            publications[1],
+            remaining[0],
+            install,
+            finish,
+        ];
+        order.windows(2).all(|pair| pair[0] < pair[1])
+    }
+
+    fn controller_idle_keeps_physical_close_before_publication(source: &str) -> bool {
+        let body = selected_body(
+            source,
+            "ActiveControllerStorageContinuity",
+            "readmit_counter_idle",
+        );
+        let Some(syn::Expr::Call(invoked)) = body
+            .stmts
+            .iter()
+            .find_map(|statement| local_value(statement, "result"))
+        else {
+            return false;
+        };
+        let syn::Expr::Paren(wrapper) = &*invoked.func else {
+            return false;
+        };
+        let syn::Expr::Closure(closure) = &*wrapper.expr else {
+            return false;
+        };
+        let syn::Expr::Block(closure) = &*closure.body else {
+            return false;
+        };
+        let statements = &closure.block.stmts;
+        let Some(tail) = statements
+            .len()
+            .checked_sub(3)
+            .map(|index| &statements[index..])
+        else {
+            return false;
+        };
+        matches!(local_value(&tail[0],"pending"),Some(syn::Expr::Try(attempt))
+            if matches!(&*attempt.expr,syn::Expr::MethodCall(call)
+                if expression_path(&call.receiver)=="self.counter" && call.method=="prepare_readmission"))
+            && direct_checked(&tail[1], "physical", "finish_controller_known", &[])
+            && matches!(&tail[2],syn::Stmt::Expr(syn::Expr::MethodCall(call),None)
+                if expression_path(&call.receiver)=="pending" && call.method=="publish"
+                    && call.args.len()==1 && expression_path(&call.args[0])=="publication")
+    }
+
+    #[test]
+    fn idle_replacement_restoration_controls_pin_actual_caps_and_publication_order() {
+        // Finite production-boundary restoration controls, not a positive
+        // native-owner simulation or an assertion that network I/O succeeds.
+        let source = include_str!("connection.rs");
+        assert!(idle_prepare_keeps_old_cap_before_full_authentication(
+            source
+        ));
+        assert!(idle_publication_keeps_final_caps_before_atomic_install(
+            source
+        ));
+        let (prefix, prepare) = source.split_once("fn prepare_readmission<").unwrap();
+        let old_cap = "connection\n                .credential\n                .check(acquisition, store.max_lease_seconds)?;";
+        for changed in [
+            prepare.replacen(old_cap, "", 1),
+            prepare.replacen(old_cap, &format!("if false {{ {old_cap} }}"), 1),
+            prepare.replacen(old_cap, &old_cap.replace("connection", "foreign"), 1),
+        ] {
+            assert_ne!(prepare, changed);
+            assert!(!idle_prepare_keeps_old_cap_before_full_authentication(
+                &format!("{prefix}fn prepare_readmission<{changed}")
+            ));
+        }
+        let (prefix, publish) = source.split_once("fn publish(").unwrap();
+        let check = "publication.check_acquisition(acquisition)?;";
+        let first_end = publish.find(check).unwrap() + check.len();
+        let (first, later) = publish.split_at(first_end);
+        for changed in [
+            publish.replacen("publication.check_acquisition(acquisition)?;", "", 2),
+            format!("{first}{}", later.replacen(check, "", 1)),
+            publish.replacen("acquisition.remaining()?;", "", 1),
+            publish.replacen("drop(previous);", "", 1),
+            publish.replacen(
+                "publication.check_acquisition(acquisition)?;",
+                "publication.check_acquisition(foreign)?;",
+                1,
+            ),
+            publish.replacen(
+                "let previous =",
+                "self.slot.state = CounterConnectionState::Admitted(connection); let previous =",
+                1,
+            ),
+        ] {
+            assert_ne!(publish, changed);
+            assert!(!idle_publication_keeps_final_caps_before_atomic_install(
+                &format!("{prefix}fn publish({changed}")
+            ));
+        }
+        let source = include_str!("../bootstrap/controller_serving.rs");
+        assert!(controller_idle_keeps_physical_close_before_publication(
+            source
+        ));
+        let changed = source.replacen(
+            "physical.finish_controller_known()?;\n            pending.publish(publication)",
+            "pending.publish(publication)?;\n            physical.finish_controller_known()",
+            1,
+        );
+        assert_ne!(source, changed);
+        assert!(!controller_idle_keeps_physical_close_before_publication(
+            &changed
+        ));
+    }
+
     fn cold_counter_entry_shape(source: &str) -> bool {
         fn path(value: &syn::Expr, name: &str) -> bool {
             matches!(value,syn::Expr::Path(p) if p.path.is_ident(name))
@@ -628,6 +1274,47 @@ mod tests {
                     if m.semi_token.is_some()
                     && m.mac.path.segments.iter().map(|s|s.ident.to_string()).collect::<Vec<_>>()==["anyhow","bail"]
                     && syn::parse2::<syn::LitStr>(m.mac.tokens.clone()).is_ok_and(|s|s.value()=="epoch_counter_connection_admission_already_attempted")))
+    }
+
+    fn cold_publication_keeps_token_cap_through_final_postchecks(source: &str) -> bool {
+        let calls = method_calls(source, "AuthenticatedReads", "into_counter_connection");
+        let Some(start) = calls.iter().position(|call| call == "admit_counter") else {
+            return false;
+        };
+        calls.get(start + 1..start + 8).is_some_and(|calls| {
+            calls
+                == [
+                    "check",
+                    "meet_current_read_view",
+                    "check",
+                    "check_selection",
+                    "check",
+                    "meet_current_read_view",
+                    "remaining",
+                ]
+        })
+    }
+
+    #[test]
+    fn cold_token_cap_covers_postchecks_before_connection_publication() {
+        // The native owner remains nonconstructible. These finite controls
+        // bind the real cold factory to its lower material/clock tests.
+        let source = include_str!("connection.rs");
+        assert!(cold_publication_keeps_token_cap_through_final_postchecks(
+            source
+        ));
+        let (prefix, body) = source.split_once("fn into_counter_connection(").unwrap();
+        for removed in [
+            "credential.check(&mut self.acquisition, self.store.max_lease_seconds)?;",
+            "owner.meet_current_read_view(self.stage, &mut self.acquisition)?;",
+            "self.acquisition.remaining()?;",
+        ] {
+            let changed = body.replacen(removed, "", 1);
+            assert_ne!(body, changed);
+            assert!(!cold_publication_keeps_token_cap_through_final_postchecks(
+                &format!("{prefix}fn into_counter_connection({changed}")
+            ));
+        }
     }
 
     #[test]
@@ -926,11 +1613,21 @@ mod tests {
         // or a claim of general Rust control-flow/type-resolution soundness.
         let source = include_str!("connection.rs");
         assert!(retained_request_shape(source));
-        for changed in [
+        // Maintenance now has a different same-original join and an Admitted
+        // hint read. Mutate the actual selected request methods, not the first
+        // similarly spelled operation anywhere in the source file.
+        let sample_marker = "impl CounterRequest<'_> {";
+        let request_marker = "pub(in crate::security_epoch) fn request<'connection>(";
+        let (before_sample, sample) = source.split_once(sample_marker).unwrap();
+        let (before_request, request) = source.split_once(request_marker).unwrap();
+        for (index, changed) in [
             source.replacen("self.connection.owner.check(stage)?;", "", 1),
             source.replace("stage.check_current_selection(", "stage.check_selection("),
             source.replace(".meet_current_read_view(", ".unchecked_current_read_view("),
-            source.replacen(".join_current_view(", ".join_storage_bootstrap_view(", 1),
+            format!(
+                "{before_sample}{sample_marker}{}",
+                sample.replacen(".join_current_view(", ".join_storage_bootstrap_view(", 1)
+            ),
             source.replacen("self.stage.capture_same_owner()?", "unavailable_owner()", 1),
             source.replacen(".admit_counter(", ".unqualified_counter(", 1),
             source.replacen(
@@ -938,19 +1635,28 @@ mod tests {
                 "let was_vacant = true;",
                 1,
             ),
-            source.replacen(
-                "CounterConnectionState::Admitted(connection) = &mut self.state",
-                "CounterConnectionState::Admitted(connection) = available_elsewhere()",
-                1,
+            format!(
+                "{before_request}{request_marker}{}",
+                request.replacen(
+                    "CounterConnectionState::Admitted(connection) = &mut self.state",
+                    "CounterConnectionState::Admitted(connection) = available_elsewhere()",
+                    1,
+                )
             ),
             source.replacen(
                 "let checked = (|| {",
                 "let checked = (|| { self.admit(stage, policy, store, purpose)?;",
                 1,
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert_ne!(changed, source);
-            assert!(!retained_request_shape(&changed));
+            assert!(
+                !retained_request_shape(&changed),
+                "request restoration mutant {index}"
+            );
         }
     }
 

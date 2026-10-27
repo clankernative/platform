@@ -242,38 +242,101 @@ impl NativeConnectionClock {
 /// Read-only historical DATA from the same original's existing samples. This
 /// cannot sample a clock, check validity, change a deadline or restore an owner.
 /// It may outlive the refused owner solely so diagnostics can run after unwind.
-pub(super) struct AcquisitionProgress {
+pub(crate) struct AcquisitionProgress {
     origin: Duration,
     observation: Rc<Cell<OriginalObservation>>,
     request_domain: Digest,
     enrolled_incarnation: Option<Digest>,
+    producer_incarnation: Option<Digest>,
+    owner_ordinal: Option<u64>,
+    request_ordinal: Option<u64>,
+    role: Option<super::native_enrollment::NativeRole>,
+    stage: Option<super::native_enrollment::StagePurpose>,
+    issuer_admission: Option<Digest>,
 }
 
 /// Redacted historical commitments, never a current permission or owner.
 /// There is no inverse native constructor from either digest.
 #[derive(Clone, serde::Serialize)]
-pub(super) struct EnrolledRequestDiagnosticData {
-    pub enrolled_incarnation: Digest,
-    pub request_original: Digest,
+pub(crate) struct EnrolledRequestDiagnosticData {
+    enrolled_incarnation: Option<Digest>,
+    request_original: Option<Digest>,
+    producer_incarnation: Option<Digest>,
+    owner_ordinal: Option<u64>,
+    request_ordinal: Option<u64>,
+    role: Option<super::native_enrollment::NativeRole>,
+    purpose: Option<super::native_enrollment::StagePurpose>,
+    issuer_admission: Option<Digest>,
+}
+
+impl EnrolledRequestDiagnosticData {
+    #[cfg(test)]
+    pub(crate) fn maximal_fixture() -> Self {
+        let digest = Digest::new(b"maximum diagnostic labels fixture only");
+        Self {
+            enrolled_incarnation: Some(digest.clone()),
+            request_original: Some(digest.clone()),
+            producer_incarnation: Some(digest.clone()),
+            owner_ordinal: Some(u64::MAX),
+            request_ordinal: Some(u64::MAX),
+            role: Some(super::native_enrollment::NativeRole::EpochController),
+            purpose: Some(super::native_enrollment::StagePurpose::StorageMetadataObservation),
+            issuer_admission: Some(digest),
+        }
+    }
+
+    pub(super) fn unknown() -> Self {
+        Self {
+            enrolled_incarnation: None,
+            request_original: None,
+            producer_incarnation: None,
+            owner_ordinal: None,
+            request_ordinal: None,
+            role: None,
+            purpose: None,
+            issuer_admission: None,
+        }
+    }
 }
 
 impl AcquisitionProgress {
-    pub(super) fn with_enrollment_data(mut self, incarnation: Digest) -> Self {
-        self.enrolled_incarnation = Some(incarnation);
+    pub(super) fn with_issuer_admission_data(mut self, signed_grant: Option<Digest>) -> Self {
+        self.issuer_admission = signed_grant;
         self
     }
 
-    pub(super) fn historical_request_binding_data(&self) -> Result<EnrolledRequestDiagnosticData> {
+    pub(super) fn with_enrollment_data(
+        mut self,
+        incarnation: Digest,
+        producer: Option<Digest>,
+        owner_ordinal: Option<u64>,
+        request_ordinal: Option<u64>,
+        role: super::native_enrollment::NativeRole,
+        stage: super::native_enrollment::StagePurpose,
+    ) -> Self {
+        self.enrolled_incarnation = Some(incarnation);
+        self.producer_incarnation = producer;
+        self.owner_ordinal = owner_ordinal;
+        self.request_ordinal = request_ordinal;
+        self.role = Some(role);
+        self.stage = Some(stage);
+        self
+    }
+
+    pub(crate) fn historical_request_binding_data(&self) -> Result<EnrolledRequestDiagnosticData> {
         let enrolled_incarnation = self
             .enrolled_incarnation
             .clone()
             .ok_or_else(|| anyhow::anyhow!("native_enrollment_diagnostic_binding_unavailable"))?;
         Ok(EnrolledRequestDiagnosticData {
-            enrolled_incarnation,
-            request_original: Digest::of(&(
-                "day2-native-request-diagnostic-commitment-v1",
-                &self.request_domain,
-            ))?,
+            enrolled_incarnation: Some(enrolled_incarnation),
+            producer_incarnation: self.producer_incarnation.clone(),
+            owner_ordinal: self.owner_ordinal,
+            request_ordinal: self.request_ordinal,
+            role: self.role,
+            purpose: self.stage,
+            issuer_admission: self.issuer_admission.clone(),
+            request_original: Some(request_diagnostic_commitment(&self.request_domain)?),
         })
     }
 
@@ -284,6 +347,12 @@ impl AcquisitionProgress {
             .checked_sub(self.origin)
             .and_then(|elapsed| elapsed.as_micros().try_into().ok())
     }
+}
+
+/// One historical commitment codec for both the real local original and its
+/// verified peer statement. This does not reconstruct any native owner.
+pub(super) fn request_diagnostic_commitment(domain: &Digest) -> Result<Digest> {
+    Digest::of(&("day2-native-request-diagnostic-commitment-v1", domain))
 }
 
 impl NativeAcquisition {
@@ -349,6 +418,7 @@ impl NativeAcquisition {
             #[cfg(test)]
             fixture_time: None,
         };
+        super::admission_work::bind_producer(&acquisition.identity_domain, acquisition.process);
         acquisition.sample()?;
         Ok(acquisition)
     }
@@ -464,6 +534,12 @@ impl NativeAcquisition {
             observation: Rc::clone(&self.observation),
             request_domain: self.domain.clone(),
             enrolled_incarnation: None,
+            producer_incarnation: None,
+            owner_ordinal: None,
+            request_ordinal: None,
+            role: None,
+            stage: None,
+            issuer_admission: None,
         }
     }
 
@@ -759,6 +835,76 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_diagnostic_identity_serializes_only_unknown_values() {
+        let unknown = serde_json::to_value(EnrolledRequestDiagnosticData::unknown()).unwrap();
+        let fields = unknown.as_object().unwrap();
+        assert_eq!(fields.len(), 8);
+        assert!(fields.values().all(serde_json::Value::is_null));
+    }
+
+    fn real_constructor_producer_seed(source: &str) -> bool {
+        fn path(expression: &syn::Expr, name: &str) -> bool {
+            matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
+        }
+        fn field(expression: &syn::Expr, name: &str) -> bool {
+            matches!(expression, syn::Expr::Field(field)
+                if path(&field.base, "acquisition") && matches!(&field.member, syn::Member::Named(actual) if actual == name))
+        }
+        let syntax = syn::parse_file(source).unwrap();
+        let Some(function) = syntax.items.iter().find_map(|item| {
+            let syn::Item::Impl(implementation) = item else { return None; };
+            if !matches!(&*implementation.self_ty, syn::Type::Path(ty) if ty.path.is_ident("NativeAcquisition")) { return None; }
+            implementation.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident == "begin_bounded" => Some(function),
+                _ => None,
+            })
+        }) else { return false; };
+        let statements = &function.block.stmts;
+        if statements.len() < 3 {
+            return false;
+        }
+        let syn::Stmt::Expr(syn::Expr::Call(bind), Some(_)) = &statements[statements.len() - 3]
+        else {
+            return false;
+        };
+        let bound = matches!(&*bind.func, syn::Expr::Path(path)
+            if path.path.segments.iter().map(|part| part.ident.to_string()).collect::<Vec<_>>() == ["super", "admission_work", "bind_producer"])
+            && bind.args.len() == 2
+            && matches!(&bind.args[0], syn::Expr::Reference(reference) if field(&reference.expr, "identity_domain"))
+            && field(&bind.args[1], "process");
+        let sampled = matches!(&statements[statements.len()-2], syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_))
+            if matches!(&*attempt.expr, syn::Expr::MethodCall(call)
+                if call.method == "sample" && path(&call.receiver, "acquisition") && call.args.is_empty()));
+        let returned = matches!(statements.last(), Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
+            if path(&call.func, "Ok") && call.args.len() == 1 && path(&call.args[0], "acquisition"));
+        bound && sampled && returned
+    }
+
+    #[test]
+    fn producer_provenance_comes_from_the_real_original_without_another_clock() {
+        let source = include_str!("native_clock.rs");
+        assert!(real_constructor_producer_seed(source));
+        for (before, after) in [
+            (
+                "&acquisition.identity_domain, acquisition.process",
+                "&unrelated, acquisition.process",
+            ),
+            (
+                "&acquisition.identity_domain, acquisition.process",
+                "&acquisition.identity_domain, 0",
+            ),
+            (
+                "super::admission_work::bind_producer",
+                "super::admission_work::fixture_seed",
+            ),
+        ] {
+            let changed = source.replacen(before, after, 1);
+            assert_ne!(changed, source);
+            assert!(!real_constructor_producer_seed(&changed));
+        }
+    }
 
     #[test]
     fn lexical_request_borrows_keep_the_actual_parents_earliest_cap_and_refusal() {
@@ -1089,12 +1235,21 @@ mod tests {
                 .is_err()
         );
         let incarnation = Digest::new(b"fixture-historical-enrollment-data");
+        let admission = Digest::new(b"fixture-historical-signed-grant-data");
         let progress = original
             .diagnostic_progress()
-            .with_enrollment_data(incarnation.clone());
+            .with_enrollment_data(
+                incarnation.clone(),
+                Some(Digest::new(b"producer-data")),
+                Some(1),
+                Some(1),
+                super::super::native_enrollment::NativeRole::AppHost,
+                super::super::native_enrollment::StagePurpose::CurrentRole,
+            )
+            .with_issuer_admission_data(Some(admission.clone()));
         let before = progress.historical_request_binding_data().unwrap();
-        assert_eq!(before.enrolled_incarnation, incarnation);
-        assert_ne!(before.request_original, original.domain);
+        assert_eq!(before.enrolled_incarnation, Some(incarnation.clone()));
+        assert_ne!(before.request_original, Some(original.domain.clone()));
         original.fixture_time = Some(Duration::from_secs(102));
         original.sample().unwrap();
         assert_eq!(progress.last_checked_elapsed_micros(), Some(2_000_000));
@@ -1104,9 +1259,18 @@ mod tests {
         assert_eq!(after.request_original, before.request_original);
         assert!(original.remaining().is_err());
         let encoded = serde_json::to_value(after).unwrap();
-        assert_eq!(encoded.as_object().unwrap().len(), 2);
+        assert_eq!(encoded.as_object().unwrap().len(), 8);
         assert!(encoded["enrolled_incarnation"].is_string());
         assert!(encoded["request_original"].is_string());
+        assert_eq!(encoded["owner_ordinal"], 1);
+        assert_eq!(encoded["request_ordinal"], 1);
+        assert_eq!(encoded["role"], "app_host");
+        assert_eq!(encoded["purpose"], "current_role");
+        assert!(encoded["producer_incarnation"].is_string());
+        assert_eq!(
+            encoded["issuer_admission"],
+            serde_json::to_value(admission).unwrap()
+        );
         let next = NativeAcquisition::fixture(
             Digest::new(b"second-request"),
             std::process::id(),
@@ -1115,10 +1279,20 @@ mod tests {
         );
         let next = next
             .diagnostic_progress()
-            .with_enrollment_data(incarnation)
+            .with_enrollment_data(
+                incarnation,
+                Some(Digest::new(b"producer-data")),
+                Some(1),
+                Some(2),
+                super::super::native_enrollment::NativeRole::AppHost,
+                super::super::native_enrollment::StagePurpose::CurrentRole,
+            )
             .historical_request_binding_data()
             .unwrap();
         assert_ne!(next.request_original, before.request_original);
+        assert_eq!(next.owner_ordinal, before.owner_ordinal);
+        assert_ne!(next.request_ordinal, before.request_ordinal);
+        assert!(next.issuer_admission.is_none());
     }
 
     #[test]

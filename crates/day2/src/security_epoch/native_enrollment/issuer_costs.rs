@@ -6,6 +6,8 @@ use std::{cell::RefCell, io::Write, rc::Rc, time::Duration};
 const PREFIX: &str = "day2-native-issuer-cost ";
 const RECORD_LIMIT: u8 = 16;
 const RECORD_BYTES: usize = 8192;
+const WORK_PREFIX: &str = "day2-native-issuer-work ";
+const WORK_RECORD_BYTES: usize = 12_288;
 
 /// Keep bounded issuer records on the provisioner's private stderr. Startup
 /// and listener descriptors remain the birth protocol's separate stdin/stdout.
@@ -216,7 +218,26 @@ pub(super) enum Outcome {
 pub(super) struct Recorder<W> {
     output: W,
     records: u8,
+    work_records: Option<u64>,
     failed: bool,
+}
+
+/// Historical DATA cutpoints for one accepted issuer connection. Capture the
+/// first snapshot before any counted work, including the parent-before check.
+/// The next cold probe's first snapshot can close an earlier warm bracket;
+/// that probe's own work must never enter the bracket.
+pub(super) struct WorkCapture {
+    ordinal: Option<u64>,
+    before: crate::security_epoch::admission_work::Snapshot,
+    signed_grant: Option<day2_capabilities::Digest>,
+}
+
+impl WorkCapture {
+    pub(super) fn bind_grant(&mut self, grant: &super::protocol::SignedStage) {
+        // No raw public key, nonce, process, runtime or provider value is
+        // exported. Missing serialization is unknown diagnostic provenance.
+        self.signed_grant = day2_capabilities::Digest::of(grant).ok();
+    }
 }
 
 impl<W: Write> Recorder<W> {
@@ -224,8 +245,74 @@ impl<W: Write> Recorder<W> {
         Self {
             output,
             records: 0,
+            work_records: Some(0),
             failed: false,
         }
+    }
+
+    pub(super) fn begin_work_capture(&mut self) -> WorkCapture {
+        self.work_records = self.work_records.and_then(|n| n.checked_add(1));
+        WorkCapture {
+            ordinal: self.work_records,
+            before: crate::security_epoch::admission_work::snapshot(),
+            signed_grant: None,
+        }
+    }
+
+    /// Export only after actual connection work has returned and its channel,
+    /// acquisitions and temporary peer observations have unwound. Cumulative
+    /// work records continue after the independent 16-record timing cap.
+    pub(super) fn emit_connection(
+        &mut self,
+        costs: &Costs,
+        capture: WorkCapture,
+        outcome: Outcome,
+    ) -> anyhow::Result<()> {
+        let result = (|| {
+            anyhow::ensure!(!self.failed, "native_issuer_cost_closed");
+            self.emit_work_inner(
+                capture,
+                outcome,
+                crate::security_epoch::admission_work::snapshot(),
+            )?;
+            self.emit(costs, outcome)
+        })();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn emit_work_inner(
+        &mut self,
+        capture: WorkCapture,
+        outcome: Outcome,
+        after: crate::security_epoch::admission_work::Snapshot,
+    ) -> anyhow::Result<()> {
+        #[derive(Serialize)]
+        struct Record {
+            format: &'static str,
+            connection_ordinal: Option<u64>,
+            signed_grant: Option<day2_capabilities::Digest>,
+            outcome: Outcome,
+            before: crate::security_epoch::admission_work::Snapshot,
+            after: crate::security_epoch::admission_work::Snapshot,
+        }
+        let json = serde_json::to_string(&Record {
+            format: "day2_native_issuer_work_v1",
+            connection_ordinal: capture.ordinal,
+            signed_grant: capture.signed_grant,
+            outcome,
+            before: capture.before,
+            after,
+        })?;
+        anyhow::ensure!(
+            WORK_PREFIX.len() + json.len() < WORK_RECORD_BYTES,
+            "native_issuer_work_record_bound"
+        );
+        self.output
+            .write_all(format!("{WORK_PREFIX}{json}\n").as_bytes())
+            .map_err(|_| anyhow::anyhow!("native_issuer_cost_export_failed"))
     }
 
     pub(super) fn connection(&self) -> Costs {
@@ -309,6 +396,140 @@ pub(super) fn preserve_error(
 mod tests {
     use super::*;
 
+    fn production_capture_order(source: &str) -> bool {
+        use syn::visit::Visit;
+
+        fn named(expression: &syn::Expr, name: &str) -> bool {
+            matches!(expression, syn::Expr::Path(path) if path.path.is_ident(name))
+        }
+        let syntax = syn::parse_file(source).unwrap();
+        let Some(run) = syntax.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "run" => Some(function),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let Some(syn::Stmt::Expr(syn::Expr::Loop(body), _)) = run.block.stmts.last() else {
+            return false;
+        };
+        let Some(syn::Stmt::Local(capture)) = body.body.stmts.get(1) else {
+            return false;
+        };
+        if !matches!(&capture.pat, syn::Pat::Ident(binding) if binding.ident == "capture")
+            || !matches!(&capture.init, Some(init)
+                if matches!(&*init.expr, syn::Expr::MethodCall(call)
+                    if named(&call.receiver, "recorder")
+                        && call.method == "begin_work_capture" && call.args.is_empty()))
+        {
+            return false;
+        }
+        let Some(syn::Stmt::Local(work)) = body.body.stmts.get(2) else {
+            return false;
+        };
+        if !matches!(&work.pat, syn::Pat::Ident(binding) if binding.ident == "work")
+            || !matches!(&work.init, Some(init)
+                if matches!(&*init.expr, syn::Expr::Call(call)
+                    if matches!(&*call.func, syn::Expr::Path(path)
+                        if path.path.segments.last().is_some_and(|s| s.ident == "begin"))))
+        {
+            return false;
+        }
+        #[derive(Default)]
+        struct Wiring {
+            captures: usize,
+            exports: usize,
+            serve: usize,
+        }
+        impl<'ast> Visit<'ast> for Wiring {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if named(&call.receiver, "recorder") {
+                    self.captures += usize::from(call.method == "begin_work_capture");
+                    self.exports += usize::from(
+                        call.method == "emit_connection"
+                            && call.args.len() == 3
+                            && named(&call.args[1], "capture"),
+                    );
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                self.serve += usize::from(
+                    named(&call.func, "serve")
+                        && call.args.len() == 6
+                        && matches!(&call.args[5], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some() && named(&reference.expr, "capture")),
+                );
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut wiring = Wiring::default();
+        wiring.visit_block(&run.block);
+        let Some(serve) = syntax.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "serve" => Some(function),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let Some(stage) = serve.block.stmts.iter().position(|statement| {
+            matches!(statement, syn::Stmt::Local(local)
+                if matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "stage")
+                    && matches!(&local.init, Some(init)
+                        if matches!(&*init.expr, syn::Expr::Struct(value)
+                            if value.path.is_ident("SignedStage"))))
+        }) else {
+            return false;
+        };
+        let joined = matches!(serve.block.stmts.get(stage + 1),
+            Some(syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)))
+                if named(&call.receiver, "capture") && call.method == "bind_grant"
+                    && call.args.len() == 1
+                    && matches!(&call.args[0], syn::Expr::Reference(reference)
+                        if reference.mutability.is_none() && named(&reference.expr, "stage")));
+        wiring.captures == 1 && wiring.exports == 2 && wiring.serve == 1 && joined
+    }
+
+    #[test]
+    fn actual_service_captures_before_all_counted_work_and_exports_both_paths() {
+        let source = include_str!("service.rs");
+        assert!(production_capture_order(source));
+        for (before, after) in [
+            ("recorder.begin_work_capture()", "recorder.connection()"),
+            (
+                "let mut capture = recorder.begin_work_capture();",
+                "let mut capture = if false { recorder.begin_work_capture() } else { unrelated };",
+            ),
+            (
+                "recorder.emit_connection(&costs, capture, Outcome::ParentBeforeError)",
+                "recorder.emit(&costs, Outcome::ParentBeforeError)",
+            ),
+            (
+                "recorder.emit_connection(&costs, capture, outcome)",
+                "recorder.emit(&costs, outcome)",
+            ),
+            ("&mut capture,", "&mut unrelated,"),
+            (
+                "capture.bind_grant(&stage);",
+                "capture.bind_grant(&unrelated);",
+            ),
+            (
+                "capture.bind_grant(&stage);",
+                "if false { capture.bind_grant(&stage); }",
+            ),
+        ] {
+            let changed = source.replacen(before, after, 1);
+            assert_ne!(changed, source);
+            assert!(!production_capture_order(&changed));
+        }
+        let capture = "let mut capture = recorder.begin_work_capture();";
+        let moved = source.replacen(capture, "", 1).replacen(
+            "let costs = recorder.connection();",
+            &format!("let costs = recorder.connection(); {capture}"),
+            1,
+        );
+        assert!(!production_capture_order(&moved));
+    }
+
     #[test]
     fn issuer_record_bound_covers_all_maximal_work_and_timing_rows() {
         let costs = Costs::new();
@@ -335,6 +556,77 @@ mod tests {
             9
         );
         assert_eq!(record["rows"].as_array().unwrap().len(), 20);
+    }
+
+    #[test]
+    fn uncapped_work_record_bound_covers_two_maximal_snapshots() {
+        let mut recorder = Recorder::new(Vec::new());
+        recorder
+            .emit_work_inner(
+                WorkCapture {
+                    ordinal: Some(u64::MAX),
+                    before: crate::security_epoch::admission_work::Snapshot::maximal_fixture(),
+                    signed_grant: Some(day2_capabilities::Digest::new(b"diagnostic-only")),
+                },
+                Outcome::Completed,
+                crate::security_epoch::admission_work::Snapshot::maximal_fixture(),
+            )
+            .unwrap();
+        assert!(recorder.output.len() < WORK_RECORD_BYTES);
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(text.strip_prefix(WORK_PREFIX).unwrap()).unwrap();
+        assert_eq!(record["connection_ordinal"], u64::MAX);
+        assert_eq!(record["before"]["rows"].as_array().unwrap().len(), 9);
+        assert_eq!(record["after"]["rows"].as_array().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn uncapped_work_cutpoints_reach_stderr_after_timing_details_are_disabled() {
+        let output = stderr_probe("work-relay").output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains(WORK_PREFIX)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let work: Vec<serde_json::Value> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix(WORK_PREFIX))
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect();
+        assert_eq!(work.len(), 40);
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| line.starts_with(PREFIX))
+                .count(),
+            usize::from(RECORD_LIMIT)
+        );
+        for (index, record) in work.iter().enumerate() {
+            assert_eq!(record["format"], "day2_native_issuer_work_v1");
+            assert_eq!(record["connection_ordinal"], index + 1);
+            assert_eq!(record["outcome"], "completed");
+            assert!(record["signed_grant"].is_null()); // No native grant fixture.
+            assert_eq!(record["before"]["rows"][2]["attempted"], index);
+            assert_eq!(record["after"]["rows"][2]["attempted"], index + 1);
+            assert_eq!(record["after"]["rows"][2]["returned"], index + 1);
+            assert_eq!(record["after"]["rows"][2]["in_flight"], 0);
+            assert!(record["before"]["producer_incarnation"].is_string());
+            assert_eq!(
+                record["before"]["producer_incarnation"],
+                record["after"]["producer_incarnation"]
+            );
+            assert_eq!(record["before"]["loss"], false);
+            assert_eq!(record["after"]["loss"], false);
+        }
+        let overflow = stderr_probe("work-overflow").output().unwrap();
+        assert!(overflow.status.success());
+        let stderr = String::from_utf8(overflow.stderr).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(stderr.trim().strip_prefix(WORK_PREFIX).unwrap()).unwrap();
+        assert!(record["connection_ordinal"].is_null());
     }
 
     const STDERR_PROBE: &str =
@@ -369,7 +661,8 @@ mod tests {
             .unwrap();
         assert_eq!(work["format"], "native_admission_work_v1");
         assert_eq!(work["sequence"], 1);
-        assert_eq!(work["complete"], true);
+        assert_eq!(work["complete"], false);
+        assert!(work["producer_incarnation"].is_null());
         assert_eq!(work["loss"], false);
         assert_eq!(work["poisoned"], false);
         let work_rows = work["rows"].as_array().unwrap();
@@ -413,6 +706,42 @@ mod tests {
                     Some(Duration::from_micros(3)),
                 );
                 recorder.emit(&costs, Outcome::Completed).unwrap();
+            }
+            "work-relay" => {
+                let status = stderr_probe("work-record")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(issuer_stderr())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            "work-record" => {
+                use crate::security_epoch::admission_work::{self, Work};
+                // DATA-only process ledger fixture. It constructs no native
+                // process, role, connection, acquisition or request owner.
+                admission_work::bind_producer(
+                    &day2_capabilities::Digest::new(b"work-stderr-data"),
+                    std::process::id(),
+                );
+                let mut recorder = Recorder::new(std::io::stderr());
+                for _ in 0..40 {
+                    let capture = recorder.begin_work_capture();
+                    let costs = recorder.connection();
+                    let mut work = admission_work::begin(Work::IssuerServiceAdmission);
+                    work.finish(true);
+                    recorder
+                        .emit_connection(&costs, capture, Outcome::Completed)
+                        .unwrap();
+                }
+            }
+            "work-overflow" => {
+                let mut recorder = Recorder::new(std::io::stderr());
+                recorder.work_records = Some(u64::MAX);
+                let capture = recorder.begin_work_capture();
+                assert!(capture.ordinal.is_none());
+                recorder
+                    .emit_connection(&Costs::disabled(), capture, Outcome::RequestError)
+                    .unwrap();
             }
             _ => panic!("unexpected issuer stderr fixture stage"),
         }
@@ -543,21 +872,32 @@ mod tests {
                 Ok(())
             }
         }
-        let mut recorder = Recorder::new(Broken(std::cell::Cell::new(0)));
-        let costs = recorder.connection();
-        let error = preserve_error(
-            Err(anyhow::anyhow!("original native failure")),
-            recorder.emit(&costs, Outcome::ParentBeforeError),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "native_issuer_cost_export_failed");
-        assert!(
-            error
-                .chain()
-                .any(|e| e.to_string() == "original native failure")
-        );
-        assert!(!format!("{error:#}").contains("private output cause"));
-        assert!(recorder.emit(&costs, Outcome::Completed).is_err());
-        assert_eq!(recorder.output.0.get(), 1);
+        for uncapped in [false, true] {
+            let mut recorder = Recorder::new(Broken(std::cell::Cell::new(0)));
+            let costs = recorder.connection();
+            let exported = if uncapped {
+                let capture = recorder.begin_work_capture();
+                recorder.emit_connection(&costs, capture, Outcome::ParentBeforeError)
+            } else {
+                recorder.emit(&costs, Outcome::ParentBeforeError)
+            };
+            let error = preserve_error(Err(anyhow::anyhow!("original native failure")), exported)
+                .unwrap_err();
+            assert_eq!(error.to_string(), "native_issuer_cost_export_failed");
+            assert!(
+                error
+                    .chain()
+                    .any(|e| e.to_string() == "original native failure")
+            );
+            assert!(!format!("{error:#}").contains("private output cause"));
+            assert!(recorder.emit(&costs, Outcome::Completed).is_err());
+            let capture = recorder.begin_work_capture();
+            assert!(
+                recorder
+                    .emit_connection(&costs, capture, Outcome::Completed)
+                    .is_err()
+            );
+            assert_eq!(recorder.output.0.get(), 1);
+        }
     }
 }

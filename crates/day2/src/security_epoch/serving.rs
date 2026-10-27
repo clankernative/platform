@@ -117,9 +117,9 @@ pub(super) enum ScopePurpose {
     Runtime(RuntimeServingUse),
 }
 
-// Historical DATA only. These capped private log records are never parsed as
-// readiness, native material or permission. Shell has no App provider snapshot
-// and cannot manufacture one from a matching binding.
+// Historical DATA only. Private log records and their capped detail are never
+// parsed as readiness, native material or permission. Shell has no App provider
+// snapshot and cannot manufacture one from a matching binding.
 #[derive(Clone)]
 pub(in crate::security_epoch) struct ConsumerScopeEvidence {
     role: super::native_enrollment::NativeRole,
@@ -128,6 +128,8 @@ pub(in crate::security_epoch) struct ConsumerScopeEvidence {
     binding: Option<Digest>,
     purpose: Option<ScopePurpose>,
     snapshot: Option<Digest>,
+    request: Option<super::native_enrollment::EnrolledRequestDiagnosticData>,
+    peer: Option<super::native_enrollment::PeerRequestDiagnosticData>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -145,11 +147,22 @@ pub(in crate::security_epoch) enum ConsumerScopeResult {
 #[derive(Serialize)]
 struct ConsumerEvidenceRecord<'a> {
     format: &'static str,
-    sequence: u8,
+    sequence: u64,
     observation: ConsumerScopeResult,
     role: super::native_enrollment::NativeRole,
-    selection: &'a Option<Digest>,
     consumer_incarnation: &'a Digest,
+    request: &'a Option<super::native_enrollment::EnrolledRequestDiagnosticData>,
+    peer: &'a Option<super::native_enrollment::PeerRequestDiagnosticData>,
+    /// Essential identity rows continue after the detail cap. Missing rows,
+    /// rejected/failed writes or sequence overflow remain UNKNOWN evidence.
+    capture_completeness: &'static str,
+    detail_limit: u8,
+    detail: Option<ConsumerEvidenceDetail<'a>>,
+}
+
+#[derive(Serialize)]
+struct ConsumerEvidenceDetail<'a> {
+    selection: &'a Option<Digest>,
     binding: &'a Option<Digest>,
     purpose: &'a Option<ScopePurpose>,
     snapshot: &'a Option<Digest>,
@@ -157,14 +170,17 @@ struct ConsumerEvidenceRecord<'a> {
 
 const CONSUMER_EVIDENCE_PREFIX: &str = "day2-native-consumer-evidence ";
 const CONSUMER_EVIDENCE_LIMIT: u8 = 128;
-const CONSUMER_EVIDENCE_BYTES: usize = 2048;
-static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+// Full local/remote transcript commitments and maximal optional detail fit
+// without changing any native work or clock bound.
+const CONSUMER_EVIDENCE_BYTES: usize = 4096;
+static CONSUMER_EVIDENCE_RECORDS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-fn next_consumer_evidence_sequence(records: &std::sync::atomic::AtomicU8) -> Option<u8> {
+fn next_consumer_evidence_sequence(records: &std::sync::atomic::AtomicU64) -> Option<u64> {
     use std::sync::atomic::Ordering;
     records
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
-            (previous < CONSUMER_EVIDENCE_LIMIT).then(|| previous + 1)
+            previous.checked_add(1)
         })
         .ok()
         .map(|previous| previous + 1)
@@ -176,6 +192,7 @@ impl ConsumerScopeEvidence {
         incarnation: Digest,
         binding: Digest,
         purpose: ScopePurpose,
+        request: Option<super::native_enrollment::EnrolledRequestDiagnosticData>,
     ) -> Self {
         Self {
             role: super::native_enrollment::NativeRole::AppHost,
@@ -184,10 +201,16 @@ impl ConsumerScopeEvidence {
             binding: Some(binding),
             purpose: Some(purpose),
             snapshot: None,
+            request,
+            peer: None,
         }
     }
 
-    pub(in crate::security_epoch) fn shell(incarnation: Digest, binding: Digest) -> Self {
+    pub(in crate::security_epoch) fn shell(
+        incarnation: Digest,
+        binding: Digest,
+        request: Option<super::native_enrollment::EnrolledRequestDiagnosticData>,
+    ) -> Self {
         Self {
             role: super::native_enrollment::NativeRole::SecurityShell,
             selection: None,
@@ -195,6 +218,8 @@ impl ConsumerScopeEvidence {
             binding: Some(binding),
             purpose: None,
             snapshot: None,
+            request,
+            peer: None,
         }
     }
 
@@ -202,20 +227,35 @@ impl ConsumerScopeEvidence {
         self.snapshot = Some(snapshot);
     }
 
-    fn line(&self, sequence: u8, observation: ConsumerScopeResult) -> Option<Vec<u8>> {
-        if !(1..=CONSUMER_EVIDENCE_LIMIT).contains(&sequence) {
+    pub(in crate::security_epoch) fn peer_data(
+        &mut self,
+        peer: super::native_enrollment::PeerRequestDiagnosticData,
+    ) {
+        self.peer = Some(peer);
+    }
+
+    fn line(&self, sequence: u64, observation: ConsumerScopeResult) -> Option<Vec<u8>> {
+        if sequence == 0 {
             return None;
         }
         let record = ConsumerEvidenceRecord {
-            format: "day2_native_consumer_evidence_v1",
+            format: "day2_native_consumer_evidence_v2",
             sequence,
             observation,
             role: self.role,
-            selection: &self.selection,
             consumer_incarnation: &self.incarnation,
-            binding: &self.binding,
-            purpose: &self.purpose,
-            snapshot: &self.snapshot,
+            request: &self.request,
+            peer: &self.peer,
+            capture_completeness: "unknown",
+            detail_limit: CONSUMER_EVIDENCE_LIMIT,
+            detail: (sequence <= u64::from(CONSUMER_EVIDENCE_LIMIT)).then_some(
+                ConsumerEvidenceDetail {
+                    selection: &self.selection,
+                    binding: &self.binding,
+                    purpose: &self.purpose,
+                    snapshot: &self.snapshot,
+                },
+            ),
         };
         let json = serde_json::to_string(&record).ok()?;
         let line = format!("{CONSUMER_EVIDENCE_PREFIX}{json}\n");
@@ -265,6 +305,11 @@ pub(crate) fn record_executor_enrollment(
         binding: None,
         purpose: None,
         snapshot: None,
+        request: stage
+            .diagnostic_progress()
+            .historical_request_binding_data()
+            .ok(),
+        peer: None,
     };
     stage.check_selection(policy, store, role)?;
     evidence.record(ConsumerScopeResult::ExecutorEnrolled);
@@ -382,6 +427,31 @@ pub(crate) struct CurrentShellServingPhase<'peer> {
 }
 
 impl ServingParticipant {
+    /// One-shot scheduling DATA, never idle authority or an expiry extension.
+    pub(crate) fn take_counter_readmission_delay(&mut self) -> Result<Option<std::time::Duration>> {
+        match &mut self.native {
+            ParticipantOwner::App(app) => app.take_counter_readmission_delay(),
+            ParticipantOwner::Shell(_) => Ok(None),
+        }
+    }
+
+    /// The actual enrolled owner must have issued this pair outside every
+    /// request. Its owned publication guard excludes requests until install.
+    pub(crate) fn readmit_counter_idle(
+        &mut self,
+        stage: EnrolledRoleStage<'_>,
+        publication: super::native_enrollment::IdleCredentialPublication,
+    ) -> Result<()> {
+        ensure!(
+            self.response.current.is_none(),
+            "native_counter_readmission_response_busy"
+        );
+        match &mut self.native {
+            ParticipantOwner::App(app) => app.readmit_counter_idle(stage, publication),
+            ParticipantOwner::Shell(_) => anyhow::bail!("native_shell_has_no_counter_material"),
+        }
+    }
+
     /// Only wakeup/readiness DATA is exchanged here. The caller acquires its
     /// real fresh role afterwards; no provider or consumer scope is returned.
     pub(crate) fn prepare_current(&mut self) -> Result<()> {
@@ -827,6 +897,11 @@ mod response_tests {
                 binding: None,
                 purpose: None,
                 snapshot: None,
+                request: Some(
+                    super::super::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture(
+                    ),
+                ),
+                peer: None,
             };
             let line = String::from_utf8(
                 evidence
@@ -838,23 +913,24 @@ mod response_tests {
                 serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap()).unwrap();
             assert_eq!(value["observation"], "executor_enrolled");
             for field in ["binding", "purpose", "snapshot"] {
-                assert!(value[field].is_null());
+                assert!(value["detail"][field].is_null());
             }
-            assert!(value["selection"].is_string());
+            assert!(value["detail"]["selection"].is_string());
             assert!(value["consumer_incarnation"].is_string());
         }
     }
 
     #[test]
-    fn consumer_diagnostic_budget_cannot_wrap_or_reopen_after_exhaustion() {
-        let records = std::sync::atomic::AtomicU8::new(0);
-        for expected in 1..=128 {
+    fn consumer_identity_rows_continue_after_detail_cap_but_never_wrap() {
+        let records = std::sync::atomic::AtomicU64::new(0);
+        for expected in 1..=256 {
             assert_eq!(next_consumer_evidence_sequence(&records), Some(expected));
         }
+        records.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
         for _ in 0..1024 {
             assert_eq!(next_consumer_evidence_sequence(&records), None);
         }
-        assert_eq!(records.load(std::sync::atomic::Ordering::Relaxed), 128);
+        assert_eq!(records.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
@@ -866,12 +942,22 @@ mod response_tests {
             digest.clone(),
             digest.clone(),
             ScopePurpose::Runtime(RuntimeServingUse::Registration),
+            Some(super::super::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture()),
         );
         app.snapshot(digest.clone());
-        let shell = ConsumerScopeEvidence::shell(digest.clone(), digest.clone());
+        app.peer_data(
+            super::super::native_enrollment::PeerRequestDiagnosticData::maximal_fixture(),
+        );
+        let mut shell = ConsumerScopeEvidence::shell(
+            digest.clone(),
+            digest.clone(),
+            Some(super::super::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture()),
+        );
+        shell.peer_data(
+            super::super::native_enrollment::PeerRequestDiagnosticData::maximal_fixture(),
+        );
         for (record, has_snapshot) in [(&app, true), (&shell, false)] {
             assert!(record.line(0, ConsumerScopeResult::Completed).is_none());
-            assert!(record.line(129, ConsumerScopeResult::Completed).is_none());
             for (result, expected) in [
                 (ConsumerScopeResult::Completed, "scope_completed"),
                 (ConsumerScopeResult::OperationRefused, "operation_refused"),
@@ -891,11 +977,62 @@ mod response_tests {
                     serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap())
                         .unwrap();
                 assert_eq!(json["observation"], expected);
-                assert_eq!(json["binding"], digest.as_str());
-                assert_eq!(json["snapshot"].is_string(), has_snapshot);
-                assert_eq!(json["selection"].is_string(), has_snapshot);
+                assert_eq!(json["detail"]["binding"], digest.as_str());
+                assert_eq!(json["detail"]["snapshot"].is_string(), has_snapshot);
+                assert_eq!(json["detail"]["selection"].is_string(), has_snapshot);
+                assert_eq!(json["format"], "day2_native_consumer_evidence_v2");
+                assert_eq!(json["capture_completeness"], "unknown");
+                assert_eq!(json["detail_limit"], 128);
+                assert_eq!(
+                    json["request"],
+                    serde_json::to_value(&record.request).unwrap()
+                );
+                assert!(json["request"]["request_original"].is_string());
+                assert!(json["request"]["producer_incarnation"].is_string());
+                assert_eq!(json["peer"], serde_json::to_value(&record.peer).unwrap());
+                assert!(json["peer"]["exchange_commitment"].is_string());
+            }
+            for sequence in [129, u64::MAX] {
+                let line = String::from_utf8(
+                    record
+                        .line(sequence, ConsumerScopeResult::Completed)
+                        .unwrap(),
+                )
+                .unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap())
+                        .unwrap();
+                assert!(json["detail"].is_null());
+                assert_eq!(
+                    json["request"],
+                    serde_json::to_value(&record.request).unwrap()
+                );
+                assert_eq!(json["peer"], serde_json::to_value(&record.peer).unwrap());
+                assert_eq!(json["sequence"], sequence);
+                assert_eq!(json["capture_completeness"], "unknown");
             }
         }
+    }
+
+    #[test]
+    fn consumer_capture_never_turns_missing_or_capped_data_into_complete_evidence() {
+        let digest = Digest::new(b"fixture scope data only");
+        let scope = ConsumerScopeEvidence::shell(digest.clone(), digest, None);
+        for sequence in [1, 127, 128, 129, u64::MAX] {
+            let line = String::from_utf8(
+                scope
+                    .line(sequence, ConsumerScopeResult::Completed)
+                    .unwrap(),
+            )
+            .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(line.strip_prefix(CONSUMER_EVIDENCE_PREFIX).unwrap()).unwrap();
+            assert!(value["request"].is_null() && value["peer"].is_null());
+            assert_eq!(value["capture_completeness"], "unknown");
+            assert_eq!(value["detail"].is_object(), sequence <= 128);
+            assert_eq!(value["observation"], "scope_completed");
+        }
+        assert!(scope.line(0, ConsumerScopeResult::Completed).is_none());
     }
 
     #[test]

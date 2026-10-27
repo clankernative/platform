@@ -3,7 +3,8 @@
 //! inclusive and must not be summed. Export happens only after native unwind.
 use super::evidence::{PreparationErrorCategory, preparation_error_category};
 use crate::security_epoch::{
-    native_clock::{self, AcquisitionProgress},
+    native_clock::{self, AcquisitionProgress, EnrolledRequestDiagnosticData},
+    native_enrollment::PeerRequestDiagnosticData,
     transport::FailedRequestWindow,
 };
 use anyhow::Result;
@@ -108,6 +109,14 @@ pub(in crate::security_epoch) struct Snapshot {
     /// narrowed sibling. Not the failure instant, current validity or remaining
     /// time. Missing when role acquisition did not return its actual stage.
     original_last_checked_us: Option<u32>,
+    /// Commitments copied from the actual enrolled original. Absent when the
+    /// role/binding was unavailable; elapsed time cannot substitute for it.
+    /// Serialized once by the Current identity record, not duplicated into
+    /// the separately bounded first-release timing detail.
+    #[serde(skip_serializing)]
+    request: Option<EnrolledRequestDiagnosticData>,
+    #[serde(skip_serializing)]
+    peer: Option<PeerRequestDiagnosticData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<ServingFailure>,
     timing_format: &'static str,
@@ -117,6 +126,7 @@ pub(in crate::security_epoch) struct Snapshot {
 pub(in crate::security_epoch) struct ServingTiming {
     started: Option<Duration>,
     original: RefCell<Option<AcquisitionProgress>>,
+    peer: RefCell<Option<PeerRequestDiagnosticData>>,
     timings: RefCell<[Measurement; STEPS.len()]>,
 }
 
@@ -125,12 +135,17 @@ impl ServingTiming {
         Self {
             started: native_clock::boottime().ok(),
             original: RefCell::new(None),
+            peer: RefCell::new(None),
             timings: RefCell::new([Measurement(Some(0), Some(0)); STEPS.len()]),
         }
     }
 
     pub(in crate::security_epoch) fn bind_progress(&self, progress: AcquisitionProgress) {
         *self.original.borrow_mut() = Some(progress);
+    }
+
+    pub(in crate::security_epoch) fn bind_peer_data(&self, peer: PeerRequestDiagnosticData) {
+        *self.peer.borrow_mut() = Some(peer);
     }
 
     pub(in crate::security_epoch) fn measure<T>(
@@ -181,6 +196,12 @@ impl ServingTiming {
                 .borrow()
                 .as_ref()
                 .and_then(AcquisitionProgress::last_checked_elapsed_micros),
+            request: self
+                .original
+                .borrow()
+                .as_ref()
+                .and_then(|progress| progress.historical_request_binding_data().ok()),
+            peer: self.peer.borrow().clone(),
             failure: error
                 .and_then(|error| error.downcast_ref::<ServingFailure>())
                 .copied(),
@@ -200,6 +221,8 @@ impl ServingTiming {
             scope: "current_app_serving",
             caller_elapsed_us: Some(u32::MAX),
             original_last_checked_us: Some(u32::MAX),
+            request: Some(EnrolledRequestDiagnosticData::maximal_fixture()),
+            peer: Some(PeerRequestDiagnosticData::maximal_fixture()),
             failure: Some(ServingFailure {
                 step: ServingStep::Acknowledgement,
                 category: PreparationErrorCategory::ClockExpiredOrRewound,
@@ -211,6 +234,16 @@ impl ServingTiming {
                 .map(|step| (step as u8, Some(u32::MAX), Some(u32::MAX)))
                 .collect(),
         }
+    }
+}
+
+impl Snapshot {
+    pub(super) fn request_data(&self) -> Option<&EnrolledRequestDiagnosticData> {
+        self.request.as_ref()
+    }
+
+    pub(super) fn peer_data(&self) -> Option<&PeerRequestDiagnosticData> {
+        self.peer.as_ref()
     }
 }
 
@@ -233,8 +266,70 @@ mod tests {
         ServingTiming {
             started: Some(Duration::from_secs(100)),
             original: RefCell::new(None),
+            peer: RefCell::new(None),
             timings: RefCell::new([Measurement(Some(0), Some(0)); STEPS.len()]),
         }
+    }
+
+    #[test]
+    fn serving_snapshot_copies_actual_original_data_without_checking_or_reviving_it() {
+        use crate::security_epoch::{
+            native_clock::NativeAcquisition,
+            native_enrollment::{NativeRole, StagePurpose},
+        };
+        use day2_capabilities::Digest;
+
+        // Clock/identity DATA only: no native role, peer or permission is made.
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"actual fixture original domain"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        let progress = original.diagnostic_progress().with_enrollment_data(
+            Digest::new(b"actual fixture enrollment"),
+            Some(Digest::new(b"actual fixture producer")),
+            Some(3),
+            Some(7),
+            NativeRole::EpochController,
+            StagePurpose::CurrentRole,
+        );
+        let expected =
+            serde_json::to_value(progress.historical_request_binding_data().unwrap()).unwrap();
+        let trace = trace();
+        trace.bind_progress(progress);
+        original.refuse();
+        for finished in [None, Some(Duration::from_secs(110))] {
+            let snapshot = trace.snapshot_at(None, finished);
+            assert_eq!(
+                serde_json::to_value(snapshot.request_data()).unwrap(),
+                expected
+            );
+            let value = serde_json::to_value(snapshot).unwrap();
+            assert!(value.get("request").is_none());
+            assert_eq!(value["original_last_checked_us"], 0);
+            assert!(original.remaining().is_err());
+        }
+    }
+
+    #[test]
+    fn unannotated_original_is_missing_evidence_even_with_an_elapsed_sample() {
+        use crate::security_epoch::native_clock::NativeAcquisition;
+        use day2_capabilities::Digest;
+
+        let original = NativeAcquisition::fixture(
+            Digest::new(b"unannotated fixture original"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        let trace = trace();
+        trace.bind_progress(original.diagnostic_progress());
+        let snapshot = trace.snapshot_at(None, Some(Duration::from_secs(101)));
+        assert!(snapshot.request_data().is_none());
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["original_last_checked_us"], 0);
+        assert!(value.get("request").is_none());
     }
 
     #[test]
@@ -281,6 +376,7 @@ mod tests {
         assert_eq!(value["failure"]["category"], "clock_expired_or_rewound");
         assert_eq!(value["caller_elapsed_us"], 6_000_000);
         assert_eq!(value["original_last_checked_us"], Value::Null);
+        assert!(value.get("request").is_none());
         assert_eq!(
             value["timing"],
             serde_json::json!([[1, 1, 3_000_000], [3, 1, 1_000_000]])

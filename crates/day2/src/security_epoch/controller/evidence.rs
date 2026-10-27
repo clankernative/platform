@@ -20,9 +20,13 @@ use std::io::{Stderr, Write};
 pub(super) const PREFIX: &str = "day2-native-controller-evidence ";
 const MAX_RECORD_BYTES: usize = 2048;
 const MAX_RECORDS: u8 = 12;
+const LISTENER_PREFIX: &str = "day2-native-controller-listener ";
+const MAX_LISTENER_BYTES: usize = 512;
 const SELF_CHECK_PREFIX: &str = "day2-native-controller-self-check ";
 const MAX_SELF_CHECK_BYTES: usize = 1024;
-const MAX_CURRENT_SELF_CHECK_BYTES: usize = 1536;
+// The full redacted original/producer commitments must fit alongside maximal
+// existing cost rows. This is a diagnostic byte bound, never a work budget.
+const MAX_CURRENT_SELF_CHECK_BYTES: usize = 4096;
 const MAX_CURRENT_SELF_CHECK_RECORDS: u16 = 256;
 
 pub(in crate::security_epoch) type Evidence = Recorder<StderrOutput>;
@@ -33,6 +37,12 @@ pub(in crate::security_epoch) struct StderrOutput {
 
 pub(in crate::security_epoch) trait RecordOutput {
     fn append(&mut self, record: &[u8]) -> std::io::Result<()>;
+}
+
+struct CurrentServingJoin {
+    role: ServingRole,
+    request: Option<super::super::native_enrollment::EnrolledRequestDiagnosticData>,
+    peer: Option<super::super::native_enrollment::PeerRequestDiagnosticData>,
 }
 
 impl RecordOutput for StderrOutput {
@@ -50,8 +60,10 @@ pub(in crate::security_epoch) struct Recorder<W> {
     activated: bool,
     serving: [bool; 2],
     records: u8,
+    listener_attempted: bool,
     self_check_exported: u8,
     current_self_check_records: u16,
+    current_join_records: u64,
     at: FailurePhase,
     refused: bool,
     export_failed: bool,
@@ -59,6 +71,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     bootstrap_timing: Option<BootstrapSnapshot>,
     serving_timing: Option<ServingSnapshot>,
     current_serving_profile: Option<super::super::self_check_profile::CurrentProfile>,
+    current_serving_join: Option<CurrentServingJoin>,
     read_only_observed: bool,
 }
 
@@ -77,12 +90,14 @@ pub(in crate::security_epoch) enum FailurePhase {
     ActivateDispatch,
     ActivateSettle,
     Activation,
+    CounterAdmission,
     ServingListener,
     AppPending,
     AppServing,
     ShellPending,
     ShellAccept,
     ShellServing,
+    CounterReadmission,
     Health,
 }
 
@@ -174,6 +189,12 @@ pub(in crate::security_epoch) enum PreparationStep {
     BootstrapRelease,
     BootstrapSnapshotBefore,
     BootstrapSnapshotAfter,
+    CounterRoleStage,
+    CounterPendingFile,
+    CounterPhysicalAcquire,
+    CounterStage,
+    CounterAdmit,
+    CounterPhysicalFinish,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -347,17 +368,29 @@ pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationEr
             "epoch_native_clock_rewind_or_expired"
             | "epoch_native_acquisition_expired"
             | "epoch_native_narrowed_acquisition_expired"
+            | "epoch_counter_credential_expired"
+            | "epoch_counter_connection_clock_rewind"
             | "native_enrollment_stage_expired",
         ) => return Category::ClockExpiredOrRewound,
-        Some("epoch_native_acquisition_refused" | "native_enrollment_owner_refused") => {
+        Some(
+            "epoch_native_acquisition_refused"
+            | "native_enrollment_owner_refused"
+            | "epoch_counter_credential_refused",
+        ) => {
             return Category::AcquisitionRefused;
         }
         Some(
             "epoch_native_transport_unavailable"
             | "epoch_native_response_unavailable"
-            | "epoch_native_metadata_unavailable",
+            | "epoch_native_metadata_unavailable"
+            | "epoch_counter_tokeninfo_unavailable"
+            | "epoch_counter_tokeninfo_transport",
         ) => return Category::TransportUnavailable,
-        Some("epoch_native_response_status_or_bound" | "epoch_native_metadata_status_or_bound") => {
+        Some(
+            "epoch_native_response_status_or_bound"
+            | "epoch_native_metadata_status_or_bound"
+            | "epoch_counter_tokeninfo_status_or_bound",
+        ) => {
             return Category::ResponseStatusOrBound;
         }
         Some(
@@ -376,6 +409,9 @@ pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationEr
             | "storage_native_private_anchor_profile"
             | "epoch_preparation_admitted_schema_mismatch"
             | "epoch_preparation_runtime_selection_mismatch"
+            | "epoch_counter_tokeninfo_bound"
+            | "epoch_counter_tokeninfo_shape"
+            | "epoch_counter_tokeninfo_binding_or_expiry"
             | "native_enrollment_full_selection_changed",
         ) => return Category::AdmissionRejected,
         _ => {}
@@ -472,6 +508,23 @@ struct Record<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ListenerEvent {
+    InitialHolderListenerBound,
+}
+
+/// A completed transport-bind observation, never peer or file authority.
+/// Only fixed labels and actual historical selection/incarnation commitments.
+#[derive(Serialize)]
+struct ListenerRecord<'a> {
+    format: &'static str,
+    event: ListenerEvent,
+    selection: &'a Digest,
+    controller_incarnation: &'a Digest,
+    scheduling_data_only: bool,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum Observation {
     Enrolled,
@@ -504,7 +557,7 @@ enum Observation {
         binding: Digest,
         snapshot: Digest,
         #[serde(skip_serializing_if = "Option::is_none")]
-        serving: Option<ServingSnapshot>,
+        serving: Option<Box<ServingSnapshot>>,
     },
     Refused {
         at: FailurePhase,
@@ -515,7 +568,7 @@ enum Observation {
         #[serde(skip_serializing_if = "Option::is_none")]
         bootstrap: Option<BootstrapSnapshot>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        serving: Option<ServingSnapshot>,
+        serving: Option<Box<ServingSnapshot>>,
     },
 }
 
@@ -538,8 +591,10 @@ impl<W: RecordOutput> Recorder<W> {
             activated: false,
             serving: [false; 2],
             records: 0,
+            listener_attempted: false,
             self_check_exported: 0,
             current_self_check_records: 0,
+            current_join_records: 0,
             at: FailurePhase::Selection,
             refused: false,
             export_failed: false,
@@ -547,6 +602,7 @@ impl<W: RecordOutput> Recorder<W> {
             bootstrap_timing: None,
             serving_timing: None,
             current_serving_profile: None,
+            current_serving_join: None,
             read_only_observed: false,
         }
     }
@@ -555,6 +611,7 @@ impl<W: RecordOutput> Recorder<W> {
         self.at = at;
         self.serving_timing = None;
         self.current_serving_profile = None;
+        self.current_serving_join = None;
     }
 
     pub(super) fn serving_timing(&mut self, timing: ServingSnapshot) {
@@ -592,6 +649,55 @@ impl<W: RecordOutput> Recorder<W> {
         );
         self.incarnation = Some(incarnation);
         self.emit(Observation::Enrolled)
+    }
+
+    /// Only the known-successful bind caller invokes this, after its actual
+    /// file phase has finished and before it waits or acquires a first-holder
+    /// original. Its separate one-record budget cannot spend a main slot.
+    pub(super) fn holder_listener_bound(&mut self) -> Result<()> {
+        ensure!(
+            !self.listener_attempted,
+            "native_listener_observation_closed"
+        );
+        // Consume even an unsuccessful/partial attempt; never emit a second
+        // apparent ready line after a failed, uncertain or invalid export.
+        self.listener_attempted = true;
+        ensure!(
+            self.at == FailurePhase::HolderListener
+                && !self.refused
+                && !self.export_failed
+                && !self.read_only_observed
+                && !self.first_holder
+                && !self.activated
+                && self.next == 0
+                && self.records == 1
+                && self.serving == [false; 2],
+            "native_listener_observation_order"
+        );
+        let record = ListenerRecord {
+            format: "day2_native_controller_listener_v1",
+            event: ListenerEvent::InitialHolderListenerBound,
+            selection: self
+                .selection
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("native_listener_selection_missing"))?,
+            controller_incarnation: self
+                .incarnation
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("native_listener_incarnation_missing"))?,
+            scheduling_data_only: true,
+        };
+        let json = serde_json::to_string(&record)?;
+        let line = format!("{LISTENER_PREFIX}{json}\n");
+        ensure!(
+            line.len() <= MAX_LISTENER_BYTES,
+            "native_listener_record_bound"
+        );
+        if self.output.append(line.as_bytes()).is_err() {
+            self.export_failed = true;
+            anyhow::bail!("native_evidence_export_failed");
+        }
+        Ok(())
     }
 
     pub(super) fn first_holder(&mut self, seed: &OriginalSeedCore, holder: &Holder) -> Result<()> {
@@ -710,18 +816,25 @@ impl<W: RecordOutput> Recorder<W> {
             ServingRole::App => 0,
             ServingRole::Shell => 1,
         };
+        // Returned only after this actual App/Shell scope's final checks and
+        // release. Keep its identity independently of optional cost profiling.
+        self.current_serving_join = Some(CurrentServingJoin {
+            role,
+            request: observed.request,
+            peer: observed.peer,
+        });
         if !self.serving[index] {
             self.emit(Observation::FirstServingRelease {
                 role,
                 binding: observed.binding,
                 snapshot: observed.snapshot,
                 serving: match role {
-                    ServingRole::App => self.serving_timing.clone(),
+                    ServingRole::App => self.serving_timing.clone().map(Box::new),
                     ServingRole::Shell => None,
                 },
             })?;
             self.serving[index] = true;
-        } else if matches!(role, ServingRole::App) {
+        } else {
             // Later actual Current operations still return historical DATA.
             // Do not fabricate another first-release lifecycle observation.
             self.emit_current_self_check(true)?;
@@ -761,6 +874,7 @@ impl<W: RecordOutput> Recorder<W> {
                     | FailurePhase::ActivateReserve
                     | FailurePhase::ActivateDispatch
                     | FailurePhase::ActivateSettle
+                    | FailurePhase::CounterAdmission
             ) {
                 error.map(PreparationFailure::observe)
             } else {
@@ -785,7 +899,7 @@ impl<W: RecordOutput> Recorder<W> {
                     None
                 },
                 serving: if matches!(self.at, FailurePhase::AppServing) {
-                    self.serving_timing.clone()
+                    self.serving_timing.clone().map(Box::new)
                 } else {
                     None
                 },
@@ -830,13 +944,11 @@ impl<W: RecordOutput> Recorder<W> {
     fn emit_self_check(&mut self, observation: &Observation) -> Result<()> {
         if matches!(
             observation,
-            Observation::FirstServingRelease {
-                role: ServingRole::App,
-                ..
-            } | Observation::Refused {
-                at: FailurePhase::AppServing,
-                ..
-            }
+            Observation::FirstServingRelease { .. }
+                | Observation::Refused {
+                    at: FailurePhase::AppServing,
+                    ..
+                }
         ) {
             return self.emit_current_self_check(matches!(
                 observation,
@@ -906,39 +1018,79 @@ impl<W: RecordOutput> Recorder<W> {
     }
 
     fn emit_current_self_check(&mut self, completed: bool) -> Result<()> {
-        // Consume even at the cap so a historical profile cannot be emitted
-        // again as a later operation or refusal. Missing DATA is not zero work.
-        let Some(profile) = self.current_serving_profile.take() else {
-            return Ok(());
-        };
-        if self.current_self_check_records == MAX_CURRENT_SELF_CHECK_RECORDS {
+        // Consume once. Essential actual-owner/original joins continue after
+        // the cost-detail cap; neither capped detail nor missing DATA is zero
+        // work or complete capture.
+        let profile = self.current_serving_profile.take();
+        let join = self.current_serving_join.take();
+        if profile.is_none() && join.is_none() {
             return Ok(());
         }
+        let sequence = self
+            .current_join_records
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("native_current_diagnostic_sequence_overflow"))?;
+        let detail =
+            profile.filter(|_| self.current_self_check_records < MAX_CURRENT_SELF_CHECK_RECORDS);
+        let role = join
+            .as_ref()
+            .map(|join| join.role)
+            .unwrap_or_else(|| match self.at {
+                FailurePhase::ShellServing => ServingRole::Shell,
+                _ => ServingRole::App,
+            });
         #[derive(Serialize)]
         struct CurrentRecord<'a> {
             format: &'static str,
             scope: &'static str,
-            sequence: u16,
+            sequence: u64,
             lifecycle_sequence: u8,
             completed: bool,
+            role: ServingRole,
             selection: &'a Option<Digest>,
             controller_incarnation: &'a Option<Digest>,
-            #[serde(flatten)]
-            costs: super::super::self_check_profile::CurrentProfile,
+            request: Option<&'a super::super::native_clock::EnrolledRequestDiagnosticData>,
+            peer: Option<&'a super::super::native_enrollment::PeerRequestDiagnosticData>,
+            capture_completeness: &'static str,
+            detail_limit: u16,
+            detail: Option<super::super::self_check_profile::CurrentProfile>,
         }
         let record = CurrentRecord {
-            format: "controller_current_app_serving_exclusive_ns_v3",
-            scope: "whole_current_app_serving_operation",
-            sequence: self.current_self_check_records + 1,
+            format: "controller_current_serving_v4",
+            scope: match role {
+                ServingRole::Shell => "whole_current_shell_serving_operation",
+                ServingRole::App => "whole_current_app_serving_operation",
+            },
+            sequence,
             lifecycle_sequence: self.records,
             completed,
+            role,
             selection: &self.selection,
             controller_incarnation: &self.incarnation,
-            costs: profile,
+            request: match &join {
+                Some(join) => join.request.as_ref(),
+                None => self
+                    .serving_timing
+                    .as_ref()
+                    .and_then(ServingSnapshot::request_data),
+            },
+            peer: match &join {
+                Some(join) => join.peer.as_ref(),
+                None => self
+                    .serving_timing
+                    .as_ref()
+                    .and_then(ServingSnapshot::peer_data),
+            },
+            capture_completeness: "unknown",
+            detail_limit: MAX_CURRENT_SELF_CHECK_RECORDS,
+            detail,
         };
         let json = serde_json::to_string(&record)?;
         self.append_self_check(&json, MAX_CURRENT_SELF_CHECK_BYTES)?;
-        self.current_self_check_records += 1;
+        self.current_join_records = sequence;
+        if detail.is_some() {
+            self.current_self_check_records += 1;
+        }
         Ok(())
     }
 
@@ -1052,12 +1204,223 @@ mod tests {
         std::str::from_utf8(output)
             .unwrap()
             .lines()
-            .filter(|line| !line.starts_with(SELF_CHECK_PREFIX))
+            .filter(|line| {
+                !line.starts_with(SELF_CHECK_PREFIX) && !line.starts_with(LISTENER_PREFIX)
+            })
             .map(|line| {
                 assert!(line.len() < MAX_RECORD_BYTES);
                 serde_json::from_str(line.strip_prefix(PREFIX).unwrap()).unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn listener_marker_is_closed_bounded_once_and_outside_lifecycle_budget() {
+        let (mut recorder, ..) = fixture();
+        let incarnation = Digest::new(b"actual Controller commitment DATA fixture");
+        recorder.enrolled(incarnation.clone()).unwrap();
+        recorder.enter(FailurePhase::HolderListener);
+        let before = recorder.output.len();
+        recorder.holder_listener_bound().unwrap();
+        let line = std::str::from_utf8(&recorder.output[before..]).unwrap();
+        assert!(line.len() <= MAX_LISTENER_BYTES && line.ends_with('\n'));
+        let row: Value = serde_json::from_str(line.strip_prefix(LISTENER_PREFIX).unwrap()).unwrap();
+        assert_eq!(row.as_object().unwrap().len(), 5);
+        assert_eq!(row["format"], "day2_native_controller_listener_v1");
+        assert_eq!(row["event"], "initial_holder_listener_bound");
+        assert_eq!(
+            row["selection"],
+            serde_json::to_value(&recorder.selection).unwrap()
+        );
+        assert_eq!(row["controller_incarnation"], incarnation.as_str());
+        assert_eq!(row["scheduling_data_only"], true);
+        assert_eq!(recorder.records, 1);
+        assert_eq!(recorder.self_check_exported, 0);
+        assert_eq!(recorder.current_join_records, 0);
+        assert!(!recorder.first_holder && !recorder.activated && recorder.serving == [false; 2]);
+        let length = recorder.output.len();
+        assert!(recorder.holder_listener_bound().is_err());
+        assert_eq!(recorder.output.len(), length);
+        assert_eq!(records(&recorder.output).len(), 1);
+    }
+
+    #[test]
+    fn listener_marker_refuses_missing_context_or_wrong_frontier_without_relabel() {
+        for case in 0..9 {
+            let (mut recorder, ..) = fixture();
+            recorder
+                .enrolled(Digest::new(b"enrolled commitment DATA"))
+                .unwrap();
+            recorder.enter(FailurePhase::HolderListener);
+            match case {
+                0 => recorder.selection = None,
+                1 => recorder.incarnation = None,
+                2 => recorder.at = FailurePhase::FirstHolder,
+                3 => recorder.refused = true,
+                4 => recorder.export_failed = true,
+                5 => recorder.read_only_observed = true,
+                6 => recorder.first_holder = true,
+                7 => recorder.activated = true,
+                8 => recorder.records = MAX_RECORDS,
+                _ => unreachable!(),
+            }
+            let before = recorder.output.len();
+            assert!(recorder.holder_listener_bound().is_err());
+            assert!(recorder.listener_attempted);
+            assert_eq!(recorder.output.len(), before);
+            // Even restoring fixture DATA cannot retry an uncertain attempt.
+            recorder.selection = Some(Digest::new(b"later selection DATA"));
+            recorder.incarnation = Some(Digest::new(b"later incarnation DATA"));
+            recorder.at = FailurePhase::HolderListener;
+            assert!(recorder.holder_listener_bound().is_err());
+            assert_eq!(recorder.output.len(), before);
+        }
+    }
+
+    #[test]
+    fn listener_marker_partial_export_is_terminal_and_never_reemitted() {
+        struct Partial {
+            fail: bool,
+            attempts: usize,
+            bytes: Vec<u8>,
+        }
+        impl RecordOutput for Partial {
+            fn append(&mut self, record: &[u8]) -> std::io::Result<()> {
+                self.attempts += 1;
+                if self.fail {
+                    self.bytes.extend_from_slice(&record[..7]);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "controlled partial export",
+                    ));
+                }
+                self.bytes.extend_from_slice(record);
+                Ok(())
+            }
+        }
+        let store = crate::security_epoch::tests::selection();
+        let policy = crate::security_epoch::control_slot_tests::policy(&store);
+        let mut recorder = Recorder::with_writer(Partial {
+            fail: false,
+            attempts: 0,
+            bytes: Vec::new(),
+        });
+        recorder.select(&policy, &store).unwrap();
+        recorder
+            .enrolled(Digest::new(b"enrolled commitment DATA"))
+            .unwrap();
+        recorder.enter(FailurePhase::HolderListener);
+        recorder.output.fail = true;
+        assert!(recorder.holder_listener_bound().is_err());
+        assert!(recorder.export_failed && recorder.listener_attempted);
+        assert_eq!(recorder.records, 1);
+        assert_eq!(recorder.output.attempts, 2);
+        let before = recorder.output.bytes.len();
+        assert!(recorder.holder_listener_bound().is_err());
+        assert!(recorder.refuse(None).is_err());
+        assert_eq!(recorder.output.attempts, 2);
+        assert_eq!(recorder.output.bytes.len(), before);
+    }
+
+    fn listener_marker_call_follows_known_bind(source: &str) -> bool {
+        let parsed = syn::parse_file(source).unwrap();
+        let body = parsed
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == "run_inner" => {
+                    Some(&function.block)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let Some(index) = body.stmts.iter().position(|statement| {
+            matches!(statement,syn::Stmt::Local(local)
+            if matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="holder_listener"))
+        }) else {
+            return false;
+        };
+        matches!(&body.stmts[index],syn::Stmt::Local(local)
+            if matches!(local.init.as_ref().map(|init|&*init.expr),Some(syn::Expr::Try(attempt))
+                if matches!(&*attempt.expr,syn::Expr::Path(path) if path.path.is_ident("result"))))
+            && matches!(body.stmts.get(index+1),Some(syn::Stmt::Expr(syn::Expr::Try(attempt),Some(_)))
+                if matches!(&*attempt.expr,syn::Expr::MethodCall(call)
+                    if call.method=="holder_listener_bound" && call.args.is_empty()
+                    && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("evidence"))))
+            && matches!(body.stmts.get(index+2),Some(syn::Stmt::Expr(syn::Expr::While(wait),_))
+                if matches!(&*wait.cond,syn::Expr::Unary(negative) if matches!(negative.op,syn::UnOp::Not(_))
+                    && matches!(&*negative.expr,syn::Expr::Try(attempt)
+                        if matches!(&*attempt.expr,syn::Expr::MethodCall(call)
+                            if call.method=="idle_ready" && call.args.is_empty()
+                            && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("holder_listener"))))))
+    }
+
+    fn listener_bind_finishes_actual_phase_before_return(source: &str) -> bool {
+        let parsed = syn::parse_file(source).unwrap();
+        parsed.items.iter().any(|item| {
+            let syn::Item::Impl(item) = item else { return false; };
+            if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("InitialHolderListener")) { return false; }
+            item.items.iter().any(|item| {
+                let syn::ImplItem::Fn(function) = item else { return false; };
+                if function.sig.ident!="bind" { return false; }
+                function.block.stmts.iter().any(|statement| {
+                    let syn::Stmt::Expr(syn::Expr::Block(block),_) = statement else { return false; };
+                    if !block.attrs.iter().any(|attribute| matches!(&attribute.meta,syn::Meta::List(list)
+                        if list.path.is_ident("cfg") && list.tokens.to_string()=="target_os = \"linux\"")) { return false; }
+                    let Some(index) = block.block.stmts.len().checked_sub(2) else { return false; };
+                    matches!(&block.block.stmts[index],syn::Stmt::Expr(syn::Expr::Try(attempt),Some(_))
+                        if matches!(&*attempt.expr,syn::Expr::MethodCall(mapped)
+                            if mapped.method=="map_err" && mapped.args.len()==1
+                            && matches!(&*mapped.receiver,syn::Expr::MethodCall(finish)
+                                if finish.method=="finish_checked" && finish.args.is_empty()
+                                && matches!(&*finish.receiver,syn::Expr::Path(path) if path.path.is_ident("phase")))))
+                        && matches!(&block.block.stmts[index+1],syn::Stmt::Expr(syn::Expr::Call(ok),None)
+                            if matches!(&*ok.func,syn::Expr::Path(path) if path.path.is_ident("Ok"))
+                            && ok.args.len()==1 && matches!(&ok.args[0],syn::Expr::Struct(value) if value.path.is_ident("Self")))
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn listener_marker_source_controls_require_completed_bind_before_idle_wait() {
+        let source = include_str!("../controller.rs");
+        assert!(listener_marker_call_follows_known_bind(source));
+        let marker = "evidence.holder_listener_bound()?;";
+        let binder = "let mut holder_listener = result?;";
+        for changed in [
+            source.replacen(marker, "", 1),
+            source.replacen(marker, &format!("if false {{ {marker} }}"), 1),
+            source.replacen(marker, "foreign.holder_listener_bound()?;", 1),
+            source.replacen(binder, "let mut holder_listener = forged_listener();", 1),
+            source
+                .replacen(marker, "", 1)
+                .replacen(binder, &format!("{marker} {binder}"), 1),
+            source.replacen(marker, "", 1).replacen(
+                "evidence.enter(FailurePhase::FirstHolder);",
+                &format!("{marker} evidence.enter(FailurePhase::FirstHolder);"),
+                1,
+            ),
+        ] {
+            assert_ne!(source, changed);
+            assert!(!listener_marker_call_follows_known_bind(&changed));
+        }
+        let source = include_str!("../native_enrollment/storage_peer.rs");
+        assert!(listener_bind_finishes_actual_phase_before_return(source));
+        let finish = "phase.finish_checked().map_err(|error| {\n                PreparationFailure::at(PreparationStep::HolderFinalCheck, error)\n            })?;";
+        for changed in [
+            source.replacen(finish, "", 1),
+            source.replacen(finish, &format!("if false {{ {finish} }}"), 1),
+            source.replacen("phase.finish_checked()", "phase.unchecked_finish()", 1),
+            source.replacen(finish, "", 1).replacen(
+                "phase.check().map_err",
+                &format!("{finish} phase.check().map_err"),
+                1,
+            ),
+        ] {
+            assert_ne!(source, changed);
+            assert!(!listener_bind_finishes_actual_phase_before_return(&changed));
+        }
     }
 
     #[test]
@@ -1090,10 +1453,7 @@ mod tests {
                 assert_eq!(profiles.len(), 1);
                 assert!(SELF_CHECK_PREFIX.len() + profiles[0].len() < MAX_CURRENT_SELF_CHECK_BYTES);
                 let profile: Value = serde_json::from_str(profiles[0]).unwrap();
-                assert_eq!(
-                    profile["format"],
-                    "controller_current_app_serving_exclusive_ns_v3"
-                );
+                assert_eq!(profile["format"], "controller_current_serving_v4");
                 assert_eq!(profile["scope"], "whole_current_app_serving_operation");
                 assert_eq!(profile["sequence"], 1);
                 assert_eq!(profile["lifecycle_sequence"], 1);
@@ -1106,8 +1466,22 @@ mod tests {
                     profile["controller_incarnation"],
                     serde_json::to_value(&recorder.incarnation).unwrap()
                 );
-                assert_eq!(profile["profile"]["rows"].as_array().unwrap().len(), 16);
-                assert_eq!(profile["physical"]["rows"].as_array().unwrap().len(), 4);
+                assert_eq!(
+                    profile["detail"]["profile"]["rows"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    16
+                );
+                assert_eq!(
+                    profile["detail"]["physical"]["rows"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    4
+                );
+                assert_eq!(profile["capture_completeness"], "unknown");
+                assert!(profile["request"].is_null());
                 assert!(
                     profile.get("step").is_none(),
                     "Current is not a bootstrap action"
@@ -1186,8 +1560,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(row.get("physical").is_none());
-        assert_eq!(row["profile"]["samples"], 1);
+        assert!(row["detail"].get("physical").is_none());
+        assert_eq!(row["detail"]["profile"]["samples"], 1);
         assert_eq!(
             records(&recorder.output)[1]["observation"]["event"],
             "refused"
@@ -1217,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn current_profiles_consume_each_sample_once_and_stop_at_the_fixed_data_cap() {
+    fn current_profiles_cap_cost_detail_but_keep_each_actual_identity_join_once() {
         let (mut recorder, ..) = fixture();
         recorder.enrolled(Digest::new(b"Controller")).unwrap();
         for sequence in 1..=MAX_CURRENT_SELF_CHECK_RECORDS + 2 {
@@ -1225,6 +1599,7 @@ mod tests {
             recorder.current_serving_profile(Some(
                 crate::security_epoch::self_check_profile::CurrentProfile::maximal_fixture(),
             ));
+            recorder.serving_timing(super::super::serving_timing::ServingTiming::maximal_fixture());
             recorder.emit_current_self_check(sequence % 2 == 0).unwrap();
             assert!(recorder.current_serving_profile.is_none());
             let length = recorder.output.len();
@@ -1243,10 +1618,65 @@ mod tests {
             assert_eq!(row["sequence"], count);
             assert_eq!(row["lifecycle_sequence"], 1);
             assert_eq!(row["completed"], count % 2 == 0);
+            assert_eq!(
+                row["detail"].is_object(),
+                count <= MAX_CURRENT_SELF_CHECK_RECORDS
+            );
+            assert_eq!(row["detail_limit"], MAX_CURRENT_SELF_CHECK_RECORDS);
+            assert!(row["request"]["request_original"].is_string());
+            assert!(row["request"]["producer_incarnation"].is_string());
+            assert!(row["peer"]["exchange_commitment"].is_string());
+            assert_eq!(row["capture_completeness"], "unknown");
         }
-        assert_eq!(count, MAX_CURRENT_SELF_CHECK_RECORDS);
+        assert_eq!(count, MAX_CURRENT_SELF_CHECK_RECORDS + 2);
+        assert_eq!(
+            recorder.current_self_check_records,
+            MAX_CURRENT_SELF_CHECK_RECORDS
+        );
+        assert_eq!(recorder.current_join_records, u64::from(count));
         assert_eq!(records(&recorder.output).len(), 1);
         assert!(!recorder.refused && !recorder.export_failed && !recorder.activated);
+    }
+
+    #[test]
+    fn current_identity_sequence_overflow_cannot_emit_a_wrapped_or_repeated_join() {
+        let (mut recorder, ..) = fixture();
+        recorder.current_join_records = u64::MAX;
+        recorder.enter(FailurePhase::AppServing);
+        recorder.current_serving_profile(Some(
+            crate::security_epoch::self_check_profile::CurrentProfile::maximal_fixture(),
+        ));
+        let before = recorder.output.len();
+        assert!(recorder.emit_current_self_check(true).is_err());
+        assert_eq!(recorder.output.len(), before);
+        assert_eq!(recorder.current_join_records, u64::MAX);
+        assert!(recorder.current_serving_profile.is_none());
+        // The consumed sample cannot be re-labelled as a later successful row.
+        recorder.emit_current_self_check(true).unwrap();
+        assert_eq!(recorder.output.len(), before);
+    }
+
+    #[test]
+    fn known_scope_with_missing_identity_cannot_adopt_another_timing_join() {
+        // Serialization DATA only; no successful native phase is constructed.
+        let (mut recorder, ..) = fixture();
+        recorder.enter(FailurePhase::AppServing);
+        recorder.serving_timing(super::super::serving_timing::ServingTiming::maximal_fixture());
+        recorder.current_serving_join = Some(CurrentServingJoin {
+            role: ServingRole::Shell,
+            request: None,
+            peer: None,
+        });
+        recorder.emit_current_self_check(true).unwrap();
+        let line = std::str::from_utf8(&recorder.output).unwrap();
+        let row: Value =
+            serde_json::from_str(line.strip_prefix(SELF_CHECK_PREFIX).unwrap()).unwrap();
+        assert!(row["request"].is_null() && row["peer"].is_null());
+        assert_eq!(row["role"], "shell");
+        assert_eq!(row["scope"], "whole_current_shell_serving_operation");
+        assert!(row["detail"].is_null());
+        assert_eq!(row["capture_completeness"], "unknown");
+        assert!(recorder.current_serving_join.is_none());
     }
 
     #[test]
@@ -1290,6 +1720,8 @@ mod tests {
         let (mut recorder, seed, holder, create, complete, snapshot) = fixture();
         let incarnation = Digest::new(b"Controller original");
         recorder.enrolled(incarnation.clone()).unwrap();
+        recorder.enter(FailurePhase::HolderListener);
+        recorder.holder_listener_bound().unwrap();
         recorder.first_holder(&seed, &holder).unwrap();
         for request in [&create, &complete] {
             for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
@@ -1319,6 +1751,8 @@ mod tests {
                         ServingObservation {
                             binding: Digest::new(b"actual request binding"),
                             snapshot: snapshot_digest.clone(),
+                            request: Some(crate::security_epoch::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture()),
+                            peer: Some(crate::security_epoch::native_enrollment::PeerRequestDiagnosticData::maximal_fixture()),
                         },
                     )
                     .unwrap();
@@ -1330,33 +1764,51 @@ mod tests {
         let rows = records(&recorder.output);
         assert_eq!(rows.len(), usize::from(MAX_RECORDS));
         let text = std::str::from_utf8(&recorder.output).unwrap();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with(LISTENER_PREFIX))
+                .count(),
+            1
+        );
         let profiles: Vec<Value> = text
             .lines()
             .filter_map(|line| {
                 line.strip_prefix(SELF_CHECK_PREFIX)
                     .map(|row| serde_json::from_str::<Value>(row).unwrap())
             })
-            .filter(|profile| profile["format"] == "controller_current_app_serving_exclusive_ns_v3")
+            .filter(|profile| profile["format"] == "controller_current_serving_v4")
             .collect();
         assert_eq!(
             text.lines()
                 .filter(|line| line.starts_with(SELF_CHECK_PREFIX))
                 .count(),
-            106
+            206
         );
-        assert_eq!(profiles.len(), 100);
+        assert_eq!(profiles.len(), 200);
         for (index, profile) in profiles.iter().enumerate() {
             assert_eq!(profile["sequence"], index + 1);
             assert_eq!(profile["completed"], true);
             assert_eq!(
                 profile["lifecycle_sequence"],
-                if index == 0 { 9 } else { 11 }
+                match index {
+                    0 => 9,
+                    1 => 10,
+                    _ => 11,
+                }
             );
             assert_eq!(profile["controller_incarnation"], incarnation.as_str());
+            assert!(profile["request"]["request_original"].is_string());
+            assert_eq!(profile["detail"].is_object(), index % 2 == 0);
+            assert_eq!(
+                profile["role"],
+                if index % 2 == 0 { "app" } else { "shell" }
+            );
         }
         assert!(
             recorder.output.len()
-                <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES + 100 * MAX_CURRENT_SELF_CHECK_BYTES
+                <= usize::from(MAX_RECORDS) * MAX_RECORD_BYTES
+                    + MAX_LISTENER_BYTES
+                    + 200 * MAX_CURRENT_SELF_CHECK_BYTES
         );
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row["sequence"], index + 1);
@@ -1403,6 +1855,8 @@ mod tests {
                     ServingObservation {
                         binding: Digest::new(b"late"),
                         snapshot: snapshot_digest,
+                        request: Some(crate::security_epoch::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture()),
+                        peer: Some(crate::security_epoch::native_enrollment::PeerRequestDiagnosticData::maximal_fixture()),
                     }
                 )
                 .is_err()
@@ -1454,6 +1908,8 @@ mod tests {
                     ServingObservation {
                         binding: Digest::new(b"binding"),
                         snapshot: Digest::new(b"snapshot"),
+                        request: Some(crate::security_epoch::native_enrollment::EnrolledRequestDiagnosticData::maximal_fixture()),
+                        peer: Some(crate::security_epoch::native_enrollment::PeerRequestDiagnosticData::maximal_fixture()),
                     }
                 )
                 .is_err()
@@ -1680,7 +2136,19 @@ mod tests {
                 Category::ClockExpiredOrRewound,
             ),
             (
+                "epoch_counter_credential_expired",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
+                "epoch_counter_connection_clock_rewind",
+                Category::ClockExpiredOrRewound,
+            ),
+            (
                 "epoch_native_acquisition_refused",
+                Category::AcquisitionRefused,
+            ),
+            (
+                "epoch_counter_credential_refused",
                 Category::AcquisitionRefused,
             ),
             (
@@ -1688,8 +2156,31 @@ mod tests {
                 Category::TransportUnavailable,
             ),
             (
+                "epoch_counter_tokeninfo_unavailable",
+                Category::TransportUnavailable,
+            ),
+            (
+                "epoch_counter_tokeninfo_transport",
+                Category::TransportUnavailable,
+            ),
+            (
                 "epoch_native_response_status_or_bound",
                 Category::ResponseStatusOrBound,
+            ),
+            (
+                "epoch_counter_tokeninfo_status_or_bound",
+                Category::ResponseStatusOrBound,
+            ),
+            ("epoch_counter_tokeninfo_bound", Category::AdmissionRejected),
+            ("epoch_counter_tokeninfo_shape", Category::AdmissionRejected),
+            (
+                "epoch_counter_tokeninfo_binding_or_expiry",
+                Category::AdmissionRejected,
+            ),
+            ("epoch_counter_tokeninfo_shape /SECRET", Category::Other),
+            (
+                "epoch_counter_tokeninfo_status_or_bound?access_token=PRIVATE",
+                Category::Other,
             ),
             ("storage_provider_disk_binding", Category::AdmissionRejected),
             (
@@ -2238,6 +2729,165 @@ mod tests {
                     .contains("bootstrap_role")
             );
         }
+    }
+
+    #[test]
+    fn cold_counter_refusal_is_closed_after_activation_and_keeps_original_cause() {
+        for step in [
+            PreparationStep::CounterRoleStage,
+            PreparationStep::CounterPendingFile,
+            PreparationStep::CounterPhysicalAcquire,
+            PreparationStep::CounterStage,
+            PreparationStep::CounterAdmit,
+            PreparationStep::CounterPhysicalFinish,
+        ] {
+            let (mut recorder, seed, holder, create, complete, snapshot) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.first_holder(&seed, &holder).unwrap();
+            for request in [&create, &complete] {
+                for action in [Action::Reserve, Action::Dispatch, Action::Settle] {
+                    recorder.bootstrap(request, action, &snapshot).unwrap();
+                }
+            }
+            recorder
+                .activated(&complete, &Digest::new(b"snapshot"))
+                .unwrap();
+            recorder.enter(FailurePhase::CounterAdmission);
+            let error = PreparationFailure::at(step, anyhow::Error::new(MustNotDisplay));
+            assert!(error.downcast_ref::<MustNotDisplay>().is_some());
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(rows.len(), 10);
+            assert_eq!(rows[8]["observation"]["event"], "activation_completed");
+            assert_eq!(
+                rows[9]["observation"],
+                serde_json::json!({
+                    "event":"refused", "at":"counter_admission",
+                    "preparation":{"step":step,"category":"other"}
+                })
+            );
+            assert!(recorder.activated && recorder.refused && recorder.serving == [false; 2]);
+            let length = recorder.output.len();
+            recorder.refuse(Some(&error)).unwrap();
+            assert_eq!(recorder.output.len(), length);
+            let text = std::str::from_utf8(&recorder.output).unwrap();
+            assert!(!text.contains("MustNotDisplay"));
+            assert!(text.lines().all(|line| line.len() < MAX_RECORD_BYTES));
+        }
+        // A more specific original native boundary keeps precedence, while
+        // context wrapping never replaces the original error or formats it.
+        let inner = PreparationFailure::at(
+            PreparationStep::VolumeCurrent,
+            anyhow::Error::new(MustNotDisplay),
+        );
+        let outer = PreparationFailure::at(PreparationStep::CounterPhysicalAcquire, inner);
+        assert_eq!(
+            PreparationFailure::observe(&outer).step,
+            PreparationStep::VolumeCurrent
+        );
+        assert!(outer.downcast_ref::<MustNotDisplay>().is_some());
+    }
+
+    fn cold_counter_boundaries_follow_activation(source: &str) -> bool {
+        fn expression(mut value: &syn::Expr) -> &syn::Expr {
+            while let syn::Expr::Block(block) = value {
+                let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else {
+                    break;
+                };
+                value = inner;
+            }
+            value
+        }
+        #[derive(Default)]
+        struct Boundaries(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Boundaries {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                syn::visit::visit_expr_method_call(self, call);
+                if call.method == "activated" {
+                    self.0.push("activated".into());
+                } else if call.method == "enter" && call.args.iter().any(|arg| {
+                    matches!(arg, syn::Expr::Path(path)
+                        if path.path.segments.last().is_some_and(|segment| segment.ident == "CounterAdmission"))
+                }) {
+                    self.0.push("counter_admission".into());
+                } else if call.method == "map_err" {
+                    let syn::Expr::MethodCall(boundary) = &*call.receiver else { return; };
+                    let Some(syn::Expr::Closure(closure)) = call.args.first() else { return; };
+                    let syn::Expr::Call(annotation) = expression(&closure.body) else { return; };
+                    let syn::Expr::Path(function) = &*annotation.func else { return; };
+                    if function.path.segments.len() != 2
+                        || function.path.segments[0].ident != "PreparationFailure"
+                        || function.path.segments[1].ident != "at"
+                        || annotation.args.len() != 2
+                        || !matches!(annotation.args.last(),Some(syn::Expr::Path(path)) if path.path.is_ident("error"))
+                    { return; }
+                    let Some(syn::Expr::Path(step)) = annotation.args.first() else { return; };
+                    if step.path.segments.len() == 2 && step.path.segments[0].ident == "PreparationStep" {
+                        let name = step.path.segments[1].ident.to_string();
+                        if name.starts_with("Counter") {
+                            self.0.push(format!("{}:{name}", boundary.method));
+                        }
+                    }
+                }
+            }
+        }
+        let parsed = syn::parse_file(source).unwrap();
+        let function = parsed
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == "activate_controller" => {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut observed = Boundaries::default();
+        syn::visit::Visit::visit_block(&mut observed, &function.block);
+        observed.0.iter().map(String::as_str).eq([
+            "activated",
+            "counter_admission",
+            "begin_current_stage:CounterRoleStage",
+            "begin_pending_current_controller:CounterPendingFile",
+            "acquire:CounterPhysicalAcquire",
+            "controller_stage:CounterStage",
+            "admit:CounterAdmit",
+            "finish_controller_known:CounterPhysicalFinish",
+        ])
+    }
+
+    #[test]
+    fn cold_counter_annotations_cover_actual_calls_without_relabeling_activation() {
+        let source = include_str!("../bootstrap.rs");
+        assert!(cold_counter_boundaries_follow_activation(source));
+        for label in [
+            "CounterRoleStage",
+            "CounterPendingFile",
+            "CounterPhysicalAcquire",
+            "CounterStage",
+            "CounterAdmit",
+            "CounterPhysicalFinish",
+        ] {
+            assert!(!cold_counter_boundaries_follow_activation(&source.replace(
+                &format!("PreparationStep::{label}"),
+                "PreparationStep::Unknown"
+            )));
+        }
+        assert!(!cold_counter_boundaries_follow_activation(&source.replace(
+            "FailurePhase::CounterAdmission",
+            "FailurePhase::Activation"
+        )));
+        let enter = "evidence.enter(super::controller::evidence::FailurePhase::CounterAdmission);";
+        let moved = source.replace(enter, "").replace(
+            "let mut counter = super::authenticated_reads::CounterConnectionSlot::new();",
+            &format!("{enter}\nlet mut counter = super::authenticated_reads::CounterConnectionSlot::new();"));
+        // This is the same pre-admission boundary, after observed activation.
+        assert!(cold_counter_boundaries_follow_activation(&moved));
+        let late = source.replace(enter, "").replace(
+            "Ok((complete, activation, counter))",
+            &format!("{enter}\nOk((complete, activation, counter))"),
+        );
+        assert!(!cold_counter_boundaries_follow_activation(&late));
     }
 
     #[test]

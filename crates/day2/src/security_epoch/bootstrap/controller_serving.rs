@@ -11,6 +11,41 @@ use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::bootstrap::NativeRole;
 
 impl ActiveControllerStorageContinuity {
+    pub(in crate::security_epoch) fn take_counter_readmission_delay(
+        &mut self,
+    ) -> Result<Option<std::time::Duration>> {
+        ensure!(self.valid, "active_controller_storage_refused");
+        self.counter.take_readmission_delay()
+    }
+
+    pub(in crate::security_epoch) fn readmit_counter_idle(
+        &mut self,
+        stage: EnrolledRoleStage<'_>,
+        mut publication: crate::security_epoch::native_enrollment::IdleCredentialPublication,
+    ) -> Result<()> {
+        ensure!(self.valid, "active_controller_storage_refused");
+        let result = (|| {
+            let mut physical = self
+                .storage
+                .begin_pending_current_controller()?
+                .acquire(stage)?;
+            let idle = publication.borrow_stage(physical.controller_stage()?)?;
+            let pending = self.counter.prepare_readmission(
+                idle,
+                &self.policy,
+                &self.store,
+                NativeRole::EpochController,
+            )?;
+            physical.finish_controller_known()?;
+            pending.publish(publication)
+        })();
+        if result.is_err() {
+            self.refuse();
+            self.counter.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn app_pending(&mut self) -> Result<bool> {
         ensure!(self.valid, "active_controller_storage_refused");
         self.storage.app_pending()
@@ -22,6 +57,10 @@ impl ActiveControllerStorageContinuity {
         trace: &ServingTiming,
     ) -> Result<ServingObservation> {
         let _profile = self_check_profile::enter(Category::ServingLocal);
+        let request_data = stage
+            .diagnostic_progress()
+            .historical_request_binding_data()
+            .ok();
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
@@ -40,6 +79,7 @@ impl ActiveControllerStorageContinuity {
             let binding = trace.measure(ServingStep::RequestBinding, || {
                 Ok(physical.app_request()?.binding.clone())
             })?;
+            let peer_data = physical.historical_peer_data();
             let names = trace.measure(ServingStep::Names, || {
                 request_names(&self.store, &self.completion)
             })?;
@@ -84,7 +124,12 @@ impl ActiveControllerStorageContinuity {
             // physical/peer release succeeds too. A later failure refuses its
             // retained connection; no new request can enter during release.
             trace.measure(ServingStep::Release, || physical.finish_app_known())?;
-            Ok(ServingObservation { binding, snapshot })
+            Ok(ServingObservation {
+                binding,
+                snapshot,
+                request: request_data,
+                peer: peer_data,
+            })
         })();
         if result.is_ok() {
             self.valid = true;
@@ -105,6 +150,10 @@ impl ActiveControllerStorageContinuity {
         mut stage: EnrolledRoleStage<'_>,
         peer: &mut crate::security_epoch::native_enrollment::ControllerServingPeer,
     ) -> Result<ServingObservation> {
+        let request_data = stage
+            .diagnostic_progress()
+            .historical_request_binding_data()
+            .ok();
         ensure!(self.valid, "active_controller_storage_refused");
         self.valid = false;
         let result = (|| {
@@ -120,6 +169,7 @@ impl ActiveControllerStorageContinuity {
             let rendezvous = peer.prepare_current(&mut stage)?;
             let mut physical = pending.acquire(stage)?;
             let mut shell = rendezvous.accept_current(physical.controller_stage()?)?;
+            let peer_data = shell.historical_peer_data();
             let binding = shell.request_binding().clone();
             let names = request_names(&self.store, &self.completion)?;
             let mut observed = reads.read(physical.controller_stage()?, &self.store, &names)?;
@@ -150,7 +200,12 @@ impl ActiveControllerStorageContinuity {
             let snapshot = super::super::journal::snapshot_digest(observed.snapshot())?;
             reads.finish(physical.controller_stage()?)?;
             physical.finish_controller_known()?;
-            Ok(ServingObservation { binding, snapshot })
+            Ok(ServingObservation {
+                binding,
+                snapshot,
+                request: request_data,
+                peer: Some(peer_data),
+            })
         })();
         if result.is_ok() {
             self.valid = true;

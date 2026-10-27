@@ -15,9 +15,16 @@ pub(super) fn with_current<'role, T>(
     operation: impl FnOnce(&mut dyn CurrentServingPhase, &mut EnrolledRoleStage<'role>) -> Result<T>,
 ) -> ScopeOutcome<T> {
     let result = (|| {
-        let evidence =
-            super::ConsumerScopeEvidence::shell(stage.incarnation_data()?, binding.clone());
+        let mut evidence = super::ConsumerScopeEvidence::shell(
+            stage.incarnation_data()?,
+            binding.clone(),
+            stage
+                .diagnostic_progress()
+                .historical_request_binding_data()
+                .ok(),
+        );
         let mut phase = peer.begin_current(stage, binding)?;
+        evidence.peer_data(phase.historical_peer_data());
         // The Controller retains current file/P3 and epoch observations until
         // the actual consumer's original postchecks and final acknowledgement.
         phase.await_known(stage)?;

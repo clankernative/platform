@@ -73,12 +73,29 @@ The closed `observation.event` values are:
 | `enrolled` | The final owning Controller thread completed native enrollment. | 1 |
 | `first_holder_durability_completed` | The real original file/PD/ext4 and authenticated first-holder exchange completed the selected conditional durability checks and retained activation continuity. `seed` and `holder` are commitments only. | 1 |
 | `bootstrap_completed` | One actual reserve, dispatch or settle finished its known result, peer acknowledgement, original checks and release. `step` is one of the six fixed steps; `operation`, `request` and `snapshot` are commitments to the exact request and resulting versioned observation. | 6 |
-| `activation_completed` | Both three-step operations completed; the exact activated snapshot and operation were retained. | 1 |
+| `activation_completed` | Both three-step operations completed; the exact activated snapshot and operation were retained. Cold counter admission and publication of the active Controller still follow this record. | 1 |
 | `first_serving_release` | The first real Controller-side App or Shell operation completed consumer acknowledgement, final provider reobservation, physical/peer checks and release. `role`, actual request `binding` and final `snapshot` identify that historical operation. | 2, one per role |
 | `refused` | An actual error stopped the executor. `at` is a fixed phase label, never the error text. A possibly attempted or unknown effect is not reported as completed. | 1 |
 
 The bootstrap `step` order is exactly `create_reserve`, `create_dispatch`,
 `create_settle`, `activate_reserve`, `activate_dispatch`, `activate_settle`.
+
+For startup sequencing, a separate line begins with
+`day2-native-controller-listener ` and carries the fixed format
+`day2_native_controller_listener_v1`, event `initial_holder_listener_bound`,
+the actual historical `selection` and `controller_incarnation` commitments,
+and `scheduling_data_only: true`. It is emitted only after the successful
+initial-holder bind has finished its actual file phase, before idle polling
+and before a first-holder action begins. Deployment can wait for this marker
+before starting App. It is transport scheduling DATA, not authenticated App,
+first-holder, P3, activation, serving or future socket-liveness permission.
+It reads no clock, holds no expiring action and changes no deadline.
+At most one attempt and 512 bytes including prefix/newline are allowed;
+invalid state, duplicate attempt or partial write cannot emit another marker.
+An export error stops the executor under its existing evidence-failure rule.
+This line consumes none of the twelve ordinary lifecycle slots, so both App
+and Shell first releases and the final refusal retain their original budget.
+
 Each ordinary lifecycle record is at most 2,048 bytes including prefix and
 newline; at most twelve such records (24 KiB) are written per process. Repeated
 serving operations do not grow this lifecycle transcript. The separately bounded
@@ -186,6 +203,20 @@ and existing refusal remain intact internally. The same twelve-record and
 permission is added. These details diagnose a stopped attempt only; they are
 neither authority nor a successful preparation receipt.
 
+After `activation_completed`, a refusal at `counter_admission` identifies cold
+Controller connection setup separately from the observed activation snapshot.
+Its closed preparation step distinguishes `counter_role_stage`,
+`counter_pending_file`, `counter_physical_acquire`, `counter_stage`,
+`counter_admit` and `counter_physical_finish`. A more specific existing inner
+annotation still takes precedence. `counter_admit` includes full provider
+authentication, token introspection and the original stage's final checks; it
+does not identify which of those failed or establish a particular HTTP status.
+The physical owner and peer postchecks must finish before an active Controller
+can enter its request loop. Only the existing terminal refusal is exported after
+unwinding: there is no additional record, in-phase I/O, clock read, retry or
+change to any admission or serving deadline. An activation record followed by
+this refusal does not establish a usable counter connection or serving success.
+
 The fixed Compute instance GET requests only
 `id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
 [partial-response fields parameter](https://docs.cloud.google.com/compute/docs/api/how-tos/performance).
@@ -269,7 +300,7 @@ Ordinary Current App-serving has a distinct diagnostic root around its actual
 Controller operation, including its role acquisition. App-side work before its
 request becomes pending at the Controller is outside this sample. After the role/file/peer borrows unwind,
 the Controller can emit `day2-native-controller-self-check` with format
-`controller_current_app_serving_exclusive_ns_v3`, scope
+`controller_current_serving_v4`, scope
 `whole_current_app_serving_operation`, its own consecutive `sequence`, the count
 of already emitted ordinary lifecycle records in `lifecycle_sequence`, selection
 and Controller incarnation. `completed` reports only whether this actual Current
@@ -278,7 +309,9 @@ It is historical DATA, not readiness,
 permission, current validity or a sampled remaining budget. It has no bootstrap
 action field and cannot be interpreted as a bootstrap full-check sample.
 
-`profile.samples` counts whole Current operations, not full checks. The sixteen
+`detail.profile.samples` counts whole Current operations, not full checks. Detail
+is absent after its finite budget; essential actual request identity continues.
+The sixteen
 fixed rows are `[span_attempts, exclusive_ns]`, in the following order:
 
 | Row | Current work |
@@ -309,7 +342,7 @@ at least 90% to named rows, but coverage and cost remain unmeasured until that
 actual run. Inspect Other and the local residual rows before claiming a dominant
 leaf, a net verity saving or complete request latency. Bootstrap retains its
 separate nine-row full-check scope; these extra marks are disabled in that scope.
-Optional `physical` DATA identifies the last attempted composite-check subcall,
+Optional `detail.physical` DATA identifies the last attempted composite-check subcall,
 whether that call succeeded, and the first failed subcall. An enclosing call's
 later failure does not overwrite a nested call's successful outcome. Rows are fixed in order
 durability, current/retained peer, final file, ProviderAcquire stage argument;
@@ -320,8 +353,9 @@ These rows overlap the exclusive profile and must not be added to it. A subcall
 can contain several guards; the marker does not establish a failed statement or
 cause. If role acquisition fails first, no physical row is fabricated.
 
-The Current record is capped separately at 1536 bytes and at 256 records per
-Controller. Each available sample is consumed once, including later successful
+The Current record is bounded separately at 4096 bytes. Cost detail is capped at
+256 records per Controller, while essential identity rows continue. Each
+available sample is consumed once, including later successful
 Current operations and a terminal refusal; startup does not consume the entire
 capture. Ordinary lifecycle records still contain only the first release per
 role. Reaching the diagnostic cap neither starts another native operation nor
@@ -617,6 +651,12 @@ samples made by narrowed views. It survives unwind as read-only DATA. It is not
 the failed guard's timestamp, current validity or remaining budget; it is absent
 when role acquisition never returned its actual stage. Missing, rewound or
 overflowed metric clocks are inconclusive and cannot change the native result.
+The Current identity record's `request` copies the actual enrolled original's historical commitments and
+producer/owner/request ordinals. It is null when no actual annotated original
+is available; an elapsed time, semantic binding or snapshot digest cannot fill
+that gap. The getter does not sample a clock, check validity or revive refusal.
+It is serialized once in that identity record, rather than duplicated into the
+separately bounded first-release timing detail.
 The closed `failure.step` identifies the innermost annotated call and
 `failure.category` uses the existing allowlist, without private error text or
 provider payloads. A labelled call may contain several unchanged inner checks;
@@ -900,3 +940,40 @@ owner or request identity, complete capture intervals or native success.
 Missing/null rows or missing producer records are never interpreted as zero.
 Actual same-owner cold/warm qualification, complete producer collection and
 final consumer settlement remain required.
+
+## Actual request joins after the detail budgets
+
+`day2-native-consumer-evidence ` emits `day2_native_consumer_evidence_v2` from
+the actual App/Shell serving scope after its disposition is known. Its
+`request` is copied from the genuine stage at scope construction, not from the
+caller, a timestamp, the business binding or a saved receipt. The Controller's
+`day2-native-controller-self-check ` uses
+`controller_current_serving_v4` and copies the actual retained
+progress or successfully closed App/Shell operation's stage DATA. Shell rows use
+`whole_current_shell_serving_operation` and have no fabricated App cost detail.
+Identity rows also emit when cost profiling is unavailable. These are historical DATA, not authority or proof
+that a response reached the browser.
+
+Essential identity records continue after the detail budgets: the first 128
+consumer records may have `detail` containing selection, binding, purpose and
+snapshot; the first 256 Controller records may have cost `detail`. Later rows
+keep their actual request identity and observation with `detail: null`. The
+checked process-local sequence never wraps or restarts. Each consumer record
+remains bounded to 4096 bytes, and each Current Controller record to 4096 bytes.
+The existing bootstrap/main Controller limits are separate.
+
+Every row says `capture_completeness: "unknown"`. Sequence gaps, missing
+producers, sequence overflow, serialization/byte refusal, a failed/partial log
+write or incomplete collection remain unknown; reaching a detail cap cannot
+be read as zero later work or complete evidence. A maximum-size DATA fixture
+does not establish a real producer/owner join or qualify native operation.
+
+`peer` copies the actual authenticated phase's verified local and remote roles,
+enrolled incarnations and original commitments, plus the same exchange's
+commitment and strict sequence. Match a consumer's local original to the
+Controller's remote original and vice versa, together with the identical
+exchange commitment; time proximity or a matching business binding is not that
+join. Missing fields remain unknown. A refused scope may still report a
+previously verified exchange, without asserting its final checks or release
+succeeded. `scope_completed` alone does not prove whole-operation success,
+browser delivery, human acknowledgement or live Google authorization.

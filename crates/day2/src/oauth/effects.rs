@@ -272,6 +272,85 @@ pub(crate) async fn timeout<F: std::future::Future>(
     super::native_http::timer(|| tokio::time::timeout(duration, future)).await
 }
 
+/// Reactor readiness DATA, separate from OAuth wall/lease time and native
+/// BOOTTIME authority. The same paused Tokio clock controls this port and the
+/// existing request-body timeout in simulation. No timer grants permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ReadinessInstant(tokio::time::Instant);
+
+impl ReadinessInstant {
+    pub(super) fn now() -> Self {
+        Self(super::native_http::timer(tokio::time::Instant::now))
+    }
+
+    pub(super) fn checked_add(self, duration: Duration) -> Option<Self> {
+        self.0.checked_add(duration).map(Self)
+    }
+}
+
+/// One-shot readiness wait. Cancellation retains its fixed deadline rather
+/// than starting a new duration. Only the effect adapter names Tokio's timer.
+pub(super) struct ReadinessTimer(std::pin::Pin<Box<tokio::time::Sleep>>);
+
+impl ReadinessTimer {
+    pub(super) fn at(deadline: ReadinessInstant) -> Self {
+        Self(super::native_http::timer(|| {
+            Box::pin(tokio::time::sleep_until(deadline.0))
+        }))
+    }
+
+    pub(super) fn after(duration: Duration) -> Self {
+        Self(super::native_http::timer(|| {
+            Box::pin(tokio::time::sleep(duration))
+        }))
+    }
+
+    pub(super) fn deadline(&self) -> ReadinessInstant {
+        ReadinessInstant(self.0.deadline())
+    }
+}
+
+impl std::future::Future for ReadinessTimer {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        super::native_http::timer(|| self.get_mut().0.as_mut().poll(context))
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn reactor_readiness_and_oauth_lease_clocks_are_independently_controlled() {
+        let world = super::super::simulation::World::new(781);
+        scope_async(world.clone(), async {
+            let anchor = ReadinessInstant::now();
+            let lease = Instant::now();
+            let deadline = anchor.checked_add(Duration::from_secs(10)).unwrap();
+            let mut timer = ReadinessTimer::at(deadline);
+            world.advance(300);
+            assert_eq!(ReadinessInstant::now(), anchor);
+            assert!((&mut timer).now_or_never().is_none());
+            assert_eq!(timer.deadline(), deadline);
+            tokio::time::advance(Duration::from_secs(10)).await;
+            (&mut timer).await;
+            assert_eq!(ReadinessInstant::now(), deadline);
+            assert_eq!(
+                Instant::now().checked_duration_since(lease),
+                Some(Duration::from_secs(300))
+            );
+            assert_eq!(timer.deadline(), deadline);
+        })
+        .await;
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn scope_async<F: std::future::Future>(
     hooks: std::sync::Arc<dyn Hooks>,
