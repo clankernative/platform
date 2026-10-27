@@ -399,6 +399,27 @@ fn validate_policy(policy: &Policy) -> Result<()> {
             "invalid buffer destructor fingerprint"
         );
     }
+    ensure!(
+        policy.proofs.windows(2).all(|pair| {
+            (pair[0].source.as_str(), semantic_name(&pair[0].type_name))
+                < (pair[1].source.as_str(), semantic_name(&pair[1].type_name))
+        }),
+        "proof entries must be sorted by source and type name"
+    );
+    ensure!(
+        policy
+            .trait_checks
+            .windows(2)
+            .all(|pair| pair[0].source < pair[1].source),
+        "trait checks must be sorted by source"
+    );
+    ensure!(
+        policy.buffer_destructors.windows(2).all(|pair| {
+            (pair[0].source.as_str(), semantic_name(&pair[0].type_name))
+                < (pair[1].source.as_str(), semantic_name(&pair[1].type_name))
+        }),
+        "buffer destructors must be sorted by source and type name"
+    );
     Ok(())
 }
 
@@ -3767,6 +3788,65 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn proof_registrations_require_stable_source_and_semantic_type_order() {
+        let mut policy = Policy {
+            version: 1,
+            proofs: ["river", "r#type"]
+                .into_iter()
+                .map(|name| {
+                    let mut reviewed = proof(Kind::Consuming);
+                    reviewed.type_name = name.into();
+                    reviewed
+                })
+                .collect(),
+            trait_checks: ["crates/a/src/lib.rs", "crates/z/src/lib.rs"]
+                .into_iter()
+                .map(|source| TraitCheck {
+                    source: source.into(),
+                    scope: TraitScope::Const,
+                    fingerprint: format!("sha256:{}", "0".repeat(64)),
+                    registration: None,
+                })
+                .collect(),
+            buffer_destructors: ["BufferAlpha", "BufferBeta"]
+                .into_iter()
+                .map(|name| BufferDestructor {
+                    source: "crates/example/src/buffers.rs".into(),
+                    type_name: name.into(),
+                    definition_fingerprint: format!("sha256:{}", "0".repeat(64)),
+                    destructor_fingerprint: format!("sha256:{}", "0".repeat(64)),
+                })
+                .collect(),
+        };
+        validate_policy(&policy).unwrap();
+        policy.proofs.swap(0, 1);
+        assert!(
+            validate_policy(&policy)
+                .unwrap_err()
+                .to_string()
+                .contains("proof entries must be sorted")
+        );
+        policy.proofs.swap(0, 1);
+        policy.trait_checks.swap(0, 1);
+        assert!(
+            validate_policy(&policy)
+                .unwrap_err()
+                .to_string()
+                .contains("trait checks must be sorted")
+        );
+        policy.trait_checks.swap(0, 1);
+        policy.buffer_destructors.swap(0, 1);
+        assert!(
+            validate_policy(&policy)
+                .unwrap_err()
+                .to_string()
+                .contains("buffer destructors must be sorted")
+        );
+        policy.buffer_destructors.swap(0, 1);
+        validate_policy(&policy).unwrap();
     }
 
     #[test]

@@ -119,6 +119,16 @@ struct Rules {
 }
 
 impl Allowance {
+    fn registration_key(&self) -> (&str, &str, &str, &str, &str) {
+        (
+            &self.source,
+            &self.kind,
+            &self.target,
+            &self.context,
+            &self.fingerprint,
+        )
+    }
+
     fn finding(&self) -> Finding {
         Finding {
             source: self.source.clone(),
@@ -733,6 +743,13 @@ fn validate(rules: &Rules, actual: &Inventory) -> Result<()> {
             violations.join("\n")
         );
     }
+    ensure!(
+        rules
+            .allowances
+            .windows(2)
+            .all(|pair| pair[0].registration_key() < pair[1].registration_key()),
+        "architecture allowances must be sorted by source, kind, target, context and fingerprint"
+    );
     Ok(())
 }
 
@@ -7386,6 +7403,9 @@ mod tests {
                 }
             })
             .collect();
+        rules
+            .allowances
+            .sort_by(|left, right| left.registration_key().cmp(&right.registration_key()));
         validate(&rules, &actual).unwrap();
         let duplicate = stdio_inventory(
             r#"fn f() { let _ = std::io::stderr().lock().write_all(b"x"); let _ = std::io::stderr().lock().write_all(b"x"); }"#,
@@ -11851,6 +11871,34 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unreviewed clock")
+        );
+    }
+
+    #[test]
+    fn reviewed_allowances_require_stable_identity_order_without_changing_admission() {
+        let actual = Inventory {
+            version: VERSION,
+            sources: vec!["crates/fixture/src/lib.rs".to_owned()],
+            findings: scan("fn f() { std::env::var(\"A\"); std::time::Instant::now(); }"),
+        };
+        let mut rules = reviewed(&actual);
+        assert_eq!(rules.allowances.len(), 2);
+        validate(&rules, &actual).unwrap();
+        rules.allowances.swap(0, 1);
+        assert!(
+            validate(&rules, &actual)
+                .unwrap_err()
+                .to_string()
+                .contains("allowances must be sorted")
+        );
+        rules.allowances.swap(0, 1);
+        validate(&rules, &actual).unwrap();
+        rules.allowances[0].count += 1;
+        assert!(
+            validate(&rules, &actual)
+                .unwrap_err()
+                .to_string()
+                .contains("changed occurrence count")
         );
     }
 
