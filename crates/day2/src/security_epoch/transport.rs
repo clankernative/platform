@@ -593,6 +593,12 @@ mod tests {
                 path(&condition.expr, &["work"])
             }
         }
+        let expected_work = match (owner, method) {
+            ("NativeHttp", "request_with_ceiling") => None,
+            ("CredentialMaterial", "metadata_source") => Some("MetadataAdmission"),
+            ("CredentialMaterial", "admit_counter") => Some("CredentialAdmission"),
+            _ => return false,
+        };
         let file = syn::parse_file(source).unwrap();
         let Some(body) = file.items.iter().find_map(|item| {
             let syn::Item::Impl(item) = item else {
@@ -636,7 +642,7 @@ mod tests {
         let start = index(&|s| {
             matches!(s, syn::Stmt::Expr(syn::Expr::Assign(assign), Some(_))
             if path(&assign.left, &["work"]) && match &*assign.right {
-                syn::Expr::MethodCall(map) => map.method == "map" && map.args.len() == 1
+                syn::Expr::MethodCall(map) => expected_work.is_none() && map.method == "map" && map.args.len() == 1
                     && path(&map.args[0], &["admission_work", "begin"])
                     && matches!(&*map.receiver, syn::Expr::Call(call)
                         if path(&call.func, &["admission_kind"]) && call.args.len()==1
@@ -645,7 +651,7 @@ mod tests {
                 syn::Expr::Call(some) => path(&some.func, &["Some"]) && some.args.len() == 1
                     && matches!(&some.args[0], syn::Expr::Call(call)
                         if path(&call.func, &["admission_work", "begin"]) && call.args.len()==1
-                        && path(&call.args[0], &["Work","MetadataAdmission"])),
+                        && expected_work.is_some_and(|kind| path(&call.args[0], &["Work",kind]))),
                 _ => false,
             })
         });
@@ -712,6 +718,11 @@ mod tests {
                 "CredentialMaterial",
                 "metadata_source",
             ),
+            (
+                include_str!("credential_material.rs"),
+                "CredentialMaterial",
+                "admit_counter",
+            ),
         ] {
             assert!(
                 actual_admission_send_wiring(source, owner, method),
@@ -745,8 +756,12 @@ mod tests {
                     assert!(!actual_admission_send_wiring(&changed, owner, method));
                 }
             } else {
-                let changed =
-                    source.replace("Work::MetadataAdmission", "Work::CredentialAdmission");
+                let (actual, wrong) = if method == "metadata_source" {
+                    ("Work::MetadataAdmission", "Work::CredentialAdmission")
+                } else {
+                    ("Work::CredentialAdmission", "Work::MetadataAdmission")
+                };
+                let changed = source.replace(actual, wrong);
                 assert_ne!(source, changed);
                 assert!(!actual_admission_send_wiring(&changed, owner, method));
             }

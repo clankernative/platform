@@ -647,3 +647,163 @@ fn hello_bind_and_grant_signature_never_substitute_a_storage_stage_purpose() {
         }
     }
 }
+
+fn actual_read_cap_handoff(source: &str) -> bool {
+    fn is_path(expression: &syn::Expr, expected: &str) -> bool {
+        matches!(expression, syn::Expr::Path(path) if path.path.is_ident(expected))
+    }
+    fn is_field(expression: &syn::Expr, owner: &str, member: &str) -> bool {
+        matches!(expression, syn::Expr::Field(field)
+            if is_path(&field.base, owner) && matches!(&field.member, syn::Member::Named(name) if name == member))
+    }
+    let syntax = syn::parse_file(source).unwrap();
+    let Some(function) = syntax.items.iter().find_map(|item| {
+        let syn::Item::Impl(implementation) = item else { return None; };
+        if !matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("SameEnrolledOwner")) { return None; }
+        implementation.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(function) if function.sig.ident == "meet_current_read_view" => Some(function),
+            _ => None,
+        })
+    }) else { return false; };
+    let Some(syn::Stmt::Local(result)) = function.block.stmts.first() else {
+        return false;
+    };
+    let Some(initializer) = &result.init else {
+        return false;
+    };
+    let syn::Expr::Call(invocation) = &*initializer.expr else {
+        return false;
+    };
+    let syn::Expr::Paren(parenthesized) = &*invocation.func else {
+        return false;
+    };
+    let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+        return false;
+    };
+    let syn::Expr::Block(body) = &*closure.body else {
+        return false;
+    };
+    if body.block.stmts.len() != 4 {
+        return false;
+    }
+    for (index, method, receiver, argument) in [
+        (0, "check", "self", Some("stage")),
+        (1, "require_purpose", "stage", Some("CURRENT_PURPOSE")),
+        (2, "exchange_current_views", "acquisition", Some("actual")),
+        (3, "check", "stage", None),
+    ] {
+        let syn::Stmt::Expr(expression, semicolon) = &body.block.stmts[index] else {
+            return false;
+        };
+        let expression = if index < 3 {
+            let syn::Expr::Try(attempt) = expression else {
+                return false;
+            };
+            if semicolon.is_none() {
+                return false;
+            }
+            &*attempt.expr
+        } else {
+            if semicolon.is_some() {
+                return false;
+            }
+            expression
+        };
+        let syn::Expr::MethodCall(call) = expression else {
+            return false;
+        };
+        let correct_receiver = if index == 2 {
+            is_field(&call.receiver, "stage", "acquisition")
+        } else {
+            is_path(&call.receiver, receiver)
+        };
+        if call.method != method
+            || !correct_receiver
+            || match argument {
+                Some("CURRENT_PURPOSE") => {
+                    call.args.len() != 1
+                        || !matches!(&call.args[0], syn::Expr::Path(path)
+                    if path.path.segments.iter().map(|segment|segment.ident.to_string()).collect::<Vec<_>>() == ["StagePurpose", "CurrentRole"])
+                }
+                Some(argument) => call.args.len() != 1 || !is_path(&call.args[0], argument),
+                None => !call.args.is_empty(),
+            }
+        {
+            return false;
+        }
+    }
+    let Some(syn::Stmt::Expr(syn::Expr::If(failed), _)) = function.block.stmts.get(1) else {
+        return false;
+    };
+    fn field_path(expression: &syn::Expr, names: &[&str]) -> bool {
+        match (expression, names.split_last()) {
+            (syn::Expr::Path(path), Some((name, []))) => path.path.is_ident(name),
+            (syn::Expr::Field(field), Some((name, parent))) => {
+                matches!(&field.member, syn::Member::Named(actual) if actual == name)
+                    && field_path(&field.base, parent)
+            }
+            _ => false,
+        }
+    }
+    fn latch(statement: &syn::Stmt, names: &[&str]) -> bool {
+        matches!(statement, syn::Stmt::Expr(syn::Expr::Assign(assign), Some(_))
+            if field_path(&assign.left,names)
+            && matches!(&*assign.right,syn::Expr::Lit(value) if matches!(value.lit,syn::Lit::Bool(syn::LitBool{value:true,..}))))
+    }
+    fn refuse(statement: &syn::Stmt, names: &[&str]) -> bool {
+        matches!(statement,syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+            if call.method=="refuse" && call.args.is_empty() && field_path(&call.receiver,names))
+    }
+    function.block.stmts.len() == 3
+        && matches!(function.block.stmts.last(),Some(syn::Stmt::Expr(value,None)) if is_path(value,"result"))
+        && matches!(&*failed.cond, syn::Expr::MethodCall(call) if call.method == "is_err" && is_path(&call.receiver, "result"))
+        && failed.then_branch.stmts.len() == 4
+        && latch(&failed.then_branch.stmts[0], &["self", "refused"])
+        && latch(&failed.then_branch.stmts[1], &["stage", "owner", "refused"])
+        && refuse(&failed.then_branch.stmts[2], &["stage", "acquisition"])
+        && refuse(&failed.then_branch.stmts[3], &["actual"])
+}
+
+#[test]
+fn actual_read_handoff_meets_the_real_child_into_the_release_stage_without_a_scalar_clock() {
+    assert!(actual_read_cap_handoff(include_str!("owner.rs")));
+}
+
+#[test]
+fn read_cap_handoff_guard_rejects_skipped_meets_wrong_views_and_lost_refusal() {
+    let source = include_str!("owner.rs");
+    let (prefix, body) = source.split_once("fn meet_current_read_view").unwrap();
+    for (before, after) in [
+        ("self.check(stage)?;", "let _ = self.check(stage);"),
+        (
+            "stage.require_purpose(StagePurpose::CurrentRole)?;",
+            "stage.check()?;",
+        ),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "if false { stage.acquisition.exchange_current_views(actual)?; }",
+        ),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "let _ = stage.acquisition.exchange_current_views(actual);",
+        ),
+        (
+            "stage.acquisition.exchange_current_views(actual)?;",
+            "stage.acquisition.exchange_current_views(unrelated)?;",
+        ),
+        ("stage.check()", "Ok(())"),
+        ("self.refused = true;", "self.refused = false;"),
+        (
+            "stage.owner.refused = true;",
+            "stage.owner.refused = false;",
+        ),
+        ("stage.acquisition.refuse();", ""),
+        ("actual.refuse();", ""),
+    ] {
+        let changed = body.replacen(before, after, 1);
+        assert_ne!(changed, body);
+        assert!(!actual_read_cap_handoff(&format!(
+            "{prefix}fn meet_current_read_view{changed}"
+        )));
+    }
+}

@@ -42,7 +42,7 @@ pub(in crate::security_epoch) enum ServingDisposition {
 
 pub(crate) struct CurrentAppServingPhase<'storage> {
     physical: super::CurrentAppStoragePhase<'storage>,
-    reads: super::RetainedEpochReads,
+    reads: super::authenticated_reads::CounterRequest<'storage>,
     observed: super::EpochObservation,
     selection: EpochStore,
     completion: Request,
@@ -410,6 +410,7 @@ pub(crate) struct AppStorageBootstrap {
 
 pub(crate) struct ActiveAppStorageContinuity {
     storage: super::AppInitialStorageContinuity,
+    counter: super::authenticated_reads::CounterConnectionSlot,
     completion: Request,
     activation: Digest,
     policy: InitialBootstrapPolicy,
@@ -419,6 +420,7 @@ pub(crate) struct ActiveAppStorageContinuity {
 
 pub(crate) struct ActiveControllerStorageContinuity {
     storage: InitialStorageContinuity,
+    counter: super::authenticated_reads::CounterConnectionSlot,
     completion: Request,
     activation: Digest,
     policy: InitialBootstrapPolicy,
@@ -565,6 +567,7 @@ impl AppStorageBootstrap {
                 ..
             } => Ok(ActiveAppStorageContinuity {
                 storage,
+                counter: super::authenticated_reads::CounterConnectionSlot::new(),
                 completion,
                 activation,
                 policy,
@@ -582,6 +585,30 @@ impl AppStorageBootstrap {
 }
 
 impl ActiveAppStorageContinuity {
+    pub(in crate::security_epoch) fn admit_counter(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+    ) -> Result<()> {
+        ensure!(self.valid, "active_app_storage_refused");
+        self.valid = false;
+        let result = (|| {
+            self.storage.check_counter_admission(stage)?;
+            self.counter.admit(
+                stage,
+                &self.policy,
+                &self.store,
+                day2_capabilities::security_epoch::bootstrap::NativeRole::AppHost,
+            )?;
+            self.storage.check_counter_admission(stage)
+        })();
+        if result.is_ok() {
+            self.valid = true;
+        } else {
+            self.refuse();
+        }
+        result
+    }
+
     pub(in crate::security_epoch) fn prepare_current(&mut self) -> Result<()> {
         ensure!(self.valid, "active_app_storage_refused");
         if let Err(error) = self.storage.prepare_current() {
@@ -594,6 +621,7 @@ impl ActiveAppStorageContinuity {
     pub(crate) fn refuse(&mut self) {
         self.valid = false;
         self.storage.refuse();
+        self.counter.refuse();
     }
 }
 
@@ -601,6 +629,7 @@ impl ActiveControllerStorageContinuity {
     pub(crate) fn refuse(&mut self) {
         self.valid = false;
         self.storage.refuse();
+        self.counter.refuse();
     }
 }
 
@@ -766,12 +795,26 @@ pub(super) fn activate_controller(
         let snapshot = activated.context("native_activation_observation_missing")?;
         let activation = super::journal::snapshot_digest(&snapshot)?;
         evidence.activated(&complete, &activation)?;
-        Ok((complete, activation))
+        // Cold provider admission is completed before the active Controller
+        // escapes into its listener/request loop. It never spends an App or
+        // Shell request's packet/physical waiting time or renews that request.
+        let mut counter = super::authenticated_reads::CounterConnectionSlot::new();
+        let stage = owner.begin_current_stage()?;
+        let mut physical = storage.begin_pending_current_controller()?.acquire(stage)?;
+        counter.admit(
+            physical.controller_stage()?,
+            policy,
+            selection,
+            day2_capabilities::security_epoch::bootstrap::NativeRole::EpochController,
+        )?;
+        physical.finish_controller_known()?;
+        Ok((complete, activation, counter))
     })();
     match result {
-        Ok((completion, activation)) => {
+        Ok((completion, activation, counter)) => {
             ControllerActivationOutcome::Active(Box::new(ActiveControllerStorageContinuity {
                 storage,
+                counter,
                 completion,
                 activation,
                 policy: policy.clone(),

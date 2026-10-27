@@ -93,6 +93,22 @@ are checked separately. Metadata equality and a decoded token are not a current
 role proof. The UID-target mint request is retained by the owning adapter; its
 expiry string is historical data, not qualified UTC.
 
+The serving transport obtains the exact minted token's remaining lifetime at
+cold admission from the fixed authenticated Google OAuth v2 `tokeninfo` POST.
+It requires the selected immutable GSA UID as both audience and issued-to,
+the datastore-only scope, and an integer remaining lifetime of 2–300 seconds.
+The BOOTTIME sample taken before introspection plus that remaining duration,
+less one second for integer quantization, supplies a conservative ceiling;
+all setup and transport time is charged. Neither the mint's requested lifetime
+nor its UTC expiry string supplies a continuous-clock mapping. Malformed,
+duplicate, unknown, missing or wrongly typed fields refuse admission.
+
+This endpoint requires the token in its query. That address is private to the
+closed admission adapter: no URL, raw response or chained transport/parser
+error is emitted. Redirects, proxy use, retries and referer forwarding are
+disabled. Response reads are bounded to 16 KiB, with an extra-byte detector.
+The temporary URL and HTTP-library copies are not a complete erasure guarantee.
+
 HTTP clients disable proxies, redirects and automatic retries. Response bodies
 are bounded while reading. Routes are fixed provider/Kubernetes selections,
 including only Firestore `batchGet` and `rollback`; no counter commit route is
@@ -117,6 +133,7 @@ separately from the epoch data reader; no project-wide writer role is implied.
 | GKE metadata source | GET selected GSA by immutable UID | `iam.serviceAccounts.get` on that account |
 | GKE metadata source | POST UID-target `generateAccessToken` | `iam.serviceAccounts.getAccessToken` on that exact target; no delegates; datastore scope, 300 seconds |
 | Minted target credential | GET selected database metadata | `datastore.databases.getMetadata` on that database |
+| Minted target credential | Fixed OAuth v2 `tokeninfo` POST during serving-connection admission | Exact token introspection; no additional IAM role or configurable endpoint |
 | Minted target credential | `batchGet` epoch documents | `datastore.entities.get` on that database |
 | Minted target credential | Read-only transaction and `rollback` | `datastore.databases.get` on that database |
 
@@ -131,4 +148,32 @@ Primary API references: [TokenReview and bound tokens](https://kubernetes.io/doc
 [project get](https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/get),
 [GSA get](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/get),
 [UID-target mint](https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
+[service-account token introspection](https://docs.cloud.google.com/docs/authentication/token-types#service-account-access-tokens),
+[OAuth v2 endpoint schema](https://www.googleapis.com/discovery/v1/apis/oauth2/v2/rest),
 [Firestore permissions](https://docs.cloud.google.com/firestore/native/docs/security/iam).
+
+## Serving implementation boundary
+
+The real activated App and Controller storage owners retain the actual HTTP
+client, exact policy/store/role selection, same enrolled-owner continuity and
+secret with its fixed expiry. The App serving constructor completes this full
+provider admission under a genuine enrolled stage after activation and before
+the participant escapes. Controller setup does so before its serving listener
+and loop. A missing connection is not a request-time admission opportunity.
+
+Every lexical Current phase borrows that retained transport with the actual
+request acquisition. It joins the same enrolled owner before applying the token
+ceiling, rereads coherent counters before use and after acknowledgement, and
+retains selection, writer, provider-version and rollback checks. Every send,
+body acceptance and final completion reapplies the same expiry. Finite responses
+keep their one borrowed phase across polls. Refusal, expiry, incomplete drop or
+changed selection permanently closes the affected request and connection.
+There is no credential refresh, token substitution or fallback in this path.
+
+The short admission acquisition, source/Kubernetes projections and standalone
+process observation do not become warm permission. The old per-Current full
+reader factory is removed. Initial bootstrap mutation and read-only operator
+metadata observation remain separate original-bound paths; no read connection
+can construct their writer or physical-admission authority. The source port and
+adapter tests do not qualify native cold latency, warm counter multiplicity or
+the complete joined consumer profile.

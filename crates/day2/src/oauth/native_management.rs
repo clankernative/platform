@@ -311,8 +311,13 @@ pub(crate) fn prepare_initial_app_storage(
             };
             match storage.into_active() {
                 Ok(storage) => {
-                    owners.storage =
-                        AppStorage::Participant(Box::new(ServingParticipant::app(storage)));
+                    // Connection admission completes before any HTTP original
+                    // can borrow this participant. Warm requests cannot mint
+                    // provider credentials or enter this cold constructor.
+                    let mut role = owners.role.try_borrow_mut()?;
+                    let mut stage = role.begin_current_stage()?;
+                    let participant = ServingParticipant::app(storage, &mut stage)?;
+                    owners.storage = AppStorage::Participant(Box::new(participant));
                     Ok(())
                 }
                 Err(storage) => {

@@ -183,12 +183,19 @@ adopt a replacement. Final-component NOFOLLOW is not an all-ancestor or atomic
 filesystem-containment guarantee, and metadata does not prove unchanged
 contents. Ongoing integrity remains the admitted services' trusted obligation.
 
-This is the physical-owner slice of the connection/request port. Initial
-creation, first-holder validation, complete initial-image checks, file and
-directory sync and readback remain. Bootstrap and counter transport still run
-their existing full admission work until their separate retained-transport
-port. Fresh counters, selected writer authority and actual SQLite durability
-are never supplied by the physical owner's admission state. The removed
+Initial creation, first-holder validation, complete initial-image checks, file
+and directory sync and readback remain. Activated App and Controller owners now
+also admit and retain their actual counter transport before entering serving.
+Cold admission joins the original file/peer owners around the full provider
+work. Every later Current phase borrows that connection, reapplies its exact
+selection and fixed token expiry, and obtains fresh coherent counters without
+repeating metadata/TokenReview/workload/GSA/database authentication. There is no
+request-time admission or refresh fallback. See the precise
+[counter boundary](CREDENTIAL-EPOCH-NATIVE-READS.md#serving-implementation-boundary).
+Initial bootstrap writer and operator metadata paths keep their separate
+original-bound admission work. Fresh counters, selected writer authority and
+actual SQLite durability are never supplied by the physical owner's admission
+state. The removed
 Current durability timing row is absent, rather than evidence of a new P3
 operation. Cold/warm native qualification and request latency must be measured
 on the complete reviewed composition.

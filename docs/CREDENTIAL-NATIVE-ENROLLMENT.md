@@ -483,7 +483,9 @@ failed reads. Supplied bytes are not proof of socket/TLS transmission or deliver
 The full-physical invocation kind is separate from each PVC/PV/Node/Disk/Instance
 request; five requests must not be inferred to be a completed five-read round.
 Metadata-token, TokenReview, selected workload identity and credential mint
-requests have separate kinds. Fresh epoch reads and cheap handle checks are separate.
+requests have separate kinds. Cold credential admission also counts its fixed
+tokeninfo exchange in the credential kind. Fresh epoch reads and cheap handle
+checks are separate.
 
 This source union covers both real executable-hash loops, issuer-client and
 accepted issuer-service admissions, and the six actual storage/provider kinds.

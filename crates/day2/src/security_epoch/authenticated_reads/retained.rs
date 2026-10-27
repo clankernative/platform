@@ -7,7 +7,7 @@ use super::{AuthenticatedReads, ReadScope};
 use crate::security_epoch::{
     controller::preparation_timing::{Operation, Timings},
     credential_material::CredentialMaterial,
-    firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
+    firestore::{Budget, EpochObservation, EpochReply, Port, Sample},
     native_clock::NativeAcquisition,
     native_enrollment::{EnrolledRoleStage, SameEnrolledOwner},
     native_identity::NativeProcessObservation,
@@ -215,10 +215,6 @@ impl ControllerEpochReads {
 }
 
 impl AuthenticatedReads<'_, '_> {
-    pub(in crate::security_epoch) fn retain_current(self) -> Result<RetainedEpochReads> {
-        self.retain_scoped(ReadScope::Current)
-    }
-
     pub(in crate::security_epoch) fn retain_storage_bootstrap(self) -> Result<RetainedEpochReads> {
         self.retain_scoped(ReadScope::StorageBootstrap)
     }
@@ -252,12 +248,13 @@ impl AuthenticatedReads<'_, '_> {
             selection,
             ..
         } = self;
-        let acquisition = match scope {
-            ReadScope::Current => acquisition,
-            ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => stage
-                .storage()?
-                .complete_storage_authentication(acquisition, store.max_lease_seconds)?,
-        };
+        ensure!(
+            scope != ReadScope::Current,
+            "epoch_retained_current_factory_removed"
+        );
+        let acquisition = stage
+            .storage()?
+            .complete_storage_authentication(acquisition, store.max_lease_seconds)?;
         Ok(RetainedEpochReads {
             scope,
             owner,
@@ -376,8 +373,7 @@ impl RetainedEpochReads {
             // neither begins a new interval nor renews our retained owner.
             let same_stage = match self.scope {
                 ReadScope::Current => {
-                    self.owner
-                        .current_read_view(stage, &self.policy, &self.store, self.purpose)?
+                    anyhow::bail!("epoch_retained_current_factory_removed")
                 }
                 ReadScope::StorageBootstrap | ReadScope::StorageMetadataObservation => {
                     self.owner.check(stage)?;
@@ -394,37 +390,6 @@ impl RetainedEpochReads {
             // wider than this retained view or the caller's context budget.
             self.acquisition.sample()
         });
-        if result.is_err() {
-            self.refuse();
-        }
-        result
-    }
-
-    pub(in crate::security_epoch) fn read(
-        &mut self,
-        stage: &mut EnrolledRoleStage<'_>,
-        selection: &EpochStore,
-        names: &Names,
-    ) -> Result<EpochObservation> {
-        let result = (|| {
-            ensure!(
-                self.scope != ReadScope::StorageMetadataObservation,
-                "epoch_metadata_only_read_refused"
-            );
-            ensure!(
-                self.selection == Digest::of(selection)? && names.matches_selection(selection),
-                "epoch_retained_read_selection_changed"
-            );
-            self.check(stage)?;
-            let budget = self.acquisition.budget()?;
-            let observed = firestore::read_with_budget(
-                &mut CurrentReadPort { owner: self, stage },
-                names,
-                budget,
-            )?;
-            self.check(stage)?;
-            Ok(observed)
-        })();
         if result.is_err() {
             self.refuse();
         }
@@ -461,27 +426,6 @@ impl RetainedEpochReads {
             )?;
             self.check(stage)?;
             Ok(pair)
-        })();
-        if result.is_err() {
-            self.refuse();
-        }
-        result
-    }
-
-    pub(in crate::security_epoch) fn check_observation(
-        &mut self,
-        stage: &mut EnrolledRoleStage<'_>,
-        observation: &mut EpochObservation,
-    ) -> Result<()> {
-        let result = (|| {
-            ensure!(
-                self.scope != ReadScope::StorageMetadataObservation,
-                "epoch_metadata_only_read_refused"
-            );
-            self.check(stage)?;
-            let selection = self.store.clone();
-            observation.remaining(&selection, &mut CurrentReadPort { owner: self, stage })?;
-            self.check(stage)
         })();
         if result.is_err() {
             self.refuse();

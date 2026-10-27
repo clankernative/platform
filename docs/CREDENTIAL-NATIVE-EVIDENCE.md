@@ -875,7 +875,7 @@ Storage instrumentation uses these closed leaves:
 | `metadata_admission` | The fixed metadata-service access-token request. |
 | `token_review` | The selected Kubernetes TokenReview request. |
 | `workload_admission` | Selected project, cluster, namespace, service-account, Pod, workload-owner, GSA and database identity requests. |
-| `credential_admission` | The UID-target credential-mint request. |
+| `credential_admission` | The UID-target credential-mint request and fixed tokeninfo exchange during cold counter-connection admission. |
 
 Attempts are recorded at the actual provider send path after its original
 guards. Returned calls include successful and failed returns; an HTTP adapter's

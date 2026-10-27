@@ -23,7 +23,9 @@ use day2_capabilities::{
 use std::{collections::BTreeMap, io::Read};
 use zeroize::Zeroizing;
 
+mod connection;
 mod retained;
+pub(in crate::security_epoch) use connection::{CounterConnectionSlot, CounterRequest};
 pub(in crate::security_epoch) use retained::ControllerBorrow;
 pub(in crate::security_epoch) use retained::RefusalGuard;
 pub(in crate::security_epoch) use retained::StorageMetadataRead;
