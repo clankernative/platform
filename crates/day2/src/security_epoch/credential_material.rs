@@ -537,6 +537,53 @@ mod tests {
         }).unwrap();
         let mut calls = Calls::default();
         calls.visit_block(body);
+        let actual = body
+            .stmts
+            .iter()
+            .find_map(|statement| {
+                let syn::Stmt::Local(local) = statement else {
+                    return None;
+                };
+                if !matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="result") {
+                    return None;
+                }
+                let syn::Expr::Call(call) = &*local.init.as_ref()?.expr else {
+                    return None;
+                };
+                let syn::Expr::Paren(parenthesized) = &*call.func else {
+                    return None;
+                };
+                let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+                    return None;
+                };
+                let syn::Expr::Block(block) = &*closure.body else {
+                    return None;
+                };
+                Some(&block.block)
+            })
+            .unwrap();
+        let checked = |name: &str, receiver_method: &str| {
+            actual.stmts.iter().position(|statement| {
+                let syn::Stmt::Expr(syn::Expr::Try(attempt),Some(_))=statement else { return false; };
+                let syn::Expr::Call(call)=&*attempt.expr else { return false; };
+                matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident(name))
+                    && call.args.len()==1
+                    && matches!(&call.args[0],syn::Expr::MethodCall(method)
+                        if method.method==receiver_method && method.args.is_empty()
+                            && matches!(&*method.receiver,syn::Expr::Path(path) if path.path.is_ident("response")))
+            })
+        };
+        let read = actual.stmts.iter().position(|statement| {
+            let syn::Stmt::Local(local)=statement else { return false; };
+            if !matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="read") { return false; }
+            matches!(local.init.as_ref().map(|init|&*init.expr),Some(syn::Expr::MethodCall(mapped))
+                if mapped.method=="map_err"
+                    && matches!(&*mapped.receiver,syn::Expr::MethodCall(read)
+                        if read.method=="read_to_end"
+                            && matches!(&*read.receiver,syn::Expr::MethodCall(take)
+                                if take.method=="take"
+                                    && matches!(&*take.receiver,syn::Expr::Path(path) if path.path.is_ident("response")))))
+        });
         let selected = calls
             .0
             .iter()
@@ -554,16 +601,19 @@ mod tests {
             })
             .map(String::as_str)
             .collect::<Vec<_>>();
-        selected
-            == [
-                "send",
-                "status",
-                "check_counter_response_status",
-                "content_length",
-                "check_counter_response_length",
-                "take",
-                "read_to_end",
-            ]
+        matches!((checked("check_counter_response_status","status"),
+            checked("check_counter_response_length","content_length"),read),
+            (Some(status),Some(length),Some(read)) if status<length && length<read)
+            && selected
+                == [
+                    "send",
+                    "status",
+                    "check_counter_response_status",
+                    "content_length",
+                    "check_counter_response_length",
+                    "take",
+                    "read_to_end",
+                ]
     }
 
     #[test]
@@ -581,6 +631,20 @@ mod tests {
             );
             assert_ne!(source, changed);
             assert!(!counter_response_guards_precede_body_read(&changed));
+            let call = if label == "check_counter_response_status" {
+                "check_counter_response_status(response.status())?;"
+            } else {
+                "check_counter_response_length(response.content_length())?;"
+            };
+            for ignored in [
+                call.replace("?;", ";"),
+                format!("let _ = {};", call.trim_end_matches("?;")),
+                format!("if false {{ {call} }}"),
+            ] {
+                let changed = source.replacen(call, &ignored, 1);
+                assert_ne!(source, changed);
+                assert!(!counter_response_guards_precede_body_read(&changed));
+            }
         }
         let changed = source.replacen(
             "check_counter_response_status(response.status())?;",

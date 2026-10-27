@@ -750,11 +750,34 @@ mod tests {
                 if call.method=="finish" && path(&call.receiver,&["work"]) && call.args.len()==1
                 && matches!(&call.args[0],syn::Expr::MethodCall(ok)
                     if ok.method=="is_ok" && ok.args.is_empty() && path(&ok.receiver,&["result"])))));
+        let forwarded = body.stmts.last().is_some_and(|statement| {
+            let syn::Stmt::Expr(value,None)=statement else { return false; };
+            let expected = match method {
+                "request_with_ceiling" => return path(value,&["result"]),
+                "metadata_source" => "CounterMetadataSource",
+                "admit_counter" => "CounterTokenInfo",
+                _ => return false,
+            };
+            let syn::Expr::MethodCall(mapped)=value else { return false; };
+            if mapped.method!="map_err" || !path(&mapped.receiver,&["result"]) || mapped.args.len()!=1 { return false; }
+            let syn::Expr::Closure(closure)=&mapped.args[0] else { return false; };
+            if !matches!(closure.inputs.first(),Some(syn::Pat::Ident(name))
+                if closure.inputs.len()==1 && name.ident=="error" && name.by_ref.is_none()
+                    && name.mutability.is_none() && name.subpat.is_none()) { return false; }
+            let mut value=&*closure.body;
+            if let syn::Expr::Block(block)=value {
+                let [syn::Stmt::Expr(inner,None)]=block.block.stmts.as_slice() else { return false; };
+                value=inner;
+            }
+            matches!(value,syn::Expr::Call(call)
+                if path(&call.func,&["PreparationFailure","at"]) && call.args.len()==2
+                    && path(&call.args[0],&["PreparationStep",expected]) && path(&call.args[1],&["error"]))
+        });
         matches!((start,send,read,charged,checked),(Some(a),Some(b),Some(c),Some(d),Some(e)) if a<b && b<c && c<d && d<e)
             && (method != "request_with_ceiling"
                 || matches!((start,request_bytes,send),(Some(a),Some(b),Some(c)) if a<b && b<c))
             && returned
-            && matches!(body.stmts.last(),Some(syn::Stmt::Expr(last,None)) if path(last,&["result"]))
+            && forwarded
     }
 
     #[test]
@@ -816,6 +839,29 @@ mod tests {
                 let changed = source.replace(actual, wrong);
                 assert_ne!(source, changed);
                 assert!(!actual_admission_send_wiring(&changed, owner, method));
+                let step = if method == "metadata_source" {
+                    "CounterMetadataSource"
+                } else {
+                    "CounterTokenInfo"
+                };
+                for replacement in [
+                    "PreparationStep::Unknown",
+                    "PreparationStep::CounterMaterial",
+                ] {
+                    let changed = source.replace(&format!("PreparationStep::{step}"), replacement);
+                    assert_ne!(source, changed);
+                    assert!(!actual_admission_send_wiring(&changed, owner, method));
+                }
+                let mapped = format!("PreparationFailure::at(PreparationStep::{step}, error)");
+                for replacement in [
+                    "error",
+                    "another_mapping(error)",
+                    "{ let _ = side_effect(); error }",
+                ] {
+                    let changed = source.replace(&mapped, replacement);
+                    assert_ne!(source, changed);
+                    assert!(!actual_admission_send_wiring(&changed, owner, method));
+                }
             }
         }
     }
