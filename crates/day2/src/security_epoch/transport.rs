@@ -1,7 +1,11 @@
 //! Private bounded HTTPS requests. Routes are selected by the native protocol,
 //! never by an app effect or forwarded URL. Transport alone grants no role proof.
 
-use super::{identity_protocol, native_clock::NativeAcquisition};
+use super::{
+    admission_work::{self, Bytes, Work},
+    identity_protocol,
+    native_clock::NativeAcquisition,
+};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     Digest,
@@ -67,6 +71,32 @@ pub(super) enum Route<'a> {
     EpochRead,
     EpochRollback,
     EpochCommit,
+}
+
+// Admission telemetry classifies the actual provider request, not a role
+// grant or a complete five-read physical round. Epoch/counter traffic remains
+// separate so a required warm counter read cannot look like cold admission.
+fn admission_kind(route: &Route<'_>) -> Option<Work> {
+    match route {
+        Route::TokenReview => Some(Work::TokenReview),
+        Route::PersistentVolumeClaim { .. }
+        | Route::PersistentVolume(_)
+        | Route::ComputeDisk { .. }
+        | Route::ComputeInstance { .. }
+        | Route::Node(_) => Some(Work::PhysicalProfile),
+        Route::Namespace(_)
+        | Route::ServiceAccount { .. }
+        | Route::Pod { .. }
+        | Route::ReplicaSet { .. }
+        | Route::Deployment { .. }
+        | Route::StatefulSet { .. }
+        | Route::GoogleAccount(_)
+        | Route::Cluster
+        | Route::Project
+        | Route::Database => Some(Work::WorkloadAdmission),
+        Route::GoogleMint(_) => Some(Work::CredentialAdmission),
+        Route::EpochRead | Route::EpochRollback | Route::EpochCommit => None,
+    }
 }
 
 pub(super) struct NativeHttp {
@@ -352,6 +382,7 @@ impl NativeHttp {
     ) -> Result<Vec<u8>> {
         let mut profile =
             super::self_check_profile::enter(super::self_check_profile::Category::ProviderHttp);
+        let mut work = None;
         let result = (|| {
             let (address, method, kube) = self.address(&route)?;
             ensure!(
@@ -389,6 +420,13 @@ impl NativeHttp {
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(body.to_vec());
             }
+            // Count only the actual send path after its existing guards. The
+            // bounded body was supplied to reqwest; this is not wire/TLS bytes
+            // or evidence that an unsuccessful send had no remote effect.
+            work = admission_kind(&route).map(admission_work::begin);
+            if let (Some(work), Some(body)) = (&mut work, body) {
+                work.bytes(Bytes::RequestBody, body.len() as u64);
+            }
             let response = request.send().map_err(|error| {
                 anyhow::Error::new(FailedRequestWindow(
                     sampled_us,
@@ -406,10 +444,15 @@ impl NativeHttp {
                 "epoch_native_response_status_or_bound"
             );
             let mut bytes = Vec::new();
-            response
+            let read = response
                 .take(MAX_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("epoch_native_response_unavailable"))?;
+                .map_err(|_| anyhow::anyhow!("epoch_native_response_unavailable"));
+            if let Some(work) = &mut work {
+                // Include a consumed partial body even when read returns Err.
+                work.bytes(Bytes::ResponseBody, bytes.len() as u64);
+            }
+            read?;
             profile.finish();
             acquisition.remaining()?;
             ensure!(bytes.len() <= MAX_BYTES, "epoch_native_response_bound");
@@ -417,6 +460,9 @@ impl NativeHttp {
         })();
         if result.is_err() {
             acquisition.refuse();
+        }
+        if let Some(mut work) = work {
+            work.finish(result.is_ok());
         }
         result
     }
@@ -434,6 +480,259 @@ fn request_timeout(remaining: Duration, ceiling: Duration) -> Result<Duration> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn storage_admission_routes_keep_physical_calls_and_counter_traffic_distinct() {
+        let http = fixture();
+        let EpochProvider::FirestoreNativeV1 { iam_source, .. } = &http.selection.provider;
+        for route in [
+            Route::PersistentVolumeClaim {
+                namespace: "ns",
+                name: "claim",
+            },
+            Route::PersistentVolume("volume"),
+            Route::Node("node"),
+            Route::ComputeDisk {
+                zone: "zone",
+                name: "disk",
+            },
+            Route::ComputeInstance {
+                zone: "zone",
+                name: "instance",
+            },
+        ] {
+            assert!(matches!(
+                admission_kind(&route),
+                Some(Work::PhysicalProfile)
+            ));
+        }
+        for route in [
+            Route::Namespace("ns"),
+            Route::ServiceAccount {
+                namespace: "ns",
+                name: "ksa",
+            },
+            Route::Pod {
+                namespace: "ns",
+                name: "pod",
+            },
+            Route::ReplicaSet {
+                namespace: "ns",
+                name: "replica",
+            },
+            Route::Deployment {
+                namespace: "ns",
+                name: "deployment",
+            },
+            Route::StatefulSet {
+                namespace: "ns",
+                name: "stateful",
+            },
+            Route::GoogleAccount(iam_source),
+            Route::Cluster,
+            Route::Project,
+            Route::Database,
+        ] {
+            assert!(matches!(
+                admission_kind(&route),
+                Some(Work::WorkloadAdmission)
+            ));
+        }
+        assert!(matches!(
+            admission_kind(&Route::TokenReview),
+            Some(Work::TokenReview)
+        ));
+        assert!(matches!(
+            admission_kind(&Route::GoogleMint(iam_source)),
+            Some(Work::CredentialAdmission)
+        ));
+        for route in [Route::EpochRead, Route::EpochRollback, Route::EpochCommit] {
+            assert!(admission_kind(&route).is_none());
+        }
+    }
+
+    fn actual_admission_send_wiring(source: &str, owner: &str, method: &str) -> bool {
+        fn path(expression: &syn::Expr, names: &[&str]) -> bool {
+            matches!(expression, syn::Expr::Path(value)
+                if value.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>() == names)
+        }
+        fn local<'a>(statement: &'a syn::Stmt, name: &str) -> Option<&'a syn::Expr> {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            if !matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == name) {
+                return None;
+            }
+            local.init.as_ref().map(|value| &*value.expr)
+        }
+        fn chain<'a>(value: &'a syn::Expr, name: &str) -> Option<&'a syn::ExprMethodCall> {
+            match value {
+                syn::Expr::Try(value) => chain(&value.expr, name),
+                syn::Expr::MethodCall(value) if value.method == name => Some(value),
+                syn::Expr::MethodCall(value) => chain(&value.receiver, name),
+                _ => None,
+            }
+        }
+        fn some_work(value: &syn::ExprIf, borrowed: bool) -> bool {
+            let syn::Expr::Let(condition) = &*value.cond else {
+                return false;
+            };
+            let syn::Pat::TupleStruct(pattern) = &*condition.pat else {
+                return false;
+            };
+            if !pattern.path.is_ident("Some")
+                || pattern.elems.len() != 1
+                || !matches!(&pattern.elems[0], syn::Pat::Ident(binding) if binding.ident == "work")
+            {
+                return false;
+            }
+            if borrowed {
+                matches!(&*condition.expr, syn::Expr::Reference(reference)
+                    if reference.mutability.is_some() && path(&reference.expr, &["work"]))
+            } else {
+                path(&condition.expr, &["work"])
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let Some(body) = file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(p) if p.path.is_ident(owner)) {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(value) if value.sig.ident == method => Some(&value.block),
+                _ => None,
+            })
+        }) else {
+            return false;
+        };
+        let Some(result) = body.stmts.iter().find_map(|s| local(s, "result")) else {
+            return false;
+        };
+        let syn::Expr::Call(call) = result else {
+            return false;
+        };
+        let syn::Expr::Paren(parenthesized) = &*call.func else {
+            return false;
+        };
+        let syn::Expr::Closure(closure) = &*parenthesized.expr else {
+            return false;
+        };
+        let syn::Expr::Block(result) = &*closure.body else {
+            return false;
+        };
+        let index = |predicate: &dyn Fn(&syn::Stmt) -> bool| {
+            let indices = result
+                .block
+                .stmts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| predicate(s).then_some(i))
+                .collect::<Vec<_>>();
+            (indices.len() == 1).then(|| indices[0])
+        };
+        let start = index(&|s| {
+            matches!(s, syn::Stmt::Expr(syn::Expr::Assign(assign), Some(_))
+            if path(&assign.left, &["work"]) && match &*assign.right {
+                syn::Expr::MethodCall(map) => map.method == "map" && map.args.len() == 1
+                    && path(&map.args[0], &["admission_work", "begin"])
+                    && matches!(&*map.receiver, syn::Expr::Call(call) if path(&call.func, &["admission_kind"])),
+                syn::Expr::Call(some) => path(&some.func, &["Some"]) && some.args.len() == 1
+                    && matches!(&some.args[0], syn::Expr::Call(call) if path(&call.func, &["admission_work", "begin"])),
+                _ => false,
+            })
+        });
+        let send = index(&|s| {
+            local(s, "response")
+                .and_then(|e| chain(e, "send"))
+                .is_some_and(|call| path(&call.receiver, &["request"]))
+        });
+        let request_bytes = index(&|s| {
+            matches!(s,syn::Stmt::Expr(syn::Expr::If(value),_)
+            if matches!(&*value.cond,syn::Expr::Let(condition)
+                if matches!(&*condition.pat,syn::Pat::Tuple(pattern) if pattern.elems.len()==2)
+                && matches!(&*condition.expr,syn::Expr::Tuple(tuple) if tuple.elems.len()==2
+                    && matches!(&tuple.elems[0],syn::Expr::Reference(r) if r.mutability.is_some() && path(&r.expr,&["work"]))
+                    && path(&tuple.elems[1],&["body"])))
+            && value.then_branch.stmts.len()==1
+            && matches!(&value.then_branch.stmts[0],syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+                if call.method=="bytes" && path(&call.receiver,&["work"]) && call.args.len()==2
+                && path(&call.args[0], &["Bytes","RequestBody"])
+                && matches!(&call.args[1],syn::Expr::Cast(cast)
+                    if matches!(&*cast.expr,syn::Expr::MethodCall(length)
+                        if length.method=="len" && length.args.is_empty() && path(&length.receiver,&["body"])))))
+        });
+        let read = index(&|s| {
+            local(s,"read").and_then(|e| chain(e,"read_to_end")).is_some_and(|call|
+            call.args.len()==1 && matches!(&call.args[0],syn::Expr::Reference(r) if r.mutability.is_some() && path(&r.expr,&["bytes"])))
+        });
+        let charged = index(&|s| {
+            matches!(s,syn::Stmt::Expr(syn::Expr::If(value),_)
+            if some_work(value,true) && value.then_branch.stmts.len()==1
+            && matches!(&value.then_branch.stmts[0],syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+                if call.method=="bytes" && path(&call.receiver,&["work"]) && call.args.len()==2
+                && path(&call.args[0], &["Bytes","ResponseBody"])
+                && matches!(&call.args[1],syn::Expr::Cast(cast)
+                    if matches!(&*cast.expr,syn::Expr::MethodCall(length)
+                        if length.method=="len" && length.args.is_empty() && path(&length.receiver,&["bytes"])))))
+        });
+        let checked = index(
+            &|s| matches!(s,syn::Stmt::Expr(syn::Expr::Try(value),Some(_)) if path(&value.expr,&["read"])),
+        );
+        let returned = body.stmts.iter().any(|s| matches!(s,syn::Stmt::Expr(syn::Expr::If(value),_)
+            if some_work(value,false) && value.then_branch.stmts.len()==1
+            && matches!(&value.then_branch.stmts[0],syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_))
+                if call.method=="finish" && path(&call.receiver,&["work"]) && call.args.len()==1
+                && matches!(&call.args[0],syn::Expr::MethodCall(ok)
+                    if ok.method=="is_ok" && ok.args.is_empty() && path(&ok.receiver,&["result"])))));
+        matches!((start,send,read,charged,checked),(Some(a),Some(b),Some(c),Some(d),Some(e)) if a<b && b<c && c<d && d<e)
+            && (method != "request_with_ceiling" || matches!((start,request_bytes,send),(Some(a),Some(b),Some(c)) if a<b && b<c))
+            && returned
+            && matches!(body.stmts.last(),Some(syn::Stmt::Expr(last,None)) if path(last,&["result"]))
+    }
+
+    #[test]
+    fn storage_admission_counters_charge_actual_sends_and_partial_errors() {
+        for (source, owner, method) in [
+            (
+                include_str!("transport.rs"),
+                "NativeHttp",
+                "request_with_ceiling",
+            ),
+            (
+                include_str!("credential_material.rs"),
+                "CredentialMaterial",
+                "metadata_source",
+            ),
+        ] {
+            assert!(
+                actual_admission_send_wiring(source, owner, method),
+                "{owner}::{method}"
+            );
+            for (before, after) in [
+                ("work.finish(result.is_ok());", "work.finish(true);"),
+                (
+                    "work.bytes(Bytes::ResponseBody, bytes.len() as u64);",
+                    "work.bytes(Bytes::ResponseBody, 0);",
+                ),
+                ("            read?;", ""),
+            ] {
+                let changed = source.replace(before, after);
+                assert_ne!(source, changed);
+                assert!(!actual_admission_send_wiring(&changed, owner, method));
+            }
+            if method == "request_with_ceiling" {
+                let changed = source.replace(
+                    "work.bytes(Bytes::RequestBody, body.len() as u64);",
+                    "work.bytes(Bytes::RequestBody, 0);",
+                );
+                assert_ne!(source, changed);
+                assert!(!actual_admission_send_wiring(&changed, owner, method));
+            }
+        }
+    }
 
     fn fixture() -> NativeHttp {
         let selection:EpochStore=serde_json::from_value(json!({
