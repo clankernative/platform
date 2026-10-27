@@ -638,9 +638,14 @@ mod tests {
             if path(&assign.left, &["work"]) && match &*assign.right {
                 syn::Expr::MethodCall(map) => map.method == "map" && map.args.len() == 1
                     && path(&map.args[0], &["admission_work", "begin"])
-                    && matches!(&*map.receiver, syn::Expr::Call(call) if path(&call.func, &["admission_kind"])),
+                    && matches!(&*map.receiver, syn::Expr::Call(call)
+                        if path(&call.func, &["admission_kind"]) && call.args.len()==1
+                        && matches!(&call.args[0],syn::Expr::Reference(reference)
+                            if reference.mutability.is_none() && path(&reference.expr,&["route"]))),
                 syn::Expr::Call(some) => path(&some.func, &["Some"]) && some.args.len() == 1
-                    && matches!(&some.args[0], syn::Expr::Call(call) if path(&call.func, &["admission_work", "begin"])),
+                    && matches!(&some.args[0], syn::Expr::Call(call)
+                        if path(&call.func, &["admission_work", "begin"]) && call.args.len()==1
+                        && path(&call.args[0], &["Work","MetadataAdmission"])),
                 _ => false,
             })
         });
@@ -688,7 +693,8 @@ mod tests {
                 && matches!(&call.args[0],syn::Expr::MethodCall(ok)
                     if ok.method=="is_ok" && ok.args.is_empty() && path(&ok.receiver,&["result"])))));
         matches!((start,send,read,charged,checked),(Some(a),Some(b),Some(c),Some(d),Some(e)) if a<b && b<c && c<d && d<e)
-            && (method != "request_with_ceiling" || matches!((start,request_bytes,send),(Some(a),Some(b),Some(c)) if a<b && b<c))
+            && (method != "request_with_ceiling"
+                || matches!((start,request_bytes,send),(Some(a),Some(b),Some(c)) if a<b && b<c))
             && returned
             && matches!(body.stmts.last(),Some(syn::Stmt::Expr(last,None)) if path(last,&["result"]))
     }
@@ -724,10 +730,19 @@ mod tests {
                 assert!(!actual_admission_send_wiring(&changed, owner, method));
             }
             if method == "request_with_ceiling" {
-                let changed = source.replace(
-                    "work.bytes(Bytes::RequestBody, body.len() as u64);",
-                    "work.bytes(Bytes::RequestBody, 0);",
-                );
+                for (before, after) in [
+                    (
+                        "work.bytes(Bytes::RequestBody, body.len() as u64);",
+                        "work.bytes(Bytes::RequestBody, 0);",
+                    ),
+                    ("admission_kind(&route)", "admission_kind(&Route::EpochRead)"),
+                ] {
+                    let changed = source.replace(before, after);
+                    assert_ne!(source, changed);
+                    assert!(!actual_admission_send_wiring(&changed, owner, method));
+                }
+            } else {
+                let changed = source.replace("Work::MetadataAdmission", "Work::CredentialAdmission");
                 assert_ne!(source, changed);
                 assert!(!actual_admission_send_wiring(&changed, owner, method));
             }

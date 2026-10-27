@@ -1270,7 +1270,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn durability_options_require_explicit_live_ordering_and_barriers() {
         let good = "rw\nbarrier\ndata=ordered\nerrors=remount-ro\n";
