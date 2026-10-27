@@ -9,7 +9,7 @@ on:
       profile:
         description: Fixed focused test group
         type: choice
-        options: [pr276, pr273, pr281, option3]
+        options: [pr276, pr273, pr281, pr290, option3]
         default: pr276
       compilation_cache:
         description: Admitted compiled action reuse
@@ -122,6 +122,11 @@ jobs:
         if: ${{ inputs.profile == 'option3' }}
         run: |
           build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::handshake::simulation:: --nocapture --test-threads=1
+      - name: Run retained policy file and enrolled-owner wiring controls
+        if: ${{ inputs.profile == 'pr290' }}
+        run: |
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::birth::tests:: --nocapture --test-threads=1
+          build-out/bin/xtask test-rust //crates/day2:unit_lib security_epoch::native_enrollment::tests:: --nocapture --test-threads=1
       - run: build-out/bin/xtask verify-fast
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
