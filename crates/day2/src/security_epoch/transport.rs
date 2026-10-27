@@ -735,14 +735,18 @@ mod tests {
                         "work.bytes(Bytes::RequestBody, body.len() as u64);",
                         "work.bytes(Bytes::RequestBody, 0);",
                     ),
-                    ("admission_kind(&route)", "admission_kind(&Route::EpochRead)"),
+                    (
+                        "admission_kind(&route)",
+                        "admission_kind(&Route::EpochRead)",
+                    ),
                 ] {
                     let changed = source.replace(before, after);
                     assert_ne!(source, changed);
                     assert!(!actual_admission_send_wiring(&changed, owner, method));
                 }
             } else {
-                let changed = source.replace("Work::MetadataAdmission", "Work::CredentialAdmission");
+                let changed =
+                    source.replace("Work::MetadataAdmission", "Work::CredentialAdmission");
                 assert_ne!(source, changed);
                 assert!(!actual_admission_send_wiring(&changed, owner, method));
             }
