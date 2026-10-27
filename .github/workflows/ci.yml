@@ -9,7 +9,7 @@ on:
       profile:
         description: Fixed focused test group
         type: choice
-        options: [pr276, pr273, pr281, pr290, pr292, option3]
+        options: [pr276, pr273, pr281, pr290, pr292, architecture, option3]
         default: pr276
       compilation_cache:
         description: Admitted compiled action reuse
@@ -135,6 +135,11 @@ jobs:
           build-out/bin/xtask test-rust //crates/day2:unit_lib oauth::native_management::tests::native_runtime_metadata_and_scripted_role_cannot_supply_runtime_or_response_permission --exact --nocapture --test-threads=1
           build-out/bin/xtask test-rust //crates/day2:unit_lib oauth::native_management::tests::native_listener_snapshot_predicates_refuse_changed_binding_schema_artifact_and_security_without_repair --exact --nocapture --test-threads=1
           build-out/bin/xtask test-rust //crates/day2:unit_lib oauth::native_management::tests::runtime_sql_snapshot_commit_and_deliberate_rollback_use_real_sqlite --exact --nocapture --test-threads=1
+      - name: Run complete architecture effect and proof controls
+        if: ${{ inputs.profile == 'architecture' }}
+        run: |
+          build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture::tests:: --nocapture --test-threads=1
+          build-out/bin/xtask test-rust //crates/xtask:unit_xtask architecture_proofs::tests:: --nocapture --test-threads=1
       - run: build-out/bin/xtask verify-fast
       - run: git diff --binary > /tmp/day2-format.patch
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
