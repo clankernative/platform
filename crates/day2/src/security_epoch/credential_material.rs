@@ -251,7 +251,7 @@ impl CredentialMaterial {
             &source.authorization()?,
             Some(body),
             acquisition,
-        )?);
+        ).map_err(|error| PreparationFailure::at(PreparationStep::CounterIamMint, error))?);
         let result = Self::mint_reply(&bytes);
         bytes.zeroize();
         if result.is_err() {
