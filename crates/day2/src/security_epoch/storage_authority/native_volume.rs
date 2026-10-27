@@ -31,6 +31,7 @@ struct ProviderReader<'role> {
     policy: InitialBootstrapPolicy,
     store: EpochStore,
     profile: PersistentDiskSelection,
+    profile_file: ProfileFile,
     authentication: ProviderAuthentication,
     acquisition: NativeAcquisition,
     timings: Timings,
@@ -38,6 +39,9 @@ struct ProviderReader<'role> {
 }
 
 enum ProviderAuthentication {
+    // No provider-call authority: a warm request only borrows the admitted
+    // physical owners. Fresh counter transport is owned separately.
+    ConnectionRequest,
     Acquired(Box<AcquiredProviderAuthentication>),
     Retained(ProviderEpochReads),
 }
@@ -55,14 +59,16 @@ pub(super) struct NativeVolumeObservation<'role> {
 }
 
 /// The original descriptors survive a successful preparation. These resources
-/// have no clock or permission of their own. Every use requires a fresh stage
-/// from the SAME still-live enrollment owner and a new actual provider read.
+/// have no clock or permission of their own. Every use requires a fresh request
+/// from the SAME still-live enrollment owner and actual named-handle checks.
+/// Full attachment and durability admission remains on the initial paths.
 pub(super) struct NativeVolumeContinuity {
     resources: NativeVolumeResources,
     owner: SameEnrolledOwner,
     policy: InitialBootstrapPolicy,
     store: EpochStore,
     profile: PersistentDiskSelection,
+    profile_file: ProfileFile,
 }
 
 pub(super) struct CurrentVolumePhase<'volume, 'role> {
@@ -75,7 +81,17 @@ struct NativeVolumeResources {
     identity: DirectoryIdentity,
     block: File,
     device_name: String,
-    valid: bool,
+    admission: VolumeAdmission,
+}
+
+// A closed milestone on the actual retained resources, never an independently
+// returned positive witness. Only successful full durability admission advances
+// Observed; a failed resource cannot be admitted or revived.
+#[derive(PartialEq, Eq)]
+enum VolumeAdmission {
+    Observed,
+    Admitted,
+    Refused,
 }
 
 fn read_fixed(path: &str, limit: usize, acquisition: &mut NativeAcquisition) -> Result<Vec<u8>> {
@@ -134,7 +150,202 @@ fn profile(acquisition: &mut NativeAcquisition) -> Result<PersistentDiskSelectio
     crate::json::decode(&bytes)
 }
 
+/// The selected configuration's actual descriptor, not a reconstructed owner
+/// or a content certificate. Admission reads its bytes; requests only join the
+/// fixed name and retained descriptor. Ongoing content integrity is entrusted
+/// to the admitted services under the selected connection profile.
+struct ProfileFile {
+    file: File,
+    identity: ProfileFileIdentity,
+    valid: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ProfileFileIdentity {
+    device_major: u32,
+    device_minor: u32,
+    inode: u64,
+    mount: u64,
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    modified: (i64, u32),
+    changed: (i64, u32),
+}
+
+impl ProfileFileIdentity {
+    fn require_operator_file(&self) -> Result<()> {
+        // The selected ConfigMap is mounted read-only with defaultMode0444.
+        // fsGroup may change its group; it must never make configuration owned
+        // by the unprivileged Controller or writable at initial admission.
+        ensure!(
+            self.uid == 0 && self.mode & 0o7777 == 0o444,
+            "storage_native_operator_profile_required"
+        );
+        Ok(())
+    }
+}
+
+impl ProfileFile {
+    fn open_named(acquisition: &mut NativeAcquisition) -> Result<File> {
+        acquisition.remaining()?;
+        let file = File::from(rustix::fs::open(
+            PROFILE,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )?);
+        acquisition.remaining()?;
+        Ok(file)
+    }
+
+    fn admit(acquisition: &mut NativeAcquisition) -> Result<(PersistentDiskSelection, Self)> {
+        let _profile = crate::security_epoch::self_check_profile::enter(
+            crate::security_epoch::self_check_profile::Category::StorageProfile,
+        );
+        let file: File = Self::open_named(acquisition)?;
+        let identity = profile_file_identity(&file)?;
+        identity.require_operator_file()?;
+        let mut bytes = Vec::new();
+        (&file)
+            .take((MAX_PROFILE + 1).try_into()?)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_PROFILE,
+            "storage_native_read_bound"
+        );
+        let selected = crate::json::decode(&bytes)?;
+        let mut retained = Self {
+            file,
+            identity,
+            valid: true,
+        };
+        retained.check(acquisition)?;
+        Ok((selected, retained))
+    }
+
+    fn check(&mut self, acquisition: &mut NativeAcquisition) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "storage_native_profile_refused");
+            self.identity.require_operator_file()?;
+            acquisition.remaining()?;
+            let named = Self::open_named(acquisition)?;
+            self.check_named(&named)?;
+            acquisition.remaining()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+
+    fn check_named(&mut self, named: &File) -> Result<()> {
+        let result = (|| {
+            ensure!(self.valid, "storage_native_profile_refused");
+            ensure!(
+                profile_file_identity(&self.file)? == self.identity,
+                "storage_native_profile_handle_changed"
+            );
+            ensure!(
+                profile_file_identity(named)? == self.identity,
+                "storage_native_profile_path_changed"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    fn borrow_descriptor(&mut self, acquisition: &mut NativeAcquisition) -> Result<Self> {
+        self.check(acquisition)?;
+        let result = (|| {
+            let mut borrowed = Self {
+                file: File::try_clone(&self.file)?,
+                identity: self.identity.clone(),
+                valid: true,
+            };
+            borrowed.check(acquisition)?;
+            self.check(acquisition)?;
+            Ok(borrowed)
+        })();
+        if result.is_err() {
+            self.valid = false;
+            acquisition.refuse();
+        }
+        result
+    }
+}
+
+fn profile_file_identity(file: &File) -> Result<ProfileFileIdentity> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("storage_native_platform_unsupported")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{AtFlags, FileType, StatxFlags};
+        let flags = StatxFlags::BASIC_STATS | StatxFlags::MNT_ID;
+        let observed = rustix::fs::statx(file, "", AtFlags::EMPTY_PATH, flags)?;
+        ensure!(
+            observed.stx_mask & flags.bits() == flags.bits()
+                && FileType::from_raw_mode(u32::from(observed.stx_mode)) == FileType::RegularFile
+                && observed.stx_nlink > 0
+                && observed.stx_ino != 0
+                && observed.stx_size > 0
+                && observed.stx_size <= MAX_PROFILE as u64,
+            "storage_native_profile_regular_required"
+        );
+        Ok(ProfileFileIdentity {
+            device_major: observed.stx_dev_major,
+            device_minor: observed.stx_dev_minor,
+            inode: observed.stx_ino,
+            mount: observed.stx_mnt_id,
+            mode: observed.stx_mode,
+            uid: observed.stx_uid,
+            gid: observed.stx_gid,
+            size: observed.stx_size,
+            modified: (observed.stx_mtime.tv_sec, observed.stx_mtime.tv_nsec),
+            changed: (observed.stx_ctime.tv_sec, observed.stx_ctime.tv_nsec),
+        })
+    }
+}
+
 impl<'role> ProviderReader<'role> {
+    fn request(
+        mut stage: EnrolledRoleStage<'role>,
+        policy: &InitialBootstrapPolicy,
+        store: &EpochStore,
+        profile: &PersistentDiskSelection,
+        admitted_profile: &mut ProfileFile,
+    ) -> Result<Self> {
+        stage.require_purpose(StagePurpose::CurrentRole)?;
+        stage.check_selection(policy, store, NativeRole::EpochController)?;
+        let mut acquisition = stage.narrow_io_acquisition(store.max_lease_seconds)?;
+        let profile_file = admitted_profile.borrow_descriptor(&mut acquisition)?;
+        stage.check_selection(policy, store, NativeRole::EpochController)?;
+        let mut reader = Self {
+            stage,
+            policy: policy.clone(),
+            store: store.clone(),
+            profile: profile.clone(),
+            profile_file,
+            authentication: ProviderAuthentication::ConnectionRequest,
+            acquisition,
+            timings: Timings::disabled(),
+            bootstrap: BootstrapTiming::disabled(),
+        };
+        reader.check()?;
+        Ok(reader)
+    }
+
     fn acquire(
         mut stage: EnrolledRoleStage<'role>,
         policy: &InitialBootstrapPolicy,
@@ -153,7 +364,7 @@ impl<'role> ProviderReader<'role> {
                 anyhow::bail!("storage_provider_authenticated_purpose_required")
             }
         };
-        let selected = profile(&mut acquisition)
+        let (selected, profile_file) = ProfileFile::admit(&mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         selected
             .validate(policy)
@@ -253,6 +464,7 @@ impl<'role> ProviderReader<'role> {
             policy: policy.clone(),
             store: store.clone(),
             profile: selected,
+            profile_file,
             authentication: ProviderAuthentication::Acquired(Box::new(
                 AcquiredProviderAuthentication {
                     http,
@@ -294,7 +506,7 @@ impl<'role> ProviderReader<'role> {
             _ => anyhow::bail!("storage_provider_authenticated_purpose_required"),
         };
         authentication.check(&mut stage, policy, store, &mut acquisition)?;
-        let selected = profile(&mut acquisition)
+        let (selected, profile_file) = ProfileFile::admit(&mut acquisition)
             .map_err(|error| PreparationFailure::at(PreparationStep::StorageProfile, error))?;
         selected
             .validate(policy)
@@ -305,6 +517,7 @@ impl<'role> ProviderReader<'role> {
             policy: policy.clone(),
             store: store.clone(),
             profile: selected,
+            profile_file,
             authentication: ProviderAuthentication::Retained(authentication),
             acquisition,
             timings,
@@ -316,7 +529,9 @@ impl<'role> ProviderReader<'role> {
 
     fn refusal_guard(&self) -> Result<Option<RefusalGuard>> {
         match &self.authentication {
-            ProviderAuthentication::Acquired(_) => Ok(None),
+            ProviderAuthentication::Acquired(_) | ProviderAuthentication::ConnectionRequest => {
+                Ok(None)
+            }
             ProviderAuthentication::Retained(authentication) => {
                 authentication.arm_refusal().map(Some)
             }
@@ -337,13 +552,19 @@ impl<'role> ProviderReader<'role> {
                 )?;
             }
             self.acquisition.remaining()?;
-            ensure!(
-                profile(&mut self.acquisition).map_err(|error| PreparationFailure::at(
-                    PreparationStep::StorageProfile,
-                    error
-                ))? == self.profile,
-                "storage_native_profile_changed"
-            );
+            self.profile_file.check(&mut self.acquisition)?;
+            if !matches!(
+                self.authentication,
+                ProviderAuthentication::ConnectionRequest
+            ) {
+                ensure!(
+                    profile(&mut self.acquisition).map_err(|error| PreparationFailure::at(
+                        PreparationStep::StorageProfile,
+                        error
+                    ))? == self.profile,
+                    "storage_native_profile_changed"
+                );
+            }
             self.profile.validate(&self.policy)?;
             self.stage
                 .check_selection(&self.policy, &self.store, NativeRole::EpochController)?;
@@ -357,11 +578,11 @@ impl<'role> ProviderReader<'role> {
             }
             Ok(())
         })();
-        if result.is_err()
-            && let ProviderAuthentication::Retained(authentication) = &mut self.authentication
-        {
-            authentication.refuse();
+        if result.is_err() {
             self.acquisition.refuse();
+            if let ProviderAuthentication::Retained(authentication) = &mut self.authentication {
+                authentication.refuse();
+            }
         }
         result?;
         if let Some(guard) = guard {
@@ -383,6 +604,10 @@ impl<'role> ProviderReader<'role> {
         let result = self
             .timings
             .measure(operation, || match &mut self.authentication {
+                ProviderAuthentication::ConnectionRequest => {
+                    self.acquisition.refuse();
+                    anyhow::bail!("storage_request_has_no_provider_admission")
+                }
                 ProviderAuthentication::Acquired(material) => {
                     let authorization = if read.google() {
                         material.source.authorization()?
@@ -596,6 +821,7 @@ impl<'role> NativeVolumeObservation<'role> {
             policy: self.reader.policy,
             store: self.reader.store,
             profile: self.reader.profile,
+            profile_file: self.reader.profile_file,
         }
     }
 
@@ -640,7 +866,7 @@ impl<'role> NativeVolumeObservation<'role> {
                     identity,
                     block,
                     device_name,
-                    valid: true,
+                    admission: VolumeAdmission::Observed,
                 },
             };
             owner
@@ -708,7 +934,10 @@ impl NativeVolumeResources {
             let _profile = crate::security_epoch::self_check_profile::enter(
                 crate::security_epoch::self_check_profile::Category::Volume,
             );
-            ensure!(self.valid, "storage_native_volume_refused");
+            ensure!(
+                self.admission != VolumeAdmission::Refused,
+                "storage_native_volume_refused"
+            );
             reader.check()?;
             ensure!(
                 directory_identity(&self.directory)? == self.identity,
@@ -771,7 +1000,7 @@ impl NativeVolumeResources {
             }
         });
         if result.is_err() {
-            self.valid = false;
+            self.admission = VolumeAdmission::Refused;
             reader.acquisition.refuse();
         }
         result
@@ -834,8 +1063,10 @@ impl NativeVolumeResources {
             }
         })();
         if result.is_err() {
-            self.valid = false;
+            self.admission = VolumeAdmission::Refused;
             reader.acquisition.refuse();
+        } else {
+            self.admission = VolumeAdmission::Admitted;
         }
         result
     }
@@ -944,7 +1175,10 @@ impl NativeVolumeContinuity {
         let guard = authentication.arm_refusal()?;
         let result = (|| {
             stage.require_purpose(StagePurpose::StorageBootstrap)?;
-            ensure!(self.resources.valid, "storage_native_volume_refused");
+            ensure!(
+                self.resources.admission != VolumeAdmission::Refused,
+                "storage_native_volume_refused"
+            );
             self.owner.check(&mut stage)?;
             ProviderReader::acquire_authenticated(
                 stage,
@@ -962,6 +1196,41 @@ impl NativeVolumeContinuity {
     }
 
     pub(super) fn begin_current<'volume, 'role>(
+        &'volume mut self,
+        mut stage: EnrolledRoleStage<'role>,
+    ) -> Result<CurrentVolumePhase<'volume, 'role>> {
+        // Only the real retained connection reaches this constructor. No path,
+        // selection DATA or previous attachment reply can construct the owner.
+        let result = (|| {
+            ensure!(
+                self.resources.admission == VolumeAdmission::Admitted,
+                "storage_native_admission_incomplete"
+            );
+            self.owner.check(&mut stage)?;
+            let mut reader = ProviderReader::request(
+                stage,
+                &self.policy,
+                &self.store,
+                &self.profile,
+                &mut self.profile_file,
+            )?;
+            self.resources.check_current(&mut reader)?;
+            self.owner.check(&mut reader.stage)?;
+            Ok(reader)
+        })();
+        match result {
+            Ok(reader) => Ok(CurrentVolumePhase {
+                resources: &mut self.resources,
+                reader,
+            }),
+            Err(error) => {
+                self.resources.admission = VolumeAdmission::Refused;
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn begin_initial<'volume, 'role>(
         &'volume mut self,
         stage: EnrolledRoleStage<'role>,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
@@ -982,7 +1251,10 @@ impl NativeVolumeContinuity {
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let result = (|| {
             stage.require_purpose(purpose)?;
-            ensure!(self.resources.valid, "storage_native_volume_refused");
+            ensure!(
+                self.resources.admission != VolumeAdmission::Refused,
+                "storage_native_volume_refused"
+            );
             self.owner.check(&mut stage)?;
             ProviderReader::acquire(
                 stage,
@@ -1000,6 +1272,11 @@ impl NativeVolumeContinuity {
         result: Result<ProviderReader<'role>>,
     ) -> Result<CurrentVolumePhase<'volume, 'role>> {
         let result = result.and_then(|mut reader| {
+            self.profile_file.check(&mut reader.acquisition)?;
+            ensure!(
+                reader.profile_file.identity == self.profile_file.identity,
+                "storage_native_profile_owner_changed"
+            );
             ensure!(
                 reader.profile == self.profile,
                 "storage_native_profile_changed"
@@ -1020,7 +1297,7 @@ impl NativeVolumeContinuity {
                 reader,
             }),
             Err(error) => {
-                self.resources.valid = false;
+                self.resources.admission = VolumeAdmission::Refused;
                 Err(error)
             }
         }
@@ -1040,6 +1317,14 @@ impl CurrentVolumePhase<'_, '_> {
     /// Observe the live selected filesystem contract, not omitted mountinfo
     /// defaults or desired fsType. This grants no standalone P3 permission.
     pub(super) fn check_durability_profile(&mut self) -> Result<()> {
+        if matches!(
+            self.reader.authentication,
+            ProviderAuthentication::ConnectionRequest
+        ) {
+            self.resources.admission = VolumeAdmission::Refused;
+            self.reader.acquisition.refuse();
+            anyhow::bail!("storage_durability_requires_initial_admission");
+        }
         self.resources.check_durability_profile(&mut self.reader)
     }
 
@@ -1066,7 +1351,10 @@ impl<'role> CurrentVolumePhase<'_, 'role> {
     /// replacement. This grants no physical-file or provider permission.
     pub(super) fn check_authentication(&mut self, reads: &mut ControllerEpochReads) -> Result<()> {
         let result = (|| {
-            ensure!(self.resources.valid, "storage_native_volume_refused");
+            ensure!(
+                self.resources.admission != VolumeAdmission::Refused,
+                "storage_native_volume_refused"
+            );
             self.reader.acquisition.require_storage_bootstrap()?;
             let ProviderAuthentication::Retained(provider) = &self.reader.authentication else {
                 anyhow::bail!("storage_provider_authenticated_purpose_required");
@@ -1084,7 +1372,7 @@ impl<'role> CurrentVolumePhase<'_, 'role> {
             Ok(())
         })();
         if result.is_err() {
-            self.resources.valid = false;
+            self.resources.admission = VolumeAdmission::Refused;
             self.reader.acquisition.refuse();
             if let ProviderAuthentication::Retained(provider) = &mut self.reader.authentication {
                 provider.refuse();
@@ -1107,7 +1395,10 @@ impl<'role> CurrentVolumePhase<'_, 'role> {
     pub(super) fn controller_stage_after_file_check(
         &mut self,
     ) -> Result<&mut EnrolledRoleStage<'role>> {
-        ensure!(self.resources.valid, "storage_native_volume_refused");
+        ensure!(
+            self.resources.admission != VolumeAdmission::Refused,
+            "storage_native_volume_refused"
+        );
         self.reader.acquisition.remaining()?;
         Ok(&mut self.reader.stage)
     }
@@ -1192,6 +1483,349 @@ fn mount(bytes: &[u8], expected: u64, major: u32, minor: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_request_profile_requires_initial_operator_ownership_and_read_only_mode() {
+        // Metadata predicate DATA only: no descriptor or native owner is made.
+        let selected = ProfileFileIdentity {
+            device_major: 1,
+            device_minor: 2,
+            inode: 3,
+            mount: 4,
+            mode: 0o100444,
+            uid: 0,
+            gid: 10001,
+            size: 10,
+            modified: (1, 0),
+            changed: (1, 0),
+        };
+        selected.require_operator_file().unwrap();
+        for (uid, mode) in [
+            (10001, 0o100444),
+            (0, 0o100644),
+            (0, 0o100664),
+            (0, 0o100555),
+            (0, 0o104444),
+        ] {
+            let changed = ProfileFileIdentity {
+                uid,
+                mode,
+                ..selected.clone()
+            };
+            assert!(
+                changed.require_operator_file().is_err(),
+                "uid={uid}, mode={mode:o}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn profile_file_fixture() -> Result<(tempfile::NamedTempFile, ProfileFile)> {
+        // Real file-adapter conformance only. Public fixture bytes do not
+        // construct a native stage, volume, initial holder or writer.
+        let mut named = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(named.as_file_mut(), b"public profile fixture")?;
+        let file = named.reopen()?;
+        let identity = profile_file_identity(&file)?;
+        Ok((
+            named,
+            ProfileFile {
+                file,
+                identity,
+                valid: true,
+            },
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn storage_request_profile_replacement_refuses_the_retained_handle_permanently() -> Result<()> {
+        let (named, mut retained) = profile_file_fixture()?;
+        retained.check_named(&named.reopen()?)?;
+        let (foreign, _) = profile_file_fixture()?;
+        assert!(retained.check_named(&foreign.reopen()?).is_err());
+        assert!(retained.check_named(&named.reopen()?).is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn storage_request_profile_truncation_mode_and_unlink_refuse_before_reuse() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        for change in 0..3 {
+            let (named, mut retained) = profile_file_fixture()?;
+            let opened = named.reopen()?;
+            let permissions = named.as_file().metadata()?.permissions();
+            match change {
+                0 => named.as_file().set_len(0)?,
+                1 => named
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o644))?,
+                _ => std::fs::remove_file(named.path())?,
+            }
+            assert!(retained.check_named(&opened).is_err());
+            // Even restoring metadata cannot clear this actual adapter's
+            // failed handle. A caller cannot catch refusal and adopt it.
+            if change == 0 {
+                named.as_file().set_len(retained.identity.size)?;
+            }
+            if change == 1 {
+                named.as_file().set_permissions(permissions)?;
+            }
+            assert!(retained.check_named(&opened).is_err());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn storage_request_profile_same_length_mutation_refuses_metadata_drift() -> Result<()> {
+        let (named, mut retained) = profile_file_fixture()?;
+        let before = profile_file_identity(&retained.file)?;
+        assert_eq!(rustix::io::pwrite(named.as_file(), b"P", 0)?, 1);
+        named.as_file().set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+        )?;
+        let after = profile_file_identity(&retained.file)?;
+        assert_eq!(
+            (after.inode, after.mount, after.size),
+            (before.inode, before.mount, before.size)
+        );
+        assert!(after != before);
+        assert!(retained.check_named(&named.reopen()?).is_err());
+        // Metadata joins are not a fresh content proof. The approved profile
+        // delegates ongoing integrity to admitted services, but visible drift
+        // still refuses even when the same inode and length remain.
+        Ok(())
+    }
+
+    fn method_calls(source: &str, owner: &str, method: &str) -> Vec<String> {
+        use syn::{parse::Parser, visit::Visit};
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_local(&mut self, node: &'ast syn::Local) {
+                if matches!(&node.pat, syn::Pat::Type(binding)
+                    if matches!(&*binding.pat, syn::Pat::Ident(name) if name.ident == "file")
+                    && matches!(&*binding.ty, syn::Type::Path(path) if path.path.is_ident("File")))
+                {
+                    self.0.push("typed_profile_descriptor".into());
+                }
+                syn::visit::visit_local(self, node);
+            }
+            fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+                if matches!(&*node.cond, syn::Expr::Unary(unary)
+                    if matches!(unary.op, syn::UnOp::Not(_))
+                    && matches!(&*unary.expr, syn::Expr::Macro(expression)
+                        if expression.mac.path.is_ident("matches")
+                        && expression.mac.tokens.to_string() == "self . authentication , ProviderAuthentication :: ConnectionRequest"))
+                    && node.else_branch.is_none()
+                {
+                    let mut guarded = Calls::default();
+                    guarded.visit_block(&node.then_branch);
+                    if guarded
+                        .0
+                        .iter()
+                        .filter(|call| call.as_str() == "profile")
+                        .count()
+                        == 1
+                    {
+                        self.0.push("admission_only_profile_read".into());
+                    }
+                }
+                syn::visit::visit_expr_if(self, node);
+            }
+            fn visit_macro(&mut self, node: &'ast syn::Macro) {
+                if node.path.is_ident("ensure")
+                    && node
+                        .tokens
+                        .to_string()
+                        .contains("self . resources . admission == VolumeAdmission :: Admitted")
+                {
+                    self.0.push("completed_admission_required".into());
+                }
+                if node.path.is_ident("ensure")
+                    && let Ok(arguments) =
+                        syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                            .parse2(node.tokens.clone())
+                    && let Some(condition) = arguments.first()
+                {
+                    let mut expression = Calls::default();
+                    expression.visit_expr(condition);
+                    self.0.extend(expression.0);
+                }
+                syn::visit::visit_macro(self, node);
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func {
+                    self.0.push(
+                        path.path
+                            .segments
+                            .iter()
+                            .map(|part| part.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::"),
+                    );
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.0.push(call.method.to_string());
+                if call.method == "check"
+                    && matches!(&*call.receiver, syn::Expr::Field(field)
+                        if field.member == syn::Member::Named(syn::Ident::new("profile_file", proc_macro2::Span::call_site())))
+                {
+                    self.0.push("retained_profile_handle".into());
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let mut calls = Calls::default();
+        for item in &file.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.len() == 1 && path.path.segments[0].ident == owner)
+            {
+                for member in &item.items {
+                    if let syn::ImplItem::Fn(function) = member
+                        && function.sig.ident == method
+                    {
+                        calls.visit_block(&function.block);
+                        return calls.0;
+                    }
+                }
+            }
+        }
+        calls.0
+    }
+
+    fn storage_request_shape(source: &str) -> bool {
+        let current = method_calls(source, "NativeVolumeContinuity", "begin_current");
+        let request = method_calls(source, "ProviderReader", "request");
+        let check = method_calls(source, "ProviderReader", "check");
+        let initial = method_calls(source, "NativeVolumeContinuity", "begin_initial");
+        let admitted = method_calls(source, "NativeVolumeContinuity", "finish_begin");
+        let profile = method_calls(source, "ProfileFile", "admit");
+        let profile_check = method_calls(source, "ProfileFile", "check");
+        let profile_borrow = method_calls(source, "ProfileFile", "borrow_descriptor");
+        let count = |calls: &[String], name: &str| {
+            calls.iter().filter(|call| call.as_str() == name).count()
+        };
+        count(&current, "ProviderReader::request") == 1
+            && count(&current, "completed_admission_required") == 1
+            && count(&current, "check") == 2
+            && count(&current, "check_current") == 1
+            && !current.iter().any(|call| {
+                matches!(
+                    call.as_str(),
+                    "begin_phase"
+                        | "observe_provider"
+                        | "ProviderReader::acquire"
+                        | "ProviderReader::acquire_authenticated"
+                )
+            })
+            && count(&request, "borrow_descriptor") == 1
+            && count(&request, "narrow_io_acquisition") == 1
+            && count(&check, "profile") == 1
+            && count(&check, "admission_only_profile_read") == 1
+            && count(&check, "retained_profile_handle") == 1
+            && !request.iter().any(|call| {
+                matches!(
+                    call.as_str(),
+                    "ProfileFile::admit"
+                        | "observe_provider"
+                        | "profile"
+                        | "read_fixed"
+                        | "cluster_ca"
+                )
+            })
+            && count(&initial, "begin_phase") == 1
+            && count(&admitted, "retained_profile_handle") == 1
+            && count(&profile, "require_operator_file") == 1
+            && count(&profile, "typed_profile_descriptor") == 1
+            && count(&profile_check, "require_operator_file") == 1
+            && count(&profile_borrow, "File::try_clone") == 1
+    }
+
+    #[test]
+    fn storage_request_uses_only_retained_physical_owners_and_initial_keeps_admission() {
+        let source = include_str!("native_volume.rs");
+        assert!(storage_request_shape(source));
+        assert!(!storage_request_shape(&source.replacen(
+            "let file: File = Self::open_named(",
+            "let file = Self::open_named(",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "File::try_clone(&self.file)",
+            "self.file.try_clone()",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "identity.require_operator_file()?;",
+            "",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "if !matches!(",
+            "if matches!(",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "self.resources.admission == VolumeAdmission::Admitted",
+            "self.resources.admission != VolumeAdmission::Refused",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "ProviderReader::request(",
+            "ProviderReader::acquire(",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen(
+            "admitted_profile.borrow_descriptor(",
+            "ProfileFile::admit(",
+            1
+        )));
+        assert!(!storage_request_shape(&source.replacen("self.resources.check_current(&mut reader)?;\n            self.owner.check", "reader.observe_provider()?;\n            self.resources.check_current(&mut reader)?;\n            self.owner.check", 1)));
+
+        let continuity = include_str!("preparation/continuity.rs");
+        let pending = method_calls(continuity, "PendingPhysicalFilePhase", "acquire");
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|call| call.as_str() == "begin_current")
+                .count(),
+            1
+        );
+        let initial = method_calls(
+            continuity,
+            "CurrentPreparedFilePhase",
+            "check_initial_durability",
+        );
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|call| call.as_str() == "check_durability_profile")
+                .count(),
+            2
+        );
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|call| call.as_str() == "rustix::fs::fsync")
+                .count(),
+            2
+        );
+        assert!(
+            method_calls(
+                continuity,
+                "CurrentPhysicalFilePhase",
+                "check_current_durability"
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn durability_options_require_explicit_live_ordering_and_barriers() {

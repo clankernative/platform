@@ -2431,8 +2431,9 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn begin_authenticated < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , authentication : ProviderEpochReads , trace : & BootstrapTiming) -> Result < CurrentVolumePhase < 'volume , 'role > >",
-        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
+        "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
+        "pub (super) fn begin_initial < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "fn begin_phase < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role > , purpose : StagePurpose) -> Result < CurrentVolumePhase < 'volume , 'role > >",
         "fn finish_begin < 'volume , 'role > (& 'volume mut self , result : Result < ProviderReader < 'role > >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
       ],
@@ -2457,11 +2458,15 @@
         },
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         },
         {
           "owner": "NativeVolumeContinuity",
           "signature": "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_initial < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         }
       ],
       "proof_uses": [],
@@ -2496,11 +2501,15 @@
         },
         {
           "owner": "NativeVolumeContinuity",
-          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+          "signature": "pub (super) fn begin_current < 'volume , 'role > (& 'volume mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         },
         {
           "owner": "NativeVolumeContinuity",
           "signature": "pub (super) fn begin_first_holder < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
+        },
+        {
+          "owner": "NativeVolumeContinuity",
+          "signature": "pub (super) fn begin_initial < 'volume , 'role > (& 'volume mut self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentVolumePhase < 'volume , 'role > >"
         }
       ],
       "material_uses": [
@@ -2556,7 +2565,7 @@
       "factories": [
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         },
         {
           "owner": "PendingPreparedFilePhase < 'file >",
@@ -2848,7 +2857,6 @@
       "owning_children": [],
       "methods": [
         "pub (crate) fn check (& mut self) -> Result < () >",
-        "pub (in crate :: security_epoch) fn check_current_durability (& mut self) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
@@ -2861,7 +2869,7 @@
         },
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "material_uses": [
@@ -2884,10 +2892,6 @@
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
-        },
-        {
-          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
-          "signature": "pub (in crate :: security_epoch) fn check_current_durability (& mut self) -> Result < () >"
         }
       ],
       "proof_uses": []
@@ -4446,7 +4450,7 @@
       "type_name": "PendingPhysicalFilePhase",
       "owning_children": [],
       "methods": [
-        "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+        "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
       ],
       "factories": [
         {
@@ -4457,7 +4461,7 @@
       "material_uses": [
         {
           "owner": "PendingPhysicalFilePhase < 'file >",
-          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire_durable < 'role > (self , stage : EnrolledRoleStage < 'role > , trace : Option < & crate :: security_epoch :: controller :: serving_timing :: ServingTiming >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn acquire < 'role > (self , stage : EnrolledRoleStage < 'role >) -> Result < CurrentPhysicalFilePhase < 'file , 'role > >"
         }
       ],
       "proof_uses": [],
