@@ -321,6 +321,7 @@
     "crates/day2/src/schema.rs",
     "crates/day2/src/sdk.rs",
     "crates/day2/src/security_admission.rs",
+    "crates/day2/src/security_epoch/admission_work.rs",
     "crates/day2/src/security_epoch/authenticated_reads.rs",
     "crates/day2/src/security_epoch/authenticated_reads/retained.rs",
     "crates/day2/src/security_epoch/authenticated_reads/retained/provider.rs",

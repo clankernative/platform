@@ -23,6 +23,9 @@ pub(super) fn run() -> Result<()> {
     let mut recorder = Recorder::new(std::io::stderr());
     loop {
         let (mut channel, mut acquisition) = issuer.listener.next()?;
+        let mut work = crate::security_epoch::admission_work::begin(
+            crate::security_epoch::admission_work::Work::IssuerServiceAdmission,
+        );
         let costs = recorder.connection();
         // Parent failure remains fatal; request failure still closes only its
         // own connection. No diagnostic record formats the native error.
@@ -32,6 +35,7 @@ pub(super) fn run() -> Result<()> {
                 .check_identity(&mut acquisition, &costs.hashes(Subject::ParentBefore))
         });
         if let Err(error) = before {
+            work.finish(false);
             drop(channel);
             drop(acquisition);
             return preserve_error(
@@ -67,6 +71,7 @@ pub(super) fn run() -> Result<()> {
         } else {
             Outcome::Completed
         };
+        work.finish(served.is_ok() && checked.is_ok());
         let exported = recorder.emit(&costs, outcome);
         if checked.is_err() {
             return preserve_error(checked, exported);
