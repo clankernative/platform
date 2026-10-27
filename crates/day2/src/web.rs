@@ -375,7 +375,8 @@ impl NativeStartupObservation {
         &mut self,
         response: Option<crate::security_epoch::CounterAdmissionResponseRefusal>,
     ) {
-        self.counter_response = if matches!(self.step, NativeStartupStep::InitialStorageColdCounter) {
+        self.counter_response = if matches!(self.step, NativeStartupStep::InitialStorageColdCounter)
+        {
             response
         } else {
             None
@@ -3392,24 +3393,54 @@ mod native_startup_tests {
                     if !matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "participant") {
                         return None;
                     }
-                    let syn::Expr::Try(attempt) = &*local.init.as_ref()?.expr else { return None; };
-                    let syn::Expr::MethodCall(inspect) = &*attempt.expr else { return None; };
-                    if inspect.method != "inspect_err" || inspect.args.len() != 1 { return None; }
-                    let syn::Expr::Call(actual) = &*inspect.receiver else { return None; };
+                    let syn::Expr::Try(attempt) = &*local.init.as_ref()?.expr else {
+                        return None;
+                    };
+                    let syn::Expr::MethodCall(inspect) = &*attempt.expr else {
+                        return None;
+                    };
+                    if inspect.method != "inspect_err" || inspect.args.len() != 1 {
+                        return None;
+                    }
+                    let syn::Expr::Call(actual) = &*inspect.receiver else {
+                        return None;
+                    };
                     if !path(&actual.func, &["ServingParticipant", "app"])
                         || actual.args.len() != 2
                         || !path(&actual.args[0], &["storage"])
                         || !matches!(&actual.args[1], syn::Expr::Reference(borrow)
                             if borrow.mutability.is_some() && path(&borrow.expr, &["stage"]))
-                    { return None; }
-                    let syn::Expr::Closure(closure) = &inspect.args[0] else { return None; };
-                    if closure.inputs.len() != 1 || !matches!(&closure.inputs[0], syn::Pat::Ident(name) if name.ident == "error") { return None; }
-                    let syn::Expr::Block(body) = &*closure.body else { return None; };
-                    let [syn::Stmt::Expr(syn::Expr::MethodCall(store), Some(_))] = body.block.stmts.as_slice() else { return None; };
-                    if store.method != "counter_refusal" || !path(&store.receiver, &["observed"]) || store.args.len() != 1 { return None; }
-                    let syn::Expr::Call(data) = &store.args[0] else { return None; };
+                    {
+                        return None;
+                    }
+                    let syn::Expr::Closure(closure) = &inspect.args[0] else {
+                        return None;
+                    };
+                    if closure.inputs.len() != 1
+                        || !matches!(&closure.inputs[0], syn::Pat::Ident(name) if name.ident == "error")
+                    {
+                        return None;
+                    }
+                    let syn::Expr::Block(body) = &*closure.body else {
+                        return None;
+                    };
+                    let [syn::Stmt::Expr(syn::Expr::MethodCall(store), Some(_))] =
+                        body.block.stmts.as_slice()
+                    else {
+                        return None;
+                    };
+                    if store.method != "counter_refusal"
+                        || !path(&store.receiver, &["observed"])
+                        || store.args.len() != 1
+                    {
+                        return None;
+                    }
+                    let syn::Expr::Call(data) = &store.args[0] else {
+                        return None;
+                    };
                     (path(&data.func, &["CounterAdmissionResponseRefusal", "observe"])
-                        && data.args.len() == 1 && path(&data.args[0], &["error"]))
+                        && data.args.len() == 1
+                        && path(&data.args[0], &["error"]))
                     .then_some(())
                 })();
                 self.0 += usize::from(observed.is_some());
@@ -3419,9 +3450,13 @@ mod native_startup_tests {
 
         let parsed = syn::parse_file(source).unwrap();
         let Some(function) = parsed.items.iter().find_map(|item| match item {
-            syn::Item::Fn(function) if function.sig.ident == "prepare_initial_app_storage" => Some(function),
+            syn::Item::Fn(function) if function.sig.ident == "prepare_initial_app_storage" => {
+                Some(function)
+            }
             _ => None,
-        }) else { return false; };
+        }) else {
+            return false;
+        };
         let mut capture = Capture::default();
         capture.visit_block(&function.block);
         capture.0 == 1
@@ -3434,10 +3469,19 @@ mod native_startup_tests {
         for (before, after) in [
             (".inspect_err(|error|", ".map_err(|error|"),
             ("observed.counter_refusal(", "foreign.counter_refusal("),
-            ("CounterAdmissionResponseRefusal::observe(error)", "CounterAdmissionResponseRefusal::observe(&foreign)"),
+            (
+                "CounterAdmissionResponseRefusal::observe(error)",
+                "CounterAdmissionResponseRefusal::observe(&foreign)",
+            ),
             ("CounterAdmissionResponseRefusal::observe(error)", "None"),
-            ("ServingParticipant::app(storage, &mut stage)", "ServingParticipant::app(storage, &mut foreign)"),
-            ("observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error));", "if false { observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error)); }"),
+            (
+                "ServingParticipant::app(storage, &mut stage)",
+                "ServingParticipant::app(storage, &mut foreign)",
+            ),
+            (
+                "observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error));",
+                "if false { observed.counter_refusal(CounterAdmissionResponseRefusal::observe(error)); }",
+            ),
         ] {
             let changed = source.replacen(before, after, 1);
             assert_ne!(source, changed);
@@ -3449,12 +3493,16 @@ mod native_startup_tests {
     fn cold_counter_detail_is_bounded_data_cleared_outside_its_actual_stage() -> Result<()> {
         use crate::security_epoch::CounterAdmissionResponseRefusal;
         let detail = CounterAdmissionResponseRefusal::maximal_fixture();
-        let mut observed = NativeStartupObservation::new(true, NativeStartupStep::InitialStorageColdCounter);
+        let mut observed =
+            NativeStartupObservation::new(true, NativeStartupStep::InitialStorageColdCounter);
         observed.counter_refusal(Some(detail));
         let line = observed.line().context("bounded counter refusal")?;
         assert!(line.len() <= 256);
         let text = std::str::from_utf8(&line)?;
-        let record: Value = serde_json::from_str(text.strip_prefix("day2-native-app-startup-refusal ").unwrap())?;
+        let record: Value = serde_json::from_str(
+            text.strip_prefix("day2-native-app-startup-refusal ")
+                .unwrap(),
+        )?;
         assert_eq!(record.as_object().unwrap().len(), 4);
         assert_eq!(record["counter"], serde_json::to_value(detail)?);
         assert_eq!(record["counter"].as_object().unwrap().len(), 2);
@@ -3468,7 +3516,8 @@ mod native_startup_tests {
         observed.complete();
         assert!(observed.line().is_none());
 
-        let mut inactive = NativeStartupObservation::new(false, NativeStartupStep::InitialStorageColdCounter);
+        let mut inactive =
+            NativeStartupObservation::new(false, NativeStartupStep::InitialStorageColdCounter);
         inactive.counter_refusal(Some(detail));
         assert!(inactive.line().is_none());
         Ok(())
@@ -3487,11 +3536,15 @@ mod native_startup_tests {
         let error = anyhow::Error::new(MustNotDisplay);
         let detail = crate::security_epoch::CounterAdmissionResponseRefusal::observe(&error);
         assert!(detail.is_none());
-        let mut observed = NativeStartupObservation::new(true, NativeStartupStep::InitialStorageColdCounter);
+        let mut observed =
+            NativeStartupObservation::new(true, NativeStartupStep::InitialStorageColdCounter);
         observed.counter_refusal(detail);
         let line = observed.line().context("unknown counter refusal")?;
         let text = std::str::from_utf8(&line)?;
-        let record: Value = serde_json::from_str(text.strip_prefix("day2-native-app-startup-refusal ").unwrap())?;
+        let record: Value = serde_json::from_str(
+            text.strip_prefix("day2-native-app-startup-refusal ")
+                .unwrap(),
+        )?;
         assert_eq!(record.as_object().unwrap().len(), 3);
         assert!(!text.contains("MustNotDisplay"));
         assert!(error.downcast_ref::<MustNotDisplay>().is_some());
