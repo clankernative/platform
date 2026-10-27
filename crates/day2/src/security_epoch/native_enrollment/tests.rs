@@ -8,6 +8,242 @@ use super::{
 };
 use day2_capabilities::Digest;
 
+fn enrolled_self_reborrow_shape(source: &str) -> bool {
+    use syn::visit::Visit;
+
+    fn fields(expression: &syn::Expr, expected: &[&str]) -> bool {
+        match (expression, expected.split_last()) {
+            (syn::Expr::Path(path), Some((last, []))) => path.path.is_ident(last),
+            (syn::Expr::Field(field), Some((last, rest))) => {
+                matches!(&field.member, syn::Member::Named(name) if name == last)
+                    && fields(&field.base, rest)
+            }
+            _ => false,
+        }
+    }
+
+    fn linux_body(statement: &syn::Stmt) -> Option<&syn::Block> {
+        let syn::Stmt::Expr(syn::Expr::Block(block), _) = statement else {
+            return None;
+        };
+        (block.label.is_none()
+            && block.attrs.len() == 1
+            && matches!(&block.attrs[0].meta, syn::Meta::List(meta)
+                if meta.path.is_ident("cfg") && meta.tokens.to_string() == "target_os = \"linux\""))
+        .then_some(&block.block)
+    }
+
+    // Follow only the actual result closure and unconditional Linux blocks.
+    // A counted call hidden under an impossible runtime condition is not a
+    // production check, and dropping its error is not a successful check.
+    fn result_body(body: &syn::Block) -> Option<&syn::Block> {
+        for statement in &body.stmts {
+            if let Some(body) = linux_body(statement) {
+                if let Some(result) = result_body(body) {
+                    return Some(result);
+                }
+            } else if let syn::Stmt::Local(local) = statement
+                && matches!(&local.pat, syn::Pat::Ident(binding) if binding.ident == "result")
+                && let Some(initializer) = &local.init
+                && let syn::Expr::Call(call) = &*initializer.expr
+                && let syn::Expr::Paren(parenthesized) = &*call.func
+                && let syn::Expr::Closure(closure) = &*parenthesized.expr
+                && let syn::Expr::Block(result) = &*closure.body
+            {
+                return Some(&result.block);
+            }
+        }
+        None
+    }
+
+    fn direct_retained_check(body: &syn::Block, owner: &[&str], clock: &[&str]) -> usize {
+        body.stmts
+            .iter()
+            .map(|statement| {
+                if let Some(body) = linux_body(statement) {
+                    return direct_retained_check(body, owner, clock);
+                }
+                let syn::Stmt::Expr(syn::Expr::Try(attempt), Some(_)) = statement else {
+                    return 0;
+                };
+                let syn::Expr::MethodCall(call) = &*attempt.expr else {
+                    return 0;
+                };
+                usize::from(
+                    call.method == "check"
+                        && fields(&call.receiver, owner)
+                        && call.args.len() == 1
+                        && matches!(&call.args[0], syn::Expr::Reference(reference)
+                            if reference.mutability.is_some() && fields(&reference.expr, clock)),
+                )
+            })
+            .sum()
+    }
+
+    fn retained_check_runs(function: &syn::ImplItemFn, owner: &[&str], clock: &[&str]) -> bool {
+        #[derive(Default)]
+        struct EarlyReturn(bool);
+        impl<'ast> Visit<'ast> for EarlyReturn {
+            fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+                self.0 = true;
+            }
+        }
+        let Some(body) = result_body(&function.block) else {
+            return false;
+        };
+        let mut early = EarlyReturn::default();
+        early.visit_block(body);
+        !early.0 && direct_retained_check(body, owner, clock) == 1
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        captures: usize,
+        clocks: usize,
+        owner_checks: usize,
+        stage_checks: usize,
+    }
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                let path = path.path.segments.iter().collect::<Vec<_>>();
+                self.captures += usize::from(
+                    path.len() == 2
+                        && path[0].ident == "SelfSnapshot"
+                        && path[1].ident == "acquire",
+                );
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.clocks += usize::from(call.method == "into_connection_clock");
+            self.owner_checks +=
+                usize::from(call.method == "check" && fields(&call.receiver, &["self", "current"]));
+            self.stage_checks += usize::from(
+                call.method == "check" && fields(&call.receiver, &["self", "owner", "current"]),
+            );
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    let source = syn::parse_file(source).unwrap();
+    let mut enrollment = None;
+    let mut begin = None;
+    let mut check = None;
+    let mut begin_runs = false;
+    let mut check_runs = false;
+    for item in source.items {
+        let syn::Item::Impl(implementation) = item else {
+            continue;
+        };
+        let syn::Type::Path(owner) = &*implementation.self_ty else {
+            continue;
+        };
+        let owner = owner.path.segments.last().unwrap().ident.to_string();
+        for item in implementation.items {
+            let syn::ImplItem::Fn(function) = item else {
+                continue;
+            };
+            let mut calls = Calls::default();
+            calls.visit_block(&function.block);
+            if owner == "EnrolledProcessRoleOwner" && function.sig.ident == "enroll_current_thread"
+            {
+                assert!(enrollment.replace(calls).is_none());
+            } else if owner == "EnrolledProcessRoleOwner" && function.sig.ident == "begin_stage" {
+                begin_runs =
+                    retained_check_runs(&function, &["self", "current"], &["authentication"]);
+                assert!(begin.replace(calls).is_none());
+            } else if owner == "EnrolledRoleStage" && function.sig.ident == "check" {
+                check_runs = retained_check_runs(
+                    &function,
+                    &["self", "owner", "current"],
+                    &["self", "acquisition"],
+                );
+                assert!(check.replace(calls).is_none());
+            }
+        }
+    }
+    matches!(
+        enrollment,
+        Some(Calls {
+            captures: 1,
+            clocks: 1,
+            ..
+        })
+    ) && begin_runs
+        && check_runs
+        && matches!(
+            begin,
+            Some(Calls {
+                captures: 0,
+                owner_checks: 1,
+                ..
+            })
+        )
+        && matches!(
+            check,
+            Some(Calls {
+                captures: 0,
+                stage_checks: 1,
+                ..
+            })
+        )
+}
+
+#[test]
+fn actual_enrolled_owner_retains_self_resources_for_request_checks() {
+    assert!(enrolled_self_reborrow_shape(include_str!("owner.rs")));
+}
+
+#[test]
+fn enrolled_self_guard_rejects_recapture_or_omitted_retained_checks() {
+    let source = include_str!("owner.rs");
+    for (before, after) in [
+        ("SelfSnapshot::acquire(", "SelfSnapshot::metadata_only("),
+        (
+            "acquisition.into_connection_clock()?",
+            "acquisition.discard_clock()?",
+        ),
+        (
+            "self.current.check(&mut authentication)?",
+            "SelfSnapshot::acquire(&mut authentication)?",
+        ),
+        (
+            "self.owner.current.check(&mut self.acquisition)?",
+            "self.owner.current.skip(&mut self.acquisition)?",
+        ),
+    ] {
+        let mutated = source.replacen(before, after, 1);
+        assert_ne!(mutated, source);
+        assert!(!enrolled_self_reborrow_shape(&mutated));
+    }
+}
+
+#[test]
+fn enrolled_self_guard_requires_unconditional_fallible_checks_of_the_actual_request() {
+    let source = include_str!("owner.rs");
+    for call in [
+        "self.current.check(&mut authentication)?;",
+        "self.owner.current.check(&mut self.acquisition)?;",
+    ] {
+        for replacement in [
+            format!("if false {{ {call} }}"),
+            call.replace("?;", ";"),
+            call.replace("&mut authentication", "&mut unrelated"),
+            call.replace("&mut self.acquisition", "&mut unrelated"),
+        ] {
+            if replacement == call {
+                continue;
+            }
+            let changed = source.replacen(call, &replacement, 1);
+            assert_ne!(changed, source);
+            assert!(!enrolled_self_reborrow_shape(&changed));
+        }
+    }
+}
+
 pub(super) fn policy(root: &KeyOwner) -> EnrollmentPolicy {
     let store = crate::security_epoch::tests::selection();
     let bootstrap = crate::security_epoch::control_slot_tests::policy(&store);

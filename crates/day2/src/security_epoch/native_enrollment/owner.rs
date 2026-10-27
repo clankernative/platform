@@ -54,6 +54,10 @@ pub(crate) struct EnrolledProcessRoleOwner {
     binding: super::runtime::RuntimeBinding,
     #[cfg(target_os = "linux")]
     self_data: super::protocol::ProcessData,
+    #[cfg(target_os = "linux")]
+    current: SelfSnapshot,
+    #[cfg(target_os = "linux")]
+    clock: crate::security_epoch::native_clock::NativeConnectionClock,
     local: PhantomData<Rc<()>>,
 }
 
@@ -62,8 +66,6 @@ pub(crate) struct EnrolledRoleStage<'a> {
     purpose: StagePurpose,
     acquisition: NativeAcquisition,
     deadline: Duration,
-    #[cfg(target_os = "linux")]
-    current: SelfSnapshot,
     #[cfg(target_os = "linux")]
     nonce_peer: IssuerReceipt,
     #[cfg(target_os = "linux")]
@@ -161,6 +163,8 @@ impl EnrolledProcessRoleOwner {
                 issuer,
                 binding: grant.data.runtime,
                 self_data: grant.data.process,
+                current,
+                clock: acquisition.into_connection_clock()?,
                 local: PhantomData,
             })
         }
@@ -206,13 +210,11 @@ impl EnrolledProcessRoleOwner {
         {
             let result = (|| {
                 let mut acquisition = match purpose {
-                    StagePurpose::CurrentRole => NativeAcquisition::begin(5)?,
-                    StagePurpose::InitialFirstHolder => {
-                        NativeAcquisition::begin_initial_first_holder()?
-                    }
-                    StagePurpose::StorageBootstrap => NativeAcquisition::begin_storage_bootstrap()?,
+                    StagePurpose::CurrentRole => self.clock.begin_current()?,
+                    StagePurpose::InitialFirstHolder => self.clock.begin_initial_first_holder()?,
+                    StagePurpose::StorageBootstrap => self.clock.begin_storage_bootstrap()?,
                     StagePurpose::StorageMetadataObservation => {
-                        NativeAcquisition::begin_storage_metadata_observation()?
+                        self.clock.begin_storage_metadata_observation()?
                     }
                 };
                 let mut authentication = acquisition.narrow_authentication()?;
@@ -235,13 +237,9 @@ impl EnrolledProcessRoleOwner {
                     )?;
                     self.issuer.check_live(&mut authentication)?;
                     self.certificate.verify(&self.policy)?;
-                    let mut current = SelfSnapshot::acquire(
-                        self.policy.code(self.role),
-                        &mut authentication,
-                        &HashCosts::disabled(),
-                    )?;
+                    self.current.check(&mut authentication)?;
                     ensure!(
-                        current.data == self.self_data,
+                        self.current.data == self.self_data,
                         "native_enrollment_self_changed"
                     );
                     let (certificate, grant, grant_peer, nonce_peer, channel) = exchange(
@@ -249,7 +247,7 @@ impl EnrolledProcessRoleOwner {
                         self.role,
                         purpose,
                         &self.key,
-                        &mut current,
+                        &mut self.current,
                         &mut authentication,
                     )?;
                     ensure!(
@@ -260,7 +258,6 @@ impl EnrolledProcessRoleOwner {
                     Ok((
                         acquisition,
                         authentication,
-                        current,
                         grant,
                         grant_peer,
                         nonce_peer,
@@ -277,7 +274,6 @@ impl EnrolledProcessRoleOwner {
                 let (
                     acquisition,
                     authentication,
-                    current,
                     grant,
                     grant_peer,
                     nonce_peer,
@@ -290,7 +286,6 @@ impl EnrolledProcessRoleOwner {
                     purpose,
                     acquisition,
                     deadline,
-                    current,
                     nonce_peer,
                     grant_peer,
                     channel,
@@ -640,7 +635,7 @@ impl EnrolledRoleStage<'_> {
                     &mut self.policy_interpretation,
                     &self.owner.policy,
                 )?;
-                self.current.check(&mut self.acquisition)?;
+                self.owner.current.check(&mut self.acquisition)?;
                 self.owner.issuer.check_live(&mut self.acquisition)?;
                 self.nonce_peer.check_live(&mut self.acquisition)?;
                 self.grant_peer.check_live(&mut self.acquisition)?;
@@ -809,7 +804,7 @@ impl ClockAnchors {
                 let current = ns::open_namespace(&current, name, &mut stage.acquisition)?;
                 ensure!(
                     ns::namespace_identity(&current)? == value
-                        && stage.current.data.namespaces.get(name)
+                        && stage.owner.current.data.namespaces.get(name)
                             == Some(&(value.device, value.inode)),
                     "native_enrollment_clock_namespace_changed"
                 );
