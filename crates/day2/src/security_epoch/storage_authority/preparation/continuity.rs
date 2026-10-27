@@ -717,6 +717,20 @@ mod cold_durability_tests {
         {
             return false;
         }
+        let syn::Stmt::Macro(unsupported) = &cold.block.stmts[3] else {
+            return false;
+        };
+        if unsupported.attrs.len() != 1
+            || !matches!(&unsupported.attrs[0].meta, syn::Meta::List(value)
+                if value.path.is_ident("cfg") && value.tokens.to_string() == "not (target_os = \"linux\")")
+            || unsupported.mac.path.segments.len() != 2
+            || unsupported.mac.path.segments[0].ident != "anyhow"
+            || unsupported.mac.path.segments[1].ident != "bail"
+            || !syn::parse2::<syn::LitStr>(unsupported.mac.tokens.clone())
+                .is_ok_and(|value| value.value() == "original_file_platform_unsupported")
+        {
+            return false;
+        }
         let syn::Stmt::Expr(syn::Expr::Block(linux), _) = &cold.block.stmts[4] else {
             return false;
         };
@@ -756,6 +770,14 @@ mod cold_durability_tests {
     fn cold_durability_rejects_removed_conditional_ignored_and_foreign_checks() {
         let source = include_str!("continuity.rs");
         for (before, after) in [
+            (
+                "            #[cfg(not(target_os = \"linux\"))]\n            anyhow::bail!(\"original_file_platform_unsupported\");",
+                "            if self.layout.proposal.length > 0 { return Ok(()); }",
+            ),
+            (
+                "            #[cfg(not(target_os = \"linux\"))]\n            anyhow::bail!(\"original_file_platform_unsupported\");",
+                "            #[cfg(not(target_os = \"linux\"))]\n            return Ok(());",
+            ),
             ("            self.phase.check_durability_profile()?;", ""),
             (
                 "            self.phase.check_durability_profile()?;",
