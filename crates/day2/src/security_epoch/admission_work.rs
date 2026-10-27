@@ -265,7 +265,8 @@ pub(super) fn snapshot() -> Snapshot {
 
 fn snapshot_ledger(ledger: &Mutex<Ledger>, lost: &AtomicBool) -> Snapshot {
     let unknown = |poisoned| {
-        let mut unavailable = Ledger::ZERO.snapshot();
+        let mut empty = Ledger::ZERO;
+        let mut unavailable = empty.snapshot();
         unavailable.sequence = None;
         unavailable.complete = false;
         unavailable.overflowed = None;
@@ -302,7 +303,8 @@ fn snapshot_ledger(ledger: &Mutex<Ledger>, lost: &AtomicBool) -> Snapshot {
 impl Snapshot {
     #[cfg(test)]
     pub(super) fn maximal_fixture() -> Self {
-        let mut data = Ledger::ZERO.snapshot();
+        let mut empty = Ledger::ZERO;
+        let mut data = empty.snapshot();
         data.sequence = Some(u64::MAX);
         for row in &mut data.rows {
             row.covered = true;
