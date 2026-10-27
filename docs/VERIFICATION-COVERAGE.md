@@ -17,6 +17,20 @@ fingerprints. New/increased effects, unknown sources and obsolete exceptions
 fail the gate. See [the structural rollout](PLATFORM-STRUCTURAL-RULES.md) for
 enforcement scope and the remaining dependency/proof/runtime slices.
 
+Keep architecture registrations in their stable source order rather than
+prepending or appending each PR's entries. In `architecture-rules.json`, retain
+one allowance per line and sort by `(source, kind, target, context, fingerprint)`.
+In `architecture-proofs.json`, sort proofs and buffer destructors by
+`(source, type_name)` and trait checks by `source`; type names use their Rust
+identity without a leading `r#` escape. Keep proof records multiline for review.
+The verifier rejects out-of-order records after its existing admission checks.
+Insert reviewed entries in their ordered position; retain every fingerprint,
+count, reason, signature, owning-child edge and destructor pin. Inventory commands
+remain read-only and never add or repair policy entries. The files and schemas
+are unchanged, and their bytes still bind the build/verification identity.
+Sorting spreads unrelated additions across their owning source sections; edits
+to the same record or nearby insertion point can still require a real merge.
+
 Private app migrations and company acceptance tests belong to downstream private
 repositories. Passing this public gate makes no claim about those applications.
 Linux kernel/runtime qualification is a separate native campaign documented in
