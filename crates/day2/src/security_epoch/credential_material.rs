@@ -3,12 +3,13 @@
 
 use super::{
     admission_work::{self, Bytes, Work},
+    controller::evidence::{PreparationFailure, PreparationStep},
     native_clock::NativeAcquisition,
-    transport::{NativeHttp, Route},
+    transport::{NativeHttp, Route, check_response_length, check_response_status},
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::security_epoch::EpochIam;
-use reqwest::{blocking::Client, header::HeaderValue};
+use reqwest::{StatusCode, blocking::Client, header::HeaderValue};
 use serde::Deserialize;
 use std::{io::Read, marker::PhantomData, rc::Rc, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
@@ -34,6 +35,14 @@ pub(super) struct CounterMaterial {
 // does not extend either bound or the actual credential expiry; delayed drain,
 // suspension or an earlier cap still makes re-admission refuse.
 const COUNTER_READMISSION_LEAD: Duration = Duration::from_secs(45);
+
+fn check_counter_response_status(status: StatusCode) -> Result<()> {
+    check_response_status(status, "epoch_counter_tokeninfo_status_or_bound")
+}
+
+fn check_counter_response_length(length: Option<u64>) -> Result<()> {
+    check_response_length(length, 16_384, "epoch_counter_tokeninfo_status_or_bound")
+}
 
 const _: () = {
     macro_rules! assert_not_impl {
@@ -190,17 +199,20 @@ impl CredentialMaterial {
                 .send()
                 .map_err(|_| anyhow::anyhow!("epoch_native_metadata_unavailable"))?;
             acquisition.remaining()?;
-            ensure!(
-                response.status().is_success()
-                    && response
-                        .headers()
-                        .get("Metadata-Flavor")
-                        .is_some_and(|value| value == "Google")
-                    && response
-                        .content_length()
-                        .is_none_or(|bytes| bytes <= 12_288),
-                "epoch_native_metadata_status_or_bound"
-            );
+            check_response_status(response.status(), "epoch_native_metadata_status_or_bound")?;
+            if !response
+                .headers()
+                .get("Metadata-Flavor")
+                .is_some_and(|value| value == "Google")
+            {
+                return Err(anyhow::anyhow!("epoch_native_metadata_status_or_bound")
+                    .context(super::transport::ResponseRefusal::MetadataFlavor));
+            }
+            check_response_length(
+                response.content_length(),
+                12_288,
+                "epoch_native_metadata_status_or_bound",
+            )?;
             let mut bytes = Zeroizing::new(Vec::new());
             let read = response
                 .take(12_289)
@@ -222,6 +234,7 @@ impl CredentialMaterial {
             work.finish(result.is_ok());
         }
         result
+            .map_err(|error| PreparationFailure::at(PreparationStep::CounterMetadataSource, error))
     }
 
     /// Successful authenticated mint for the immutable target is retained by
@@ -244,7 +257,7 @@ impl CredentialMaterial {
         if result.is_err() {
             acquisition.refuse();
         }
-        result
+        result.map_err(|error| PreparationFailure::at(PreparationStep::CounterIamMint, error))
     }
 
     /// Consume the actual minted token after the full caller's identity and
@@ -291,13 +304,8 @@ impl CredentialMaterial {
                 .send()
                 .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_unavailable"))?;
             acquisition.remaining()?;
-            ensure!(
-                response.status().is_success()
-                    && response
-                        .content_length()
-                        .is_none_or(|bytes| bytes <= 16_384),
-                "epoch_counter_tokeninfo_status_or_bound"
-            );
+            check_counter_response_status(response.status())?;
+            check_counter_response_length(response.content_length())?;
             let mut bytes = Zeroizing::new(Vec::new());
             let read = response
                 .take(16_385)
@@ -328,7 +336,7 @@ impl CredentialMaterial {
         if let Some(mut work) = work {
             work.finish(result.is_ok());
         }
-        result
+        result.map_err(|error| PreparationFailure::at(PreparationStep::CounterTokenInfo, error))
     }
 
     fn metadata_reply(bytes: &[u8]) -> Result<Self> {
@@ -446,7 +454,138 @@ impl Drop for MintReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security_epoch::transport::ResponseRefusal as CounterResponseRefusal;
     use day2_capabilities::Digest;
+
+    #[test]
+    fn counter_response_metadata_preserves_status_and_length_acceptance() {
+        for code in 100..=599 {
+            let status = StatusCode::from_u16(code).unwrap();
+            for length in [None, Some(0), Some(16_384), Some(16_385), Some(u64::MAX)] {
+                let actual = check_counter_response_status(status)
+                    .and_then(|()| check_counter_response_length(length));
+                assert_eq!(
+                    actual.is_ok(),
+                    status.is_success() && length.is_none_or(|bytes| bytes <= 16_384)
+                );
+                if let Err(error) = actual {
+                    assert_eq!(
+                        error.downcast_ref::<&'static str>(),
+                        Some(&"epoch_counter_tokeninfo_status_or_bound")
+                    );
+                    let observed = *error.downcast_ref::<CounterResponseRefusal>().unwrap();
+                    if status.is_success() {
+                        assert_eq!(observed, CounterResponseRefusal::DeclaredLengthBound);
+                    } else {
+                        assert_ne!(observed, CounterResponseRefusal::DeclaredLengthBound);
+                    }
+                    assert_eq!(error.to_string(), "response metadata refused");
+                }
+            }
+        }
+        for (code, expected) in [
+            (400, CounterResponseRefusal::BadRequest),
+            (401, CounterResponseRefusal::Unauthorized),
+            (403, CounterResponseRefusal::Forbidden),
+            (404, CounterResponseRefusal::NotFound),
+            (405, CounterResponseRefusal::MethodNotAllowed),
+            (408, CounterResponseRefusal::RequestTimeout),
+            (429, CounterResponseRefusal::RateLimited),
+            (500, CounterResponseRefusal::ServerError),
+            (599, CounterResponseRefusal::ServerError),
+            (302, CounterResponseRefusal::OtherStatus),
+            (418, CounterResponseRefusal::OtherStatus),
+        ] {
+            let error =
+                check_counter_response_status(StatusCode::from_u16(code).unwrap()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CounterResponseRefusal>(),
+                Some(&expected)
+            );
+        }
+    }
+
+    fn counter_response_guards_precede_body_read(source: &str) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                syn::visit::visit_expr_call(self, call);
+                if let syn::Expr::Path(path) = &*call.func {
+                    if let Some(name) = path.path.get_ident() {
+                        self.0.push(name.to_string());
+                    }
+                }
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                syn::visit::visit_expr_method_call(self, call);
+                self.0.push(call.method.to_string());
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let body=file.items.iter().find_map(|item| {
+            let syn::Item::Impl(item)=item else { return None; };
+            if !matches!(&*item.self_ty,syn::Type::Path(path) if path.path.is_ident("CredentialMaterial")) { return None; }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident=="admit_counter" => Some(&function.block),
+                _ => None,
+            })
+        }).unwrap();
+        let mut calls = Calls::default();
+        calls.visit_block(body);
+        let selected = calls
+            .0
+            .iter()
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "send"
+                        | "status"
+                        | "check_counter_response_status"
+                        | "content_length"
+                        | "check_counter_response_length"
+                        | "take"
+                        | "read_to_end"
+                )
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        selected
+            == [
+                "send",
+                "status",
+                "check_counter_response_status",
+                "content_length",
+                "check_counter_response_length",
+                "take",
+                "read_to_end",
+            ]
+    }
+
+    #[test]
+    fn actual_counter_transport_keeps_status_then_length_before_secret_body() {
+        let source = include_str!("credential_material.rs");
+        assert!(counter_response_guards_precede_body_read(source));
+        for label in [
+            "check_counter_response_status",
+            "check_counter_response_length",
+        ] {
+            let changed = source.replacen(
+                &format!("{label}(response."),
+                "unchecked_metadata(response.",
+                1,
+            );
+            assert_ne!(source, changed);
+            assert!(!counter_response_guards_precede_body_read(&changed));
+        }
+        let changed = source.replacen(
+            "check_counter_response_status(response.status())?;",
+            "check_counter_response_length(response.content_length())?;",
+            1,
+        );
+        assert!(!counter_response_guards_precede_body_read(&changed));
+    }
 
     fn selected_counter_account() -> EpochIam {
         EpochIam::GkeWorkloadIdentityV1 {

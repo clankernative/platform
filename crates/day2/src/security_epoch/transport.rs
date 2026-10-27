@@ -11,7 +11,7 @@ use day2_capabilities::{
     Digest,
     security_epoch::{EpochIam, EpochProvider, EpochStore, bootstrap::GkeClusterSelection},
 };
-use reqwest::{Method, blocking::Client, header::HeaderValue};
+use reqwest::{Method, StatusCode, blocking::Client, header::HeaderValue};
 use std::{io::Read, time::Duration};
 use url::Url;
 use zeroize::Zeroizing;
@@ -38,6 +38,59 @@ impl std::fmt::Display for FailedRequestWindow {
 }
 
 impl std::error::Error for FailedRequestWindow {}
+
+/// Closed response DATA only. Never stores a URL, query, header or body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResponseRefusal {
+    BadRequest,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    MethodNotAllowed,
+    RequestTimeout,
+    RateLimited,
+    ServerError,
+    OtherStatus,
+    DeclaredLengthBound,
+    MetadataFlavor,
+}
+
+impl std::fmt::Display for ResponseRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("response metadata refused")
+    }
+}
+
+impl std::error::Error for ResponseRefusal {}
+
+pub(super) fn check_response_status(status: StatusCode, original: &'static str) -> Result<()> {
+    if !status.is_success() {
+        let category = match status.as_u16() {
+            400 => ResponseRefusal::BadRequest,
+            401 => ResponseRefusal::Unauthorized,
+            403 => ResponseRefusal::Forbidden,
+            404 => ResponseRefusal::NotFound,
+            405 => ResponseRefusal::MethodNotAllowed,
+            408 => ResponseRefusal::RequestTimeout,
+            429 => ResponseRefusal::RateLimited,
+            500..=599 => ResponseRefusal::ServerError,
+            _ => ResponseRefusal::OtherStatus,
+        };
+        return Err(anyhow::anyhow!(original).context(category));
+    }
+    Ok(())
+}
+
+pub(super) fn check_response_length(
+    length: Option<u64>,
+    limit: u64,
+    original: &'static str,
+) -> Result<()> {
+    if !length.is_none_or(|bytes| bytes <= limit) {
+        return Err(anyhow::anyhow!(original).context(ResponseRefusal::DeclaredLengthBound));
+    }
+    Ok(())
+}
 
 impl FailedRequestWindow {
     pub(in crate::security_epoch) fn observe(error: &anyhow::Error) -> Option<Self> {
@@ -436,13 +489,12 @@ impl NativeHttp {
                 .context("epoch_native_transport_unavailable")
             })?;
             acquisition.remaining()?;
-            ensure!(
-                response.status().is_success()
-                    && response
-                        .content_length()
-                        .is_none_or(|bytes| bytes <= MAX_BYTES as u64),
-                "epoch_native_response_status_or_bound"
-            );
+            check_response_status(response.status(), "epoch_native_response_status_or_bound")?;
+            check_response_length(
+                response.content_length(),
+                MAX_BYTES as u64,
+                "epoch_native_response_status_or_bound",
+            )?;
             let mut bytes = Vec::new();
             let read = response
                 .take(MAX_BYTES as u64 + 1)

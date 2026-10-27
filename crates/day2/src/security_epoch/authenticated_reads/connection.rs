@@ -4,6 +4,7 @@
 
 use super::{AuthenticatedReads, ReadScope};
 use crate::security_epoch::{
+    controller::evidence::{PreparationFailure, PreparationStep},
     credential_material::CounterMaterial,
     firestore::{self, Budget, EpochObservation, EpochReply, Names, Port, Sample},
     native_clock::NativeAcquisition,
@@ -261,10 +262,20 @@ impl CounterConnectionSlot {
             anyhow::bail!("epoch_counter_connection_admission_already_attempted");
         }
         let result = (|| {
-            let connection = AuthenticatedReads::acquire(policy, store, purpose, stage)?
-                .into_counter_connection()?;
-            stage.check_current_selection(policy, store, purpose)?;
-            original.remaining()?;
+            let connection = AuthenticatedReads::acquire(policy, store, purpose, stage)
+                .map_err(|error| {
+                    PreparationFailure::at(PreparationStep::CounterProviderAcquire, error)
+                })?
+                .into_counter_connection()
+                .map_err(|error| PreparationFailure::at(PreparationStep::CounterMaterial, error))?;
+            stage
+                .check_current_selection(policy, store, purpose)
+                .map_err(|error| {
+                    PreparationFailure::at(PreparationStep::CounterStagePostcheck, error)
+                })?;
+            original.remaining().map_err(|error| {
+                PreparationFailure::at(PreparationStep::CounterOriginalPostcheck, error)
+            })?;
             Ok(connection)
         })();
         match result {

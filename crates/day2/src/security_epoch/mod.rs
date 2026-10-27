@@ -45,6 +45,7 @@ pub(crate) use bootstrap::{
     ActiveAppStorageContinuity, ActiveControllerStorageContinuity, AppStorageBootstrap,
     CurrentAppServingPhase,
 };
+pub(crate) use controller::evidence::CounterAdmissionResponseRefusal;
 pub(crate) use credential_material::CredentialMaterial;
 pub(crate) use firestore::EpochObservation;
 pub(crate) use native_clock::NativeAcquisition;

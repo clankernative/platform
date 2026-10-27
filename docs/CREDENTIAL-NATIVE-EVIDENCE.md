@@ -217,6 +217,37 @@ unwinding: there is no additional record, in-phase I/O, clock read, retry or
 change to any admission or serving deadline. An activation record followed by
 this refusal does not establish a usable counter connection or serving success.
 
+The cold connection's inner steps distinguish `counter_provider_acquire`
+(the complete provider authentication), `counter_metadata_source` (the actual
+metadata credential response), `counter_iam_mint` (the selected IAM mint),
+`counter_token_info` (introspection of
+the actual minted token), `counter_material` (remaining owner/material setup),
+`counter_stage_postcheck` and `counter_original_postcheck`. Earlier specific
+inner annotations still win. A tokeninfo status refusal exports only one closed
+category: bad request (400), unauthorized (401), forbidden (403), not found
+(404), method not allowed (405), request timeout (408), rate limited (429),
+server error (5xx), or other non-success status. These use the
+`response_` prefix. A successful status whose declared response length exceeds
+the unchanged bound has category `response_declared_length_bound` instead.
+No response headers, declared lengths, URLs, query parameters, tokens, provider
+bodies or transport error strings are retained or exported. The original fixed
+internal status-or-bound error remains in the chain. Unknown status metadata
+does not become a guessed code, a changed token binding or a new permission.
+The same closed categories distinguish status from declared length at the
+existing metadata and native-provider response guards. Metadata additionally
+distinguishes a failed required flavor check as `response_metadata_flavor`;
+no header value is exported. The provider producer alone does not identify a
+particular native route. The old combined category remains valid for historical
+records and is not retroactively reinterpreted as a tokeninfo failure.
+
+The App caller can project the actual annotated error into only closed
+`producer` and `category` fields. Its `provider`, `metadata`, `mint`, `token_info`,
+`material`, `stage` and `original` producer names correspond to the actual inner
+step; unannotated, unrelated or `other` errors provide no projection. This
+read-only DATA does not serialize the underlying error or construct authority.
+An App refusal must be attributed to its own error; another executor's category
+does not establish that both failed at the same producer.
+
 The fixed Compute instance GET requests only
 `id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
 [partial-response fields parameter](https://docs.cloud.google.com/compute/docs/api/how-tos/performance).

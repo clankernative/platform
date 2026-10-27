@@ -195,6 +195,13 @@ pub(in crate::security_epoch) enum PreparationStep {
     CounterStage,
     CounterAdmit,
     CounterPhysicalFinish,
+    CounterProviderAcquire,
+    CounterMetadataSource,
+    CounterIamMint,
+    CounterTokenInfo,
+    CounterMaterial,
+    CounterStagePostcheck,
+    CounterOriginalPostcheck,
 }
 
 /// Cumulative microseconds from the last successful samples of the SAME
@@ -254,6 +261,17 @@ pub(super) enum PreparationErrorCategory {
     #[cfg(target_os = "linux")]
     PacketDescriptorNotCloexec,
     ResponseStatusOrBound,
+    ResponseBadRequest,
+    ResponseUnauthorized,
+    ResponseForbidden,
+    ResponseNotFound,
+    ResponseMethodNotAllowed,
+    ResponseRequestTimeout,
+    ResponseRateLimited,
+    ResponseServerError,
+    ResponseOtherStatus,
+    ResponseDeclaredLengthBound,
+    ResponseMetadataFlavor,
     AdmissionRejected,
     PermissionDenied,
     NotFound,
@@ -273,6 +291,57 @@ pub(in crate::security_epoch) struct PreparationFailure {
     progress: Option<PreparationProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request: Option<FailedRequestWindow>,
+}
+
+/// Read-only projection of an actual annotated cold-admission failure. These
+/// private closed fields cannot carry a provider error, URL, credential or body.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct CounterAdmissionResponseRefusal {
+    producer: CounterAdmissionProducer,
+    category: PreparationErrorCategory,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CounterAdmissionProducer {
+    Provider,
+    Metadata,
+    Mint,
+    TokenInfo,
+    Material,
+    Stage,
+    Original,
+}
+
+impl CounterAdmissionResponseRefusal {
+    pub(crate) fn observe(error: &anyhow::Error) -> Option<Self> {
+        let context = error.downcast_ref::<PreparationFailure>()?;
+        if context.category == PreparationErrorCategory::Other {
+            return None;
+        }
+        let producer = match context.step {
+            PreparationStep::CounterProviderAcquire => CounterAdmissionProducer::Provider,
+            PreparationStep::CounterMetadataSource => CounterAdmissionProducer::Metadata,
+            PreparationStep::CounterIamMint => CounterAdmissionProducer::Mint,
+            PreparationStep::CounterTokenInfo => CounterAdmissionProducer::TokenInfo,
+            PreparationStep::CounterMaterial => CounterAdmissionProducer::Material,
+            PreparationStep::CounterStagePostcheck => CounterAdmissionProducer::Stage,
+            PreparationStep::CounterOriginalPostcheck => CounterAdmissionProducer::Original,
+            _ => return None,
+        };
+        Some(Self {
+            producer,
+            category: context.category,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn maximal_fixture() -> Self {
+        Self {
+            producer: CounterAdmissionProducer::TokenInfo,
+            category: PreparationErrorCategory::ResponseDeclaredLengthBound,
+        }
+    }
 }
 
 impl std::fmt::Display for PreparationFailure {
@@ -330,7 +399,23 @@ impl PreparationFailure {
 }
 
 pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationErrorCategory {
+    use crate::security_epoch::transport::ResponseRefusal as Counter;
     use PreparationErrorCategory as Category;
+    if let Some(counter) = error.downcast_ref::<Counter>() {
+        return match counter {
+            Counter::BadRequest => Category::ResponseBadRequest,
+            Counter::Unauthorized => Category::ResponseUnauthorized,
+            Counter::Forbidden => Category::ResponseForbidden,
+            Counter::NotFound => Category::ResponseNotFound,
+            Counter::MethodNotAllowed => Category::ResponseMethodNotAllowed,
+            Counter::RequestTimeout => Category::ResponseRequestTimeout,
+            Counter::RateLimited => Category::ResponseRateLimited,
+            Counter::ServerError => Category::ResponseServerError,
+            Counter::OtherStatus => Category::ResponseOtherStatus,
+            Counter::DeclaredLengthBound => Category::ResponseDeclaredLengthBound,
+            Counter::MetadataFlavor => Category::ResponseMetadataFlavor,
+        };
+    }
     // Inspect only stored message DATA against a closed list. Never format the
     // error, walk Display causes, or emit an unrecognized string.
     let code = error
@@ -2786,6 +2871,107 @@ mod tests {
             PreparationStep::VolumeCurrent
         );
         assert!(outer.downcast_ref::<MustNotDisplay>().is_some());
+    }
+
+    #[test]
+    fn counter_http_refusal_exports_only_typed_status_or_declared_bound() {
+        use crate::security_epoch::transport::ResponseRefusal as Counter;
+        for (refusal, expected) in [
+            (Counter::BadRequest, "response_bad_request"),
+            (Counter::Unauthorized, "response_unauthorized"),
+            (Counter::Forbidden, "response_forbidden"),
+            (Counter::NotFound, "response_not_found"),
+            (Counter::MethodNotAllowed, "response_method_not_allowed"),
+            (Counter::RequestTimeout, "response_request_timeout"),
+            (Counter::RateLimited, "response_rate_limited"),
+            (Counter::ServerError, "response_server_error"),
+            (Counter::OtherStatus, "response_other_status"),
+            (
+                Counter::DeclaredLengthBound,
+                "response_declared_length_bound",
+            ),
+            (Counter::MetadataFlavor, "response_metadata_flavor"),
+        ] {
+            let error = anyhow::Error::new(MustNotDisplay).context(refusal);
+            let error = PreparationFailure::at(PreparationStep::CounterTokenInfo, error);
+            let error = PreparationFailure::at(PreparationStep::CounterAdmit, error);
+            assert!(error.downcast_ref::<MustNotDisplay>().is_some());
+            let (mut recorder, ..) = fixture();
+            recorder.enrolled(Digest::new(b"Controller")).unwrap();
+            recorder.enter(FailurePhase::CounterAdmission);
+            recorder.refuse(Some(&error)).unwrap();
+            let rows = records(&recorder.output);
+            assert_eq!(
+                rows[1]["observation"],
+                serde_json::json!({
+                    "event":"refused","at":"counter_admission",
+                    "preparation":{"step":"counter_token_info","category":expected}
+                })
+            );
+            let text = std::str::from_utf8(&recorder.output).unwrap();
+            for private in [
+                "MustNotDisplay",
+                "access_token",
+                "https://",
+                "Bearer",
+                "response body",
+            ] {
+                assert!(!text.contains(private));
+            }
+            assert!(recorder.refused && !recorder.activated && recorder.serving == [false; 2]);
+        }
+        // Matching text is not a typed transport observation.
+        let error = anyhow::anyhow!("response_forbidden https://private/?access_token=PRIVATE");
+        assert_eq!(
+            preparation_error_category(&error),
+            PreparationErrorCategory::Other
+        );
+    }
+
+    #[test]
+    fn app_counter_projection_requires_actual_known_cold_context() {
+        use crate::security_epoch::transport::ResponseRefusal;
+        let maximal = serde_json::to_vec(&CounterAdmissionResponseRefusal::maximal_fixture())
+            .unwrap()
+            .len();
+        for (step, producer) in [
+            (PreparationStep::CounterProviderAcquire, "provider"),
+            (PreparationStep::CounterMetadataSource, "metadata"),
+            (PreparationStep::CounterIamMint, "mint"),
+            (PreparationStep::CounterTokenInfo, "token_info"),
+            (PreparationStep::CounterMaterial, "material"),
+            (PreparationStep::CounterStagePostcheck, "stage"),
+            (PreparationStep::CounterOriginalPostcheck, "original"),
+        ] {
+            let error =
+                anyhow::Error::new(MustNotDisplay).context(ResponseRefusal::DeclaredLengthBound);
+            let error = PreparationFailure::at(step, error);
+            let observed = CounterAdmissionResponseRefusal::observe(&error).unwrap();
+            let json = serde_json::to_value(observed).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({"producer":producer,"category":"response_declared_length_bound"})
+            );
+            assert!(serde_json::to_vec(&observed).unwrap().len() <= maximal);
+            let unknown = PreparationFailure::at(step, anyhow::Error::new(MustNotDisplay));
+            assert!(CounterAdmissionResponseRefusal::observe(&unknown).is_none());
+        }
+        for step in [
+            PreparationStep::Unknown,
+            PreparationStep::CounterAdmit,
+            PreparationStep::BootstrapTransport,
+            PreparationStep::CounterPhysicalAcquire,
+        ] {
+            let error = anyhow::Error::new(MustNotDisplay).context(ResponseRefusal::Forbidden);
+            let error = PreparationFailure::at(step, error);
+            assert!(CounterAdmissionResponseRefusal::observe(&error).is_none());
+        }
+        assert!(
+            CounterAdmissionResponseRefusal::observe(&anyhow::anyhow!(
+                "counter_token_info response_forbidden https://private/?access_token=PRIVATE"
+            ))
+            .is_none()
+        );
     }
 
     fn cold_counter_boundaries_follow_activation(source: &str) -> bool {
