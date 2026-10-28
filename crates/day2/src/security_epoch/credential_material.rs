@@ -264,7 +264,7 @@ impl CredentialMaterial {
     }
 
     /// Consume the actual minted token after the full caller's identity and
-    /// recipient joins. The fixed authenticated v2 tokeninfo response supplies
+    /// recipient joins. The fixed service-account tokeninfo response supplies
     /// remaining seconds, not an invented UTC/BOOTTIME mapping or the requested
     /// mint lifetime. The caller retains the resulting secret in its real
     /// connection; neither parser DATA nor this material constructs that owner.
@@ -281,12 +281,11 @@ impl CredentialMaterial {
             // The documented endpoint requires a query parameter. Keep its
             // transient secret URL inside this closed transport and discard
             // every reqwest/URL/body error without formatting or chaining it.
-            let mut address = url::Url::parse("https://www.googleapis.com/oauth2/v2/tokeninfo")
+            let mut address = url::Url::parse("https://oauth2.googleapis.com/tokeninfo")
                 .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_address"))?;
             address
                 .query_pairs_mut()
-                .append_pair("access_token", self.subject_text()?)
-                .append_pair("fields", "audience,issued_to,expires_in,scope");
+                .append_pair("access_token", self.subject_text()?);
             let client = Client::builder()
                 .https_only(true)
                 .no_proxy()
@@ -299,12 +298,8 @@ impl CredentialMaterial {
                 .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_transport"))?;
             let remaining = acquisition.remaining()?.min(Duration::from_secs(5));
             let request = client
-                .post(address)
+                .get(address)
                 .header(reqwest::header::CACHE_CONTROL, "no-store")
-                // This query-only POST has no body. The pinned blocking
-                // client does not frame body=None itself; explicitly send
-                // its true zero length (RFC 9110 sections 8.6 and 15.5.12).
-                .header(reqwest::header::CONTENT_LENGTH, "0")
                 .timeout(remaining);
             work = Some(admission_work::begin(Work::CredentialAdmission));
             let response = request
@@ -409,9 +404,9 @@ struct MintReply {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterTokenInfo {
-    audience: String,
-    issued_to: String,
-    expires_in: i32,
+    aud: String,
+    azp: String,
+    expires_in: String,
     scope: String,
 }
 
@@ -422,22 +417,56 @@ fn counter_token_remaining(bytes: &[u8], selected: &EpochIam) -> Result<u32> {
     );
     // A derived struct can also accept an array through a Value deserializer.
     // Admit only an object, with duplicate rejection in the bounded decoder.
-    let object: serde_json::Map<String, serde_json::Value> =
+    let mut object: serde_json::Map<String, serde_json::Value> =
         crate::json::decode(bytes).map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_shape"))?;
+    let EpochIam::GkeWorkloadIdentityV1 {
+        service_account,
+        service_account_uid,
+    } = selected;
+    // The canonical service-account response has no documented v2 fields
+    // selector. Admit only its documented optional metadata, with strict wire
+    // types and bounds. None supplies expiry, authority or a UTC mapping.
+    for name in ["exp", "email", "email_verified", "access_type"] {
+        if let Some(value) = object.remove(name) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("epoch_counter_tokeninfo_shape"))?;
+            let valid = match name {
+                "exp" => {
+                    !value.is_empty()
+                        && value.len() <= 20
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                        && value.parse::<u64>().is_ok()
+                }
+                "email" => value.len() <= 320 && value == service_account,
+                "email_verified" => value == "true",
+                "access_type" => value == "online",
+                _ => false,
+            };
+            ensure!(valid, "epoch_counter_tokeninfo_metadata");
+        }
+    }
     let info: CounterTokenInfo = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_shape"))?;
-    let EpochIam::GkeWorkloadIdentityV1 {
-        service_account_uid,
-        ..
-    } = selected;
     ensure!(
-        info.audience == service_account_uid.as_str()
-            && info.issued_to == service_account_uid.as_str()
+        !info.expires_in.is_empty()
+            && info.expires_in.len() <= 3
+            && !info.expires_in.starts_with('0')
+            && info.expires_in.bytes().all(|byte| byte.is_ascii_digit()),
+        "epoch_counter_tokeninfo_expiry"
+    );
+    let seconds = info
+        .expires_in
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("epoch_counter_tokeninfo_expiry"))?;
+    ensure!(
+        info.aud == service_account_uid.as_str()
+            && info.azp == service_account_uid.as_str()
             && info.scope == "https://www.googleapis.com/auth/datastore"
-            && (2..=300).contains(&info.expires_in),
+            && (2..=300).contains(&seconds),
         "epoch_counter_tokeninfo_binding_or_expiry"
     );
-    Ok(u32::try_from(info.expires_in)?)
+    Ok(seconds)
 }
 
 // Arithmetic DATA only. The sole production caller supplies its actual
@@ -567,7 +596,7 @@ mod tests {
                 Some(&block.block)
             })
             .unwrap();
-        let framed_request = actual.stmts.iter().any(|statement| {
+        let canonical_request = actual.stmts.iter().any(|statement| {
             fn variable(value: &syn::Expr, name: &str) -> bool {
                 matches!(value,syn::Expr::Path(path) if path.path.is_ident(name))
             }
@@ -584,13 +613,38 @@ mod tests {
             let Some(init)=&local.init else { return false; };
             let syn::Expr::MethodCall(timeout)=&*init.expr else { return false; };
             if timeout.method!="timeout" || timeout.args.len()!=1 || !variable(&timeout.args[0],"remaining")
-                || !header(&timeout.receiver,"CONTENT_LENGTH","0") { return false; }
-            let syn::Expr::MethodCall(length)=&*timeout.receiver else { return false; };
-            if !header(&length.receiver,"CACHE_CONTROL","no-store") { return false; }
-            let syn::Expr::MethodCall(cache)=&*length.receiver else { return false; };
-            matches!(&*cache.receiver,syn::Expr::MethodCall(post)
-                if post.method=="post" && post.args.len()==1 && variable(&post.args[0],"address")
-                    && variable(&post.receiver,"client"))
+                || !header(&timeout.receiver,"CACHE_CONTROL","no-store") { return false; }
+            let syn::Expr::MethodCall(cache)=&*timeout.receiver else { return false; };
+            matches!(&*cache.receiver,syn::Expr::MethodCall(get)
+                if get.method=="get" && get.args.len()==1 && variable(&get.args[0],"address")
+                    && variable(&get.receiver,"client"))
+        });
+        let canonical_address = actual.stmts.iter().any(|statement| {
+            let syn::Stmt::Local(local) = statement else { return false; };
+            if !matches!(&local.pat,syn::Pat::Ident(name) if name.ident=="address") { return false; }
+            let Some(init)=&local.init else { return false; };
+            let syn::Expr::Try(attempt)=&*init.expr else { return false; };
+            let syn::Expr::MethodCall(mapped)=&*attempt.expr else { return false; };
+            let syn::Expr::Call(parse)=&*mapped.receiver else { return false; };
+            mapped.method=="map_err"
+                && matches!(&*parse.func,syn::Expr::Path(path)
+                    if path.path.segments.iter().map(|part|part.ident.to_string()).collect::<Vec<_>>()==["url","Url","parse"])
+                && parse.args.len()==1
+                && matches!(&parse.args[0],syn::Expr::Lit(literal)
+                    if matches!(&literal.lit,syn::Lit::Str(text) if text.value()=="https://oauth2.googleapis.com/tokeninfo"))
+        });
+        let canonical_query = actual.stmts.iter().any(|statement| {
+            let syn::Stmt::Expr(syn::Expr::MethodCall(pair),Some(_))=statement else { return false; };
+            let syn::Expr::MethodCall(query)=&*pair.receiver else { return false; };
+            pair.method=="append_pair" && pair.args.len()==2
+                && matches!(&pair.args[0],syn::Expr::Lit(literal)
+                    if matches!(&literal.lit,syn::Lit::Str(text) if text.value()=="access_token"))
+                && matches!(&pair.args[1],syn::Expr::Try(attempt)
+                    if matches!(&*attempt.expr,syn::Expr::MethodCall(subject)
+                        if subject.method=="subject_text" && subject.args.is_empty()
+                            && matches!(&*subject.receiver,syn::Expr::Path(path) if path.path.is_ident("self"))))
+                && query.method=="query_pairs_mut" && query.args.is_empty()
+                && matches!(&*query.receiver,syn::Expr::Path(path) if path.path.is_ident("address"))
         });
         let checked = |name: &str, receiver_method: &str| {
             actual.stmts.iter().position(|statement| {
@@ -631,7 +685,9 @@ mod tests {
             })
             .map(String::as_str)
             .collect::<Vec<_>>();
-        framed_request
+        canonical_request
+            && canonical_address
+            && canonical_query
             && matches!((checked("check_counter_response_status","status"),
             checked("check_counter_response_length","content_length"),read),
             (Some(status),Some(length),Some(read)) if status<length && length<read)
@@ -686,16 +742,24 @@ mod tests {
     }
 
     #[test]
-    fn actual_tokeninfo_post_requires_truthful_zero_framing_and_original_method() {
+    fn actual_tokeninfo_uses_only_canonical_access_token_get_and_original_timeout() {
         let source = include_str!("credential_material.rs");
         assert!(counter_response_guards_precede_body_read(source));
         for (from, to) in [
-            (".header(reqwest::header::CONTENT_LENGTH, \"0\")", ""),
             (
-                ".header(reqwest::header::CONTENT_LENGTH, \"0\")",
-                ".header(reqwest::header::CONTENT_LENGTH, \"1\")",
+                "https://oauth2.googleapis.com/tokeninfo",
+                "https://www.googleapis.com/oauth2/v2/tokeninfo",
             ),
-            (".post(address)", ".get(address)"),
+            (".get(address)", ".post(address)"),
+            (
+                ".append_pair(\"access_token\", self.subject_text()?)",
+                ".append_pair(\"id_token\", self.subject_text()?)",
+            ),
+            (
+                ".append_pair(\"access_token\", self.subject_text()?)",
+                ".append_pair(\"access_token\", self.subject_text()?).append_pair(\"fields\", \"aud,azp,scope,expires_in\")",
+            ),
+            (".timeout(remaining)", ".timeout(Duration::from_secs(5))"),
         ] {
             let changed = source.replacen(from, to, 1);
             assert_ne!(source, changed);
@@ -704,11 +768,11 @@ mod tests {
     }
 
     #[test]
-    fn pinned_bodyless_post_wire_distinguishes_absent_length_from_explicit_zero() -> Result<()> {
+    fn pinned_canonical_tokeninfo_get_wire_has_only_the_access_token_query() -> Result<()> {
         use std::{io::Write, net::TcpListener, time::Instant};
         // Local public dummy only. This exercises the pinned client's HTTP/1
-        // framing, not TLS, a provider, an enrolled owner or token validity.
-        for framed in [false, true] {
+        // method/query, not TLS, a provider, an enrolled owner or token validity.
+        {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
             let address = listener.local_addr()?;
             listener.set_nonblocking(true)?;
@@ -720,7 +784,7 @@ mod tests {
                 .connect_timeout(Duration::from_secs(2))
                 .build()?;
             std::thread::scope(|threads| -> Result<()> {
-                let server=threads.spawn(move || -> Result<(bool,bool)> {
+                let server=threads.spawn(move || -> Result<()> {
                     let deadline=Instant::now()+Duration::from_secs(5);
                     let mut socket=loop {
                         match listener.accept() {
@@ -741,36 +805,26 @@ mod tests {
                     }
                     ensure!(header.ends_with(b"\r\n\r\n"),"dummy header bound");
                     let header=std::str::from_utf8(&header)?;
-                    let lengths=header.lines().filter_map(|line| {
-                        let (name,value)=line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length").then_some(value.trim())
-                    }).collect::<Vec<_>>();
-                    let zero=lengths==["0"];
-                    let transfer=header.lines().any(|line| line.split_once(':')
-                        .is_some_and(|(name,_)|name.eq_ignore_ascii_case("transfer-encoding")));
-                    let reply=if zero {
-                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
-                    } else {
-                        b"HTTP/1.1 411 Length Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
-                    };
-                    socket.write_all(reply)?;
-                    Ok((zero,transfer))
+                    let mut first=header.lines().next().unwrap().split_whitespace();
+                    ensure!(first.next()==Some("GET"),"dummy method");
+                    let target=first.next().ok_or_else(||anyhow::anyhow!("dummy target"))?;
+                    let url=url::Url::parse(&format!("http://127.0.0.1{target}"))?;
+                    ensure!(url.path()=="/tokeninfo","dummy path");
+                    let pairs=url.query_pairs().collect::<Vec<_>>();
+                    ensure!(pairs.len()==1 && pairs[0].0=="access_token" && pairs[0].1=="public-wire-fixture-not-a-credential","dummy query");
+                    ensure!(!header.lines().any(|line|line.split_once(':').is_some_and(|(name,_)|
+                        name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("authorization"))),"dummy body or authorization");
+                    socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+                    Ok(())
                 });
-                let request=client.post(format!("http://{address}/oauth2/v2/tokeninfo?access_token=public-wire-fixture-not-a-credential"))
+                let request=client.get(format!("http://{address}/tokeninfo?access_token=public-wire-fixture-not-a-credential"))
                     .header(reqwest::header::CACHE_CONTROL,"no-store").timeout(Duration::from_secs(5));
-                let request = if framed {
-                    request.header(reqwest::header::CONTENT_LENGTH, "0")
-                } else {
-                    request
-                };
                 let response = request.send();
-                let (zero, transfer) = server
+                server
                     .join()
                     .map_err(|_| anyhow::anyhow!("dummy server panicked"))??;
                 let response = response?;
-                assert_eq!(zero, framed);
-                assert!(!transfer);
-                assert_eq!(response.status().as_u16(), if framed { 400 } else { 411 });
+                assert_eq!(response.status().as_u16(), 400);
                 Ok(())
             })?;
         }
@@ -789,9 +843,9 @@ mod tests {
         // Provider response DATA only; none constructs an admitted connection.
         let selected = selected_counter_account();
         let good = serde_json::json!({
-            "audience":"100000000000000000007",
-            "issued_to":"100000000000000000007",
-            "expires_in":300,
+            "aud":"100000000000000000007",
+            "azp":"100000000000000000007",
+            "expires_in":"300",
             "scope":"https://www.googleapis.com/auth/datastore"
         });
         assert_eq!(
@@ -799,8 +853,8 @@ mod tests {
             300
         );
         for (key, value) in [
-            ("audience", serde_json::json!("100000000000000000008")),
-            ("issued_to", serde_json::json!("100000000000000000008")),
+            ("aud", serde_json::json!("100000000000000000008")),
+            ("azp", serde_json::json!("100000000000000000008")),
             (
                 "scope",
                 serde_json::json!("https://www.googleapis.com/auth/cloud-platform"),
@@ -813,7 +867,21 @@ mod tests {
             ("expires_in", serde_json::json!(1)),
             ("expires_in", serde_json::json!(-1)),
             ("expires_in", serde_json::json!(301)),
-            ("expires_in", serde_json::json!("300")),
+            ("expires_in", serde_json::json!(300)),
+            ("expires_in", serde_json::json!("0")),
+            ("expires_in", serde_json::json!("1")),
+            ("expires_in", serde_json::json!("301")),
+            ("expires_in", serde_json::json!("-1")),
+            ("expires_in", serde_json::json!("+2")),
+            ("expires_in", serde_json::json!("2.0")),
+            ("expires_in", serde_json::json!("2e2")),
+            ("expires_in", serde_json::json!(" 2")),
+            ("expires_in", serde_json::json!("02")),
+            ("expires_in", serde_json::json!("")),
+            (
+                "expires_in",
+                serde_json::json!("999999999999999999999999999"),
+            ),
             ("expires_in", serde_json::json!(null)),
             ("extra", serde_json::json!("controlled-secret")),
         ] {
@@ -823,7 +891,7 @@ mod tests {
                 .unwrap_err();
             assert!(!format!("{error:#}").contains("controlled-secret"));
         }
-        for key in ["audience", "issued_to", "scope", "expires_in"] {
+        for key in ["aud", "azp", "scope", "expires_in"] {
             let mut changed = good.clone();
             changed.as_object_mut().unwrap().remove(key);
             assert!(
@@ -831,7 +899,9 @@ mod tests {
             );
         }
         for bad in [
-            br#"{"audience":"100000000000000000007","issued_to":"100000000000000000007","expires_in":300,"expires_in":299,"scope":"https://www.googleapis.com/auth/datastore"}"#.as_slice(),
+            br#"{"aud":"100000000000000000007","azp":"100000000000000000007","expires_in":"300","expires_in":"299","scope":"https://www.googleapis.com/auth/datastore"}"#.as_slice(),
+            br#"{"aud":"100000000000000000007","\u0061ud":"100000000000000000008","azp":"100000000000000000007","expires_in":"300","scope":"https://www.googleapis.com/auth/datastore"}"#,
+            br#"{"audience":"100000000000000000007","issued_to":"100000000000000000007","expires_in":300,"scope":"https://www.googleapis.com/auth/datastore"}"#,
             b"[]", b"controlled-secret",
             br#"["100000000000000000007","100000000000000000007",300,"https://www.googleapis.com/auth/datastore"]"#,
         ] {
@@ -839,6 +909,63 @@ mod tests {
             assert!(!format!("{error:#}").contains("controlled-secret"));
         }
         assert!(counter_token_remaining(&vec![b' '; 16_385], &selected).is_err());
+    }
+
+    #[test]
+    fn canonical_counter_metadata_is_bounded_typed_and_never_an_expiry_fallback() {
+        let selected = selected_counter_account();
+        let full = serde_json::json!({
+            "aud":"100000000000000000007", "azp":"100000000000000000007",
+            "scope":"https://www.googleapis.com/auth/datastore", "expires_in":"2",
+            "exp":"1744687132", "email":"counter@selected-project.iam.gserviceaccount.com",
+            "email_verified":"true", "access_type":"online"
+        });
+        let remaining = |value: &serde_json::Value| {
+            counter_token_remaining(&serde_json::to_vec(value).unwrap(), &selected)
+        };
+        assert_eq!(remaining(&full).unwrap(), 2);
+        let mut changed = full.clone();
+        changed["exp"] = serde_json::json!("18446744073709551615");
+        assert_eq!(remaining(&changed).unwrap(), 2);
+        changed.as_object_mut().unwrap().remove("expires_in");
+        assert!(remaining(&changed).is_err());
+        for (name, value) in [
+            ("exp", serde_json::json!(1744687132)),
+            ("exp", serde_json::json!("18446744073709551616")),
+            ("exp", serde_json::json!("+123")),
+            (
+                "email",
+                serde_json::json!("foreign@other.iam.gserviceaccount.com"),
+            ),
+            ("email_verified", serde_json::json!(true)),
+            ("access_type", serde_json::json!("offline")),
+            ("audience", serde_json::json!("100000000000000000007")),
+            ("issued_to", serde_json::json!("100000000000000000007")),
+            ("id_token", serde_json::json!("controlled-secret")),
+            ("error_description", serde_json::json!("controlled-secret")),
+        ] {
+            let mut changed = full.clone();
+            changed[name] = value;
+            let error = remaining(&changed).unwrap_err();
+            assert!(!format!("{error:#}").contains("controlled-secret"));
+        }
+        for name in ["exp", "email", "email_verified", "access_type"] {
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!([]),
+                serde_json::json!({}),
+                serde_json::json!("controlled-secret".repeat(1000)),
+            ] {
+                let mut changed = full.clone();
+                changed[name] = value;
+                let error = remaining(&changed).unwrap_err();
+                assert!(!format!("{error:#}").contains("controlled-secret"));
+            }
+        }
+        let duplicate = serde_json::to_string(&full)
+            .unwrap()
+            .replacen("{", "{\"exp\":\"1\",", 1);
+        assert!(counter_token_remaining(duplicate.as_bytes(), &selected).is_err());
     }
 
     #[test]

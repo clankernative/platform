@@ -248,21 +248,29 @@ read-only DATA does not serialize the underlying error or construct authority.
 An App refusal must be attributed to its own error; another executor's category
 does not establish that both failed at the same producer.
 
-Token introspection retains the fixed
-[`oauth2:v2` POST endpoint and query parameters](https://www.googleapis.com/discovery/v1/apis/oauth2/v2/rest).
-Its body is empty and is explicitly framed with `Content-Length: 0` on that
-request only. The pinned blocking client does not add the header for `body=None`
-on its HTTP/1 path. [RFC 9110 section 8.6](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6)
-recommends the length on POST even when zero;
-[section 15.5.12](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.12)
-defines length-required refusal. This does not add token bytes to the body,
-change the recipient/method/field selection, enable redirects/retries, or alter
-the original interval and expiry checks. `response_length_required` identifies
-a newly observed 411 only. A historical `response_other_status` does not prove
-411 or establish that missing framing caused that native refusal. Native34's
-actual HTTP status is unknown; both its App and Controller records retain
-`response_other_status`. The local loopback dummy-client tests qualify framing
-only, not provider or token admission or a successful native rerun.
+Cold admission introspects its actual minted service-account access token with
+the [documented service-account tokeninfo API](https://docs.cloud.google.com/docs/authentication/token-types#service_account_access_tokens):
+one GET to `https://oauth2.googleapis.com/tokeninfo`, with `access_token` in the
+query and no body. There is no v2 partial-response selector, endpoint fallback,
+retry or ID-token interpretation. Both `aud` and `azp` must equal the selected
+GSA's unique ID; scope must be exactly datastore. The remaining lifetime is a
+strict decimal `expires_in` string in 2–300 seconds. Documented optional
+service-account metadata has bounded string types: `exp` is unsigned decimal
+DATA only, `email` must match the selected GSA, `email_verified` must be `true`,
+and `access_type` must be `online`. Unknown fields, duplicate keys, old/mixed
+schemas and malformed/oversized input refuse. No absolute `exp`, caller UTC or
+requested mint lifetime can replace missing relative lifetime. The same
+pre-introspection BOOTTIME sample, transport debit, one-second quantization
+debit, original five-second ceiling and final owner/cap checks remain.
+
+Native34's actual HTTP status remains unknown; both App and Controller records
+retain `response_other_status`. Native35 separately observed tokeninfo 400 in
+both executors, before response parsing; the body and precise cause were not
+captured. Its v2 request matched published Discovery, so the in-place move to
+the currently documented service-account contract does not establish Native35's
+cause or a fix. `response_length_required` identifies an actually observed 411
+only. The local loopback dummy-client and actual-builder mutation tests qualify
+request wiring, not provider/token admission or a successful native rerun.
 
 The fixed Compute instance GET requests only
 `id,name,selfLink,status,disks(source,deviceName,type,mode,boot)` using Google's
