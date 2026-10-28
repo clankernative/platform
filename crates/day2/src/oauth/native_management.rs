@@ -2974,7 +2974,15 @@ mod tests {
         )?;
         assert!(metadata_only.uses_native_storage());
         assert!(!ordinary.uses_native_storage());
-        crate::web::admit_listener_storage(&ordinary)?;
+        let mut observed = crate::web::NativeStartupObservation::new(
+            false,
+            crate::web::NativeStartupStep::ListenerStore,
+        );
+        crate::web::prepare_listener_secret(
+            &ordinary,
+            ordinary.inputs().entropy.as_ref(),
+            &mut observed,
+        )?;
         let instance = crate::artifact::Instance::load(ordinary.instance_path())?;
         let scope = AuthorityScope {
             installation: instance.installation.try_into()?,
@@ -2984,7 +2992,12 @@ mod tests {
         let world = super::super::simulation::World::new(458);
         super::super::effects::scope(world, || -> Result<()> {
             fixtures::select_app_scope(&scope)?;
-            let error = crate::web::admit_listener_storage(&metadata_only).unwrap_err();
+            let error = crate::web::prepare_listener_secret(
+                &metadata_only,
+                ordinary.inputs().entropy.as_ref(),
+                &mut observed,
+            )
+            .unwrap_err();
             assert_eq!(error.to_string(), "native runtime executor missing");
             let entered = std::cell::Cell::new(false);
             let error = with_app_request(&scope, || {
@@ -3147,6 +3160,95 @@ mod tests {
             "security_runtime_mismatch" | "security_host_evidence_unavailable"
         ));
         assert_eq!(db.total_changes(), changed);
+        Ok(())
+    }
+
+    #[test]
+    fn listener_validation_and_secret_use_one_real_writer_and_refusals_do_not_publish_data()
+    -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Entropy {
+            calls: AtomicUsize,
+            unavailable: bool,
+        }
+        impl crate::host_inputs::Entropy for Entropy {
+            fn fill(&self, bytes: &mut [u8]) -> Result<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                bytes.fill(37);
+                ensure!(!self.unavailable, "scripted_entropy_unavailable");
+                Ok(())
+            }
+        }
+        // Exercise the actual combined SQL-only function under the supported
+        // real SQLite facade. This does not construct a native admission owner.
+        for outcome in ["success", "artifact", "entropy", "callback"] {
+            let directory = tempfile::tempdir()?;
+            let (runtime, _, _) =
+                super::super::admission::tests::management_fixture(directory.path())?;
+            let entropy = Entropy {
+                calls: AtomicUsize::new(0),
+                unavailable: outcome == "entropy",
+            };
+            let db = crate::store::open(runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_web_secret", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            if outcome == "artifact" {
+                db.execute(
+                    "UPDATE day2_authority SET artifact_id='foreign' WHERE singleton=1",
+                    [],
+                )?;
+            }
+            drop(db);
+            let mut observed = crate::web::NativeStartupObservation::new(
+                false,
+                crate::web::NativeStartupStep::ListenerStore,
+            );
+            let result = runtime.sql_write(|tx| {
+                assert!(!tx.is_autocommit());
+                let secret =
+                    crate::web::native_listener_secret_in(&runtime, tx, &entropy, &mut observed)?;
+                assert_eq!(secret, [37; 32]);
+                ensure!(
+                    outcome != "callback",
+                    "scripted_callback_refusal_after_mutation"
+                );
+                Ok(secret)
+            });
+            if outcome == "success" {
+                assert_eq!(result?, [37; 32]);
+                let repeated = runtime.sql_write(|tx| {
+                    crate::web::native_listener_secret_in(
+                        &runtime,
+                        tx,
+                        &crate::host_inputs::simulation::SeededEntropy::new(931),
+                        &mut observed,
+                    )
+                })?;
+                assert_eq!(repeated, [37; 32], "an existing secret is never replaced");
+            } else {
+                let error = result.unwrap_err();
+                let expected = match outcome {
+                    "artifact" => "artifact_binding_changed",
+                    "entropy" => "scripted_entropy_unavailable",
+                    "callback" => "scripted_callback_refusal_after_mutation",
+                    _ => unreachable!(),
+                };
+                assert_eq!(error.to_string(), expected);
+            }
+            assert_eq!(
+                entropy.calls.load(Ordering::SeqCst),
+                usize::from(outcome != "artifact")
+            );
+            let db = crate::store::open(runtime.db())?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM day2_web_secret", [], |row| row
+                    .get::<_, i64>(0))?,
+                i64::from(outcome == "success")
+            );
+        }
         Ok(())
     }
 

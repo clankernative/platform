@@ -20,7 +20,8 @@ pub(crate) fn secret(
     runtime.sql_write(|db| secret_in(db, entropy))
 }
 
-fn secret_in(
+/// SQL-only secret operation; the caller supplies its already-owned transaction.
+pub(crate) fn secret_in(
     db: &rusqlite::Connection,
     entropy: &dyn crate::host_inputs::Entropy,
 ) -> Result<Vec<u8>> {

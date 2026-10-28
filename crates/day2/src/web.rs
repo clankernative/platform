@@ -415,15 +415,36 @@ impl Drop for NativeStartupObservation {
     }
 }
 
-/// Native Runtime metadata cannot authorize this admission. Its existing SQL
-/// facade must obtain the real Current App owner BEFORE opening the file and
-/// retain it through this snapshot's close and postchecks. No native DDL,
-/// initializer, schema repair or alternate opener is introduced here.
-pub(crate) fn admit_listener_storage(runtime: &Runtime) -> Result<()> {
+/// Native host construction uses one owned write unit for the listener snapshot
+/// and session secret. Its actual Current owner is acquired before opening SQL
+/// and retained through commit, close and postchecks. The caller's original is
+/// never recaptured here. Ordinary storage retains its supported initializer.
+pub(crate) fn prepare_listener_secret(
+    runtime: &Runtime,
+    entropy: &dyn Entropy,
+    observed: &mut NativeStartupObservation,
+) -> Result<Vec<u8>> {
+    observed.enter(NativeStartupStep::ListenerStore);
     if !runtime.uses_native_storage() {
-        return runtime.initialize();
+        runtime.initialize()?;
+        observed.enter(NativeStartupStep::SessionSecret);
+        return security::secret(runtime, entropy);
     }
-    runtime.sql_read(|db| validate_listener_snapshot(runtime, db))
+    runtime.sql_write(|db| native_listener_secret_in(runtime, db, entropy, observed))
+}
+
+/// SQL-only work, not an owner or admission witness. The native facade above
+/// supplies the single owned transaction. Validate before entropy or mutation;
+/// no provider, filesystem or nested Runtime SQL operation belongs here.
+pub(crate) fn native_listener_secret_in(
+    runtime: &Runtime,
+    db: &rusqlite::Connection,
+    entropy: &dyn Entropy,
+    observed: &mut NativeStartupObservation,
+) -> Result<Vec<u8>> {
+    validate_listener_snapshot(runtime, db)?;
+    observed.enter(NativeStartupStep::SessionSecret);
+    security::secret_in(db, entropy)
 }
 
 /// Read-only predicates, not a native admission witness. Only the facade above
@@ -569,8 +590,6 @@ impl LocalServer {
         );
         runtime.artifact().require_current_api()?;
         let api = crate::openapi::Catalog::from_artifact(runtime.artifact().contract())?;
-        observed.enter(NativeStartupStep::ListenerStore);
-        admit_listener_storage(&runtime)?;
         observed.enter(NativeStartupStep::Ingress);
         validate_ingress_credentials(&runtime)?;
         // `__Host-` makes the browser refuse the cookie unless it is Secure,
@@ -593,6 +612,17 @@ impl LocalServer {
             #[cfg(test)]
             PresentationSource::Test(port) => Some(port),
         };
+        observed.enter(NativeStartupStep::Routes);
+        let routes = (runtime.artifact().contract().format >= 7)
+            .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
+            .transpose()?;
+        let redirects = crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?;
+        observed.enter(NativeStartupStep::Appearance);
+        let appearance = Appearance::load(&runtime)?;
+        // Finish filesystem/configuration work before the one native SQL unit.
+        // Its listener predicates and secret mutation share the same writer,
+        // original deadline and final settlement before any Host is published.
+        let secret = prepare_listener_secret(&runtime, entropy.as_ref(), &mut observed)?;
         let host = Arc::new(Host {
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
@@ -601,21 +631,10 @@ impl LocalServer {
             credential_effects: crate::managed_credentials::effects::capture(),
             presentation,
             api,
-            routes: {
-                observed.enter(NativeStartupStep::Routes);
-                (runtime.artifact().contract().format >= 7)
-                    .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
-                    .transpose()?
-            },
-            redirects: crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?,
-            appearance: {
-                observed.enter(NativeStartupStep::Appearance);
-                Appearance::load(&runtime)?
-            },
-            secret: {
-                observed.enter(NativeStartupStep::SessionSecret);
-                security::secret(&runtime, entropy.as_ref())?
-            },
+            routes,
+            redirects,
+            appearance,
+            secret,
             cookie_name: format!(
                 "{prefix}day2_{}_{}",
                 runtime.app(),
@@ -3563,8 +3582,25 @@ mod native_startup_tests {
         Ok(())
     }
 
+    fn selected_function(source: &syn::File, name: &str) -> syn::Block {
+        source
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == name => Some((*item.block).clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn path_is(expression: &syn::Expr, names: &[&str]) -> bool {
+        matches!(expression, syn::Expr::Path(path)
+            if path.path.segments.iter().map(|part| part.ident.to_string()).eq(names.iter().copied()))
+    }
+
     fn native_admission_is_preserved(body: &syn::Block) -> bool {
         let [
+            _,
             syn::Stmt::Expr(syn::Expr::If(branch), _),
             syn::Stmt::Expr(syn::Expr::MethodCall(current), _),
         ] = body.stmts.as_slice()
@@ -3577,72 +3613,163 @@ mod native_startup_tests {
         let syn::Expr::MethodCall(selected) = &*condition.expr else {
             return false;
         };
-        let [syn::Stmt::Expr(syn::Expr::Return(returned), _)] = branch.then_branch.stmts.as_slice()
+        let [
+            syn::Stmt::Expr(syn::Expr::Try(initialized), _),
+            _,
+            syn::Stmt::Expr(syn::Expr::Return(returned), _),
+        ] = branch.then_branch.stmts.as_slice()
         else {
+            return false;
+        };
+        let syn::Expr::MethodCall(initializer) = &*initialized.expr else {
             return false;
         };
         let Some(returned) = &returned.expr else {
             return false;
         };
-        let syn::Expr::MethodCall(initializer) = &**returned else {
+        let syn::Expr::Call(ordinary) = &**returned else {
             return false;
         };
         matches!(condition.op, syn::UnOp::Not(_))
             && branch.else_branch.is_none()
             && selected.method == "uses_native_storage"
             && selected.args.is_empty()
-            && matches!(&*selected.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
+            && path_is(&selected.receiver, &["runtime"])
             && initializer.method == "initialize"
             && initializer.args.is_empty()
-            && matches!(&*initializer.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
-            && current.method == "sql_read"
+            && path_is(&initializer.receiver, &["runtime"])
+            && path_is(&ordinary.func, &["security", "secret"])
+            && ordinary.args.len() == 2
+            && path_is(&ordinary.args[0], &["runtime"])
+            && path_is(&ordinary.args[1], &["entropy"])
+            && current.method == "sql_write"
             && current.args.len() == 1
-            && matches!(&*current.receiver, syn::Expr::Path(path) if path.path.is_ident("runtime"))
+            && path_is(&current.receiver, &["runtime"])
             && matches!(&current.args[0], syn::Expr::Closure(closure)
                 if closure.inputs.len() == 1
                 && matches!(&closure.inputs[0], syn::Pat::Ident(input) if input.ident == "db")
                 && matches!(&*closure.body, syn::Expr::Call(call)
-                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("validate_listener_snapshot"))
-                    && call.args.len() == 2
-                    && matches!(&call.args[0], syn::Expr::Path(path) if path.path.is_ident("runtime"))
-                    && matches!(&call.args[1], syn::Expr::Path(path) if path.path.is_ident("db"))))
+                    if path_is(&call.func, &["native_listener_secret_in"])
+                    && call.args.len() == 4
+                    && call.args.iter().zip(["runtime", "db", "entropy", "observed"])
+                        .all(|(arg, expected)| path_is(arg, &[expected]))))
+    }
+
+    fn native_sql_work_is_preserved(body: &syn::Block) -> bool {
+        let [
+            syn::Stmt::Expr(syn::Expr::Try(validated), _),
+            _,
+            syn::Stmt::Expr(syn::Expr::Call(secret), _),
+        ] = body.stmts.as_slice()
+        else {
+            return false;
+        };
+        matches!(&*validated.expr, syn::Expr::Call(call)
+            if path_is(&call.func, &["validate_listener_snapshot"])
+            && call.args.len() == 2
+            && path_is(&call.args[0], &["runtime"]) && path_is(&call.args[1], &["db"]))
+            && path_is(&secret.func, &["security", "secret_in"])
+            && secret.args.len() == 2
+            && path_is(&secret.args[0], &["db"])
+            && path_is(&secret.args[1], &["entropy"])
     }
 
     #[test]
-    fn native_listener_requires_the_actual_current_sql_owner_instead_of_an_initializer_or_noop() {
+    fn native_listener_and_secret_require_one_current_writer_with_validation_before_mutation() {
         let source = syn::parse_file(include_str!("web.rs")).unwrap();
-        let admission = source
-            .items
-            .iter()
-            .find_map(|item| match item {
-                syn::Item::Fn(item) if item.sig.ident == "admit_listener_storage" => {
-                    Some(&*item.block)
-                }
-                _ => None,
-            })
-            .unwrap();
-        assert!(native_admission_is_preserved(admission));
-        let mut skipped = admission.clone();
-        *skipped.stmts.last_mut().unwrap() = syn::Stmt::Expr(syn::parse_quote!(Ok(())), None);
-        assert!(!native_admission_is_preserved(&skipped));
-        let mut initializer = admission.clone();
-        *initializer.stmts.last_mut().unwrap() =
-            syn::Stmt::Expr(syn::parse_quote!(runtime.initialize()), None);
-        assert!(!native_admission_is_preserved(&initializer));
-        let mut noop = admission.clone();
-        *noop.stmts.last_mut().unwrap() =
-            syn::Stmt::Expr(syn::parse_quote!(runtime.sql_read(|_| Ok(()))), None);
-        assert!(!native_admission_is_preserved(&noop));
-        let mut ignored = admission.clone();
-        *ignored.stmts.last_mut().unwrap() = syn::Stmt::Expr(
-            syn::parse_quote!(runtime.sql_read(|db| {
-                let _ = validate_listener_snapshot(runtime, db);
-                Ok(())
-            })),
-            None,
-        );
-        assert!(!native_admission_is_preserved(&ignored));
+        let admission = selected_function(&source, "prepare_listener_secret");
+        assert!(native_admission_is_preserved(&admission));
+        for replacement in [
+            syn::parse_quote!(Ok(Vec::new())),
+            syn::parse_quote!(runtime.initialize()),
+            syn::parse_quote!(
+                runtime.sql_read(|db| native_listener_secret_in(runtime, db, entropy, observed))
+            ),
+            syn::parse_quote!(runtime.sql_write(|db| security::secret_in(db, entropy))),
+        ] {
+            let mut changed = admission.clone();
+            *changed.stmts.last_mut().unwrap() = syn::Stmt::Expr(replacement, None);
+            assert!(!native_admission_is_preserved(&changed));
+        }
+        let work = selected_function(&source, "native_listener_secret_in");
+        assert!(native_sql_work_is_preserved(&work));
+        for replacement in [
+            syn::parse_quote!(let _ = validate_listener_snapshot(runtime, db);),
+            syn::parse_quote!(if false {
+                validate_listener_snapshot(runtime, db)?;
+            }),
+            syn::parse_quote!(security::secret_in(db, entropy)?;),
+        ] {
+            let mut changed = work.clone();
+            changed.stmts[0] = replacement;
+            assert!(!native_sql_work_is_preserved(&changed));
+        }
+        let mut after = work.clone();
+        after.stmts.swap(0, 2);
+        assert!(!native_sql_work_is_preserved(&after));
+    }
 
+    fn binder_has_one_sql_unit_after_configuration(body: &syn::Block) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Calls {
+            admission: usize,
+            other: usize,
+        }
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if path_is(&call.func, &["prepare_listener_secret"]) {
+                    self.admission += 1;
+                }
+                if matches!(&*call.func, syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|part|
+                        matches!(part.ident.to_string().as_str(), "with_app_request" | "secret")))
+                {
+                    self.other += 1;
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "initialize" | "sql_read" | "sql_write"
+                ) {
+                    self.other += 1;
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+        }
+        let mut calls = Calls::default();
+        calls.visit_block(body);
+        let position = |name: &str| {
+            body.stmts.iter().position(|statement| matches!(statement,
+            syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(part) if part.ident == name)))
+        };
+        let Some(secret) = position("secret") else {
+            return false;
+        };
+        let syn::Stmt::Local(local) = &body.stmts[secret] else {
+            return false;
+        };
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Try(tried) = &*init.expr else {
+            return false;
+        };
+        calls.admission == 1
+            && calls.other == 0
+            && matches!(&*tried.expr, syn::Expr::Call(call)
+                if path_is(&call.func, &["prepare_listener_secret"]) && call.args.len() == 3)
+            && ["presentation", "routes", "redirects", "appearance"]
+                .into_iter()
+                .all(|name| position(name).is_some_and(|before| before < secret))
+            && position("host").is_some_and(|host| secret < host)
+    }
+
+    #[test]
+    fn native_listener_finishes_configuration_before_its_single_sql_unit_and_host_publication() {
+        let source = syn::parse_file(include_str!("web.rs")).unwrap();
         let binder = source.items.iter().find_map(|item| match item {
             syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("LocalServer")) => {
                 item.items.iter().find_map(|item| match item {
@@ -3651,71 +3778,28 @@ mod native_startup_tests {
                 })
             }, _ => None,
         }).unwrap();
-        fn calls_admission(body: &syn::Block) -> bool {
-            use syn::visit::Visit;
-            #[derive(Default)]
-            struct Calls {
-                admission: usize,
-                initializer: usize,
-            }
-            impl<'ast> Visit<'ast> for Calls {
-                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
-                    {
-                        self.admission += 1;
-                    }
-                    syn::visit::visit_expr_call(self, call);
-                }
-                fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-                    if call.method == "initialize" {
-                        self.initializer += 1;
-                    }
-                    syn::visit::visit_expr_method_call(self, call);
-                }
-            }
-            let mut calls = Calls::default();
-            calls.visit_block(body);
-            let direct: Vec<_> = body.stmts.iter().enumerate().filter_map(|(index, statement)| {
-                let syn::Stmt::Expr(syn::Expr::Try(propagated), _) = statement else { return None; };
-                let syn::Expr::Call(call) = &*propagated.expr else { return None; };
-                (matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))
-                    && call.args.len() == 1
-                    && matches!(&call.args[0], syn::Expr::Reference(reference)
-                        if reference.mutability.is_none()
-                        && matches!(&*reference.expr, syn::Expr::Path(path) if path.path.is_ident("runtime"))))
-                    .then_some(index)
-            }).collect();
-            let host = body.stmts.iter().position(|statement| matches!(statement,
-                syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "host")));
-            calls.admission == 1
-                && calls.initializer == 0
-                && direct.len() == 1
-                && host.is_some_and(|host| direct[0] < host)
-        }
-        assert!(calls_admission(binder));
-        let mut restored = binder.clone();
-        restored
-            .stmts
-            .insert(0, syn::parse_quote!(runtime.initialize()?;));
-        assert!(!calls_admission(&restored));
-        let position = binder.stmts.iter().position(|statement| matches!(statement,
-            syn::Stmt::Expr(syn::Expr::Try(tried), _)
-                if matches!(&*tried.expr, syn::Expr::Call(call)
-                    if matches!(&*call.func, syn::Expr::Path(path) if path.path.is_ident("admit_listener_storage"))))).unwrap();
-        for replacement in [
-            syn::parse_quote!(if false {
-                admit_listener_storage(&runtime)?;
-            }),
-            syn::parse_quote!(let _ = admit_listener_storage(&runtime);),
+        assert!(binder_has_one_sql_unit_after_configuration(binder));
+        for added in [
+            syn::parse_quote!(runtime.sql_read(|db| validate_listener_snapshot(&runtime, db))?;),
+            syn::parse_quote!(runtime.initialize()?;),
+            syn::parse_quote!(prepare_listener_secret(&runtime, entropy.as_ref(), &mut observed)?;),
         ] {
-            let mut skipped = binder.clone();
-            skipped.stmts[position] = replacement;
-            assert!(!calls_admission(&skipped));
+            let mut changed = binder.clone();
+            changed.stmts.insert(0, added);
+            assert!(!binder_has_one_sql_unit_after_configuration(&changed));
         }
-        let mut late = binder.clone();
-        let admission = late.stmts.remove(position);
-        late.stmts.push(admission);
-        assert!(!calls_admission(&late));
+        let position = binder.stmts.iter().position(|statement| matches!(statement,
+            syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(part) if part.ident == "secret"))).unwrap();
+        for early in [true, false] {
+            let mut changed = binder.clone();
+            let secret = changed.stmts.remove(position);
+            if early {
+                changed.stmts.insert(0, secret);
+            } else {
+                changed.stmts.push(secret);
+            }
+            assert!(!binder_has_one_sql_unit_after_configuration(&changed));
+        }
     }
 
     #[test]
