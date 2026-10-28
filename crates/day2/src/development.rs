@@ -21,12 +21,9 @@ pub const DEFAULT_SEED: u64 = 0xDA72_2026;
 pub const DEFAULT_CASES: u64 = 16;
 const MAX_STEPS: usize = 256;
 const VERIFICATION_TIME: i64 = 1_700_000_000;
-/// Error cases run on the campaign clock after every bounded success step and
-/// beyond provider cache lifetimes, so no error case observes later state.
+/// A verification campaign's error phase starts no earlier than this long after
+/// its epoch, so repeated verification evidence keeps the same error-case times.
 const ERROR_PHASE_OFFSET_SECONDS: i64 = 100_000;
-const _: () = assert!(
-    ERROR_PHASE_OFFSET_SECONDS > MAX_STEPS as i64 + crate::workspace_directory::SOURCE_TTL_SECONDS
-);
 
 #[cfg(test)]
 #[path = "development/verification_failure_tests.rs"]
@@ -35,6 +32,11 @@ mod verification_failure_tests;
 /// Non-interactive invocation and provider-fixture time. Verification uses a
 /// repeatable epoch; local serving uses the runtime clock for fresh providers.
 /// Interactive credential confirmations always use the runtime clock.
+///
+/// Error cases run after the latest recorded success step, interactive ones
+/// included, one second apart. Verification starts them at a fixed offset from
+/// its epoch; a local campaign starts them at the current runtime clock, so an
+/// instance seeded and then served is never stamped in the future.
 #[derive(Clone, Copy)]
 pub enum CampaignTime {
     Verification,
@@ -48,6 +50,23 @@ impl CampaignTime {
             Self::Local => Ok(runtime.host().now_ms()?.div_euclid(1000)),
         }
     }
+
+    fn error_phase_start(
+        self,
+        runtime: &Runtime,
+        provider_clock: i64,
+        latest_success: Option<i64>,
+    ) -> Result<i64> {
+        let floor = match self {
+            Self::Verification => provider_clock + ERROR_PHASE_OFFSET_SECONDS,
+            Self::Local => runtime.host().now_ms()?.div_euclid(1000),
+        };
+        Ok(after_latest_success(floor, latest_success))
+    }
+}
+
+fn after_latest_success(floor: i64, latest_success: Option<i64>) -> i64 {
+    latest_success.map_or(floor, |latest| floor.max(latest.saturating_add(1)))
 }
 
 /// A selected callee's checked example, used only by disposable verification.
@@ -738,6 +757,26 @@ fn validate_example_privacy(internal: bool, simulated: bool) -> Result<()> {
 #[cfg(test)]
 mod example_step_tests {
     use super::*;
+
+    #[test]
+    fn error_phase_starts_after_every_recorded_success_step() {
+        // A verification error phase keeps its fixed start after ordinary steps.
+        assert_eq!(
+            after_latest_success(1_700_100_000, Some(1_700_000_255)),
+            1_700_100_000
+        );
+        assert_eq!(after_latest_success(1_700_100_000, None), 1_700_100_000);
+        // An interactive step stamped by the runtime clock moves it later.
+        assert_eq!(
+            after_latest_success(1_700_100_000, Some(1_793_000_000)),
+            1_793_000_001
+        );
+        // A local campaign whose steps ran ahead of the wall clock still follows them.
+        assert_eq!(
+            after_latest_success(1_793_000_000, Some(1_793_000_040)),
+            1_793_000_041
+        );
+    }
 
     fn operation(name: &str, kind: &str) -> crate::artifact::Operation {
         crate::artifact::Operation {
@@ -3573,6 +3612,7 @@ pub struct Campaign {
     pub evidence: Evidence,
     example: Option<String>,
     actor: String,
+    time: CampaignTime,
     provider_clock: i64,
     include_examples: bool,
     catalog: Option<Vec<Example>>,
@@ -3765,6 +3805,7 @@ impl Campaign {
             runtime,
             example: example.map(str::to_owned),
             actor: actor.into(),
+            time,
             provider_clock,
             include_examples,
             catalog: None,
@@ -4311,6 +4352,15 @@ impl Campaign {
                         && !self.errors_checked,
                     "error verification phase order"
                 );
+                let error_start = self.time.error_phase_start(
+                    &self.runtime,
+                    self.provider_clock,
+                    self.evidence
+                        .traces
+                        .iter()
+                        .map(|trace| trace.request.context.now)
+                        .max(),
+                )?;
                 if let Some(definition) = &self.runtime.artifact().contract().app_contract {
                     for (code, error) in &definition.errors {
                         for target in error.targets() {
@@ -4344,9 +4394,7 @@ impl Campaign {
                                 let input: Value = serde_json::from_str(&input)?;
                                 let ordinal = self.evidence.error_traces.len();
                                 let id = format!("failure-{ordinal}");
-                                let now = self.provider_clock
-                                    + ERROR_PHASE_OFFSET_SECONDS
-                                    + ordinal as i64;
+                                let now = error_start + ordinal as i64;
                                 // Error cases may select only an artifact-declared host
                                 // fixture. Direct cases remain direct; no input field can
                                 // select the caller or authentication path.
