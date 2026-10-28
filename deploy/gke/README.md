@@ -1057,6 +1057,15 @@ and its scratch volume holds a full copy: as the database grows, keep
 and artifact together, and `backup_active_deadline_seconds` above the copy,
 integrity checks and upload.
 
+`app-edge.public_download_paths` optionally routes exact
+`/downloads/<filename>.crx` and `.xml` URLs through a separate backend without
+IAP. Use it for Chrome Enterprise update XML and CRX downloads, whose updater
+cannot use a browser login. Empty creates no backend. The app artifact must
+independently publish each filename in `public-downloads/`; the host admits
+anonymous access only to that exact catalog. Wildcards, traversal, private-key
+files and human routes are refused. The default backend retains IAP. See
+[application layout](../../docs/APP-LAYOUT.md#public-release-downloads).
+
 `app-edge.signed_webhook_paths` optionally routes exact `/ingress/<endpoint>`
 paths through a separate backend without IAP. This is for provider deliveries:
 Day2 still requires the configured signature before admission. The ordinary

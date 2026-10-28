@@ -953,6 +953,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             path if path.starts_with(freetool_credentials::PREFIX) => "credential_management",
             path if path.starts_with(crate::ingress::ROUTE_PREFIX) => "ingress",
             path if path.starts_with("/assets/") => "asset",
+            path if path.starts_with(crate::public_downloads::PREFIX) => "download",
             crate::mcp::PATH => "mcp",
             path if crate::web_api::is_json(path) => "api",
             "/docs" => "api_docs",
@@ -1140,6 +1141,12 @@ impl Host {
         let SignIn::Edge(verifier) = &self.sign_in else {
             return Ok((cookie(), None));
         };
+        // App authors explicitly publish these immutable files. The Chrome
+        // updater has no browser session or IAP assertion. Only exact admitted
+        // names bypass identity; no other route inherits anonymous access.
+        if crate::public_downloads::registered(&self.runtime, path) {
+            return Ok((None, None));
+        }
         if path.starts_with(crate::ingress::ROUTE_PREFIX) {
             return Ok((None, None));
         }
@@ -1211,6 +1218,9 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        if uri.path().starts_with(crate::public_downloads::PREFIX) {
+            return crate::public_downloads::serve(&self.runtime, uri.path(), method, headers);
+        }
         if uri
             .path()
             .starts_with(crate::managed_credentials::ingress::PREFIX)

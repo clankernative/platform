@@ -248,6 +248,39 @@ fn source_admission_rejects_authority_expansion_and_ignores_only_vcs_metadata() 
 }
 
 #[test]
+fn source_capture_keeps_public_downloads_and_excludes_separate_extension_tooling() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::create_dir(directory.path().join(".chrome-extension"))?;
+    fs::create_dir(directory.path().join("public-downloads"))?;
+    fs::write(
+        directory.path().join(".chrome-extension/package.json"),
+        b"not app runtime input",
+    )?;
+    fs::write(
+        directory.path().join("public-downloads/extension.crx"),
+        b"crx",
+    )?;
+    fs::write(
+        directory.path().join("public-downloads/updates.xml"),
+        b"xml",
+    )?;
+    let source = SourceBundle::capture(directory.path())?;
+    assert_eq!(source.files().len(), 2);
+    assert_eq!(source.files()["public-downloads/extension.crx"], b"crx");
+    for path in [
+        "elsewhere/extension.crx",
+        "public-downloads/private.pem",
+        "public-downloads/nested/updates.xml",
+    ] {
+        assert!(
+            SourceBundle::from_files(BTreeMap::from([(path.into(), b"private".to_vec())])).is_err(),
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn local_control_cli_uses_the_real_instance_and_resumes_accepted_work() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().canonicalize()?;
