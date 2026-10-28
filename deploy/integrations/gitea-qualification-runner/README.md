@@ -3,7 +3,7 @@
 This provider-specific deployment example creates a dedicated GCE VM for one
 Gitea repository's qualification jobs. It is an opt-in integration under
 [`deploy/integrations/`](../README.md), not a prerequisite or change to the core
-[`qualification-runner` VM](../../gke/stacks/qualification-runner/README.md).
+[`qualification-runner` VM](../../gke/stacks/qualification-runner/main.tf).
 The core qualification-runner remains a plain operator VM.
 
 The runner uses an x86_64 C3 Sapphire Rapids machine (`c3-standard-8` by
