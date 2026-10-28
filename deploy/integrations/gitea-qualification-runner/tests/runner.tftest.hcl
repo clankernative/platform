@@ -46,8 +46,10 @@ run "defaults_are_sapphire_rapids_debian_13_and_least_authority" {
   assert {
     condition = (
       strcontains(google_compute_instance.runner.metadata["startup-script"], "docker-buildx-plugin") &&
-      strcontains(google_compute_instance.runner.metadata["startup-script"], "act_runner-0.2.11-linux-amd64") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "ci_runner_version='0.2.11'") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "act_runner-$${ci_runner_version}-linux-amd64") &&
       strcontains(google_compute_instance.runner.metadata["startup-script"], "7a5e833793286bbfd9b59ce682bd41fc3f1c096bae1bb2a09b66ab2f6dacf90c") &&
+      strcontains(google_compute_instance.runner.metadata["startup-script"], "wonderly/platform") &&
       strcontains(google_compute_instance.runner.metadata["startup-script"], "qualification-x86:host") &&
       !strcontains(google_compute_instance.runner.metadata["startup-script"], "registration-token-value") &&
       !strcontains(google_compute_instance.runner.metadata["startup-script"], "register --token") &&

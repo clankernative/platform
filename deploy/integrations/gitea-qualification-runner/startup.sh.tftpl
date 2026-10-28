@@ -21,7 +21,7 @@ runner_binary=/usr/local/bin/act_runner
 if [[ ! -x "$runner_binary" ]] || [[ "$(sha256sum "$runner_binary" | cut -d ' ' -f 1)" != "$ci_runner_sha256" ]]; then
   runner_tmp="$(mktemp)"
   trap 'rm -f "$runner_tmp"' EXIT
-  curl -fsSL "https://gitea.com/gitea/runner/releases/download/v${ci_runner_version}/act_runner-${ci_runner_version}-linux-amd64" -o "$runner_tmp"
+  curl -fsSL "https://gitea.com/gitea/runner/releases/download/v$${ci_runner_version}/act_runner-$${ci_runner_version}-linux-amd64" -o "$runner_tmp"
   printf '%s  %s\n' "$ci_runner_sha256" "$runner_tmp" | sha256sum --check --status
   install -o root -g root -m 0755 "$runner_tmp" "$runner_binary"
   rm -f "$runner_tmp"
