@@ -437,14 +437,17 @@ mod tests {
         let mut data = Snapshot::maximal_fixture();
         // Distinct values expose row/column swaps; retain a real zero so it
         // cannot be silently exchanged with the later unknown/null fixture.
-        for (index,row) in data.rows.iter_mut().enumerate() {
-            let base=u64::try_from(index).unwrap()*100;
-            row.covered=index%2==0;
-            row.attempted=Some(base);row.returned=Some(base+1);
-            row.succeeded=Some(base+2);row.abandoned=Some(base+3);
-            row.in_flight=Some(base+4);row.sha_bytes_read=Some(base+5);
-            row.request_body_bytes_supplied=Some(base+6);
-            row.response_body_bytes_read=Some(base+7);
+        for (index, row) in data.rows.iter_mut().enumerate() {
+            let base = u64::try_from(index).unwrap() * 100;
+            row.covered = index != 4;
+            row.attempted = Some(base);
+            row.returned = Some(base + 1);
+            row.succeeded = Some(base + 2);
+            row.abandoned = Some(base + 3);
+            row.in_flight = Some(base + 4);
+            row.sha_bytes_read = Some(base + 5);
+            row.request_body_bytes_supplied = Some(base + 6);
+            row.response_body_bytes_read = Some(base + 7);
         }
         for unknown in [false, true] {
             if unknown {
