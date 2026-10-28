@@ -511,8 +511,8 @@ mod diagnostic_tests {
                 1,
             ),
             source.replacen(
-                "role.begin_current_stage()",
-                "force_full_check(); role.begin_current_stage()",
+                "self_check_profile::enter(self_check_profile::Category::RoleLocal);",
+                "self_check_profile::enter(self_check_profile::Category::RoleLocal); force_full_check();",
                 1,
             ),
             source.replacen(
@@ -532,6 +532,7 @@ mod diagnostic_tests {
             ),
         ] {
             assert_ne!(source, changed);
+            assert!(syn::parse_file(&changed).is_ok(), "Current mutant must be valid Rust syntax");
             assert!(!current_work_brackets_are_present(&changed));
         }
     }
