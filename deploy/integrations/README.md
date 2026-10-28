@@ -30,6 +30,7 @@ qualification requirements; no generalized CI interface is introduced here.
 | Example | Provider-specific implementation |
 | --- | --- |
 | [Gitea instance CI](gitea-instance-ci/README.md) | Optional GCE runner and workload identity provider for infrastructure plans/applies from one private Gitea repository |
+| [Gitea qualification runner](gitea-qualification-runner/README.md) | Optional dedicated Sapphire Rapids host-executor VM for qualification jobs from one private Gitea repository |
 | [Firestore security authority](firestore-security-epoch/README.md) | Optional dedicated Native database and separate app reader/controller IAM resources; no native readiness or bootstrap workload |
 
 The Gitea example is reusable because every company endpoint and repository

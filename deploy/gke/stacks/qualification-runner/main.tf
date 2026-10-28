@@ -10,25 +10,12 @@
 # stack enables both).
 
 locals {
-  count         = var.enabled ? 1 : 0
-  operators     = var.enabled ? var.operator_members : toset([])
-  iap_tcp_range = "35.235.240.0/20"
-  push_repo_id  = trimspace(var.image_push_repository_id)
-  push_repo_iam = var.enabled && local.push_repo_id != "" ? 1 : 0
-  ci_runner_iam = var.enabled && var.ci_runner != null ? 1 : 0
-  startup_script = var.ci_runner == null ? file("${path.module}/startup.sh") : join("\n", [
-    file("${path.module}/startup.sh"),
-    templatefile("${path.module}/ci-runner.sh.tftpl", {
-      gitea_url           = var.ci_runner.gitea_url
-      repository          = var.ci_runner.repository
-      registration_secret = "projects/${var.project_id}/secrets/${var.ci_runner.registration_secret_id}/versions/latest"
-      runner_name         = var.name
-      runner_version      = var.ci_runner.runner_version
-      runner_sha256       = var.ci_runner.runner_sha256
-      labels              = join(",", [for label in var.ci_runner.labels : "${label}:host"])
-      yaml_labels         = join("\n", [for label in var.ci_runner.labels : "    - \"${label}:host\""])
-    }),
-  ])
+  count          = var.enabled ? 1 : 0
+  operators      = var.enabled ? var.operator_members : toset([])
+  iap_tcp_range  = "35.235.240.0/20"
+  push_repo_id   = trimspace(var.image_push_repository_id)
+  push_repo_iam  = var.enabled && local.push_repo_id != "" ? 1 : 0
+  startup_script = file("${path.module}/startup.sh")
 }
 
 resource "google_compute_network" "runner" {
@@ -100,20 +87,6 @@ resource "google_artifact_registry_repository_iam_member" "runner_push" {
   repository = local.push_repo_id
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.runner[0].email}"
-}
-
-# CI remains opt-in and can read only its repository-scoped registration token.
-# Jobs intentionally use act_runner's host executor, not DinD: qualification
-# must observe this VM's actual kernel/cgroups. This gives the job's unprivileged
-# account Docker access (and therefore host-level authority), but adds no GCP role.
-# The secret value is fetched by the VM at boot; it is never a Terraform input.
-resource "google_secret_manager_secret_iam_member" "ci_runner_registration" {
-  count = local.ci_runner_iam
-
-  project   = var.project_id
-  secret_id = var.ci_runner.registration_secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runner[0].email}"
 }
 
 # The only ingress: SSH from Google's IAP TCP forwarding range. The VPC's
@@ -193,7 +166,6 @@ resource "google_compute_instance" "runner" {
   depends_on = [
     google_compute_firewall.runner_iap_ssh,
     google_compute_router_nat.runner,
-    google_secret_manager_secret_iam_member.ci_runner_registration,
   ]
 }
 

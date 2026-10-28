@@ -1,5 +1,6 @@
-# Optional direct-host Gitea Actions runner. The repository scope is enforced by
-# the repository-scoped token held in the named Secret Manager secret.
+# Appended to the core qualification host prerequisites by the integration root.
+# Runs as root on GCE first boot and on reboot; the secret value is never
+# interpolated into this script or stored in instance metadata.
 ci_runner_dir=/var/lib/day2-qualification/act-runner
 ci_runner_user=day2-qualification
 ci_runner_version='${runner_version}'
@@ -7,13 +8,9 @@ ci_runner_sha256='${runner_sha256}'
 ci_runner_url='${gitea_url}'
 ci_runner_repository='${repository}'
 ci_runner_name='${runner_name}'
-ci_runner_labels='${labels}'
+ci_runner_labels='${runner_labels}'
+registration_secret='${registration_secret}'
 
-if ! command -v jq >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends jq
-fi
 if ! id -u "$ci_runner_user" >/dev/null 2>&1; then
   useradd --system --user-group --create-home --home-dir "$ci_runner_dir" --shell /usr/sbin/nologin "$ci_runner_user"
 fi
@@ -24,7 +21,7 @@ runner_binary=/usr/local/bin/act_runner
 if [[ ! -x "$runner_binary" ]] || [[ "$(sha256sum "$runner_binary" | cut -d ' ' -f 1)" != "$ci_runner_sha256" ]]; then
   runner_tmp="$(mktemp)"
   trap 'rm -f "$runner_tmp"' EXIT
-  curl -fsSL "https://gitea.com/gitea/runner/releases/download/v${runner_version}/act_runner-${runner_version}-linux-amd64" -o "$runner_tmp"
+  curl -fsSL "https://gitea.com/gitea/runner/releases/download/v${ci_runner_version}/act_runner-${ci_runner_version}-linux-amd64" -o "$runner_tmp"
   printf '%s  %s\n' "$ci_runner_sha256" "$runner_tmp" | sha256sum --check --status
   install -o root -g root -m 0755 "$runner_tmp" "$runner_binary"
   rm -f "$runner_tmp"
@@ -42,33 +39,37 @@ runner:
   fetch_timeout: 5s
   fetch_interval: 2s
   labels:
-${yaml_labels}
+${runner_labels_yaml}
 cache:
   enabled: false
 YAML
 chown "$ci_runner_user:$ci_runner_user" "$ci_runner_dir/config.yaml"
 chmod 0640 "$ci_runner_dir/config.yaml"
 
-# Register only when the persistent runner credential is absent. The Gitea
-# repository token is retrieved in memory; its value is never written to disk
-# or instance metadata. A reboot reuses .runner instead of creating a second
-# runner registration.
+# act_runner v0.2.11 accepts the registration token only through its --token
+# CLI flag, which exposes it in /proc/PID/cmdline. Use its supported interactive
+# registration flow instead: stdin is a root-only temporary file on /run (tmpfs),
+# then the file is deleted immediately after registration.
 if [[ ! -s "$ci_runner_dir/.runner" ]]; then
+  logger -t day2-qualification "Registering host runner for $ci_runner_repository with labels $ci_runner_labels"
   metadata_access_token="$(curl -fsS -H 'Metadata-Flavor: Google' \
     'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' | jq -er '.access_token')"
   registration_token="$(curl -fsS -H "Authorization: Bearer $metadata_access_token" \
-    "https://secretmanager.googleapis.com/v1/${registration_secret}:access" | jq -er '.payload.data' | base64 --decode)"
-  [[ -n "$registration_token" ]] || { echo 'empty Gitea runner registration token' >&2; exit 1; }
-  logger -t day2-qualification "Registering host runner for $ci_runner_repository with labels $ci_runner_labels"
-  runuser -u "$ci_runner_user" -- /usr/bin/env \
-    /usr/local/bin/act_runner register \
-      --no-interactive \
-      --instance "$ci_runner_url" \
-      --token "$registration_token" \
-      --name "$ci_runner_name" \
-      --labels "$ci_runner_labels" \
-      --config "$ci_runner_dir/config.yaml"
+    "https://secretmanager.googleapis.com/v1/$registration_secret:access" | jq -er '.payload.data' | base64 --decode)"
+  [[ -n "$registration_token" && "$registration_token" != *$'\\n'* && "$registration_token" != *$'\\r'* ]] || {
+    echo 'invalid Gitea runner registration token' >&2
+    exit 1
+  }
+  registration_input="$(mktemp /run/day2-qualification-registration.XXXXXX)"
+  chmod 0600 "$registration_input"
+  printf '%s\n%s\n%s\n' "$ci_runner_url" "$registration_token" "$ci_runner_name" >"$registration_input"
   unset registration_token metadata_access_token
+  if ! runuser -u "$ci_runner_user" -- "$runner_binary" \
+    --config="$ci_runner_dir/config.yaml" register <"$registration_input"; then
+    rm -f "$registration_input"
+    exit 1
+  fi
+  rm -f "$registration_input"
   chown "$ci_runner_user:$ci_runner_user" "$ci_runner_dir/.runner"
   chmod 0600 "$ci_runner_dir/.runner"
 fi
@@ -86,7 +87,7 @@ User=day2-qualification
 Group=day2-qualification
 SupplementaryGroups=docker
 WorkingDirectory=/var/lib/day2-qualification/act-runner
-ExecStart=/usr/local/bin/act_runner daemon --config=/var/lib/day2-qualification/act-runner/config.yaml
+ExecStart=/usr/local/bin/act_runner --config=/var/lib/day2-qualification/act-runner/config.yaml daemon
 Restart=always
 RestartSec=5
 

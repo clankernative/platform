@@ -111,30 +111,3 @@ variable "image_push_repository_id" {
   type        = string
   default     = ""
 }
-
-variable "ci_runner" {
-  description = "Optional Gitea Actions host runner. Its registration secret must contain a repository-scoped token; its value is read by the VM at boot and is never stored in OpenTofu state."
-  type = object({
-    gitea_url              = string
-    repository             = string
-    registration_secret_id = string
-    labels                 = list(string)
-    runner_version         = string
-    runner_sha256          = string
-  })
-  default = null
-
-  validation {
-    condition = var.ci_runner == null ? true : (
-      can(regex("^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._/-]*)?$", var.ci_runner.gitea_url)) &&
-      can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.ci_runner.repository)) &&
-      can(regex("^[A-Za-z0-9_-]{1,255}$", var.ci_runner.registration_secret_id)) &&
-      length(var.ci_runner.labels) > 0 &&
-      length(distinct(var.ci_runner.labels)) == length(var.ci_runner.labels) &&
-      alltrue([for label in var.ci_runner.labels : can(regex("^[A-Za-z0-9][A-Za-z0-9._-]*$", label))]) &&
-      can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.ci_runner.runner_version)) &&
-      can(regex("^[0-9a-f]{64}$", var.ci_runner.runner_sha256))
-    )
-    error_message = "ci_runner requires an HTTPS Gitea URL, owner/name repository, Secret Manager id, unique safe labels, a numeric act_runner version and its 64-character lowercase SHA-256 digest."
-  }
-}

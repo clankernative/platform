@@ -1373,6 +1373,9 @@ jobs:
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci init -backend=false -lockfile=readonly
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci validate
       - run: tofu -chdir=deploy/integrations/gitea-instance-ci test
+      - run: tofu -chdir=deploy/integrations/gitea-qualification-runner init -backend=false -lockfile=readonly
+      - run: tofu -chdir=deploy/integrations/gitea-qualification-runner validate
+      - run: tofu -chdir=deploy/integrations/gitea-qualification-runner test
 
   firestore-epoch-integration-example:
     # Resource-only provider example; no credentials or live cloud operations.
