@@ -35,8 +35,9 @@ mod verification_failure_tests;
 ///
 /// Error cases run after the latest recorded success step, interactive ones
 /// included, one second apart. Verification starts them at a fixed offset from
-/// its epoch; a local campaign starts them at the current runtime clock, so an
-/// instance seeded and then served is never stamped in the future.
+/// its epoch. A local campaign starts them at the current runtime clock, or just
+/// after a success step that ran ahead of it, so an instance seeded and then
+/// served is stamped no later than its own campaign's steps imply.
 #[derive(Clone, Copy)]
 pub enum CampaignTime {
     Verification,
