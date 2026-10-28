@@ -602,6 +602,17 @@ impl LocalServer {
         };
         let inputs = runtime.inputs().clone();
         let entropy = inputs.entropy.clone();
+        observed.enter(NativeStartupStep::Routes);
+        let routes = (runtime.artifact().contract().format >= 7)
+            .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
+            .transpose()?;
+        let redirects = crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?;
+        observed.enter(NativeStartupStep::Appearance);
+        let appearance = Appearance::load(&runtime)?;
+        // Listener predicates and secret mutation share one owned writer and
+        // the original deadline. Presentation may start an executable worker:
+        // keep that activation after listener admission, outside the transaction.
+        let secret = prepare_listener_secret(&runtime, entropy.as_ref(), &mut observed)?;
         observed.enter(NativeStartupStep::Presentation);
         let declarations =
             crate::web_templates::presentation_catalog(&runtime.artifact().contract().templates)?;
@@ -612,17 +623,6 @@ impl LocalServer {
             #[cfg(test)]
             PresentationSource::Test(port) => Some(port),
         };
-        observed.enter(NativeStartupStep::Routes);
-        let routes = (runtime.artifact().contract().format >= 7)
-            .then(|| crate::routing::Catalog::from_artifact(runtime.artifact().contract()))
-            .transpose()?;
-        let redirects = crate::redirects::Catalog::from_artifact(runtime.artifact().contract())?;
-        observed.enter(NativeStartupStep::Appearance);
-        let appearance = Appearance::load(&runtime)?;
-        // Finish filesystem/configuration work before the one native SQL unit.
-        // Its listener predicates and secret mutation share the same writer,
-        // original deadline and final settlement before any Host is published.
-        let secret = prepare_listener_secret(&runtime, entropy.as_ref(), &mut observed)?;
         let host = Arc::new(Host {
             entropy: entropy.clone(),
             clock: inputs.clock.clone(),
@@ -3761,14 +3761,16 @@ mod native_startup_tests {
             && calls.other == 0
             && matches!(&*tried.expr, syn::Expr::Call(call)
                 if path_is(&call.func, &["prepare_listener_secret"]) && call.args.len() == 3)
-            && ["presentation", "routes", "redirects", "appearance"]
+            && ["routes", "redirects", "appearance"]
                 .into_iter()
                 .all(|name| position(name).is_some_and(|before| before < secret))
-            && position("host").is_some_and(|host| secret < host)
+            && position("presentation")
+                .zip(position("host"))
+                .is_some_and(|(presentation, host)| secret < presentation && presentation < host)
     }
 
     #[test]
-    fn native_listener_finishes_configuration_before_its_single_sql_unit_and_host_publication() {
+    fn native_listener_admits_sql_before_presentation_activation_and_host_publication() {
         let source = syn::parse_file(include_str!("web.rs")).unwrap();
         let binder = source.items.iter().find_map(|item| match item {
             syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("LocalServer")) => {
@@ -3779,6 +3781,12 @@ mod native_startup_tests {
             }, _ => None,
         }).unwrap();
         assert!(binder_has_one_sql_unit_after_configuration(binder));
+        let mut premature = binder.clone();
+        let presentation = premature.stmts.iter().position(|statement| matches!(statement,
+            syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(part) if part.ident == "presentation"))).unwrap();
+        let activation = premature.stmts.remove(presentation);
+        premature.stmts.insert(0, activation);
+        assert!(!binder_has_one_sql_unit_after_configuration(&premature));
         for added in [
             syn::parse_quote!(runtime.sql_read(|db| validate_listener_snapshot(&runtime, db))?;),
             syn::parse_quote!(runtime.initialize()?;),

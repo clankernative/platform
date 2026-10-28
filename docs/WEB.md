@@ -1049,10 +1049,13 @@ ID. Retrying the same ticket/input does not repeat a write, including after a
 restart or a lost post-commit response. Different input with the same nonce is
 an idempotency conflict. The host secret and sessions persist privately.
 
-Native host startup finishes its configuration and filesystem loads before one
-owned SQL write unit. That unit validates the current listener binding, schema,
-artifact and security requirements before obtaining or creating the session
-secret in the same transaction. It uses the existing host-construction original
+Native host startup uses one owned SQL write unit for listener validation and
+the session secret. That unit validates the current listener binding, schema,
+artifact and security requirements before obtaining or creating the secret in
+the same transaction. Routing and branding inputs are prepared beforehand;
+presentation activation, which may start a pinned executable worker, stays after
+this admission returns. No SQL transaction spans those filesystem/worker steps.
+It uses the existing host-construction original
 and its unchanged five-second deadline; callbacks do not capture a replacement
 original. Validation or callback failure rolls back this transaction. A later
 owner/settlement refusal prevents host publication, even if SQL already committed;
