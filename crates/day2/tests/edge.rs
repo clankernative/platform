@@ -131,7 +131,7 @@ impl Server {
         Self::start_with(instance)
     }
 
-    fn start_with(instance: fn(&str) -> Value) -> Result<Self> {
+    fn start_with(instance: impl FnOnce(&str) -> Value) -> Result<Self> {
         let artifact = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
             .map(PathBuf::from)
             .context("run xtask verify or set DAY2_TEST_DELEGATION_ARTIFACT")?;
@@ -237,6 +237,122 @@ fn issued(response: &Response) -> Option<(String, String)> {
         .to_owned();
     let pair = header.split(';').next()?.to_owned();
     Some((pair, header))
+}
+
+#[test]
+fn public_downloads_are_anonymous_pinned_and_do_not_open_other_edge_routes() -> Result<()> {
+    fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+            } else {
+                fs::copy(entry.path(), target.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+    let original = std::env::var_os("DAY2_TEST_DELEGATION_ARTIFACT")
+        .map(PathBuf::from)
+        .context("run xtask verify")?;
+    let directory = tempfile::tempdir()?;
+    let stage = directory.path().join("stage");
+    copy_tree(&original, &stage)?;
+    let source = directory.path().join("downloads");
+    fs::create_dir(&source)?;
+    fs::write(source.join("extension.crx"), b"pinned crx download")?;
+    fs::write(source.join("updates.xml"), b"<gupdate />")?;
+    let catalog = day2::public_downloads::package(&source, &stage)?;
+    let mut artifact: Value = serde_json::from_slice(&fs::read(stage.join("artifact.json"))?)?;
+    artifact["public_downloads"] = serde_json::to_value(&catalog)?;
+    let bytes = serde_json::to_vec(&artifact)?;
+    fs::write(stage.join("artifact.json"), &bytes)?;
+    let artifact_path = directory
+        .path()
+        .join(day2_assets::hash_part(&day2::digest(&bytes))?);
+    fs::rename(&stage, &artifact_path)?;
+    let server = Server::start_with(|_| instance(artifact_path.to_str().unwrap()))?;
+    assert_eq!(server.sessions()?, 0);
+    for name in ["extension.crx", "updates.xml"] {
+        let path = format!("/downloads/{name}?x=id%3Dexample%26v%3D1.0");
+        let response = server.get(&path).send()?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], catalog[name].media_type);
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert!(!response.headers().contains_key(SET_COOKIE));
+        let etag = response.headers()["etag"].clone();
+        assert_eq!(day2::digest(&response.bytes()?), catalog[name].digest);
+        assert_eq!(
+            server
+                .get(&path)
+                .header("if-none-match", &etag)
+                .send()?
+                .status(),
+            StatusCode::NOT_MODIFIED
+        );
+        let head = server
+            .client
+            .head(format!("{}{path}", server.origin))
+            .header(HOST, AUTHORITY)
+            .send()?;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(
+            head.headers()["content-length"].to_str()?,
+            catalog[name].bytes.to_string()
+        );
+        assert!(head.bytes()?.is_empty());
+        let post = server
+            .client
+            .post(format!("{}{path}", server.origin))
+            .header(HOST, AUTHORITY)
+            .send()?;
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(post.headers()["allow"], "GET, HEAD");
+        assert!(
+            server
+                .get(&path)
+                .header(HOST, "other.example.test")
+                .send()?
+                .status()
+                .is_client_error()
+        );
+    }
+    for path in [
+        "/",
+        "/api/delegation.who",
+        "/downloads/not-admitted.crx",
+        "/downloads/%75pdates.xml",
+        "/assets/ui/other/app.js",
+    ] {
+        assert_eq!(
+            server.get(path).send()?.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path}"
+        );
+    }
+    assert_eq!(server.sessions()?, 0);
+    // An artifact without an explicit publication does not inherit this access.
+    let other = Server::start()?;
+    assert_eq!(
+        other.get("/downloads/extension.crx").send()?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // Even a matching validator cannot turn corrupted bytes into a 304.
+    let file = &catalog["extension.crx"];
+    fs::write(
+        artifact_path
+            .join("public-downloads")
+            .join(format!("{}.bin", day2_assets::hash_part(&file.digest)?)),
+        b"changed",
+    )?;
+    let response = server
+        .get("/downloads/extension.crx")
+        .header("if-none-match", format!("\"{}\"", file.digest))
+        .send()?;
+    assert!(response.status().is_server_error());
+    Ok(())
 }
 
 #[test]

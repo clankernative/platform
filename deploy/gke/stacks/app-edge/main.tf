@@ -749,6 +749,21 @@ resource "kubernetes_ingress_v1" "app" {
             }
           }
         }
+        dynamic "path" {
+          for_each = var.public_download_paths
+          content {
+            path      = path.value
+            path_type = "Exact"
+            backend {
+              service {
+                name = kubernetes_service_v1.public_downloads[0].metadata[0].name
+                port {
+                  number = 8080
+                }
+              }
+            }
+          }
+        }
         path {
           path      = "/"
           path_type = "Prefix"

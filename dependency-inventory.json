@@ -2704,7 +2704,7 @@
     ],
     "repository": "https://github.com/raphlinus/pulldown-cmark",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.13.4"
+    "version": "0.13.5"
   },
   {
     "license": "Apache-2.0",

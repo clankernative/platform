@@ -43328,10 +43328,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-===== pulldown-cmark 0.13.4 =====
+===== pulldown-cmark 0.13.5 =====
 License: MIT
 Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/pulldown-cmark/0.13.4/download
+Unmodified source: https://crates.io/api/v1/crates/pulldown-cmark/0.13.5/download
 
 --- LICENSE ---
 The MIT License
