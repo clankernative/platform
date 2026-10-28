@@ -1972,6 +1972,48 @@ mod tests {
     }
 
     #[test]
+    fn partial_before_or_after_ledger_export_is_terminal_and_preserves_native_failure() {
+        struct PartialSidecar { bytes:Vec<u8>,calls:usize,fail_at:usize }
+        impl RecordOutput for PartialSidecar {
+            fn append(&mut self,record:&[u8])->std::io::Result<()> {
+                self.calls+=1;
+                if self.calls==self.fail_at {
+                    self.bytes.extend_from_slice(&record[..10]);
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                self.bytes.extend_from_slice(record);Ok(())
+            }
+        }
+        for fail_at in [2,3] {
+            let mut recorder=Recorder::with_writer(PartialSidecar {bytes:Vec::new(),calls:0,fail_at});
+            recorder.activated=true;
+            recorder.enter(FailurePhase::AppServing);
+            let data=super::super::super::admission_work::Snapshot::maximal_fixture();
+            recorder.current_admission_work(ServingRole::App,data.clone(),data);
+            recorder.current_serving_join=Some(CurrentServingJoin {
+                role:ServingRole::App,
+                request:Some(super::super::super::native_clock::EnrolledRequestDiagnosticData::maximal_fixture()),
+                peer:Some(super::super::super::native_enrollment::PeerRequestDiagnosticData::maximal_fixture()),
+            });
+            let native=PreparationFailure::at(PreparationStep::DiskBinding,anyhow::anyhow!("storage_provider_disk_binding"));
+            let exported=recorder.refuse(Some(&native));
+            assert!(exported.is_err());
+            let error=super::super::preserve_native_failure(Err(native),exported).unwrap_err();
+            assert!(error.downcast_ref::<PreparationFailure>().is_some());
+            assert!(error.chain().any(|cause|cause.to_string()=="storage_provider_disk_binding"));
+            assert!(recorder.export_failed && recorder.current_admission_work.is_none() && recorder.current_serving_join.is_none());
+            let end=recorder.output.bytes.iter().rposition(|byte|*byte==b'\n').unwrap()+1;
+            let complete=current_work_rows(&recorder.output.bytes[..end]);
+            assert_eq!(complete.len(),fail_at-2);
+            assert!(!complete.iter().any(|row|row["boundary"]=="after"));
+            let bytes=recorder.output.bytes.len();let calls=recorder.output.calls;
+            assert!(recorder.refuse(None).is_err());
+            recorder.emit_current_self_check(false).unwrap();
+            assert_eq!((recorder.output.bytes.len(),recorder.output.calls),(bytes,calls));
+        }
+    }
+
+    #[test]
     fn controller_ledger_observes_injected_full_check_in_an_isolated_process() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
