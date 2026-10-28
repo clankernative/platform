@@ -688,6 +688,8 @@ mod tests {
         canonical_request
             && canonical_address
             && canonical_query
+            && calls.0.iter().filter(|name| name.as_str() == "append_pair").count() == 1
+            && calls.0.iter().filter(|name| name.as_str() == "query_pairs_mut").count() == 1
             && matches!((checked("check_counter_response_status","status"),
             checked("check_counter_response_length","content_length"),read),
             (Some(status),Some(length),Some(read)) if status<length && length<read)
@@ -758,6 +760,14 @@ mod tests {
             (
                 ".append_pair(\"access_token\", self.subject_text()?)",
                 ".append_pair(\"access_token\", self.subject_text()?).append_pair(\"fields\", \"aud,azp,scope,expires_in\")",
+            ),
+            (
+                ".append_pair(\"access_token\", self.subject_text()?);",
+                ".append_pair(\"access_token\", self.subject_text()?); address.query_pairs_mut().append_pair(\"fields\", \"aud,azp,scope,expires_in\");",
+            ),
+            (
+                ".append_pair(\"access_token\", self.subject_text()?);",
+                ".append_pair(\"access_token\", self.subject_text()?); address.query_pairs_mut().append_pair(\"access_token\", self.subject_text()?);",
             ),
             (".timeout(remaining)", ".timeout(Duration::from_secs(5))"),
         ] {
