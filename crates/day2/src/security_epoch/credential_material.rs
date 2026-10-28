@@ -688,8 +688,18 @@ mod tests {
         canonical_request
             && canonical_address
             && canonical_query
-            && calls.0.iter().filter(|name| name.as_str() == "append_pair").count() == 1
-            && calls.0.iter().filter(|name| name.as_str() == "query_pairs_mut").count() == 1
+            && calls
+                .0
+                .iter()
+                .filter(|name| name.as_str() == "append_pair")
+                .count()
+                == 1
+            && calls
+                .0
+                .iter()
+                .filter(|name| name.as_str() == "query_pairs_mut")
+                .count()
+                == 1
             && matches!((checked("check_counter_response_status","status"),
             checked("check_counter_response_length","content_length"),read),
             (Some(status),Some(length),Some(read)) if status<length && length<read)
