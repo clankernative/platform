@@ -955,6 +955,39 @@ nor human acknowledgement, continued readiness, or a durable product connection.
 
 ## Cumulative admission-work observations
 
+The Controller exports its own process ledger on the existing
+`day2-native-controller-self-check ` channel, as two
+`controller_current_admission_work_v1` sidecars for each actual Current. They
+share the existing `controller_current_serving_v4` record's sequence, role,
+selection, Controller incarnation and actual request/peer joins. `boundary`
+is `before` or `after`: the first snapshot precedes the readiness probe and
+role acquisition; the second follows the returned operation after native
+borrows unwind, including refusal. No record is emitted for idle polls. This
+conservative interval can include concurrent process work; a positive delta
+does not by itself attribute that work to this request.
+
+Each complete line, including prefix/newline, retains the 4,096-byte bound.
+The existing timing-detail cap of 256 does not cap these ledger sidecars.
+Each `admission_work` uses `native_admission_work_compact_v1`, preserving the
+original snapshot format, sequence, producer incarnation, completeness,
+overflow/in-flight nullability, loss and poison flags. Its
+`work_code_covered_counts8_v1` rows are `[work_code, covered, counts]`.
+Codes 0–8 are executable SHA, issuer-client exchange, issuer-service admission,
+full physical admission, physical provider request, metadata admission,
+TokenReview, workload admission and credential admission. The eight counters
+are attempted, returned, succeeded, abandoned, in-flight, SHA bytes read,
+request-body bytes supplied and response-body bytes actually read. Null is
+never zero; no counter is truncated or converted into a saturating delta.
+
+Warm-zero qualification requires both matching sidecars and actual Current
+joins, healthy complete same-producer snapshots, increasing snapshot sequence,
+all nine covered rows, no outstanding work/loss/poison/overflow, and unchanged
+cumulative counters. Missing, partial, duplicated, mismatched or failed exports
+are inconclusive. These are historical DATA only: no serialized counter,
+identity label or computed delta grants permission or changes a deadline.
+The frozen native36 source lacks these Controller sidecars; its Controller
+warm-zero result remains inconclusive, independent of other producers' logs.
+
 The private admission-work ledger is process-cumulative diagnostic DATA. It is
 separate from the bounded timing records above and never resets at a request
 boundary. A cold snapshot followed by two warm start/end snapshots must be

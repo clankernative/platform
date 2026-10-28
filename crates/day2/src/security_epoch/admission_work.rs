@@ -233,6 +233,25 @@ pub(crate) struct Snapshot {
     rows: [Row; 9],
 }
 
+/// Lossless DATA encoding for the existing bounded Controller exporter. Work
+/// codes follow Work's fixed 0..8 representation. Counts retain nulls in order:
+/// attempted, returned, succeeded, abandoned, in_flight, SHA bytes, supplied
+/// request-body bytes, actually read response-body bytes. Never a permission.
+#[derive(Serialize)]
+pub(super) struct CompactSnapshot<'a> {
+    format: &'static str,
+    snapshot_format: &'static str,
+    row_encoding: &'static str,
+    sequence: Option<u64>,
+    producer_incarnation: &'a Option<Digest>,
+    complete: bool,
+    overflowed: Option<bool>,
+    in_flight: Option<bool>,
+    loss: bool,
+    poisoned: bool,
+    rows: [(u8, bool, [Option<u64>; 8]); 9],
+}
+
 static LEDGER: Mutex<Ledger> = Mutex::new(Ledger::ZERO);
 static LOST: AtomicBool = AtomicBool::new(false);
 
@@ -357,6 +376,38 @@ fn snapshot_ledger(ledger: &Mutex<Ledger>, lost: &AtomicBool) -> Snapshot {
 }
 
 impl Snapshot {
+    pub(super) fn compact_data(&self) -> CompactSnapshot<'_> {
+        CompactSnapshot {
+            format: "native_admission_work_compact_v1",
+            snapshot_format: self.format,
+            row_encoding: "work_code_covered_counts8_v1",
+            sequence: self.sequence,
+            producer_incarnation: &self.producer_incarnation,
+            complete: self.complete,
+            overflowed: self.overflowed,
+            in_flight: self.in_flight,
+            loss: self.loss,
+            poisoned: self.poisoned,
+            rows: std::array::from_fn(|index| {
+                let row = &self.rows[index];
+                (
+                    row.work as u8,
+                    row.covered,
+                    [
+                        row.attempted,
+                        row.returned,
+                        row.succeeded,
+                        row.abandoned,
+                        row.in_flight,
+                        row.sha_bytes_read,
+                        row.request_body_bytes_supplied,
+                        row.response_body_bytes_read,
+                    ],
+                )
+            }),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn maximal_fixture() -> Self {
         let mut empty = Ledger::ZERO;
@@ -380,6 +431,73 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn controller_compact_snapshot_is_lossless_including_unknown_fields() {
+        use super::*;
+        let mut data = Snapshot::maximal_fixture();
+        for unknown in [false, true] {
+            if unknown {
+                data.sequence = None;
+                data.producer_incarnation = None;
+                data.overflowed = None;
+                data.in_flight = None;
+                data.complete = false;
+                data.loss = true;
+                data.poisoned = true;
+                data.rows[0].attempted = None;
+                data.rows[8].response_body_bytes_read = None;
+            }
+            let raw = serde_json::to_value(&data).unwrap();
+            let compact = serde_json::to_value(data.compact_data()).unwrap();
+            assert_eq!(compact["snapshot_format"], raw["format"]);
+            for name in [
+                "sequence",
+                "producer_incarnation",
+                "complete",
+                "overflowed",
+                "in_flight",
+                "loss",
+                "poisoned",
+            ] {
+                assert_eq!(compact[name], raw[name]);
+            }
+            assert_eq!(compact["rows"].as_array().unwrap().len(), 9);
+            let names = [
+                "executable_sha256",
+                "issuer_client_exchange",
+                "issuer_service_admission",
+                "physical_admission",
+                "physical_profile",
+                "metadata_admission",
+                "token_review",
+                "workload_admission",
+                "credential_admission",
+            ];
+            for (index, work) in WORK.iter().enumerate() {
+                let row = &compact["rows"][index];
+                assert_eq!(row[0], *work as u8);
+                assert_eq!(row[0], index);
+                assert_eq!(raw["rows"][index]["work"], names[index]);
+                assert_eq!(row[1], raw["rows"][index]["covered"]);
+                for (column, name) in [
+                    "attempted",
+                    "returned",
+                    "succeeded",
+                    "abandoned",
+                    "in_flight",
+                    "sha_bytes_read",
+                    "request_body_bytes_supplied",
+                    "response_body_bytes_read",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    assert_eq!(row[2][column], raw["rows"][index][*name]);
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

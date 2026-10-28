@@ -2,6 +2,7 @@
 //! thread. Idle probes create DATA, never a role lease or action permission.
 use crate::artifact::Instance;
 use crate::security_epoch::{
+    admission_work,
     bootstrap::{self, ControllerActivationOutcome},
     native_enrollment::{
         ControllerServingListener, ControllerServingPeer, EnrolledProcessRoleOwner,
@@ -237,6 +238,7 @@ fn run_inner(
             // Serving still acquires an original only for actual pending
             // work. Maintenance never enters or renews a serving request.
             evidence.enter(FailurePhase::AppPending);
+            let admission_before = admission_work::snapshot();
             if active.app_pending()? {
                 evidence.enter(FailurePhase::AppServing);
                 let trace = serving_timing::ServingTiming::new();
@@ -254,6 +256,8 @@ fn run_inner(
                             })
                         })
                 });
+                let admission_now = admission_work::snapshot();
+                evidence.current_admission_work(ServingRole::App, admission_before, admission_now);
                 // Both records contain only historical DATA after all native
                 // role/physical/provider borrows have returned or unwound.
                 evidence.serving_timing(trace.snapshot(result.as_ref().err()));
@@ -263,9 +267,18 @@ fn run_inner(
             }
             if let Some(peer) = &mut shell {
                 evidence.enter(FailurePhase::ShellPending);
+                let admission_before = admission_work::snapshot();
                 if peer.idle_ready()? {
                     evidence.enter(FailurePhase::ShellServing);
-                    let observed = active.serve_shell_current(role.begin_current_stage()?, peer)?;
+                    let result =
+                        (|| active.serve_shell_current(role.begin_current_stage()?, peer))();
+                    let admission_now = admission_work::snapshot();
+                    evidence.current_admission_work(
+                        ServingRole::Shell,
+                        admission_before,
+                        admission_now,
+                    );
+                    let observed = result?;
                     evidence.serving(ServingRole::Shell, observed)?;
                 }
             } else {
@@ -295,6 +308,233 @@ fn run_inner(
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    fn current_work_brackets_are_present(source: &str) -> bool {
+        use syn::visit::Visit;
+        fn name(local: &syn::Local, expected: &str) -> bool {
+            matches!(&local.pat,syn::Pat::Ident(id) if id.ident==expected)
+        }
+        fn snapshot(statement: &syn::Stmt, expected: &str) -> bool {
+            let syn::Stmt::Local(local) = statement else {
+                return false;
+            };
+            name(local, expected)
+                && matches!(local.init.as_ref().map(|v|&*v.expr),Some(syn::Expr::Call(call))
+                if call.args.is_empty() && matches!(&*call.func,syn::Expr::Path(path)
+                    if path.path.segments.iter().map(|v|v.ident.to_string()).collect::<Vec<_>>()==["admission_work","snapshot"]))
+        }
+        #[derive(Default)]
+        struct Brackets {
+            app: usize,
+            shell: usize,
+            valid: bool,
+        }
+        impl<'a> Visit<'a> for Brackets {
+            fn visit_block(&mut self, block: &'a syn::Block) {
+                for (index, statement) in block.stmts.iter().enumerate() {
+                    let syn::Stmt::Expr(syn::Expr::If(branch), _) = statement else {
+                        continue;
+                    };
+                    let syn::Expr::Try(attempt) = &*branch.cond else {
+                        continue;
+                    };
+                    let syn::Expr::MethodCall(ready) = &*attempt.expr else {
+                        continue;
+                    };
+                    let syn::Expr::Path(receiver) = &*ready.receiver else {
+                        continue;
+                    };
+                    let role = if ready.method == "app_pending" && receiver.path.is_ident("active")
+                    {
+                        self.app += 1;
+                        "App"
+                    } else if ready.method == "idle_ready" && receiver.path.is_ident("peer") {
+                        self.shell += 1;
+                        "Shell"
+                    } else {
+                        continue;
+                    };
+                    if index == 0 || !snapshot(&block.stmts[index - 1], "admission_before") {
+                        self.valid = false;
+                        continue;
+                    }
+                    let stmts = &branch.then_branch.stmts;
+                    let Some(end) = stmts.iter().position(|s| snapshot(s, "admission_now")) else {
+                        self.valid = false;
+                        continue;
+                    };
+                    let before_end = if end > 0 {
+                        &stmts[end - 1]
+                    } else {
+                        self.valid = false;
+                        continue;
+                    };
+                    let syn::Stmt::Local(result) = before_end else {
+                        self.valid = false;
+                        continue;
+                    };
+                    let result_name = if role == "App" {
+                        matches!(&result.pat,syn::Pat::Tuple(tuple)
+                        if matches!(tuple.elems.first(),Some(syn::Pat::Ident(id)) if id.ident=="result"))
+                    } else {
+                        name(result, "result")
+                    };
+                    #[derive(Default)]
+                    struct Warm {
+                        role: usize,
+                        app: usize,
+                        shell: usize,
+                        snapshots: usize,
+                        captures: usize,
+                        invalid: bool,
+                    }
+                    impl<'b> Visit<'b> for Warm {
+                        fn visit_expr_call(&mut self, call: &'b syn::ExprCall) {
+                            match &*call.func {
+                                syn::Expr::Path(path) => {
+                                    let parts = path
+                                        .path
+                                        .segments
+                                        .iter()
+                                        .map(|v| v.ident.to_string())
+                                        .collect::<Vec<_>>();
+                                    if parts == ["admission_work", "snapshot"] {
+                                        self.snapshots += 1;
+                                    } else if parts != ["self_check_profile", "sample_current"]
+                                        && parts != ["self_check_profile", "enter"]
+                                        && parts != ["serving_timing", "ServingTiming", "new"]
+                                    {
+                                        self.invalid = true;
+                                    }
+                                }
+                                syn::Expr::Paren(paren)
+                                    if matches!(&*paren.expr, syn::Expr::Closure(_)) => {}
+                                _ => self.invalid = true,
+                            }
+                            syn::visit::visit_expr_call(self, call);
+                        }
+                        fn visit_expr_method_call(&mut self, call: &'b syn::ExprMethodCall) {
+                            match call.method.to_string().as_str() {
+                                "begin_current_stage" => self.role += 1,
+                                "serve_app_current" => self.app += 1,
+                                "serve_shell_current" => self.shell += 1,
+                                "current_admission_work" => self.captures += 1,
+                                "measure"
+                                | "and_then"
+                                | "bind_progress"
+                                | "diagnostic_progress"
+                                | "enter"
+                                | "snapshot"
+                                | "serving_timing"
+                                | "current_serving_profile"
+                                | "serving"
+                                | "as_ref"
+                                | "err" => {}
+                                _ => self.invalid = true,
+                            }
+                            syn::visit::visit_expr_method_call(self, call);
+                        }
+                    }
+                    let mut warm = Warm::default();
+                    if let Some(init) = &result.init {
+                        let retained_result = matches!(&*init.expr,syn::Expr::Call(call)
+                        if match &*call.func {
+                            syn::Expr::Path(path)=>role=="App" && path.path.segments.iter().map(|s|s.ident.to_string()).collect::<Vec<_>>()==["self_check_profile","sample_current"],
+                            syn::Expr::Paren(parenthesized)=>role=="Shell" && matches!(&*parenthesized.expr,syn::Expr::Closure(_)),
+                            _=>false,
+                        });
+                        warm.invalid |= !retained_result;
+                    } else {
+                        warm.invalid = true;
+                    }
+                    warm.visit_block(&branch.then_branch);
+                    let set = matches!(stmts.get(end+1),Some(syn::Stmt::Expr(syn::Expr::MethodCall(call),Some(_)))
+                        if call.method=="current_admission_work" && call.args.len()==3
+                        && matches!(&*call.receiver,syn::Expr::Path(path) if path.path.is_ident("evidence"))
+                        && matches!(&call.args[0],syn::Expr::Path(path) if path.path.segments.last().unwrap().ident==role)
+                        && matches!(&call.args[1],syn::Expr::Path(path) if path.path.is_ident("admission_before"))
+                        && matches!(&call.args[2],syn::Expr::Path(path) if path.path.is_ident("admission_now")));
+                    let result_propagated_later=stmts.iter().skip(end+2).any(|s|matches!(s,syn::Stmt::Local(local)
+                        if matches!(local.init.as_ref().map(|v|&*v.expr),Some(syn::Expr::Try(attempt))
+                            if matches!(&*attempt.expr,syn::Expr::Path(path) if path.path.is_ident("result")))));
+                    self.valid &= result_name
+                        && !warm.invalid
+                        && warm.role == 1
+                        && warm.snapshots == 1
+                        && warm.captures == 1
+                        && warm.app == usize::from(role == "App")
+                        && warm.shell == usize::from(role == "Shell")
+                        && set
+                        && result_propagated_later;
+                }
+                syn::visit::visit_block(self, block);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let mut audit = Brackets {
+            valid: true,
+            ..Default::default()
+        };
+        for item in &file.items {
+            if let syn::Item::Fn(function) = item
+                && function.sig.ident == "run_inner"
+            {
+                audit.visit_block(&function.block);
+            }
+        }
+        audit.valid && audit.app == 1 && audit.shell == 1
+    }
+
+    #[test]
+    fn current_work_capture_brackets_role_operation_and_error_on_both_paths() {
+        let source = include_str!("controller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(current_work_brackets_are_present(source));
+        for changed in [
+            source.replacen("let admission_before = admission_work::snapshot();", "", 1),
+            source.replacen("let admission_now = admission_work::snapshot();", "", 1),
+            source.replacen(
+                "if active.app_pending()? {",
+                "if active.app_pending()? { force_full_check();",
+                1,
+            ),
+            source.replacen(
+                "let observed = result?;",
+                "force_full_check(); let observed = result?;",
+                1,
+            ),
+            source.replacen(
+                "evidence.current_admission_work(",
+                "foreign.current_admission_work(",
+                1,
+            ),
+            source.replacen(
+                "role.begin_current_stage()",
+                "force_full_check(); role.begin_current_stage()",
+                1,
+            ),
+            source.replacen(
+                "active.serve_app_current(stage, &trace)",
+                "{ force_full_check(); active.serve_app_current(stage, &trace) }",
+                1,
+            ),
+            source.replacen(
+                "active.serve_shell_current",
+                "active.full_check_and_serve_shell_current",
+                1,
+            ),
+            source.replacen(
+                "let observed = result?;",
+                "let observed = result.unwrap();",
+                1,
+            ),
+        ] {
+            assert_ne!(source, changed);
+            assert!(!current_work_brackets_are_present(&changed));
+        }
+    }
 
     #[test]
     fn interrupted_diagnostic_export_retains_original_native_failure_and_stays_terminal() {

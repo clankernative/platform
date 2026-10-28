@@ -45,6 +45,12 @@ struct CurrentServingJoin {
     peer: Option<super::super::native_enrollment::PeerRequestDiagnosticData>,
 }
 
+struct CurrentAdmissionWork {
+    role: ServingRole,
+    before: Option<super::super::admission_work::Snapshot>,
+    now: Option<super::super::admission_work::Snapshot>,
+}
+
 impl RecordOutput for StderrOutput {
     fn append(&mut self, record: &[u8]) -> std::io::Result<()> {
         self.stream.write_all(record)
@@ -72,6 +78,7 @@ pub(in crate::security_epoch) struct Recorder<W> {
     serving_timing: Option<ServingSnapshot>,
     current_serving_profile: Option<super::super::self_check_profile::CurrentProfile>,
     current_serving_join: Option<CurrentServingJoin>,
+    current_admission_work: Option<CurrentAdmissionWork>,
     read_only_observed: bool,
 }
 
@@ -690,6 +697,7 @@ impl<W: RecordOutput> Recorder<W> {
             serving_timing: None,
             current_serving_profile: None,
             current_serving_join: None,
+            current_admission_work: None,
             read_only_observed: false,
         }
     }
@@ -699,6 +707,29 @@ impl<W: RecordOutput> Recorder<W> {
         self.serving_timing = None;
         self.current_serving_profile = None;
         self.current_serving_join = None;
+        self.current_admission_work = None;
+    }
+
+    /// Historical snapshots from the real Controller, never native admission.
+    /// Duplicate or wrongly phased captures remain unknown until enter clears
+    /// the phase. They cannot replace a prior interval with a later baseline.
+    pub(super) fn current_admission_work(
+        &mut self,
+        role: ServingRole,
+        before: super::super::admission_work::Snapshot,
+        now: super::super::admission_work::Snapshot,
+    ) {
+        let valid = self.current_admission_work.is_none()
+            && matches!(
+                (role, self.at),
+                (ServingRole::App, FailurePhase::AppServing)
+                    | (ServingRole::Shell, FailurePhase::ShellServing)
+            );
+        self.current_admission_work = Some(CurrentAdmissionWork {
+            role,
+            before: valid.then_some(before),
+            now: valid.then_some(now),
+        });
     }
 
     pub(super) fn serving_timing(&mut self, timing: ServingSnapshot) {
@@ -1036,7 +1067,14 @@ impl<W: RecordOutput> Recorder<W> {
                     at: FailurePhase::AppServing,
                     ..
                 }
-        ) {
+        ) || (matches!(
+            observation,
+            Observation::Refused {
+                at: FailurePhase::ShellServing,
+                ..
+            }
+        ) && self.current_admission_work.is_some())
+        {
             return self.emit_current_self_check(matches!(
                 observation,
                 Observation::FirstServingRelease { .. }
@@ -1110,15 +1148,14 @@ impl<W: RecordOutput> Recorder<W> {
         // work or complete capture.
         let profile = self.current_serving_profile.take();
         let join = self.current_serving_join.take();
-        if profile.is_none() && join.is_none() {
+        let admission = self.current_admission_work.take();
+        if profile.is_none() && join.is_none() && admission.is_none() {
             return Ok(());
         }
         let sequence = self
             .current_join_records
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("native_current_diagnostic_sequence_overflow"))?;
-        let detail =
-            profile.filter(|_| self.current_self_check_records < MAX_CURRENT_SELF_CHECK_RECORDS);
         let role = join
             .as_ref()
             .map(|join| join.role)
@@ -1126,6 +1163,10 @@ impl<W: RecordOutput> Recorder<W> {
                 FailurePhase::ShellServing => ServingRole::Shell,
                 _ => ServingRole::App,
             });
+        let detail = profile.filter(|_| {
+            matches!(role, ServingRole::App)
+                && self.current_self_check_records < MAX_CURRENT_SELF_CHECK_RECORDS
+        });
         #[derive(Serialize)]
         struct CurrentRecord<'a> {
             format: &'static str,
@@ -1173,7 +1214,56 @@ impl<W: RecordOutput> Recorder<W> {
             detail,
         };
         let json = serde_json::to_string(&record)?;
+        #[derive(Serialize)]
+        struct WorkRecord<'a> {
+            format: &'static str,
+            sequence: u64,
+            boundary: &'static str,
+            completed: bool,
+            role: ServingRole,
+            selection: &'a Option<Digest>,
+            controller_incarnation: &'a Option<Digest>,
+            request: Option<&'a super::super::native_clock::EnrolledRequestDiagnosticData>,
+            peer: Option<&'a super::super::native_enrollment::PeerRequestDiagnosticData>,
+            admission_work: Option<super::super::admission_work::CompactSnapshot<'a>>,
+        }
+        // Serialize both bounded sidecars before borrowing the output. The
+        // same actual Current joins and ordinal are copied, never reconstructed.
+        let work_json = admission
+            .as_ref()
+            .map(|admission| {
+                let same_role = matches!(
+                    (admission.role, role),
+                    (ServingRole::App, ServingRole::App) | (ServingRole::Shell, ServingRole::Shell)
+                );
+                let encode =
+                    |boundary, snapshot: Option<&super::super::admission_work::Snapshot>| {
+                        serde_json::to_string(&WorkRecord {
+                            format: "controller_current_admission_work_v1",
+                            sequence,
+                            boundary,
+                            completed,
+                            role,
+                            selection: record.selection,
+                            controller_incarnation: record.controller_incarnation,
+                            request: record.request,
+                            peer: record.peer,
+                            admission_work: snapshot
+                                .filter(|_| same_role)
+                                .map(|value| value.compact_data()),
+                        })
+                    };
+                Ok::<_, serde_json::Error>((
+                    encode("before", admission.before.as_ref())?,
+                    encode("after", admission.now.as_ref())?,
+                ))
+            })
+            .transpose()?;
         self.append_self_check(&json, MAX_CURRENT_SELF_CHECK_BYTES)?;
+        if let Some((before, after)) = work_json {
+            self.append_self_check(&before, MAX_CURRENT_SELF_CHECK_BYTES)?;
+            self.append_self_check(&after, MAX_CURRENT_SELF_CHECK_BYTES)?;
+        }
         self.current_join_records = sequence;
         if detail.is_some() {
             self.current_self_check_records += 1;
@@ -1764,6 +1854,184 @@ mod tests {
         assert!(row["detail"].is_null());
         assert_eq!(row["capture_completeness"], "unknown");
         assert!(recorder.current_serving_join.is_none());
+    }
+
+    fn current_work_rows(output: &[u8]) -> Vec<Value> {
+        std::str::from_utf8(output)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let json = line.strip_prefix(SELF_CHECK_PREFIX)?;
+                let value: Value = serde_json::from_str(json).unwrap();
+                (value["format"] == "controller_current_admission_work_v1").then_some(value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn current_ledger_pairs_are_uncapped_joined_bounded_and_once_on_both_role_outcomes() {
+        for role in [ServingRole::App, ServingRole::Shell] {
+            for completed in [false, true] {
+                let (mut recorder, ..) = fixture();
+                recorder.activated = true;
+                recorder.incarnation = Some(Digest::new(b"actual Controller DATA fixture"));
+                recorder.enter(match role {
+                    ServingRole::App => FailurePhase::AppServing,
+                    ServingRole::Shell => FailurePhase::ShellServing,
+                });
+                recorder.current_join_records = u64::MAX - 1;
+                // Ledger output continues after the optional timing-detail cap.
+                recorder.current_self_check_records = MAX_CURRENT_SELF_CHECK_RECORDS;
+                recorder.current_admission_work(
+                    role,
+                    super::super::super::admission_work::Snapshot::maximal_fixture(),
+                    super::super::super::admission_work::Snapshot::maximal_fixture(),
+                );
+                recorder.current_serving_join=Some(CurrentServingJoin {
+                    role,
+                    request:Some(super::super::super::native_clock::EnrolledRequestDiagnosticData::maximal_fixture()),
+                    peer:Some(super::super::super::native_enrollment::PeerRequestDiagnosticData::maximal_fixture()),
+                });
+                if completed {
+                    recorder.emit_current_self_check(true).unwrap();
+                } else {
+                    recorder
+                        .refuse(Some(&anyhow::anyhow!("PRIVATE error must not serialize")))
+                        .unwrap();
+                }
+                let rows = current_work_rows(&recorder.output);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0]["boundary"], "before");
+                assert_eq!(rows[1]["boundary"], "after");
+                for row in &rows {
+                    assert_eq!(row["sequence"], u64::MAX);
+                    assert_eq!(row["completed"], completed);
+                    assert_eq!(row["role"], serde_json::to_value(role).unwrap());
+                    assert_eq!(
+                        row["controller_incarnation"],
+                        serde_json::to_value(&recorder.incarnation).unwrap()
+                    );
+                    assert!(row["request"]["request_original"].is_string());
+                    assert!(row["peer"].is_object());
+                    assert_eq!(row["admission_work"]["rows"].as_array().unwrap().len(), 9);
+                    assert!(
+                        row["admission_work"]["rows"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|row| row[2].as_array().unwrap().len() == 8)
+                    );
+                }
+                let lines = std::str::from_utf8(&recorder.output).unwrap();
+                assert!(!lines.contains("PRIVATE"));
+                for line in lines
+                    .lines()
+                    .filter(|line| line.starts_with(SELF_CHECK_PREFIX))
+                {
+                    assert!(
+                        line.len() + 1 <= MAX_CURRENT_SELF_CHECK_BYTES,
+                        "maximal complete line exceeds bound"
+                    );
+                }
+                assert!(recorder.current_admission_work.is_none());
+                let length = recorder.output.len();
+                recorder.emit_current_self_check(false).unwrap();
+                assert_eq!(recorder.output.len(), length);
+            }
+        }
+    }
+
+    #[test]
+    fn current_ledger_capture_cannot_rebaseline_or_cross_a_phase_or_role() {
+        let data = super::super::super::admission_work::Snapshot::maximal_fixture();
+        let (mut recorder, ..) = fixture();
+        recorder.enter(FailurePhase::AppServing);
+        recorder.current_admission_work(ServingRole::App, data.clone(), data.clone());
+        recorder.current_admission_work(ServingRole::App, data.clone(), data.clone());
+        recorder.emit_current_self_check(false).unwrap();
+        assert!(
+            current_work_rows(&recorder.output)
+                .iter()
+                .all(|row| row["admission_work"].is_null())
+        );
+        recorder.enter(FailurePhase::ShellServing);
+        recorder.current_admission_work(ServingRole::App, data.clone(), data.clone());
+        recorder.emit_current_self_check(false).unwrap();
+        assert!(
+            current_work_rows(&recorder.output)
+                .iter()
+                .all(|row| row["admission_work"].is_null())
+        );
+        recorder.enter(FailurePhase::AppServing);
+        recorder.current_admission_work(ServingRole::App, data.clone(), data);
+        recorder.enter(FailurePhase::ShellPending);
+        assert!(recorder.current_admission_work.is_none());
+        let length = recorder.output.len();
+        recorder.emit_current_self_check(false).unwrap();
+        assert_eq!(recorder.output.len(), length);
+    }
+
+    #[test]
+    fn controller_ledger_observes_injected_full_check_in_an_isolated_process() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "security_epoch::controller::evidence::tests::controller_ledger_full_check_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated Controller ledger control failed"
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated production-ledger control executed by parent"]
+    fn controller_ledger_full_check_child() {
+        use super::super::super::admission_work::{self, Work};
+        admission_work::bind_producer(
+            &Digest::new(b"Controller DATA ledger fixture"),
+            std::process::id(),
+        );
+        let baseline = admission_work::snapshot();
+        for inject in [false, true] {
+            let before = admission_work::snapshot();
+            if inject {
+                let mut full = admission_work::begin(Work::PhysicalAdmission);
+                full.finish(true);
+            }
+            let after = admission_work::snapshot();
+            let (mut recorder, ..) = fixture();
+            recorder.enter(FailurePhase::AppServing);
+            recorder.current_admission_work(ServingRole::App, before, after);
+            recorder.emit_current_self_check(true).unwrap();
+            let rows = current_work_rows(&recorder.output);
+            assert_eq!(rows.len(), 2);
+            let a = &rows[0]["admission_work"];
+            let b = &rows[1]["admission_work"];
+            assert_eq!(a["producer_incarnation"], b["producer_incarnation"]);
+            assert!(a["complete"].as_bool().unwrap() && b["complete"].as_bool().unwrap());
+            assert!(a["sequence"].as_u64() < b["sequence"].as_u64());
+            let zero = (0..9).all(|index| a["rows"][index] == b["rows"][index]);
+            assert_eq!(
+                zero, !inject,
+                "full-check attempt must break warm-zero evidence"
+            );
+            if inject {
+                assert_eq!(
+                    b["rows"][3][2][0].as_u64().unwrap(),
+                    a["rows"][3][2][0].as_u64().unwrap() + 1
+                );
+            }
+        }
+        assert!(
+            serde_json::to_value(baseline).unwrap()["complete"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[test]
