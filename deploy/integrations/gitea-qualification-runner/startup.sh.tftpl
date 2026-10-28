@@ -56,7 +56,7 @@ if [[ ! -s "$ci_runner_dir/.runner" ]]; then
     'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' | jq -er '.access_token')"
   registration_token="$(curl -fsS -H "Authorization: Bearer $metadata_access_token" \
     "https://secretmanager.googleapis.com/v1/$registration_secret:access" | jq -er '.payload.data' | base64 --decode)"
-  [[ -n "$registration_token" && "$registration_token" != *$'\\n'* && "$registration_token" != *$'\\r'* ]] || {
+  [[ -n "$registration_token" && "$registration_token" != *$'\n'* && "$registration_token" != *$'\r'* ]] || {
     echo 'invalid Gitea runner registration token' >&2
     exit 1
   }
