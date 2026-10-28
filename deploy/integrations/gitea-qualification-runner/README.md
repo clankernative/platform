@@ -60,7 +60,10 @@ registration token is fetched at boot using the VM service account. In pinned
 `--token` command-line flag (the flag has no environment-variable binding). The
 startup script therefore uses act_runner's interactive registration input,
 feeding a temporary root-only mode-0600 file on `/run` (tmpfs) through stdin;
-the file is removed immediately after registration. The registration token is
+the file is removed immediately after registration. During that short
+registration window, the token necessarily exists in the startup process's
+memory and in this root-only tmpfs file; `/run` is cleared on reboot, and the
+script deletes the file on both registration success and failure. The token is
 not included in argv, instance metadata, Terraform inputs/state, or persistent
 disk. The generated `.runner` file contains the separate runner credential
 needed by the daemon and is owned mode 0600 by the runner account.
