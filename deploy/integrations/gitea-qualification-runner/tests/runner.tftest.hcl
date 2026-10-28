@@ -119,11 +119,21 @@ run "rejects_non_repository_scope" {
   expect_failures = [var.repository]
 }
 
-run "rejects_duplicate_or_empty_host_labels" {
+run "rejects_duplicate_host_labels" {
   command = plan
 
   variables {
     runner_labels = ["qualify-x86", "qualify-x86"]
+  }
+
+  expect_failures = [var.runner_labels]
+}
+
+run "rejects_empty_host_labels" {
+  command = plan
+
+  variables {
+    runner_labels = []
   }
 
   expect_failures = [var.runner_labels]
