@@ -795,6 +795,9 @@ mod tests {
                             Err(error) => return Err(error.into()),
                         }
                     };
+                    // Accepted sockets can inherit the listener's nonblocking
+                    // mode. Use the bounded blocking reads below explicitly.
+                    socket.set_nonblocking(false)?;
                     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
                     socket.set_write_timeout(Some(Duration::from_secs(5)))?;
                     let mut header=Vec::new();
