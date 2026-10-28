@@ -1929,7 +1929,7 @@ mod tests {
                     .filter(|line| line.starts_with(SELF_CHECK_PREFIX))
                 {
                     assert!(
-                        line.len() + 1 <= MAX_CURRENT_SELF_CHECK_BYTES,
+                        line.len() < MAX_CURRENT_SELF_CHECK_BYTES,
                         "maximal complete line exceeds bound"
                     );
                 }
