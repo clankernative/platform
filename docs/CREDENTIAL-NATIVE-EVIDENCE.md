@@ -966,6 +966,10 @@ borrows unwind, including refusal. No record is emitted for idle polls. This
 conservative interval can include concurrent process work; a positive delta
 does not by itself attribute that work to this request.
 
+A readiness error before any Current begins has no Current request join or
+paired sidecars. Its lifecycle refusal remains inconclusive for Current work;
+missing records must never be interpreted as zero work.
+
 Each complete line, including prefix/newline, retains the 4,096-byte bound.
 The existing timing-detail cap of 256 does not cap these ledger sidecars.
 Each `admission_work` uses `native_admission_work_compact_v1`, preserving the
