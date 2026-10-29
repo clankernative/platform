@@ -797,6 +797,7 @@ fn ensure_store_within_bound(connection: &Connection, max_bytes: u64) -> Result<
 }
 
 /// Reuse only the source org-unit list while its 15-minute source cache is live.
+/// A capture published after `now` is not a cache entry for `now`; it is a miss.
 /// The current user's path is deliberately not part of this lookup.
 pub fn cached_hierarchy(
     connection: &Connection,
@@ -805,7 +806,7 @@ pub fn cached_hierarchy(
     now: i64,
 ) -> Result<Option<(Vec<OrgUnit>, i64)>> {
     let header: Option<(String, i64, i64, i64)> = connection.query_row(
-        "SELECT id,org_unit_count,captured_at,expires_at FROM workspace_directory_captures WHERE customer_id=?1 AND connection_id=?2 AND expires_at>?3 ORDER BY captured_at DESC LIMIT 1",
+        "SELECT id,org_unit_count,captured_at,expires_at FROM workspace_directory_captures WHERE customer_id=?1 AND connection_id=?2 AND expires_at>?3 AND captured_at<=?3 ORDER BY captured_at DESC LIMIT 1",
         params![customer_id, connection_id, now],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional()?;
@@ -1748,6 +1749,55 @@ mod tests {
         assert_eq!(capture.metadata.source_captured_at, 100);
         assert_eq!(capture.metadata.expires_at, 1000);
         assert_eq!(capture.metadata.user_path(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn capture_published_after_now_is_a_cache_miss() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("directory.sqlite");
+        let mut store = open_store(&path)?;
+        publish(&mut store, &capture_at(fixture(), 100, 100)?)?;
+        publish(&mut store, &capture_at(fixture(), 500, 400)?)?;
+        // A later publication never shadows the capture that is live at `now`.
+        assert_eq!(
+            cached_hierarchy(&store, "customer-1", "directory-connection/1", 300)?
+                .map(|(_, source_time)| source_time),
+            Some(100)
+        );
+        assert_eq!(
+            cached_hierarchy(&store, "customer-1", "directory-connection/1", 500)?
+                .map(|(_, source_time)| source_time),
+            Some(400)
+        );
+
+        let future_only = directory.path().join("future.sqlite");
+        let mut store = open_store(&future_only)?;
+        publish(&mut store, &capture_at(fixture(), 500, 400)?)?;
+        for now in [399, 450, 499] {
+            assert_eq!(
+                cached_hierarchy(&store, "customer-1", "directory-connection/1", now)?,
+                None
+            );
+        }
+        let plan = CapturePlan::prepare(
+            &future_only,
+            CaptureInput {
+                captured_at: 450,
+                ..capture_input("alice@example.test")
+            },
+            CaptureMode::Hierarchy,
+        )?;
+        assert!(!plan.is_cached());
+        let capture = plan.collect(|_, _| {
+            Ok(Box::new(HierarchyOnlyPort {
+                units: fixture(),
+                source_time: 450,
+                user_calls: 0,
+            }))
+        })?;
+        assert_eq!(capture.metadata.source_captured_at, 450);
+        assert_eq!(capture.metadata.expires_at, 1350);
         Ok(())
     }
 
