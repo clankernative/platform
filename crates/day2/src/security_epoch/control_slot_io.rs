@@ -7,6 +7,7 @@
 use super::{
     control_slot::{AttemptCore, LogicalCore, RearmCore, SettlementCore, Slot, SlotState},
     control_slot_firestore::{self as codec, VersionedSlot},
+    controller::evidence::FailureBoundary,
     firestore::{ActionTransaction, Budget, EpochObservation, Port, Sample},
     journal::{AuthorizedDispatch, CurrentBootstrapExecution, Purpose, snapshot_digest},
     kernel::{self, Outcome, Request, UpdateTime},
@@ -212,13 +213,16 @@ impl<'storage, 'role> Mutation<'storage, 'role> {
 
     fn send(mut self, selection: &EpochStore, port: &mut impl Port) -> Result<(Self, UpdateTime)> {
         let prepared = (|| {
-            let (_, budget) = self.check(selection, port)?;
+            let (_, budget) = self
+                .check(selection, port)
+                .map_err(|error| FailureBoundary::MutationBefore.at(error))?;
             let body = self
                 .slot
                 .transaction
                 .as_ref()
                 .context("control_slot_action_transaction_required")?
-                .commit_body(selection, &self.core, &self.write)?;
+                .commit_body(selection, &self.core, &self.write)
+                .map_err(|error| FailureBoundary::MutationBody.at(error))?;
             Ok((budget, body))
         })();
         let (mut budget, body) = match prepared {
@@ -239,9 +243,13 @@ impl<'storage, 'role> Mutation<'storage, 'role> {
             .take()
             .context("control_slot_action_transaction_required")?;
         let result = (|| {
-            let bytes = budget.call(port, &endpoint(selection, "commit"), &body)?;
-            let version = commit_version(&bytes)?;
-            self.check(selection, port)?;
+            let bytes = budget
+                .call(port, &endpoint(selection, "commit"), &body)
+                .map_err(|error| FailureBoundary::CommitExchange.at(error))?;
+            let version =
+                commit_version(&bytes).map_err(|error| FailureBoundary::CommitDecode.at(error))?;
+            self.check(selection, port)
+                .map_err(|error| FailureBoundary::MutationAfter.at(error))?;
             Ok(version)
         })();
         match result {

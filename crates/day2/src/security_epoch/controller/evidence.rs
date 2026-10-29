@@ -299,6 +299,151 @@ pub(in crate::security_epoch) struct PreparationFailure {
     progress: Option<PreparationProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request: Option<FailedRequestWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<FailureLocation>,
+}
+
+/// Closed historical location of the FIRST actual failure. This is attached to
+/// each Result, never a mutable last-visited stage or an authority observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum FailureBoundary {
+    MutationBefore,
+    MutationBody,
+    CommitExchange,
+    CommitDecode,
+    MutationAfter,
+    WriterPreStage,
+    WriterPreAuthentication,
+    WriterCredential,
+    WriterTimeout,
+    WriterRequest,
+    WriterAuthenticationAfter,
+    WriterBorrowAfter,
+    WriterOwnerAfter,
+    WriterBudgetAfter,
+    WriterGateAfter,
+    ResponseBudgetAfter,
+    HttpBudgetBefore,
+    HttpSend,
+    HttpClockAfterHeaders,
+    HttpRead,
+    HttpClockAfterBody,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureIoKind {
+    Interrupted,
+    WouldBlock,
+    BrokenPipe,
+    ConnectionReset,
+    ConnectionAborted,
+    NotConnected,
+    UnexpectedEof,
+    InvalidData,
+    InvalidInput,
+    WriteZero,
+    PermissionDenied,
+    NotFound,
+    AlreadyExists,
+    TimedOut,
+    Unsupported,
+    OutOfMemory,
+    Other,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct FailureIo {
+    kind: FailureIoKind,
+    // Only an already-typed OS errno; never parsed from a foreign message.
+    errno: Option<i32>,
+}
+
+impl FailureIo {
+    fn new(kind: std::io::ErrorKind, errno: Option<i32>) -> Self {
+        use std::io::ErrorKind as Kind;
+        let kind = match kind {
+            Kind::Interrupted => FailureIoKind::Interrupted,
+            Kind::WouldBlock => FailureIoKind::WouldBlock,
+            Kind::BrokenPipe => FailureIoKind::BrokenPipe,
+            Kind::ConnectionReset => FailureIoKind::ConnectionReset,
+            Kind::ConnectionAborted => FailureIoKind::ConnectionAborted,
+            Kind::NotConnected => FailureIoKind::NotConnected,
+            Kind::UnexpectedEof => FailureIoKind::UnexpectedEof,
+            Kind::InvalidData => FailureIoKind::InvalidData,
+            Kind::InvalidInput => FailureIoKind::InvalidInput,
+            Kind::WriteZero => FailureIoKind::WriteZero,
+            Kind::PermissionDenied => FailureIoKind::PermissionDenied,
+            Kind::NotFound => FailureIoKind::NotFound,
+            Kind::AlreadyExists => FailureIoKind::AlreadyExists,
+            Kind::TimedOut => FailureIoKind::TimedOut,
+            Kind::Unsupported => FailureIoKind::Unsupported,
+            Kind::OutOfMemory => FailureIoKind::OutOfMemory,
+            Kind::Other => FailureIoKind::Other,
+            _ => FailureIoKind::Unknown,
+        };
+        Self { kind, errno }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct FailureLocation {
+    boundary: FailureBoundary,
+    // Unknown/non-I/O is null, never a fabricated successful check.
+    io: Option<FailureIo>,
+}
+
+impl std::fmt::Display for FailureLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native operation boundary refused")
+    }
+}
+
+impl FailureLocation {
+    fn observe(error: &anyhow::Error) -> Option<Self> {
+        error.downcast_ref::<Self>().copied()
+    }
+}
+
+impl FailureBoundary {
+    pub(in crate::security_epoch) fn at(self, error: anyhow::Error) -> anyhow::Error {
+        if FailureLocation::observe(&error).is_some() {
+            return error;
+        }
+        let errno = error.downcast_ref::<rustix::io::Errno>().copied();
+        let native = error.downcast_ref::<std::io::Error>();
+        let kind = native.map(std::io::Error::kind).or_else(|| {
+            errno.map(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()).kind())
+        });
+        let io = kind.map(|kind| {
+            FailureIo::new(
+                kind,
+                native
+                    .and_then(std::io::Error::raw_os_error)
+                    .or_else(|| errno.map(rustix::io::Errno::raw_os_error)),
+            )
+        });
+        error.context(FailureLocation { boundary: self, io })
+    }
+
+    /// Preserve the transport's original fixed error mapping while observing
+    /// only the already-typed body-read kind/errno. Never retain its foreign
+    /// error message or source in that mapped error.
+    pub(in crate::security_epoch) fn mapped_io(
+        self,
+        error: anyhow::Error,
+        source: &std::io::Error,
+    ) -> anyhow::Error {
+        if FailureLocation::observe(&error).is_some() {
+            return error;
+        }
+        error.context(FailureLocation {
+            boundary: self,
+            io: Some(FailureIo::new(source.kind(), source.raw_os_error())),
+        })
+    }
 }
 
 /// Read-only projection of an actual annotated cold-admission failure. These
@@ -373,6 +518,7 @@ impl PreparationFailure {
             category: preparation_error_category(&error),
             progress: None,
             request: FailedRequestWindow::observe(&error),
+            failure: FailureLocation::observe(&error),
         };
         error.context(context)
     }
@@ -397,12 +543,18 @@ impl PreparationFailure {
     }
 
     fn observe(error: &anyhow::Error) -> Self {
-        error.downcast_ref::<Self>().copied().unwrap_or(Self {
+        let mut observed = error.downcast_ref::<Self>().copied().unwrap_or(Self {
             step: PreparationStep::Unknown,
             category: preparation_error_category(error),
             progress: None,
             request: FailedRequestWindow::observe(error),
-        })
+            failure: None,
+        });
+        // A lower native boundary may already have PreparationFailure before
+        // the consuming writer labels its Result. Keep its step/category and
+        // expose that first Result's location without replacing the cause.
+        observed.failure = observed.failure.or_else(|| FailureLocation::observe(error));
+        observed
     }
 }
 
@@ -2659,6 +2811,7 @@ mod tests {
                 category: PreparationErrorCategory::PermissionDenied,
                 progress: None,
                 request: None,
+                failure: None,
             }
         );
         assert_eq!(
@@ -3036,6 +3189,145 @@ mod tests {
             assert!(!recorder.first_holder && !recorder.activated);
             let bytes = String::from_utf8(recorder.output).unwrap();
             assert!(!bytes.contains("epoch_native_clock") && !bytes.contains("MustNotDisplay"));
+        }
+    }
+
+    #[test]
+    fn failure_location_preserves_typed_io_first_cause_and_unknown_without_formatting() {
+        for (kind, expected) in [
+            (std::io::ErrorKind::Interrupted, "interrupted"),
+            (std::io::ErrorKind::WouldBlock, "would_block"),
+            (std::io::ErrorKind::BrokenPipe, "broken_pipe"),
+            (std::io::ErrorKind::ConnectionReset, "connection_reset"),
+            (std::io::ErrorKind::UnexpectedEof, "unexpected_eof"),
+            (std::io::ErrorKind::Other, "other"),
+        ] {
+            let native = anyhow::Error::new(std::io::Error::new(kind, MustNotDisplay));
+            let inner = FailureBoundary::WriterAuthenticationAfter.at(native);
+            let outer = FailureBoundary::MutationAfter.at(inner);
+            let error = PreparationFailure::at(PreparationStep::BootstrapReserveSend, outer);
+            assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
+            let data = serde_json::to_value(PreparationFailure::observe(&error)).unwrap();
+            assert_eq!(data["failure"]["boundary"], "writer_authentication_after");
+            assert_eq!(data["failure"]["io"]["kind"], expected);
+            assert!(data["failure"]["io"]["errno"].is_null());
+        }
+        let raw = rustix::io::Errno::IO;
+        let original = PreparationFailure::at(PreparationStep::StorageProfile, raw.into());
+        let located = FailureBoundary::WriterAuthenticationAfter.at(original);
+        let outer = PreparationFailure::at(PreparationStep::BootstrapReserveSend, located);
+        let observed = PreparationFailure::observe(&outer);
+        assert_eq!(observed.step, PreparationStep::StorageProfile);
+        assert_eq!(outer.downcast_ref::<rustix::io::Errno>(), Some(&raw));
+        assert_eq!(
+            observed.failure.unwrap().io.unwrap().errno,
+            Some(raw.raw_os_error())
+        );
+
+        let unknown = FailureBoundary::CommitDecode.at(anyhow::Error::new(MustNotDisplay));
+        let data = serde_json::to_value(FailureLocation::observe(&unknown).unwrap()).unwrap();
+        assert_eq!(data["boundary"], "commit_decode");
+        assert!(data["io"].is_null());
+        assert!(unknown.downcast_ref::<MustNotDisplay>().is_some());
+
+        let source = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, MustNotDisplay);
+        let mapped = FailureBoundary::HttpRead.mapped_io(
+            anyhow::anyhow!("epoch_native_response_unavailable"),
+            &source,
+        );
+        assert!(mapped.downcast_ref::<std::io::Error>().is_none());
+        assert_eq!(
+            mapped.downcast_ref::<&str>(),
+            Some(&"epoch_native_response_unavailable")
+        );
+        assert_eq!(
+            FailureLocation::observe(&mapped).unwrap().io.unwrap().kind,
+            FailureIoKind::UnexpectedEof
+        );
+        assert_eq!(
+            preparation_error_category(&mapped),
+            PreparationErrorCategory::TransportUnavailable
+        );
+    }
+
+    #[test]
+    fn failure_location_with_maximal_existing_fields_fits_the_original_private_record() {
+        for boundary in [
+            FailureBoundary::MutationBefore,
+            FailureBoundary::MutationBody,
+            FailureBoundary::CommitExchange,
+            FailureBoundary::CommitDecode,
+            FailureBoundary::MutationAfter,
+            FailureBoundary::WriterPreStage,
+            FailureBoundary::WriterPreAuthentication,
+            FailureBoundary::WriterCredential,
+            FailureBoundary::WriterTimeout,
+            FailureBoundary::WriterRequest,
+            FailureBoundary::WriterAuthenticationAfter,
+            FailureBoundary::WriterBorrowAfter,
+            FailureBoundary::WriterOwnerAfter,
+            FailureBoundary::WriterBudgetAfter,
+            FailureBoundary::WriterGateAfter,
+            FailureBoundary::ResponseBudgetAfter,
+            FailureBoundary::HttpBudgetBefore,
+            FailureBoundary::HttpSend,
+            FailureBoundary::HttpClockAfterHeaders,
+            FailureBoundary::HttpRead,
+            FailureBoundary::HttpClockAfterBody,
+        ] {
+            for io in [
+                None,
+                Some(FailureIo {
+                    kind: FailureIoKind::ConnectionAborted,
+                    errno: Some(i32::MIN),
+                }),
+            ] {
+                let error = anyhow::Error::new(FailedRequestWindow::maximal_fixture(true))
+                    .context("epoch_native_transport_unavailable")
+                    .context(MustNotDisplay)
+                    .context(FailureLocation { boundary, io });
+                let error = PreparationFailure::with_progress(
+                    PreparationStep::BootstrapDispatchCounterSend,
+                    error,
+                    PreparationProgress {
+                        acquired_us: Some(u32::MAX),
+                        image_us: Some(u32::MAX),
+                        prepared_us: Some(u32::MAX),
+                        last_checked_us: Some(u32::MAX),
+                    },
+                );
+                let (mut recorder, ..) = fixture();
+                recorder.enrolled(Digest::new(b"Controller")).unwrap();
+                recorder.preparation_timings(
+                    super::super::preparation_timing::Timings::maximal_summary_fixture(),
+                );
+                recorder.enter(FailurePhase::ActivateDispatch);
+                recorder.bootstrap_timing(Some(
+                    super::super::bootstrap_timing::BootstrapTiming::maximal_fixture(),
+                ));
+                recorder.records = MAX_RECORDS - 1;
+                recorder.refuse(Some(&error)).unwrap();
+                let rows = records(&recorder.output);
+                let data = &rows[1]["observation"]["preparation"];
+                assert_eq!(
+                    data["failure"]["boundary"],
+                    serde_json::to_value(boundary).unwrap()
+                );
+                assert_eq!(data["failure"]["io"], serde_json::to_value(io).unwrap());
+                let text = std::str::from_utf8(&recorder.output).unwrap();
+                assert!(text.lines().all(|line| line.len() < MAX_RECORD_BYTES));
+                for private in [
+                    "MustNotDisplay",
+                    "https://",
+                    "Bearer",
+                    "epoch_native_transport",
+                ] {
+                    assert!(!text.contains(private));
+                }
+                let before = recorder.output.len();
+                recorder.refuse(Some(&error)).unwrap();
+                assert_eq!(recorder.output.len(), before);
+            }
         }
     }
 

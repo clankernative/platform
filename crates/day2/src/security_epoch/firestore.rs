@@ -2,6 +2,7 @@
 //! no production port implementation until immutable provider identity, current
 //! role, execution and continuous-clock producers have been qualified together.
 //! Parsing authenticated bytes alone would still not mint readiness.
+use super::controller::evidence::FailureBoundary;
 use super::kernel::{
     self, AuthorityRecord, Bootstrap, Phase, Receipt, Request, SentinelRecord, Snapshot,
     UpdateTime, Versioned,
@@ -257,7 +258,8 @@ impl Budget {
             // Charge all returned postwork centrally too. Ordinary ports keep
             // their previous full sample; only the closed Controller uses its
             // actual clock here after its mandatory full physical postguard.
-            self.remaining_decoding(port)?;
+            self.remaining_decoding(port)
+                .map_err(|error| FailureBoundary::ResponseBudgetAfter.at(error))?;
             ensure!(
                 response.status == 200,
                 "security_epoch_provider_unavailable"

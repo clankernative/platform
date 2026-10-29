@@ -955,6 +955,29 @@ nor human acknowledgement, continued readiness, or a durable product connection.
 
 ## Cumulative admission-work observations
 
+Bootstrap failure records may include `preparation.failure`, containing a closed
+`boundary` and nullable `io` data (`kind`, nullable already-typed OS `errno`).
+This identifies the first actual failing Result in the mutation/commit envelope;
+it is not the last callback visited. In particular the writer still evaluates
+the request and its mandatory authentication postcheck, then preserves the
+request error when both fail. Outer context and cleanup never relabel that first
+failure. Missing I/O data is unknown, not zero or a successful guard.
+
+The boundary distinguishes mutation checks/body, writer prechecks, HTTP send or
+original-clock checkpoints, response reading, authentication/physical/budget
+postchecks, commit decoding and the final mutation check. No additional clock,
+provider/file/peer I/O, retry or diagnostic channel is introduced. The existing
+complete private-record bound remains mandatory. Foreign error text, paths,
+recipient, credentials, headers and bodies are never serialized or formatted;
+body-read errors retain their original fixed public category and only project
+typed kind/errno before discarding the foreign error as before.
+
+The native37 `bootstrap_reserve_send/io` record predates this detail. Its commit
+timing proves entry into the callback, not wire delivery, response acceptance or
+remote no-effect. No exact native37 syscall or remote commit result is inferred.
+The transaction remains spent before the first possible send, and a failed
+send/decode/postcheck still permanently refuses without a resend grant.
+
 The Controller exports its own process ledger on the existing
 `day2-native-controller-self-check ` channel, as two
 `controller_current_admission_work_v1` sidecars for each actual Current. They

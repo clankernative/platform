@@ -3,6 +3,7 @@
 
 use super::{
     admission_work::{self, Bytes, Work},
+    controller::evidence::FailureBoundary,
     identity_protocol,
     native_clock::NativeAcquisition,
 };
@@ -462,7 +463,12 @@ impl NativeHttp {
                     "epoch_native_cluster_recipient_domain_changed"
                 );
             }
-            let remaining = request_timeout(acquisition.remaining()?, ceiling)?;
+            let remaining = request_timeout(
+                acquisition
+                    .remaining()
+                    .map_err(|error| FailureBoundary::HttpBudgetBefore.at(error))?,
+                ceiling,
+            )?;
             let sampled_us = acquisition.last_checked_elapsed_micros();
             let limit_us = u32::try_from(remaining.as_micros())?;
             let client: &Client = if kube { &self.kubernetes } else { &self.google };
@@ -483,14 +489,16 @@ impl NativeHttp {
                 work.bytes(Bytes::RequestBody, body.len() as u64);
             }
             let response = request.send().map_err(|error| {
-                anyhow::Error::new(FailedRequestWindow(
+                FailureBoundary::HttpSend.at(anyhow::Error::new(FailedRequestWindow(
                     sampled_us,
                     limit_us,
                     error.is_timeout(),
                 ))
-                .context("epoch_native_transport_unavailable")
+                .context("epoch_native_transport_unavailable"))
             })?;
-            acquisition.remaining()?;
+            acquisition
+                .remaining()
+                .map_err(|error| FailureBoundary::HttpClockAfterHeaders.at(error))?;
             check_response_status(response.status(), "epoch_native_response_status_or_bound")?;
             check_response_length(
                 response.content_length(),
@@ -501,14 +509,19 @@ impl NativeHttp {
             let read = response
                 .take(MAX_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("epoch_native_response_unavailable"));
+                .map_err(|error| {
+                    FailureBoundary::HttpRead
+                        .mapped_io(anyhow::anyhow!("epoch_native_response_unavailable"), &error)
+                });
             if let Some(work) = &mut work {
                 // Include a consumed partial body even when read returns Err.
                 work.bytes(Bytes::ResponseBody, bytes.len() as u64);
             }
             read?;
             profile.finish();
-            acquisition.remaining()?;
+            acquisition
+                .remaining()
+                .map_err(|error| FailureBoundary::HttpClockAfterBody.at(error))?;
             ensure!(bytes.len() <= MAX_BYTES, "epoch_native_response_bound");
             Ok(bytes)
         })();

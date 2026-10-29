@@ -5,6 +5,7 @@
 use super::{ControllerEpochReads, ReadScope, RetainedEpochReads};
 use crate::security_epoch::CurrentStorageBootstrapPhase;
 use crate::security_epoch::{
+    controller::evidence::FailureBoundary,
     controller::preparation_timing::{Operation, Timings},
     firestore::{Budget, EpochReply, Port, Sample},
     transport::Route,
@@ -256,10 +257,14 @@ impl ControllerPort<'_, '_> {
             let mut phase = self.owner.try_borrow_mut()?;
             // Keep FULL physical/file/peer admission before the actual effect;
             // the authentication-only leaf is never used in its place.
-            let stage = phase.controller_stage()?;
+            let stage = phase
+                .controller_stage()
+                .map_err(|error| FailureBoundary::WriterPreStage.at(error))?;
             let borrow = self.reads.state.gate.enter()?;
             let mut material = self.reads.state.material.try_borrow_mut()?;
-            material.sample(stage)?;
+            material
+                .sample(stage)
+                .map_err(|error| FailureBoundary::WriterPreAuthentication.at(error))?;
             let (route, operation) = writer_route(url)?;
             ensure!(
                 material.http.matches(&route, url)?,
@@ -273,28 +278,52 @@ impl ControllerPort<'_, '_> {
             } = &mut *material;
             // Keep this fallible evaluation outside the diagnostic closure:
             // failure must exit before both request and post-request sampling.
-            let authorization = credential.authorization()?;
+            let authorization = credential
+                .authorization()
+                .map_err(|error| FailureBoundary::WriterCredential.at(error))?;
             // The caller may have a shorter context deadline than this live
             // parent. Charge every preguard before selecting the one HTTP
             // timeout, and fail BEFORE the request closure/post-request path.
             let timeout = budget
-                .remaining_native(acquisition)?
+                .remaining_native(acquisition)
+                .map_err(|error| FailureBoundary::WriterTimeout.at(error))?
                 .min(Duration::from_secs(5));
-            let requested = self.timings.measure(operation, || {
-                http.request_with_ceiling(route, &authorization, Some(body), acquisition, timeout)
-            });
-            let checked = material.sample(stage);
+            let requested = self
+                .timings
+                .measure(operation, || {
+                    http.request_with_ceiling(
+                        route,
+                        &authorization,
+                        Some(body),
+                        acquisition,
+                        timeout,
+                    )
+                })
+                .map_err(|error| FailureBoundary::WriterRequest.at(error));
+            // Label each Result at its actual failure. The later mandatory
+            // postcheck must still run, and cannot relabel the first error.
+            let checked = material
+                .sample(stage)
+                .map_err(|error| FailureBoundary::WriterAuthenticationAfter.at(error));
             // An attempted transport still receives its authentication
             // postcheck, but its first error exits before completing this
             // exclusive use or doing successful-path physical postwork.
             let bytes = requested?;
             checked?;
             drop(material);
-            borrow.complete()?;
+            borrow
+                .complete()
+                .map_err(|error| FailureBoundary::WriterBorrowAfter.at(error))?;
             drop(phase);
-            self.owner.try_borrow_mut()?.check()?;
-            self.remaining_budget(budget)?;
-            guard.complete()?;
+            self.owner
+                .try_borrow_mut()?
+                .check()
+                .map_err(|error| FailureBoundary::WriterOwnerAfter.at(error))?;
+            self.remaining_budget(budget)
+                .map_err(|error| FailureBoundary::WriterBudgetAfter.at(error))?;
+            guard
+                .complete()
+                .map_err(|error| FailureBoundary::WriterGateAfter.at(error))?;
             Ok(EpochReply {
                 status: 200,
                 body: bytes,
@@ -398,6 +427,177 @@ fn writer_route(url: &str) -> Result<(Route<'static>, Operation)> {
 #[cfg(test)]
 mod tests {
     use super::writer_route;
+
+    fn request_and_postcheck_order(source: &str) -> bool {
+        use syn::visit::Visit;
+        fn ident(expr: &syn::Expr, name: &str) -> bool {
+            matches!(expr,syn::Expr::Path(path) if path.path.is_ident(name))
+        }
+        fn mapped(expr: &syn::Expr, boundary: &str, method: &str) -> bool {
+            let syn::Expr::MethodCall(call) = expr else {
+                return false;
+            };
+            let syn::Expr::MethodCall(actual) = &*call.receiver else {
+                return false;
+            };
+            let actual_call = if method == "sample" {
+                ident(&actual.receiver, "material")
+                    && actual.args.len() == 1
+                    && ident(&actual.args[0], "stage")
+            } else {
+                actual.args.len() == 2 && ident(&actual.args[0], "operation")
+            };
+            call.method == "map_err"
+                && actual.method == method
+                && actual_call
+                && call.args.len() == 1
+                && matches!(&call.args[0],syn::Expr::Closure(closure)
+                    if matches!(&*closure.body,syn::Expr::MethodCall(label)
+                        if label.method=="at" && label.args.len()==1 && ident(&label.args[0],"error")
+                        && matches!(&*label.receiver,syn::Expr::Path(path)
+                            if path.path.segments.iter().map(|v|v.ident.to_string()).collect::<Vec<_>>()
+                                ==["FailureBoundary",boundary])))
+        }
+        #[derive(Default)]
+        struct Ordered {
+            found: usize,
+            valid: bool,
+            requests: usize,
+        }
+        impl<'ast> Visit<'ast> for Ordered {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if call.method == "request_with_ceiling" {
+                    self.requests += 1;
+                    self.valid &= ident(&call.receiver, "http") && call.args.len() == 5;
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_block(&mut self, body: &'ast syn::Block) {
+                let local = |name: &str| {
+                    body.stmts.iter().enumerate().find_map(|(i,stmt)|
+                    match stmt { syn::Stmt::Local(local)
+                        if matches!(&local.pat,syn::Pat::Ident(id) if id.ident==name)=>Some((i,local)),
+                        _=>None })
+                };
+                if let (Some((request, first)), Some((check, second)), Some((bytes, value))) =
+                    (local("requested"), local("checked"), local("bytes"))
+                {
+                    self.found += 1;
+                    self.valid &= check == request + 1
+                        && bytes == check + 1
+                        && first
+                            .init
+                            .as_ref()
+                            .is_some_and(|v| mapped(&v.expr, "WriterRequest", "measure"))
+                        && second.init.as_ref().is_some_and(|v| {
+                            mapped(&v.expr, "WriterAuthenticationAfter", "sample")
+                        })
+                        && matches!(value.init.as_ref().map(|v|&*v.expr),
+                            Some(syn::Expr::Try(v)) if ident(&v.expr,"requested"))
+                        && matches!(body.stmts.get(bytes+1),
+                            Some(syn::Stmt::Expr(syn::Expr::Try(v),Some(_)))
+                                if ident(&v.expr,"checked"));
+                }
+                syn::visit::visit_block(self, body);
+            }
+        }
+        let file = syn::parse_file(source).unwrap();
+        let mut ordered = Ordered {
+            valid: true,
+            ..Default::default()
+        };
+        ordered.visit_file(&file);
+        ordered.valid && ordered.found == 1 && ordered.requests == 1
+    }
+
+    #[test]
+    fn post_failure_labels_preserve_both_evaluations_and_first_request_error() {
+        let source = include_str!("writer.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(request_and_postcheck_order(source));
+        for changed in [
+            source.replacen("let bytes = requested?;", "let bytes = checked?;", 1),
+            source.replacen("checked?;", "requested?;", 1),
+            source.replacen(
+                "FailureBoundary::WriterRequest.at(error)",
+                "FailureBoundary::WriterAuthenticationAfter.at(error)",
+                1,
+            ),
+            source.replacen("let checked =", "let checked = return", 1),
+            source.replacen("request_with_ceiling(", "unrelated_callback(", 1),
+        ] {
+            assert_ne!(
+                changed, source,
+                "mutation must change the actual production path"
+            );
+            assert!(
+                syn::parse_file(&changed).is_ok(),
+                "mutant must be valid syntax"
+            );
+            assert!(!request_and_postcheck_order(&changed));
+        }
+        use crate::security_epoch::controller::evidence::{
+            FailureBoundary, PreparationFailure, PreparationStep,
+        };
+        for (first_failed, second_failed) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut order = Vec::new();
+            order.push("request");
+            let requested = if first_failed {
+                Err(
+                    FailureBoundary::HttpClockAfterHeaders.at(anyhow::Error::new(
+                        std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                    )),
+                )
+            } else {
+                Ok(Vec::<u8>::new())
+            };
+            order.push("authentication_after");
+            let checked = if second_failed {
+                Err(FailureBoundary::WriterAuthenticationAfter
+                    .at(anyhow::Error::new(rustix::io::Errno::INTR)))
+            } else {
+                Ok(())
+            };
+            // This exact selection is tied to the production AST above. Both
+            // Results exist before propagation; later failure cannot relabel it.
+            let selected = (|| {
+                let bytes = requested?;
+                checked?;
+                Ok(bytes)
+            })();
+            assert_eq!(order, ["request", "authentication_after"]);
+            match selected {
+                Ok(_) => assert!(!first_failed && !second_failed),
+                Err(error) => {
+                    let error =
+                        PreparationFailure::at(PreparationStep::BootstrapReserveSend, error);
+                    let data =
+                        serde_json::to_value(error.downcast_ref::<PreparationFailure>().unwrap())
+                            .unwrap();
+                    assert_eq!(
+                        data["failure"]["boundary"],
+                        if first_failed {
+                            "http_clock_after_headers"
+                        } else {
+                            "writer_authentication_after"
+                        }
+                    );
+                    if first_failed {
+                        assert!(error.downcast_ref::<std::io::Error>().is_some());
+                    } else {
+                        assert_eq!(
+                            error.downcast_ref::<rustix::io::Errno>(),
+                            Some(&rustix::io::Errno::INTR)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn counter_routes_are_closed_and_transport_checks_the_selected_recipient() {
