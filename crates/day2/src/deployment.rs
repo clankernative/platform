@@ -1158,12 +1158,56 @@ mod tests {
 
     #[test]
     fn a_second_replica_cannot_open_the_same_state_volume() -> Result<()> {
+        const CHILD: &str = "deployment::tests::replica_lock_isolated_child";
+        // File locks belong to shared open-file descriptions. A concurrent
+        // process spawn in another harness thread can transiently inherit one
+        // until exec closes it. Run the same real lock/drop assertions in one
+        // isolated process, without changing production locks or adding retries.
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--ignored",
+                "--exact",
+                CHILD,
+                "--test-threads=1",
+                "--color=never",
+            ])
+            .env("DAY2_REPLICA_LOCK_ISOLATED", "1")
+            .output()?;
+        let stdout = std::str::from_utf8(&output.stdout)?;
+        ensure!(
+            output.status.success(),
+            "isolated replica-lock control failed: {stdout}"
+        );
+        ensure!(
+            stdout.contains(&format!("test {CHILD} ... ok"))
+                && stdout.contains("1 passed; 0 failed; 0 ignored"),
+            "isolated replica-lock control did not execute exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "real process-local lock control executed by its parent test"]
+    fn replica_lock_isolated_child() -> Result<()> {
+        ensure!(
+            std::env::var("DAY2_REPLICA_LOCK_ISOLATED").as_deref() == Ok("1"),
+            "replica-lock child must run through its parent"
+        );
         let root = tempfile::tempdir()?;
-        let first = replica_lock(root.path(), "reports")?;
+        let first = replica_lock(root.path(), "reports").context("first replica lock")?;
         assert!(replica_lock(root.path(), "reports").is_err());
         drop(first);
-        replica_lock(root.path(), "reports")?;
+        replica_lock(root.path(), "reports").context("lock after final descriptor closes")?;
         assert!(replica_lock(root.path(), "../escape").is_err());
+
+        // A deterministic shared-handle counterexample to assuming that one
+        // close releases a lock while a duplicate still owns the same file.
+        let first = replica_lock(root.path(), "reports")?;
+        let duplicate = first.try_clone()?;
+        drop(first);
+        assert!(replica_lock(root.path(), "reports").is_err());
+        drop(duplicate);
+        replica_lock(root.path(), "reports").context("lock after duplicate closes")?;
         Ok(())
     }
 
