@@ -390,25 +390,24 @@ impl FailureIo {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+type CompactFailureLocation = (u8, Option<(u8, Option<i32>)>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(into = "CompactFailureLocation")]
 struct FailureLocation {
     boundary: FailureBoundary,
     // Unknown/non-I/O is null, never a fabricated successful check.
     io: Option<FailureIo>,
 }
 
-impl Serialize for FailureLocation {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
+impl From<FailureLocation> for CompactFailureLocation {
+    fn from(value: FailureLocation) -> Self {
         // Lossless closed DATA codes keep even the combined maximal record
         // under the unchanged private bound. Null is never code zero.
         (
-            self.boundary as u8,
-            self.io.map(|io| (io.kind as u8, io.errno)),
+            value.boundary as u8,
+            value.io.map(|io| (io.kind as u8, io.errno)),
         )
-            .serialize(serializer)
     }
 }
 
