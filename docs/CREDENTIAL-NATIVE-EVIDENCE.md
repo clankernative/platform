@@ -955,8 +955,23 @@ nor human acknowledgement, continued readiness, or a durable product connection.
 
 ## Cumulative admission-work observations
 
-Bootstrap failure records may include `preparation.failure`, containing a closed
-`boundary` and nullable `io` data (`kind`, nullable already-typed OS `errno`).
+Bootstrap failure records may include compact `preparation.failure` DATA:
+`[boundary_code, io]`, where `io` is `null` or `[kind_code, errno]`. `errno` is
+`null` or an already-typed signed OS errno. This lossless encoding keeps the
+original 2,048-byte complete preparation-record limit; code zero is not null.
+
+Boundary codes are explicit: 0 mutation_before; 1 mutation_body; 2 commit_exchange;
+3 commit_decode; 4 mutation_after; 5 writer_pre_stage; 6 writer_pre_authentication;
+7 writer_credential; 8 writer_timeout; 9 writer_request; 10 writer_authentication_after;
+11 writer_borrow_after; 12 writer_owner_after; 13 writer_budget_after; 14 writer_gate_after;
+15 response_budget_after; 16 http_budget_before; 17 http_send; 18 http_clock_after_headers;
+19 http_read; 20 http_clock_after_body.
+
+I/O-kind codes are explicit: 0 interrupted; 1 would_block; 2 broken_pipe; 3 connection_reset;
+4 connection_aborted; 5 not_connected; 6 unexpected_eof; 7 invalid_data; 8 invalid_input;
+9 write_zero; 10 permission_denied; 11 not_found; 12 already_exists; 13 timed_out;
+14 unsupported; 15 out_of_memory; 16 other; 17 unknown.
+
 This identifies the first actual failing Result in the mutation/commit envelope;
 it is not the last callback visited. In particular the writer still evaluates
 the request and its mandatory authentication postcheck, then preserves the

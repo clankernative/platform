@@ -307,51 +307,53 @@ pub(in crate::security_epoch) struct PreparationFailure {
 /// each Result, never a mutable last-visited stage or an authority observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub(in crate::security_epoch) enum FailureBoundary {
-    MutationBefore,
-    MutationBody,
-    CommitExchange,
-    CommitDecode,
-    MutationAfter,
-    WriterPreStage,
-    WriterPreAuthentication,
-    WriterCredential,
-    WriterTimeout,
-    WriterRequest,
-    WriterAuthenticationAfter,
-    WriterBorrowAfter,
-    WriterOwnerAfter,
-    WriterBudgetAfter,
-    WriterGateAfter,
-    ResponseBudgetAfter,
-    HttpBudgetBefore,
-    HttpSend,
-    HttpClockAfterHeaders,
-    HttpRead,
-    HttpClockAfterBody,
+    MutationBefore = 0,
+    MutationBody = 1,
+    CommitExchange = 2,
+    CommitDecode = 3,
+    MutationAfter = 4,
+    WriterPreStage = 5,
+    WriterPreAuthentication = 6,
+    WriterCredential = 7,
+    WriterTimeout = 8,
+    WriterRequest = 9,
+    WriterAuthenticationAfter = 10,
+    WriterBorrowAfter = 11,
+    WriterOwnerAfter = 12,
+    WriterBudgetAfter = 13,
+    WriterGateAfter = 14,
+    ResponseBudgetAfter = 15,
+    HttpBudgetBefore = 16,
+    HttpSend = 17,
+    HttpClockAfterHeaders = 18,
+    HttpRead = 19,
+    HttpClockAfterBody = 20,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 enum FailureIoKind {
-    Interrupted,
-    WouldBlock,
-    BrokenPipe,
-    ConnectionReset,
-    ConnectionAborted,
-    NotConnected,
-    UnexpectedEof,
-    InvalidData,
-    InvalidInput,
-    WriteZero,
-    PermissionDenied,
-    NotFound,
-    AlreadyExists,
-    TimedOut,
-    Unsupported,
-    OutOfMemory,
-    Other,
-    Unknown,
+    Interrupted = 0,
+    WouldBlock = 1,
+    BrokenPipe = 2,
+    ConnectionReset = 3,
+    ConnectionAborted = 4,
+    NotConnected = 5,
+    UnexpectedEof = 6,
+    InvalidData = 7,
+    InvalidInput = 8,
+    WriteZero = 9,
+    PermissionDenied = 10,
+    NotFound = 11,
+    AlreadyExists = 12,
+    TimedOut = 13,
+    Unsupported = 14,
+    OutOfMemory = 15,
+    Other = 16,
+    Unknown = 17,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -388,11 +390,26 @@ impl FailureIo {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FailureLocation {
     boundary: FailureBoundary,
     // Unknown/non-I/O is null, never a fabricated successful check.
     io: Option<FailureIo>,
+}
+
+impl Serialize for FailureLocation {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        // Lossless closed DATA codes keep even the combined maximal record
+        // under the unchanged private bound. Null is never code zero.
+        (
+            self.boundary as u8,
+            self.io.map(|io| (io.kind as u8, io.errno)),
+        )
+            .serialize(serializer)
+    }
 }
 
 impl std::fmt::Display for FailureLocation {
@@ -3192,6 +3209,106 @@ mod tests {
         }
     }
 
+    fn expanded_failure(value: &Value) -> Value {
+        const BOUNDARIES: [&str; 21] = [
+            "mutation_before",
+            "mutation_body",
+            "commit_exchange",
+            "commit_decode",
+            "mutation_after",
+            "writer_pre_stage",
+            "writer_pre_authentication",
+            "writer_credential",
+            "writer_timeout",
+            "writer_request",
+            "writer_authentication_after",
+            "writer_borrow_after",
+            "writer_owner_after",
+            "writer_budget_after",
+            "writer_gate_after",
+            "response_budget_after",
+            "http_budget_before",
+            "http_send",
+            "http_clock_after_headers",
+            "http_read",
+            "http_clock_after_body",
+        ];
+        const KINDS: [&str; 18] = [
+            "interrupted",
+            "would_block",
+            "broken_pipe",
+            "connection_reset",
+            "connection_aborted",
+            "not_connected",
+            "unexpected_eof",
+            "invalid_data",
+            "invalid_input",
+            "write_zero",
+            "permission_denied",
+            "not_found",
+            "already_exists",
+            "timed_out",
+            "unsupported",
+            "out_of_memory",
+            "other",
+            "unknown",
+        ];
+        let value = value.as_array().unwrap();
+        assert_eq!(value.len(), 2);
+        let boundary = BOUNDARIES[usize::try_from(value[0].as_u64().unwrap()).unwrap()];
+        let io = if value[1].is_null() {
+            Value::Null
+        } else {
+            let io = value[1].as_array().unwrap();
+            assert_eq!(io.len(), 2);
+            let kind = KINDS[usize::try_from(io[0].as_u64().unwrap()).unwrap()];
+            serde_json::json!({"kind":kind,"errno":io[1]})
+        };
+        serde_json::json!({"boundary":boundary,"io":io})
+    }
+
+    #[test]
+    fn compact_failure_keeps_every_kind_errno_and_unknown_distinct_from_zero() {
+        for kind in [
+            FailureIoKind::Interrupted,
+            FailureIoKind::WouldBlock,
+            FailureIoKind::BrokenPipe,
+            FailureIoKind::ConnectionReset,
+            FailureIoKind::ConnectionAborted,
+            FailureIoKind::NotConnected,
+            FailureIoKind::UnexpectedEof,
+            FailureIoKind::InvalidData,
+            FailureIoKind::InvalidInput,
+            FailureIoKind::WriteZero,
+            FailureIoKind::PermissionDenied,
+            FailureIoKind::NotFound,
+            FailureIoKind::AlreadyExists,
+            FailureIoKind::TimedOut,
+            FailureIoKind::Unsupported,
+            FailureIoKind::OutOfMemory,
+            FailureIoKind::Other,
+            FailureIoKind::Unknown,
+        ] {
+            for errno in [None, Some(0), Some(i32::MIN), Some(i32::MAX)] {
+                let location = FailureLocation {
+                    boundary: FailureBoundary::MutationBefore,
+                    io: Some(FailureIo { kind, errno }),
+                };
+                let data = expanded_failure(&serde_json::to_value(location).unwrap());
+                assert_eq!(data["boundary"], "mutation_before");
+                assert_eq!(data["io"]["kind"], serde_json::to_value(kind).unwrap());
+                assert_eq!(data["io"]["errno"], serde_json::to_value(errno).unwrap());
+            }
+        }
+        let unknown = FailureLocation {
+            boundary: FailureBoundary::MutationBefore,
+            io: None,
+        };
+        let compact = serde_json::to_value(unknown).unwrap();
+        assert_eq!(compact, serde_json::json!([0, null]));
+        assert!(expanded_failure(&compact)["io"].is_null());
+    }
+
     #[test]
     fn failure_location_preserves_typed_io_first_cause_and_unknown_without_formatting() {
         for (kind, expected) in [
@@ -3208,9 +3325,10 @@ mod tests {
             let error = PreparationFailure::at(PreparationStep::BootstrapReserveSend, outer);
             assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
             let data = serde_json::to_value(PreparationFailure::observe(&error)).unwrap();
-            assert_eq!(data["failure"]["boundary"], "writer_authentication_after");
-            assert_eq!(data["failure"]["io"]["kind"], expected);
-            assert!(data["failure"]["io"]["errno"].is_null());
+            let failure = expanded_failure(&data["failure"]);
+            assert_eq!(failure["boundary"], "writer_authentication_after");
+            assert_eq!(failure["io"]["kind"], expected);
+            assert!(failure["io"]["errno"].is_null());
         }
         let raw = rustix::io::Errno::IO;
         let original = PreparationFailure::at(PreparationStep::StorageProfile, raw.into());
@@ -3225,7 +3343,9 @@ mod tests {
         );
 
         let unknown = FailureBoundary::CommitDecode.at(anyhow::Error::new(MustNotDisplay));
-        let data = serde_json::to_value(FailureLocation::observe(&unknown).unwrap()).unwrap();
+        let data = expanded_failure(
+            &serde_json::to_value(FailureLocation::observe(&unknown).unwrap()).unwrap(),
+        );
         assert_eq!(data["boundary"], "commit_decode");
         assert!(data["io"].is_null());
         assert!(unknown.downcast_ref::<MustNotDisplay>().is_some());
@@ -3278,7 +3398,7 @@ mod tests {
             for io in [
                 None,
                 Some(FailureIo {
-                    kind: FailureIoKind::ConnectionAborted,
+                    kind: FailureIoKind::Unknown,
                     errno: Some(i32::MIN),
                 }),
             ] {
@@ -3309,11 +3429,9 @@ mod tests {
                 recorder.refuse(Some(&error)).unwrap();
                 let rows = records(&recorder.output);
                 let data = &rows[1]["observation"]["preparation"];
-                assert_eq!(
-                    data["failure"]["boundary"],
-                    serde_json::to_value(boundary).unwrap()
-                );
-                assert_eq!(data["failure"]["io"], serde_json::to_value(io).unwrap());
+                let failure = expanded_failure(&data["failure"]);
+                assert_eq!(failure["boundary"], serde_json::to_value(boundary).unwrap());
+                assert_eq!(failure["io"], serde_json::to_value(io).unwrap());
                 let text = std::str::from_utf8(&recorder.output).unwrap();
                 assert!(text.lines().all(|line| line.len() < MAX_RECORD_BYTES));
                 for private in [

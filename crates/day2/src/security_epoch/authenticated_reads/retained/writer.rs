@@ -579,11 +579,11 @@ mod tests {
                         serde_json::to_value(error.downcast_ref::<PreparationFailure>().unwrap())
                             .unwrap();
                     assert_eq!(
-                        data["failure"]["boundary"],
+                        data["failure"][0],
                         if first_failed {
-                            "http_clock_after_headers"
+                            FailureBoundary::HttpClockAfterHeaders as u8
                         } else {
-                            "writer_authentication_after"
+                            FailureBoundary::WriterAuthenticationAfter as u8
                         }
                     );
                     if first_failed {
