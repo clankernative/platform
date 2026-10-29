@@ -379,7 +379,7 @@ fn pattern(path: &str) -> Result<(Vec<String>, String)> {
 /// `login`, ...) are single platform endpoints: the endpoint itself is never a
 /// link, but a longer path beginning with the same word, such as `/docs/intro`
 /// for a `docs/%s` link, is not the platform's and may be.
-const PLATFORM_NAMESPACES: &[&str] = &["api", "assets", "health", "ingress", "_live"];
+const PLATFORM_NAMESPACES: &[&str] = &["api", "assets", "health", "ingress", "_live", "downloads"];
 
 /// Every name the platform reserves as a first segment. A declared literal prefix
 /// may not begin with one, so no application route is ever inside the platform's.

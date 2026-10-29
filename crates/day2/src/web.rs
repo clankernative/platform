@@ -761,6 +761,10 @@ impl NativeResponse {
         }
     }
 
+    pub(crate) fn is_literal_health(&self) -> bool {
+        self.literal_health
+    }
+
     pub(crate) fn response(&self) -> &Response {
         &self.response
     }
@@ -786,10 +790,10 @@ pub(crate) fn literal_health_fixture(method: &Method, ready: bool) -> NativeResp
     NativeResponse::health(method, ready)
 }
 
-fn literal_health_request(
+fn literal_health_request<B>(
     enabled: bool,
     admitting: &AtomicBool,
-    request: &Request,
+    request: &axum::http::Request<B>,
 ) -> Option<NativeResponse> {
     if !enabled || !matches!(request.uri().path(), "/health/live" | "/health/ready") {
         return None;
@@ -831,13 +835,20 @@ pub(crate) async fn native_pump(
     .await
 }
 
+/// The same sealed literal classifier runs before native request capture. It
+/// examines only routing DATA, never a body, cookie, identity or application.
+pub(crate) fn native_literal_health<B>(
+    host: &Host,
+    request: &axum::http::Request<B>,
+) -> Option<NativeResponse> {
+    literal_health_request(host.health_endpoints, &host.admitting, request)
+}
+
 pub(crate) async fn handle_native(host: Arc<Host>, request: Request) -> NativeResponse {
     host.credential_effects
         .clone()
         .run_async(async move {
-            if let Some(response) =
-                literal_health_request(host.health_endpoints, &host.admitting, &request)
-            {
+            if let Some(response) = native_literal_health(&host, &request) {
                 return response;
             }
             NativeResponse::application(handle_inner(host, request).await)
@@ -942,6 +953,7 @@ async fn handle_inner(host: Arc<Host>, request: Request) -> Response {
             path if path.starts_with(freetool_credentials::PREFIX) => "credential_management",
             path if path.starts_with(crate::ingress::ROUTE_PREFIX) => "ingress",
             path if path.starts_with("/assets/") => "asset",
+            path if path.starts_with(crate::public_downloads::PREFIX) => "download",
             crate::mcp::PATH => "mcp",
             path if crate::web_api::is_json(path) => "api",
             "/docs" => "api_docs",
@@ -1129,6 +1141,12 @@ impl Host {
         let SignIn::Edge(verifier) = &self.sign_in else {
             return Ok((cookie(), None));
         };
+        // App authors explicitly publish these immutable files. The Chrome
+        // updater has no browser session or IAP assertion. Only exact admitted
+        // names bypass identity; no other route inherits anonymous access.
+        if crate::public_downloads::registered(&self.runtime, path) {
+            return Ok((None, None));
+        }
         if path.starts_with(crate::ingress::ROUTE_PREFIX) {
             return Ok((None, None));
         }
@@ -1200,6 +1218,9 @@ impl Host {
             crate::error::Failure::UnsupportedMethod
         );
         self.appearance.check_binding(&self.runtime)?;
+        if uri.path().starts_with(crate::public_downloads::PREFIX) {
+            return crate::public_downloads::serve(&self.runtime, uri.path(), method, headers);
+        }
         if uri
             .path()
             .starts_with(crate::managed_credentials::ingress::PREFIX)

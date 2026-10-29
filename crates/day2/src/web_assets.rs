@@ -231,13 +231,13 @@ fn blob(
     )
 }
 
-enum CachePolicy {
+pub(crate) enum CachePolicy {
     PublicImmutable,
     PublicRevalidate,
     PrivateRevalidate,
 }
 
-fn bytes(
+pub(crate) fn bytes(
     kind: &str,
     bytes: impl AsRef<[u8]> + Into<Body>,
     policy: CachePolicy,

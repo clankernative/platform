@@ -651,9 +651,9 @@ impl NativeAppStartup {
         let runtime = match self.runtime {
             AppStartupRuntime::Ordinary(runtime) => {
                 observed.enter(NativeStartupStep::RuntimeAdmission);
-                for scope in scopes {
+                for scope in &scopes {
                     crate::oauth::native_management::with_current_app_role(
-                        &scope,
+                        scope,
                         crate::oauth::native_management::RuntimePhase::InitialStorage,
                         |stage| stage.check(),
                     )?;
@@ -673,62 +673,75 @@ impl NativeAppStartup {
                 crate::oauth::native_management::load_initial_app_runtime(scope, *metadata)?
             }
         };
-        // Native admission already checked the existing store while its actual
-        // participant and stage were held. It must never run an initializer or
-        // open ordinary serving SQL again outside that native scope.
-        observed.enter(NativeStartupStep::RuntimePostcheck);
-        let security = if native_initial {
-            None
+        // The initial Runtime admission has settled its own fixed operation.
+        // Host configuration and its read/write units share one new original;
+        // no SQL callback may create or renew that operation context.
+        let prepare_host = || {
+            // Native admission already checked the existing store while its actual
+            // participant and stage were held. It must never run an initializer or
+            // open ordinary serving SQL again outside that native scope.
+            observed.enter(NativeStartupStep::RuntimePostcheck);
+            let security = if native_initial {
+                None
+            } else {
+                admit_store(&runtime)?
+            };
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "native App startup admission closed"
+            );
+            if let Some(requirements) = &security {
+                requirements.require_runtime()?;
+            }
+            observed.enter(NativeStartupStep::Configuration);
+            let runtime = (self.configure)(runtime)?;
+            observed.enter(NativeStartupStep::Providers);
+            let providers = match self.providers {
+                Some(providers) => providers,
+                None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
+            };
+            observed.enter(NativeStartupStep::Receiver);
+            let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
+            ensure!(
+                admission.load(Ordering::Acquire),
+                "native App startup admission closed"
+            );
+            observed.enter(NativeStartupStep::Edge);
+            let (identity, edge) = self.declared.edge(runtime.app())?;
+            observed.enter(NativeStartupStep::Verifier);
+            let verifier = crate::iap::Verifier::new(
+                &edge.iap_audience,
+                &identity.hosted_domain,
+                Box::new(crate::iap::GoogleKeys),
+            )?;
+            observed.enter(NativeStartupStep::Host);
+            let mut server = LocalServer::bind_edge_listener(
+                runtime,
+                self.listener,
+                edge,
+                verifier,
+                self.concurrency,
+            )?;
+            observed.enter(NativeStartupStep::Mount);
+            server.mount_oauth(receiver)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "mode":"edge", "scheme":identity.scheme,
+                    "origin":server.origin, "replicas":self.replicas
+                })
+            );
+            observed.enter(NativeStartupStep::HostParts);
+            server.into_native_parts(admission)
+        };
+        let parts = if native_initial {
+            let [scope] = scopes.as_slice() else {
+                anyhow::bail!("native App startup scope required")
+            };
+            crate::oauth::native_management::with_app_request(scope, prepare_host)
         } else {
-            admit_store(&runtime)?
-        };
-        ensure!(
-            admission.load(Ordering::Acquire),
-            "native App startup admission closed"
-        );
-        if let Some(requirements) = &security {
-            requirements.require_runtime()?;
-        }
-        observed.enter(NativeStartupStep::Configuration);
-        let runtime = (self.configure)(runtime)?;
-        observed.enter(NativeStartupStep::Providers);
-        let providers = match self.providers {
-            Some(providers) => providers,
-            None => crate::oauth::host::Providers::from_gke_runtime(&runtime)?,
-        };
-        observed.enter(NativeStartupStep::Receiver);
-        let (runtime, receiver) = crate::oauth::host::app_receiver(runtime, &providers)?;
-        ensure!(
-            admission.load(Ordering::Acquire),
-            "native App startup admission closed"
-        );
-        observed.enter(NativeStartupStep::Edge);
-        let (identity, edge) = self.declared.edge(runtime.app())?;
-        observed.enter(NativeStartupStep::Verifier);
-        let verifier = crate::iap::Verifier::new(
-            &edge.iap_audience,
-            &identity.hosted_domain,
-            Box::new(crate::iap::GoogleKeys),
-        )?;
-        observed.enter(NativeStartupStep::Host);
-        let mut server = LocalServer::bind_edge_listener(
-            runtime,
-            self.listener,
-            edge,
-            verifier,
-            self.concurrency,
-        )?;
-        observed.enter(NativeStartupStep::Mount);
-        server.mount_oauth(receiver)?;
-        println!(
-            "{}",
-            serde_json::json!({
-                "mode":"edge", "scheme":identity.scheme,
-                "origin":server.origin, "replicas":self.replicas
-            })
-        );
-        observed.enter(NativeStartupStep::HostParts);
-        let parts = server.into_native_parts(admission)?;
+            prepare_host()
+        }?;
         observed.complete();
         Ok(parts)
     }

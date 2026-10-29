@@ -1181,6 +1181,7 @@ mod tests {
             redirects: Vec::new(),
             assets: Default::default(),
             web_resources: Default::default(),
+            public_downloads: Default::default(),
             outputs: BTreeMap::from([(
                 "Output".into(),
                 crate::output_schema::Contract {

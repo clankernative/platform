@@ -49,19 +49,41 @@ enrolled common continuous clock. Earlier local deadlines only tighten it.
 Signed provider timestamps require their own qualified interpretation; they are
 not converted into BOOTTIME by subtraction.
 
-`native_management::with_current_original` borrows the real original and a fresh
-enrolled role stage through one closed consumer phase. Its callback cannot
-return either borrow. The phase's original check samples that retained clock
-and checks exact intent identity and the original ceiling. S3 adds current
-epoch, selection, writer and known-commit checks inside this borrow. A role
-stage is at most five seconds; acquiring another stage never replaces the
-original or extends its deadline. Test binaries have an explicit scripted
-supplier within the existing full effect simulation scope. Serving binaries
+Each accepted native HTTP operation also owns one native request with an original
+five-second interval. App capture runs before body parsing, cookies, operation
+entropy or protected I/O. Shell captures an unselected original at that same
+boundary, then consumes it once when binding the selected actual Shell owner.
+That handoff retains its origin, domain, task and namespace anchors. The
+unselected value grants no app permission. The existing sealed literal health
+producer needs no application or native authority; application responses cannot
+manufacture its seal.
+
+An explicitly non-native profile retains ordinary prerequisite, registration
+and application HTTP behavior on this executor. Its request record tracks only
+transport completion and refusal; it cannot bind a native role, lend a stage or
+lease native authority. A selected native profile with a missing owner fails
+capture instead of taking this path. Capture failure cannot be retried as a
+non-native request.
+
+`native_management` callbacks borrow the actual stored request through
+`borrow_current_request`; they never create a replacement clock. Its stage
+checks actual owner identity, process, thread, handles and shared refusal. Counter
+and peer ceilings tighten the stored acquisition itself, so a later SQL or
+response callback cannot recover a wider ceiling. The separate human original
+still checks its exact intent and 300-second ceiling through that stage. Each
+closed SQL unit uses a distinct serving phase under the same request, without
+rearming a completed phase. Its snapshot or transaction closes and postchecks
+before any provider action. A final human commit remains one-shot.
+
+Test binaries have an explicit scripted supplier within the existing complete
+effect simulation scope. Its HTTP clock models the same operation interval but
+cannot construct a native role, enrolled request or stage. Serving binaries
 contain no scripted enrollment or clock constructor.
 
-Every connection carries a private index of the one exact original used by its
-request. Enlisting a second role or attempt refuses. The socket wrapper resolves
-that index and rechecks the original
+Every connection carries the accepted request's shared holder and a private
+index of its exact human original, when applicable. Routing clones share the
+holder; they cannot clone its native value. Enlisting a second role or attempt
+refuses. The socket wrapper resolves the index and rechecks the original
 before write, flush and shutdown. Both HTTP headers and body bytes go through
 that wrapper; checking only `Body::poll_frame` would miss buffered headers and
 writes. There is one request per connection, with keepalive and pipelining
@@ -70,6 +92,22 @@ and request-body reads have short bounds; asynchronous connection delivery has
 a 30-second timeout measured from acceptance. It cannot preempt synchronous
 native work, which keeps its slot until it returns. Excess connections wait in the OS listener rather
 than accumulating an unbounded in-process task queue.
+
+A finite App response moves the actual request, role and storage participant
+into its response lease. One borrowed response phase stays live across socket
+polls; no RefCell borrow guard crosses suspension. Cancellation or an unknown
+result refuses those actual owners. Known transport completion and final
+checks consume the request before publishing completion. A shared refusal latch
+also survives an abort caught while a synchronous callback holds the original.
+Neither callback reentry nor later restoration can reopen that accepted request.
+
+A background command, schedule or journal wake captures its own request around
+the whole pump operation, before wall time or SQL. An active response reservation
+excludes an unstarted wakeup before owner lookup or clock capture, because that
+response has moved the actual owner out of the available map. A refused
+reservation is an error, not retryable busy permission. SQL units never create
+their own root requests. Startup operations have their own explicit entry;
+full connection admission remains distinct from warm HTTP requests.
 
 A disconnected browser cannot cancel an already executing synchronous native
 operation or release its slot while it is still executing. Graceful shutdown
@@ -80,9 +118,10 @@ Local successful write completion is not evidence that a human received data,
 nor a universal guarantee about the last network byte before an expiry. Native
 admission, local commit and physical delivery remain distinct events.
 
-These owners do not implement the missing epoch/storage authority or create a
-fresh-human proof. The existing production proof refusal remains until S1, S2
-and S3 are composed and qualified together.
+These consumers require the real enrollment and storage/current suppliers; they
+cannot create a fresh-human proof or substitute metadata for a missing supplier.
+Source and model checks do not establish native enrollment, live Firestore,
+signed Google claims or browser lifecycle qualification.
 
 Initial storage, ordinary read and refresh consumers borrow a current App role for their exact
 authority scope through `with_current_app_role`. They do not borrow a human
@@ -94,6 +133,12 @@ existing binding, current audit schema, activated artifact and security contract
 It never calls the ordinary initializer or repairs native state. A native path
 or simulated role cannot supply that owner; the later session-secret write also
 retains its own real SQL scope.
+
+Initial Runtime admission and subsequent host construction are distinct fixed
+startup operations. Host construction captures one App request original before
+configuration or provider setup, and every SQL unit reborrows that same original.
+Only known settlement of the operation permits returning its completed host.
+SQL adapters cannot create a replacement request clock.
 
 During `NativeAppStartup::prepare` and native web construction, an unfinished
 phase emits `day2-native-app-startup-refusal` with a

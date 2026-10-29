@@ -223,6 +223,37 @@ authority change during the call fails the read closed, even when the old
 artifact still exports the pinned contract. Simulated build verification uses
 its recorded world and does not consult a live release journal.
 
+## Public release downloads
+
+Apps may opt into anonymous, artifact-pinned release files by placing `.crx`
+and `.xml` files directly under `public-downloads/`. The build rejects other
+types, subdirectories, symlinks, special files, invalid filenames and excess
+files/bytes (32 files, 2 MiB per file, 16 MiB total). It pins the selected bytes
+and MIME types in `Artifact.public_downloads`, copies them into the immutable
+artifact and checks their hashes at load and on every download, including
+conditional requests. These opaque attachments are never executed by the host
+or admitted as browser UI resources; Chrome validates CRX signatures itself.
+
+The selected app serves `GET` and `HEAD /downloads/<filename>` without identity,
+with content disposition, MIME type, ETag and `no-cache` revalidation. URLs are
+stable across app releases; they always select the loaded app artifact, so no
+filesystem path or another artifact can be selected by the caller. Query
+parameters are accepted for Chrome's update protocol. Unknown files return no
+content and never fall through to a catch-all app redirect. Other methods are
+refused. The `downloads` namespace is reserved from page/redirect declarations.
+
+If the installation uses IAP at its load balancer, it must also explicitly list
+the exact file URLs in `app-edge.public_download_paths`; otherwise IAP blocks
+the request before it reaches the app. That module keeps the default backend
+authenticated and adds an IAP-free backend only for selected exact download
+paths. Do not select a wildcard or disable IAP for the app.
+
+Separate extension sources/release tooling may live in the app-root
+`.chrome-extension/` directory. The app source-capture paths exclude that
+directory; only its published `public-downloads/` outputs enter the runtime
+artifact. This does not add an app build hook, package manager or server-side
+execution capability. Keep signing keys outside the repository.
+
 ## App creation
 
 Apps are currently authored manually using this layout and Reports as the canonical

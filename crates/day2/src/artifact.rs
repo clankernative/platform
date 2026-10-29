@@ -335,6 +335,8 @@ pub struct Artifact {
     pub assets: day2_assets::Catalog,
     #[serde(default)]
     pub web_resources: crate::web_resources::Catalog,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub public_downloads: crate::public_downloads::Catalog,
     #[serde(default)]
     pub outputs: crate::output_schema::Catalog,
     #[serde(default)]
@@ -459,6 +461,59 @@ fn app_contract_exchange_context(id: &str, worker_digest: &str, executable: &Pat
         path.len(),
         digest(path),
     )
+}
+
+// GoLinks' persisted store still names a format-14 artifact. Backup and
+// activation must admit that immutable artifact before preserving its links.
+// The deployed metadata predates these fixtures and the verification profile.
+// The projection is for preservation, never verification evidence: the format
+// remains 14 and require_current_api still forbids execution. Current builds
+// and explicit malformed values retain their strict contract checks.
+fn decode_persisted_contract(mut value: serde_json::Value) -> Result<Artifact> {
+    if value.get("format").and_then(serde_json::Value::as_u64) == Some(14) {
+        value
+            .as_object_mut()
+            .unwrap()
+            .entry("verification_limits")
+            .or_insert(serde_json::to_value(VerificationLimits::QUALIFIED)?);
+        if let Some(pages) = value
+            .get_mut("pages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for page in pages
+                .iter_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                page.entry("preparation")
+                    .or_insert_with(|| serde_json::json!([]));
+                page.entry("prepare_failure_operation")
+                    .or_insert_with(|| serde_json::json!(""));
+            }
+        }
+        for (catalog, fields) in [
+            (
+                "operations",
+                &["verification_setup", "verification_delegation"][..],
+            ),
+            ("errors", &["verification_delegations"][..]),
+        ] {
+            if let Some(entries) = value
+                .get_mut("app_contract")
+                .and_then(|contract| contract.get_mut(catalog))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for entry in entries
+                    .values_mut()
+                    .filter_map(serde_json::Value::as_object_mut)
+                {
+                    for field in fields {
+                        entry.entry(*field).or_insert_with(|| serde_json::json!([]));
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 #[cfg(test)]
@@ -602,7 +657,7 @@ impl LoadedArtifact {
                 );
             }
         }
-        let contract: Artifact = serde_json::from_value(value)?;
+        let contract = decode_persisted_contract(value)?;
         ensure!(
             matches!(contract.format, 1..=CURRENT_FORMAT)
                 && contract.admission == "local-spike-only",
@@ -757,6 +812,7 @@ impl LoadedArtifact {
             "legacy artifact has web resources"
         );
         crate::web_resources::validate_blobs(&directory, &contract.web_resources)?;
+        crate::public_downloads::validate_blobs(&directory, &contract.public_downloads)?;
         ensure!(
             contract.format >= 6 || (contract.outputs.is_empty() && contract.templates.is_empty()),
             "legacy artifact has template contracts"
@@ -2944,6 +3000,72 @@ mod output_contract_tests {
             missing["verification_limits"] = serde_json::Value::Null;
             assert!(serde_json::from_value::<Artifact>(missing).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_format_14_projects_absent_metadata_without_enabling_execution() -> Result<()> {
+        let mut wire = serde_json::to_value(schedule_admission_tests::fixture()?)?;
+        wire["format"] = json!(14);
+        wire.as_object_mut().unwrap().remove("verification_limits");
+        wire["pages"] = json!([{"name":"reports", "title":"Reports", "operation":"reports.list", "defaults":"{}"}]);
+        for operation in wire["app_contract"]["operations"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            let operation = operation.as_object_mut().unwrap();
+            operation.remove("verification_setup");
+            operation.remove("verification_delegation");
+        }
+        wire["app_contract"]["errors"]["invalid_input"] = json!({
+            "code":"app:example.invalid_input", "description":"Invalid input", "recovery":"Correct input",
+            "operation":{"operation":"reports.sweep","input_type":"empty","output_type":"out"},
+            "additional_operations":[]
+        });
+        assert!(serde_json::from_value::<Artifact>(wire.clone()).is_err());
+        let decoded = decode_persisted_contract(wire.clone())?;
+        assert!(decoded.pages[0].preparation.is_empty());
+        assert!(decoded.pages[0].prepare_failure_operation.is_empty());
+        let contract = decoded.app_contract.as_ref().unwrap();
+        assert!(
+            contract
+                .operations
+                .values()
+                .all(|operation| operation.verification_setup.is_empty()
+                    && operation.verification_delegation.is_empty())
+        );
+        assert!(
+            contract.errors["invalid_input"]
+                .verification_delegations
+                .is_empty()
+        );
+        let historical =
+            LoadedArtifact::from_contract_for_tests("history".into(), PathBuf::new(), decoded);
+        assert_eq!(
+            historical.require_current_api().unwrap_err().to_string(),
+            "artifact_upgrade_required"
+        );
+
+        let mut current = wire.clone();
+        current["format"] = json!(CURRENT_FORMAT);
+        assert!(decode_persisted_contract(current).is_err());
+        for field in ["verification_setup", "verification_delegation"] {
+            let mut invalid = wire.clone();
+            invalid["app_contract"]["operations"]["reports.sweep"][field] = serde_json::Value::Null;
+            assert!(decode_persisted_contract(invalid).is_err());
+        }
+        for field in ["preparation", "prepare_failure_operation"] {
+            let mut invalid = wire.clone();
+            invalid["pages"][0][field] = serde_json::Value::Null;
+            assert!(decode_persisted_contract(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid["verification_limits"] = serde_json::Value::Null;
+        assert!(decode_persisted_contract(invalid).is_err());
+        wire["app_contract"]["errors"]["invalid_input"]["verification_delegations"] =
+            serde_json::Value::Null;
+        assert!(decode_persisted_contract(wire).is_err());
         Ok(())
     }
 

@@ -174,15 +174,18 @@ fn snapshot(
         // own repository carries it beside its sources. `.clanker` holds design
         // tool data (Studio fake-data scenes and canvas layout) committed with
         // the app; it is never compiled, served or admitted. Only the app root
-        // may carry it. UI build dependencies belong to the Platform distribution.
+        // may carry it. `.chrome-extension` is separate browser-extension source
+        // and release tooling; only its explicitly published public-downloads/
+        // outputs enter the app artifact. Signing keys must live outside the app.
+        // UI build dependencies belong to the Platform distribution.
         if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str())
-            || (prefix == "app" && name == ".clanker")
+            || (prefix == "app" && [".clanker", ".chrome-extension"].contains(&name.as_str()))
         {
             continue;
         }
         let kind = entry.file_type()?;
         ensure!(!kind.is_symlink(), "source symlinks forbidden");
-        if prefix == "app" && ["assets", "ui"].contains(&name.as_str()) {
+        if prefix == "app" && ["assets", "ui", "public-downloads"].contains(&name.as_str()) {
             ensure!(kind.is_dir(), "{name} must be a directory");
         }
         let key = format!("{prefix}/{name}");
@@ -190,7 +193,11 @@ fn snapshot(
             snapshot(&entry.path(), &target.join(&name), hashes, &key)?;
         } else {
             ensure!(kind.is_file(), "special source file forbidden");
-            let resource = prefix.starts_with("app/ui") || prefix.starts_with("app/assets");
+            let resource = prefix.starts_with("app/ui/")
+                || prefix.starts_with("app/assets/")
+                || prefix == "app/ui"
+                || prefix == "app/assets"
+                || prefix == "app/public-downloads";
             if name.ends_with(".md") && !resource {
                 continue;
             }
@@ -1400,6 +1407,32 @@ fn build_row_authority_adversaries(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_snapshot_admits_published_downloads_but_not_extension_tooling() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join("public-downloads"))?;
+        fs::create_dir(source.join(".chrome-extension"))?;
+        fs::write(source.join("public-downloads/extension.crx"), b"crx")?;
+        fs::write(source.join("public-downloads/updates.xml"), b"xml")?;
+        fs::write(
+            source.join(".chrome-extension/release.mjs"),
+            b"not app runtime source",
+        )?;
+        let target = root.path().join("target");
+        let mut hashes = BTreeMap::new();
+        snapshot(&source, &target, &mut hashes, "app")?;
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(
+            fs::read(target.join("public-downloads/extension.crx"))?,
+            b"crx"
+        );
+        assert!(!target.join(".chrome-extension").exists());
+        fs::write(source.join("unreviewed.mjs"), b"not app runtime source")?;
+        assert!(snapshot(&source, &target, &mut hashes, "app").is_err());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

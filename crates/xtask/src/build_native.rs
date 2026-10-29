@@ -17,6 +17,7 @@ struct Prepared {
     hashes: BTreeMap<String, String>,
     assets: day2_assets::Catalog,
     web_resources: day2::web_resources::Catalog,
+    public_downloads: day2::public_downloads::Catalog,
     templates: day2::web_templates::Catalog,
     namespace: String,
     projection: day2::registry::Projection,
@@ -114,6 +115,10 @@ fn prepare(
     )?;
     let assets = day2_assets::package(&captured.join("assets"), &stage)?;
     let web_resources = day2::web_resources::package(&captured.join("ui"), &stage)?;
+    let public_downloads = day2::public_downloads::package(
+        &captured.join(day2::public_downloads::SOURCE_DIRECTORY),
+        &stage,
+    )?;
     let templates = day2::web_templates::package(&captured.join("ui"), &stage)?;
     fs::write(
         stage.join("app/Assets.roc"),
@@ -150,6 +155,7 @@ fn prepare(
         hashes,
         assets,
         web_resources,
+        public_downloads,
         templates,
         namespace,
         projection,
@@ -304,6 +310,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         hashes,
         assets,
         web_resources,
+        public_downloads,
         templates,
         pin,
         imports,
@@ -368,6 +375,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "redirects": manifest.redirects,
         "assets": assets,
         "web_resources": web_resources,
+        "public_downloads": public_downloads,
         "outputs": outputs,
         "templates": templates,
         "app_contract": app_contract,
@@ -568,6 +576,7 @@ fn publish_contract(
         .join(identity.trim_start_matches("sha256:"));
     fs::create_dir_all(&directory)?;
     day2::web_resources::copy_blobs(stage, &directory, web_resources)?;
+    day2::public_downloads::copy_blobs(stage, &directory, &contract.public_downloads)?;
     day2::web_templates::copy_blobs(stage, &directory, templates)?;
     if !assets.is_empty() {
         fs::create_dir_all(directory.join("assets"))?;

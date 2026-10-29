@@ -49,7 +49,7 @@ fn discover(
     ensure!(entries.len() <= 256, "app module directory budget exceeded");
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        if [".git", "ui", "assets"]
+        if [".git", "ui", "assets", "public-downloads"]
             .iter()
             .any(|name| entry.file_name() == *name)
         {

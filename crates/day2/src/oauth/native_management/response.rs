@@ -145,6 +145,18 @@ impl<T> std::ops::DerefMut for Registry<T> {
 }
 
 impl<T> Registry<T> {
+    /// Negative admission DATA only. The actual owner must still be acquired
+    /// and checked; a retired reservation cannot become a retryable busy one.
+    pub(super) fn excludes_unstarted_operation(&self, key: &str) -> Result<bool> {
+        match self.reserved.get(key) {
+            Some(reservation) => {
+                ensure!(!reservation.refused.get(), "native operation owner refused");
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(super) fn clear(&mut self) {
         for reservation in self.reserved.values() {
             reservation.refused.set(true);
@@ -479,6 +491,7 @@ impl Sink {
         let policy = owners.selection.policy.clone();
         let store = owners.selection.store.clone();
         let mut role = owners.role.take()?;
+        let mut request_owner = self.request.take(&scope, NativeRole::AppHost)?;
         let result = effects
             .run_async(async {
                 let role = role.owner();
@@ -486,8 +499,8 @@ impl Sink {
                     anyhow::bail!("native response participant unavailable")
                 };
                 transport.scope_attempt();
+                let mut stage = request_owner.borrow(role)?;
                 participant.prepare_current()?;
-                let mut stage = role.begin_current_stage()?;
                 stage.check_selection(
                     &owners.selection.policy,
                     &owners.selection.store,
@@ -568,6 +581,10 @@ impl Sink {
                 .response
                 .connection = None;
         }
+        // The actual request is consumed only after physical completion and
+        // all Current/original postchecks. The role/storage leases remain
+        // unknown unless the following result publication also succeeds.
+        request_owner.finish(role.owner())?;
         // A rejected/lost result publication remains terminally unknown.
         // No await or fallible operation follows the positive disposition.
         transport.complete(sequence)?;
@@ -625,6 +642,53 @@ mod lease_tests {
             refused,
             dropped,
         }
+    }
+
+    #[test]
+    fn unstarted_work_is_excluded_by_the_live_response_but_abort_is_not_retryable_busy() {
+        let Fixture {
+            registry, refused, ..
+        } = fixture();
+        assert!(
+            !registry
+                .borrow()
+                .excludes_unstarted_operation("calendar")
+                .unwrap()
+        );
+        let winner = ResponseIdentity::new();
+        let loser = ResponseIdentity::new();
+        let lease = Lease::acquire(registry.clone(), "calendar", &winner, None).unwrap();
+        assert!(registry.borrow().get("calendar").is_none());
+        assert!(
+            registry
+                .borrow()
+                .excludes_unstarted_operation("calendar")
+                .unwrap()
+        );
+        registry.borrow().refuse_for(&loser);
+        assert!(
+            registry
+                .borrow()
+                .excludes_unstarted_operation("calendar")
+                .unwrap()
+        );
+        assert!(!lease.refused.get() && !refused.get());
+        registry.borrow().refuse_for(&winner);
+        assert!(
+            registry
+                .borrow()
+                .excludes_unstarted_operation("calendar")
+                .is_err()
+        );
+        assert!(Lease::acquire(registry.clone(), "calendar", &loser, None).is_err());
+        assert!(
+            registry
+                .borrow()
+                .excludes_unstarted_operation("calendar")
+                .is_err()
+        );
+        drop(lease);
+        assert!(refused.get());
     }
 
     #[test]

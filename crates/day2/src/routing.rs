@@ -12,7 +12,15 @@ const MAX_QUERY_BYTES: usize = 65_536;
 pub const MAX_URL_BYTES: usize = 8_192;
 const MAX_SEGMENTS: usize = 32;
 const RESERVED: &[&str] = &[
-    "assets", "audit", "actions", "login", "logout", "pages", "health", "_live",
+    "assets",
+    "audit",
+    "actions",
+    "login",
+    "logout",
+    "pages",
+    "health",
+    "_live",
+    "downloads",
 ];
 
 #[derive(Clone, Debug)]

@@ -38,6 +38,11 @@ impl SourceBundle {
                 if entry.file_name() == ".git" {
                     continue;
                 }
+                // Separate extension tooling is not app runtime source. Its
+                // reviewed release bytes enter through public-downloads/.
+                if directory == root && entry.file_name() == ".chrome-extension" {
+                    continue;
+                }
                 let kind = entry.file_type()?;
                 if kind.is_dir() {
                     visit(root, &entry.path(), files, total)?;
@@ -99,6 +104,10 @@ impl TryFrom<BTreeMap<String, Vec<u8>>> for SourceBundle {
                 .unwrap_or("");
             ensure!(
                 name == ".gitignore"
+                    || (path
+                        .strip_prefix("public-downloads/")
+                        .is_some_and(|name| !name.contains('/'))
+                        && ["crx", "xml"].contains(&extension))
                     || ([
                         "roc", "html", "css", "js", "json", "md", "svg", "png", "jpg", "jpeg",
                         "webp", "ico", "woff", "woff2", "txt"

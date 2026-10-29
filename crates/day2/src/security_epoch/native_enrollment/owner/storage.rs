@@ -33,7 +33,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -49,14 +49,14 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
 
     // Private DATA assembly within a checked operation. This never leaves the
     // facade or returns a permission; standalone statements and signing retain
-    // full pre/post native checks around their actual consuming boundary.
+    // fresh pre/post handle/authority checks around their consuming boundary.
     fn storage_statement_data(&mut self) -> Result<StageStatement> {
         ensure!(
             matches!(
@@ -69,12 +69,13 @@ impl EnrolledStorageStage<'_, '_> {
         anyhow::bail!("storage_peer_platform_unsupported");
         #[cfg(target_os = "linux")]
         {
-            let (origin, deadline) = self.stage.acquisition.interval_data()?;
-            let sample = self.stage.acquisition.sample()?;
+            let (origin, deadline) = self.stage.acquisition.as_mut().interval_data()?;
+            let sample = self.stage.acquisition.as_mut().sample()?;
             Ok(StageStatement {
                 certificate: self.stage.owner.certificate.clone(),
-                stage: self.stage.current_grant.clone(),
+                stage: self.stage.owner.admission.clone(),
                 original: OriginalInterval {
+                    purpose: self.stage.purpose,
                     domain: sample.domain,
                     origin_ns: origin.as_nanos().try_into()?,
                     deadline_ns: deadline.min(self.stage.deadline).as_nanos().try_into()?,
@@ -95,8 +96,8 @@ impl EnrolledStorageStage<'_, '_> {
                 "storage_peer_local_sender_role"
             );
             let sender = self.storage_statement_data()?.digest()?;
-            // The same full native check remains immediately before the key
-            // operation, followed by the original full post-signing check.
+            // Fresh actual-owner checks remain immediately before the key
+            // operation and after signing, on the same request original.
             self.stage.check()?;
             let signature = self
                 .stage
@@ -112,7 +113,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }
@@ -126,9 +127,9 @@ impl EnrolledStorageStage<'_, '_> {
             if self.stage.purpose == super::StagePurpose::StorageBootstrap {
                 acquisition.require_storage_bootstrap()?;
             }
-            let current = self.stage.acquisition.sample()?;
+            let current = self.stage.acquisition.as_mut().sample()?;
             let child = acquisition.sample()?;
-            let (origin, deadline) = self.stage.acquisition.interval_data()?;
+            let (origin, deadline) = self.stage.acquisition.as_mut().interval_data()?;
             let (child_origin, child_deadline) = acquisition.interval_data()?;
             ensure!(
                 child.domain == current.domain
@@ -140,7 +141,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -200,7 +201,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -240,7 +241,38 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
+            acquisition.refuse();
+        }
+        result
+    }
+
+    /// Request validation behind an actual retained native peer. The caller
+    /// must check that peer and the newly received sender before publication;
+    /// these statement comparisons alone supply no native authority.
+    pub(in crate::security_epoch::native_enrollment) fn check_admitted_storage_statement(
+        &mut self,
+        statement: &StageStatement,
+        admitted: &StageStatement,
+        acquisition: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let result = (|| {
+            self.check_storage_acquisition(acquisition)?;
+            ensure!(
+                statement.stage.data.role == self.storage_peer_role()?,
+                "storage_peer_request_role_changed"
+            );
+            statement.validate_request(
+                admitted,
+                acquisition.sample()?.elapsed,
+                self.stage.purpose,
+            )?;
+            self.check_storage_runtime_selection(statement, statement.stage.data.role)?;
+            self.check_storage_acquisition(acquisition)
+        })();
+        if result.is_err() {
+            self.stage.owner.refused = true;
+            self.stage.acquisition.as_mut().refuse();
             acquisition.refuse();
         }
         result
@@ -279,7 +311,7 @@ impl EnrolledStorageStage<'_, '_> {
         })();
         if result.is_err() {
             self.stage.owner.refused = true;
-            self.stage.acquisition.refuse();
+            self.stage.acquisition.as_mut().refuse();
         }
         result
     }

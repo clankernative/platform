@@ -71,6 +71,7 @@ mod preparation;
 pub mod presentation;
 pub mod properties;
 pub mod protocol;
+pub mod public_downloads;
 pub mod redirects;
 pub mod registry;
 pub mod resource_admin;

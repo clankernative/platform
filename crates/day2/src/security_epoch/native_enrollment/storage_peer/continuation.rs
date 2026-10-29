@@ -82,8 +82,8 @@ struct RetainedPeer {
     local: StageStatement,
     initial: Digest,
     projection: PreparedFileProjection,
-    last_local_grant: Digest,
-    last_remote_grant: Digest,
+    last_local_request: super::super::storage_peer_wire::OriginalInterval,
+    last_remote_request: super::super::storage_peer_wire::OriginalInterval,
     first_holder: crate::security_epoch::kernel::Holder,
     disposition: Disposition,
     #[cfg(target_os = "linux")]
@@ -137,7 +137,7 @@ pub(crate) struct CurrentStoragePeerPhase<'peer> {
     acquisition: NativeAcquisition,
     local: StageStatement,
     exchange: CurrentExchange,
-    remote_grant: Digest,
+    remote_request: super::super::storage_peer_wire::OriginalInterval,
     completion: Completion,
     #[cfg(target_os = "linux")]
     peer: Peer,
@@ -152,8 +152,8 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
         let projection = self.file.projection()?;
         self.check()?;
         let initial = self.offer.exchange.digest()?;
-        let last_local_grant = self.offer.local.grant_digest()?;
-        let last_remote_grant = self.offer.remote.grant_digest()?;
+        let last_local_request = self.offer.local.original.clone();
+        let last_remote_request = self.offer.remote.original.clone();
         let first_holder = self.offer.local.app_holder()?;
         // The storage owner moves the SAME descriptors after its own final
         // original checks. No file/key/channel is reopened or reconstructed.
@@ -166,8 +166,8 @@ impl AuthenticatedAppFirstHolder<'_, '_> {
                     local: self.offer.local,
                     initial,
                     projection,
-                    last_local_grant,
-                    last_remote_grant,
+                    last_local_request,
+                    last_remote_request,
                     first_holder,
                     disposition: Disposition::Ready(0),
                     #[cfg(target_os = "linux")]
@@ -187,8 +187,8 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
         let projection = self.phase.projection()?;
         self.check()?;
         let initial = self.exchange.digest()?;
-        let last_local_grant = self.local.grant_digest()?;
-        let last_remote_grant = self.remote.grant_digest()?;
+        let last_local_request = self.local.original.clone();
+        let last_remote_request = self.remote.original.clone();
         let first_holder = self.remote.app_holder()?;
         // Only known initial exchange completion closes this original phase.
         // Its caller still owns the SAME PreparedFileContinuity; it may now
@@ -200,8 +200,8 @@ impl AuthenticatedControllerFirstHolder<'_, '_> {
                 local: self.local,
                 initial,
                 projection,
-                last_local_grant,
-                last_remote_grant,
+                last_local_request,
+                last_remote_request,
                 first_holder,
                 disposition: Disposition::Ready(0),
                 #[cfg(target_os = "linux")]
@@ -252,7 +252,7 @@ impl RetainedPeer {
             self.local.same_enrollment(&local),
             "storage_peer_enrollment_changed"
         );
-        local.require_new_grant(&self.last_local_grant)?;
+        local.require_request_continuity(&self.last_local_request)?;
         self.check_resources(stage, &mut acquisition)?;
         // The actual signed stage matched this purpose above, and the
         // purpose-specific clock/peer guards just succeeded. The DATA reducer
@@ -437,8 +437,14 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
             );
-            remote.require_new_grant(&self.owner.last_remote_grant)?;
-            let mut peer = Peer::authenticate(&ready, remote, process, stage, &mut acquisition)?;
+            remote.require_request_continuity(&self.owner.last_remote_request)?;
+            let mut peer = self.owner.peer.authenticate_request(
+                &ready,
+                remote,
+                process,
+                stage,
+                &mut acquisition,
+            )?;
             let nonce = protocol::nonce("current-storage-peer-app")?;
             self.owner.check_resources(stage, &mut acquisition)?;
             let hello = stage.storage()?.sign_storage_message(Body::CurrentHello {
@@ -500,7 +506,7 @@ impl<'peer> PendingAppCurrentPeer<'peer> {
             );
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
-                remote_grant: peer.statement().grant_digest()?,
+                remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
                 local,
@@ -663,8 +669,14 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
                 self.owner.peer.statement().same_enrollment(&remote),
                 "storage_peer_remote_enrollment_changed"
             );
-            remote.require_new_grant(&self.owner.last_remote_grant)?;
-            let mut peer = Peer::authenticate(&hello, remote, process, stage, &mut acquisition)?;
+            remote.require_request_continuity(&self.owner.last_remote_request)?;
+            let mut peer = self.owner.peer.authenticate_request(
+                &hello,
+                remote,
+                process,
+                stage,
+                &mut acquisition,
+            )?;
             let exchange = CurrentExchange {
                 initial: self.owner.initial.clone(),
                 sequence,
@@ -704,7 +716,7 @@ impl<'peer> ControllerCurrentRendezvous<'peer> {
                 .send_storage(&ready, stage, &mut acquisition)?;
             let mut phase = CurrentStoragePeerPhase {
                 completion: Completion::Waiting,
-                remote_grant: peer.statement().grant_digest()?,
+                remote_request: peer.statement().original.clone(),
                 owner: self.owner,
                 acquisition,
                 local,
@@ -902,8 +914,8 @@ impl CurrentStoragePeerPhase<'_> {
             ),
             "storage_peer_completion_not_consumed"
         );
-        self.owner.last_local_grant = self.local.grant_digest()?;
-        self.owner.last_remote_grant = self.remote_grant.clone();
+        self.owner.last_local_request = self.local.original.clone();
+        self.owner.last_remote_request = self.remote_request.clone();
         self.owner.disposition.complete(self.exchange.sequence)
     }
 

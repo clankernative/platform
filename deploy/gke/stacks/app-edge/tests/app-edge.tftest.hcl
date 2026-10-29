@@ -555,6 +555,71 @@ run "refuses_wildcard_provider_route" {
   expect_failures = [var.signed_webhook_paths]
 }
 
+run "download_bypass_is_exact_and_human_backend_remains_iap" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    public_download_paths = ["/downloads/golinks.crx", "/downloads/updates.xml"]
+  }
+  assert {
+    condition = (
+      length(kubernetes_service_v1.public_downloads) == 1 &&
+      kubernetes_manifest.public_downloads[0].manifest.spec.iap.enabled == false &&
+      kubernetes_manifest.backend_config.manifest.spec.iap.enabled == true &&
+      kubernetes_ingress_v1.app.spec[0].default_backend[0].service[0].name == "app" &&
+      length([for path in kubernetes_ingress_v1.app.spec[0].rule[0].http[0].path : path if contains(var.public_download_paths, path.path) && path.path_type == "Exact" && path.backend[0].service[0].name == "public-downloads"]) == 2
+    )
+    error_message = "Only the two exact download URLs may bypass IAP; default and human routes must retain it."
+  }
+}
+
+run "no_download_backend_without_explicit_selection" {
+  command = plan
+  variables {
+    backend_service_name = ""
+  }
+  assert {
+    condition     = length(kubernetes_service_v1.public_downloads) == 0 && length(kubernetes_manifest.public_downloads) == 0
+    error_message = "Apps without public downloads must not create an anonymous backend."
+  }
+}
+
+run "refuses_download_wildcards" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    public_download_paths = ["/downloads/*"]
+  }
+  expect_failures = [var.public_download_paths]
+}
+
+run "refuses_download_human_routes" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    public_download_paths = ["/"]
+  }
+  expect_failures = [var.public_download_paths]
+}
+
+run "refuses_download_traversal" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    public_download_paths = ["/downloads/../secrets.xml"]
+  }
+  expect_failures = [var.public_download_paths]
+}
+
+run "refuses_download_private_keys" {
+  command = plan
+  variables {
+    backend_service_name  = ""
+    public_download_paths = ["/downloads/private.pem"]
+  }
+  expect_failures = [var.public_download_paths]
+}
+
 run "grants_the_runtime_principal_only_its_named_secrets" {
   command = plan
   variables {
