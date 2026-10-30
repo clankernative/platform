@@ -1,6 +1,6 @@
 {
   "package": {
-    "digest": "sha256:ad5a42c297cfa65cbf6125e377f372f7a45b82310056ffe13f542ba317281b93",
+    "digest": "sha256:e91113e53ad41b66c9a4376c1cee756b4a76876bc864bc6ee5fc04127661b6b1",
     "inputs": [
       {
         "bytes": 4975,
@@ -1358,8 +1358,8 @@
         "path": "components/number/fragment.html"
       },
       {
-        "bytes": 13250,
-        "digest": "sha256:ae5db036ca8fc51301d783bae25327450879d28d3ae14d4f93a4978177321ce1",
+        "bytes": 18835,
+        "digest": "sha256:5bf85b3b613a77b4b7e9f125e9e360465ecd60e2744cbd5f5b8069fd6ab31973",
         "path": "components/number/interaction.js"
       },
       {
@@ -2304,12 +2304,12 @@
       },
       {
         "bytes": 1557,
-        "digest": "sha256:b9c61febb8c1daf3c877dcdf4c6e072ea231145c8073006d284298059bfb09c8",
+        "digest": "sha256:b52df36c80a4282906f22c3339a9d7f429f990ef54403256731981b76e8e247f",
         "path": "ui-package.json"
       }
     ],
     "name": "@clanker/vanilla",
-    "version": "0.8.1"
+    "version": "0.8.2"
   },
   "provider": "clanker-ui.native",
   "schemaVersion": 2

@@ -832,26 +832,26 @@ and content-addressed as app source. Assembly runs in that private snapshot, the
 the host independently admits the returned templates/resources.
 Installation builds capture and materialize the same complete
 verified dependency into their offline job, binding its identity to the builder
-and evidence. The v0.2.1 bundle (vanilla 0.8.1) also retains and verifies the chart worker,
+and evidence. The v0.2.2 bundle (vanilla 0.8.2) also retains and verifies the chart worker,
 its presentation ABI 1 contract and legal closure. This does not authorize worker
 execution or add chart runtime support: matching host support and separate
 operator approval are still required. GoLinks does not request that worker.
-Vanilla 0.8.1 retains the `number` contract and opt-in Metric value motion; both
-remain `adapter-required` upstream. Direct compatible attribute updates retarget
-persistent CSS digit columns, including mid-transition updates. The host dispatches
-`cui:before-patch` for reactive query forms, but real-browser testing found that its
-detach/reinsert replacement cancels the v0.2.1 transition. This pin is not a qualified
-reactive-motion fix; values still update but snap. The follow-up source candidate is
-tracked in [Clanker UI #9](https://github.com/clankernative/clanker-ui/pull/9), not
-consumed by this pin.
+Vanilla 0.8.2 retains the `number` contract and opt-in Metric value motion; both
+remain `adapter-required` upstream. Compatible value updates retarget persistent
+CSS digit columns. The host dispatches `cui:before-patch` for reactive query forms;
+v0.2.2 captures current strip positions and restores continuity after the host's
+synchronous detach/reinsert replacement, correcting v0.2.1's transition cancellation.
+The package pin alone is not consumer qualification: rebuild the locked app and
+verify its actual reactive path, reduced-motion behavior and served-byte identity.
+Roc/app code still owns formatted values and business calculations.
 The assembly provider is never loaded while serving pages. App models,
 commands, routes and authorization remain app-owned; normal form, resource, CSP
 and runtime checks still apply.
 
 Only protocol 2 / binding ABI 2 with Minijinja 2.12.0 is accepted. See the released
-[protocol](https://github.com/clankernative/clanker-ui/blob/v0.2.1/docs/native-assembly-protocol.md)
+[protocol](https://github.com/clankernative/clanker-ui/blob/v0.2.2/docs/native-assembly-protocol.md)
 for the envelope and generic `ui_*` helpers. The distribution-approved executable is
-trusted operator tooling, not a hostile-code sandbox. The upstream v0.2.1 assets
+trusted operator tooling, not a hostile-code sandbox. The upstream v0.2.2 assets
 are unsigned; reviewed hashes identify exact bytes, not a claim of upstream
 signature verification. A Platform upgrade does not silently update app UI locks.
 
