@@ -248,7 +248,11 @@ mod tests {
         );
         assert_eq!(lock["schemaVersion"], 2);
         assert!(lock["package"].get("path").is_none());
-        assert_eq!(lock["package"]["version"], "0.8.0");
+        assert_eq!(lock["package"]["version"], "0.8.1");
+        assert_eq!(
+            lock["package"]["digest"],
+            "sha256:ad5a42c297cfa65cbf6125e377f372f7a45b82310056ffe13f542ba317281b93"
+        );
         assert_eq!(lock["package"]["inputs"].as_array().unwrap().len(), 461);
         assert!(generate().status.success());
         assert_eq!(fs::read(&path).unwrap(), authored);

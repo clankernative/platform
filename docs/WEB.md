@@ -837,10 +837,13 @@ its presentation ABI 1 contract and legal closure. This does not authorize worke
 execution or add chart runtime support: matching host support and separate
 operator approval are still required. GoLinks does not request that worker.
 Vanilla 0.8.1 retains the `number` contract and opt-in Metric value motion; both
-remain `adapter-required` upstream. Compatible value updates retarget persistent
-CSS digit columns, including updates received during a transition. Their live roll
-animation also depends on the host dispatching `cui:before-patch` for reactive query
-forms; without that host support, values still update but snap.
+remain `adapter-required` upstream. Direct compatible attribute updates retarget
+persistent CSS digit columns, including mid-transition updates. The host dispatches
+`cui:before-patch` for reactive query forms, but real-browser testing found that its
+detach/reinsert replacement cancels the v0.2.1 transition. This pin is not a qualified
+reactive-motion fix; values still update but snap. The follow-up source candidate is
+tracked in [Clanker UI #9](https://github.com/clankernative/clanker-ui/pull/9), not
+consumed by this pin.
 The assembly provider is never loaded while serving pages. App models,
 commands, routes and authorization remain app-owned; normal form, resource, CSP
 and runtime checks still apply.
