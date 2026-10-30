@@ -1,6 +1,6 @@
 {
   "package": {
-    "digest": "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde",
+    "digest": "sha256:e91113e53ad41b66c9a4376c1cee756b4a76876bc864bc6ee5fc04127661b6b1",
     "inputs": [
       {
         "bytes": 4975,
@@ -1338,8 +1338,8 @@
         "path": "components/modal/styles.css"
       },
       {
-        "bytes": 2788,
-        "digest": "sha256:7d11d611487c2258a1ed93e83dc7f94e6dd45113284baae23843353d6874ca78",
+        "bytes": 3659,
+        "digest": "sha256:392855928cc8f7b7456066aee93ec5d6c67a044d3a9a45327cd78e6d252dd9d8",
         "path": "components/number/component.json"
       },
       {
@@ -1358,13 +1358,13 @@
         "path": "components/number/fragment.html"
       },
       {
-        "bytes": 9026,
-        "digest": "sha256:2629deac2a3364cf2aca3539f52e8d97d897a3fac53ce335f16f829d7cdd6949",
+        "bytes": 18835,
+        "digest": "sha256:5bf85b3b613a77b4b7e9f125e9e360465ecd60e2744cbd5f5b8069fd6ab31973",
         "path": "components/number/interaction.js"
       },
       {
-        "bytes": 521,
-        "digest": "sha256:5b725424af5bb1626a0b49a6b80a023cc92b1d441587797bcaf401bcc81870bc",
+        "bytes": 1330,
+        "digest": "sha256:8dc5eab58971bf3ba41f8d60de90a6d45cd0a8dce115593ac246604e6a22fd6e",
         "path": "components/number/styles.css"
       },
       {
@@ -2278,8 +2278,8 @@
         "path": "icons.json"
       },
       {
-        "bytes": 237772,
-        "digest": "sha256:225548d9f47190ebba471ee9a59a2165bfd6e09a62ebf4133c3c6664b58c4be0",
+        "bytes": 237777,
+        "digest": "sha256:baecee8144a045c9191c07708823b05a8bbaf784e7c0f88ef4bd901be6bd2e9d",
         "path": "property-catalog.json"
       },
       {
@@ -2304,12 +2304,12 @@
       },
       {
         "bytes": 1557,
-        "digest": "sha256:8c69d207e701a19e72a3af6396ca9a786d367b790980f470abc70de32ccdd25d",
+        "digest": "sha256:b52df36c80a4282906f22c3339a9d7f429f990ef54403256731981b76e8e247f",
         "path": "ui-package.json"
       }
     ],
     "name": "@clanker/vanilla",
-    "version": "0.8.0"
+    "version": "0.8.2"
   },
   "provider": "clanker-ui.native",
   "schemaVersion": 2

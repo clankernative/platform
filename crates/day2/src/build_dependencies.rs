@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(lock["schemaVersion"], 2);
         assert_eq!(
             lock["package"]["digest"],
-            "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde"
+            "sha256:e91113e53ad41b66c9a4376c1cee756b4a76876bc864bc6ee5fc04127661b6b1"
         );
         assert_eq!(lock["package"]["inputs"][0]["bytes"], 27);
         assert_eq!(
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(installed.identity()["manifestDigest"], manifest_digest);
         assert_eq!(
             installed.identity()["package"]["digest"],
-            "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde"
+            "sha256:e91113e53ad41b66c9a4376c1cee756b4a76876bc864bc6ee5fc04127661b6b1"
         );
 
         let changed = tempfile::tempdir().unwrap();
