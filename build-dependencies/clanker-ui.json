@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "name": "@clanker/vanilla",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "inputCount": 461,
-  "packageDigest": "sha256:a8e188b6bbd9e5f1cbb3fb1c93f010847934f296be85d752e986b090a795bcde",
+  "packageDigest": "sha256:ad5a42c297cfa65cbf6125e377f372f7a45b82310056ffe13f542ba317281b93",
   "provider": "clanker-ui.native",
-  "release": "0.2.0",
-  "sourceRevision": "23caccfed24c99c222567efdefb73681dd49aac3",
+  "release": "0.2.1",
+  "sourceRevision": "9dc2a7928e0a3f27fb6a0e39bc412b32b02c3fb3",
   "assemblyProtocol": 2,
   "bindingAbi": 2,
   "templateEngine": "minijinja-2.12.0",
@@ -16,26 +16,26 @@
   },
   "targets": {
     "macos-aarch64": {
-      "archive": "clanker-ui-native-0.2.0-macos-aarch64.tar.gz",
-      "archiveSha256": "49f420934f7a2113c15275e6519a7cad7a86480652815c052f49b65f27f582cc",
-      "archiveBytes": 5021292,
-      "manifestSha256": "b79bb6e60656f0592696e5432dd12e7702f46cf35467cf2b02f1151743350083",
-      "executableSha256": "8ed807a2e6eb36266240243c5dcd56a72b0a509fd852ebf478f5db27a291f74f",
-      "executableBytes": 10124288,
-      "providerPinSha256": "54b2598891d8179f1398f86f4d7aba9a3d88ebaa988eb28ad68fccabdf20feac",
-      "chartWorkerSha256": "4adc50432ef70a1feca3563385f0b510ca01887d69404589129e09819ef3c244",
-      "chartWorkerBytes": 3119392
+      "archive": "clanker-ui-native-0.2.1-macos-aarch64.tar.gz",
+      "archiveSha256": "e6833279a06ac9584dcf9127bfb6bca6cc4865d83040c07c87d32a148374bd81",
+      "archiveBytes": 5024015,
+      "manifestSha256": "1a9b1c7fc705d7b21cb6d919661e4749f706e4e80fa20f6264777a1ce03f8a72",
+      "executableSha256": "d4ed067c1e5530b65ac9f9f9c079a45e9e1b7b569a3b2baf7a84e800eb0b76e4",
+      "executableBytes": 10129456,
+      "providerPinSha256": "03fa22071998c8c63954fc4305ac4cfde4968476332f2e05c89270f3f3e80b23",
+      "chartWorkerSha256": "07fb2b3071b5f4a8afd990f1d187de57bd84ddf867a78cce090a607a7831b0fc",
+      "chartWorkerBytes": 3119264
     },
     "linux-x86_64": {
-      "archive": "clanker-ui-native-0.2.0-linux-x86_64.tar.gz",
-      "archiveSha256": "c0d0eb55cad69c0745e9505d8179e1e6520c81cc7b100f4d06d406b0adaa3d1e",
-      "archiveBytes": 5445715,
-      "manifestSha256": "7ec830a4e6bb388b3d50d849e7c9d3c52bd0225404e0eda2367fce8dbc59dba4",
-      "executableSha256": "cfaee4b5eee0c680424c16398fa3830e7af444971f1a95d05a2bd696b960a12e",
-      "executableBytes": 11887080,
-      "providerPinSha256": "a2882f64b0190858383d52b2f7399cf3a6988432e0c84bf9b5bf1e4c456dfc70",
-      "chartWorkerSha256": "9f81d95813f0e4ecb36e47e1591095d798e1e9af9be05ebe6c5340ce86309a19",
-      "chartWorkerBytes": 3383904
+      "archive": "clanker-ui-native-0.2.1-linux-x86_64.tar.gz",
+      "archiveSha256": "47628132fc04d337ea9f33d259c2960f27fda767c5751217423d6d022110c181",
+      "archiveBytes": 5448112,
+      "manifestSha256": "748a3d2f9b0d1b3fc4521903fcf7fe2fbb3369ce922dd0a95ac711d337d5362f",
+      "executableSha256": "544e2863c5dcfea7d9fbce6e907f2681c50a7905d6530488366dfcdd8cb3ab34",
+      "executableBytes": 11885904,
+      "providerPinSha256": "5b884b5825f78cb6dda378301adbcece9fef0361bdfd53b0de5f369a35ba3bd9",
+      "chartWorkerSha256": "d0bdc55656807ab7424d695b73f513fb074ce5ae2e9a8ac973190611417bb771",
+      "chartWorkerBytes": 3383808
     }
   }
 }
