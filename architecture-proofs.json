@@ -2734,6 +2734,7 @@
         "pub (super) fn exchange_storage_bootstrap_views (& mut self , other : & mut Self) -> Result < () >",
         "pub (super) fn exchange_storage_metadata_observation_views (& mut self , other : & mut Self) -> Result < () >",
         "pub (super) fn fixture (domain : Digest , process : u32 , origin : Duration , limit : Duration) -> Self",
+        "pub (super) fn fixture_observe (& mut self , now : Duration) -> Result < () >",
         "pub (super) fn historical_interval_observation (& self) -> (Digest , Duration , Duration , Duration)",
         "pub (super) fn identity_domain (& mut self) -> Result < Digest >",
         "pub (super) fn interval_data (& mut self) -> Result < (Duration , Duration) >",

@@ -3,6 +3,7 @@
 //! Actual native ownership stays with the issuer/process/provider guards.
 
 use super::identity_protocol::{self, ReviewedSubject};
+use super::native_enrollment::issuer_costs::FailureStage;
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{Digest, security_epoch::bootstrap::GkeRoleSelection};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,12 @@ pub(super) struct ContainerFacts {
 pub(super) struct ContainerObservation {
     pub facts: ContainerFacts,
     pub owner: Value,
+}
+
+/// Lifecycle DATA only. AwaitPublication carries no facts or runtime witness.
+pub(super) enum ContainerPublication {
+    Running(ContainerObservation),
+    AwaitPublication,
 }
 
 fn selected_digest(value: &str) -> Result<Digest> {
@@ -61,6 +68,7 @@ fn dns_label(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+#[cfg(test)]
 pub(super) fn container(
     role: &GkeRoleSelection,
     reviewed: &ReviewedSubject,
@@ -71,6 +79,125 @@ pub(super) fn container(
     // Reuse actual response-shape/lifecycle/role/owner joins. This remains DATA:
     // authenticated transport and real runtime identity are separate owners.
     let (value, owner) = identity_protocol::pod(role, reviewed, bytes)?.into_parts();
+    container_parts(role, reviewed, value, owner)
+}
+
+/// Only the native issuer uses this with its retained actual task. Every
+/// partial identity already published must agree before a bounded wait.
+pub(super) fn publication(
+    role: &GkeRoleSelection,
+    reviewed: &ReviewedSubject,
+    bytes: &[u8],
+    node: &str,
+    container_id: &str,
+    attempt: Option<u32>,
+) -> Result<ContainerPublication> {
+    role.container
+        .validate()
+        .context(FailureStage::PodIdentity)?;
+    let (value, owner) = identity_protocol::pod_publication(role, reviewed, bytes)
+        .context(FailureStage::PodIdentity)?
+        .into_parts();
+    if value.pointer("/status/phase").and_then(Value::as_str) == Some("Running") {
+        return Ok(ContainerPublication::Running(
+            container_parts(role, reviewed, value, owner).context(FailureStage::ContainerFacts)?,
+        ));
+    }
+    pending_container(role, &value, &owner, node, container_id, attempt)
+        .context(FailureStage::PendingContainer)?;
+    Ok(ContainerPublication::AwaitPublication)
+}
+
+fn pending_container(
+    role: &GkeRoleSelection,
+    value: &Value,
+    owner: &Value,
+    node: &str,
+    container_id: &str,
+    attempt: Option<u32>,
+) -> Result<()> {
+    ensure!(
+        attempt == Some(0) && value.pointer("/spec/nodeName").and_then(Value::as_str) == Some(node),
+        "native_enrollment_publication_node_or_attempt"
+    );
+    use day2_capabilities::security_epoch::bootstrap::WorkloadKind;
+    ensure!(
+        owner.get("apiVersion").and_then(Value::as_str) == Some("apps/v1")
+            && match role.workload_kind {
+                WorkloadKind::DeploymentV1 =>
+                    owner.get("kind").and_then(Value::as_str) == Some("ReplicaSet"),
+                WorkloadKind::StatefulSetV1 =>
+                    owner.get("kind").and_then(Value::as_str) == Some("StatefulSet")
+                        && owner.get("name").and_then(Value::as_str)
+                            == Some(role.workload.name.as_str())
+                        && owner.get("uid").and_then(Value::as_str)
+                            == Some(role.workload.uid.as_str()),
+            },
+        "native_enrollment_publication_owner"
+    );
+    let (configured, current) = selected_container(role, value)?;
+    ensure!(
+        selected_digest(
+            configured
+                .get("image")
+                .and_then(Value::as_str)
+                .context("epoch_native_container_image")?
+        )? == role.container.image,
+        "epoch_native_container_image_mismatch"
+    );
+    ensure!(
+        current.get("restartCount").and_then(Value::as_u64) == Some(0)
+            && current
+                .get("lastState")
+                .and_then(Value::as_object)
+                .is_some_and(|state| state.is_empty())
+            && current.get("ready").and_then(Value::as_bool) == Some(false)
+            && current
+                .get("started")
+                .is_none_or(|started| started.as_bool() == Some(false)),
+        "native_enrollment_publication_lifecycle"
+    );
+    let state = current
+        .get("state")
+        .and_then(Value::as_object)
+        .context("native_enrollment_publication_state")?;
+    let waiting = state
+        .get("waiting")
+        .and_then(Value::as_object)
+        .context("native_enrollment_publication_state")?;
+    ensure!(
+        state.len() == 1
+            && waiting.get("reason").and_then(Value::as_str) == Some("ContainerCreating")
+            && waiting
+                .keys()
+                .all(|key| key == "reason" || key == "message")
+            && waiting
+                .get("message")
+                .is_none_or(|message| message.as_str().is_some_and(|text| text.len() <= 4096)),
+        "native_enrollment_publication_state"
+    );
+    if let Some(id) = current.get("containerID") {
+        let id = id.as_str().context("epoch_native_container_id")?;
+        ensure!(
+            id.is_empty() || id == format!("containerd://{container_id}"),
+            "native_enrollment_publication_container"
+        );
+    }
+    let image = current
+        .get("imageID")
+        .and_then(Value::as_str)
+        .context("epoch_native_container_image")?;
+    ensure!(
+        image.is_empty() || selected_digest(image)? == role.container.image,
+        "epoch_native_container_image_mismatch"
+    );
+    Ok(())
+}
+
+fn selected_container<'a>(
+    role: &GkeRoleSelection,
+    value: &'a Value,
+) -> Result<(&'a Value, &'a Value)> {
     let containers = value
         .pointer("/spec/containers")
         .and_then(Value::as_array)
@@ -86,21 +213,29 @@ pub(super) fn container(
             && statuses.len() <= 8,
         "epoch_native_container_count"
     );
-    let matching = |items: &Vec<Value>| {
+    fn matching<'a>(items: &'a [Value], name: &str) -> Vec<&'a Value> {
         items
             .iter()
-            .filter(|v| v.get("name").and_then(Value::as_str) == Some(selected.name.as_str()))
-            .cloned()
+            .filter(|v| v.get("name").and_then(Value::as_str) == Some(name))
             .collect::<Vec<_>>()
-    };
-    let configured = matching(containers);
-    let current = matching(statuses);
+    }
+    let configured = matching(containers, &role.container.name);
+    let current = matching(statuses, &role.container.name);
     ensure!(
         configured.len() == 1 && current.len() == 1,
         "epoch_native_container_ambiguous"
     );
-    let configured = &configured[0];
-    let current = &current[0];
+    Ok((configured[0], current[0]))
+}
+
+fn container_parts(
+    role: &GkeRoleSelection,
+    reviewed: &ReviewedSubject,
+    value: Value,
+    owner: Value,
+) -> Result<ContainerObservation> {
+    let selected = &role.container;
+    let (configured, current) = selected_container(role, &value)?;
     let image = configured
         .get("image")
         .and_then(Value::as_str)

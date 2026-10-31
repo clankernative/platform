@@ -56,6 +56,7 @@ pub(super) fn run() -> Result<()> {
                 &mut capture,
             )
         });
+        capture.record_request_result(&served);
         let checked = (|| {
             let mut check = NativeAcquisition::begin(5)?;
             costs.measure(Operation::ParentAfter, || {

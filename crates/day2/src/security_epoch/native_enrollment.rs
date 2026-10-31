@@ -30,6 +30,8 @@ mod policy;
 #[cfg(target_os = "linux")]
 mod process;
 mod protocol;
+#[cfg(any(target_os = "linux", test))]
+mod publication;
 #[cfg(target_os = "linux")]
 mod qualification;
 mod root_kms;

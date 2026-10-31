@@ -112,6 +112,214 @@ fn fixture() -> (GkeRoleSelection, ReviewedSubject, Value) {
     (role, subject, value)
 }
 
+fn pending_fixture() -> (GkeRoleSelection, ReviewedSubject, Value) {
+    let (role, subject, mut value) = fixture();
+    value["status"]["phase"] = json!("Pending");
+    let status = &mut value["status"]["containerStatuses"][0];
+    status["state"] = json!({"waiting":{"reason":"ContainerCreating"}});
+    status["lastState"] = json!({});
+    status["ready"] = json!(false);
+    status["started"] = json!(false);
+    status["imageID"] = json!("");
+    status.as_object_mut().unwrap().remove("containerID");
+    (role, subject, value)
+}
+
+fn publication(
+    role: &GkeRoleSelection,
+    subject: &ReviewedSubject,
+    value: &Value,
+) -> anyhow::Result<runtime_profile::ContainerPublication> {
+    runtime_profile::publication(
+        role,
+        subject,
+        &serde_json::to_vec(value).unwrap(),
+        "node-seven",
+        &"7".repeat(64),
+        Some(0),
+    )
+}
+
+#[test]
+fn cold_pending_publication_is_not_a_running_container_or_authority() {
+    use runtime_profile::ContainerPublication;
+    let (role, subject, pending) = pending_fixture();
+    assert!(matches!(
+        publication(&role, &subject, &pending).unwrap(),
+        ContainerPublication::AwaitPublication
+    ));
+    assert!(
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&pending).unwrap())
+            .is_err()
+    );
+    assert!(
+        super::identity_protocol::pod(&role, &subject, &serde_json::to_vec(&pending).unwrap())
+            .is_err()
+    );
+    let (_, _, running) = fixture();
+    let ContainerPublication::Running(actual) = publication(&role, &subject, &running).unwrap()
+    else {
+        panic!("running DATA required")
+    };
+    let expected =
+        runtime_profile::container(&role, &subject, &serde_json::to_vec(&running).unwrap())
+            .unwrap();
+    assert_eq!(actual.facts, expected.facts);
+    assert_eq!(actual.owner, expected.owner);
+}
+
+#[test]
+fn cold_publication_refuses_foreign_partial_identity_unknown_states_and_restarts() {
+    let (role, subject, pending) = pending_fixture();
+    for (pointer, value) in [
+        ("/metadata/uid", json!("replacement")),
+        ("/metadata/name", json!("replacement")),
+        ("/metadata/namespace", json!("replacement")),
+        ("/spec/serviceAccountName", json!("replacement")),
+        ("/spec/nodeName", json!("other-node")),
+        ("/spec/containers/0/image", json!("registry/native:latest")),
+        ("/spec/containers/0/name", json!("foreign")),
+        ("/status/phase", json!("Unknown")),
+        ("/status/phase", json!("Failed")),
+        ("/status/phase", json!("Succeeded")),
+        ("/status/containerStatuses/0/name", json!("foreign")),
+        ("/status/containerStatuses/0/restartCount", json!(1)),
+        ("/status/containerStatuses/0/restartCount", json!("0")),
+        (
+            "/status/containerStatuses/0/lastState",
+            json!({"terminated":{"exitCode":0}}),
+        ),
+        ("/status/containerStatuses/0/lastState", json!(null)),
+        ("/status/containerStatuses/0/ready", json!(true)),
+        ("/status/containerStatuses/0/started", json!(true)),
+        (
+            "/status/containerStatuses/0/state",
+            json!({"waiting":{"reason":"CrashLoopBackOff"}}),
+        ),
+        (
+            "/status/containerStatuses/0/state",
+            json!({"waiting":{"reason":"ContainerCreating"},"running":{}}),
+        ),
+        (
+            "/status/containerStatuses/0/state",
+            json!({"terminated":{"reason":"Unknown","exitCode":137}}),
+        ),
+        (
+            "/status/containerStatuses/0/imageID",
+            json!(format!(
+                "registry/foreign@{}",
+                Digest::new(b"foreign").as_str()
+            )),
+        ),
+        ("/metadata/ownerReferences/0/kind", json!("Job")),
+        ("/metadata/ownerReferences/0/apiVersion", json!("batch/v1")),
+    ] {
+        let mut bad = pending.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        assert!(publication(&role, &subject, &bad).is_err(), "{pointer}");
+    }
+    for value in [
+        json!(null),
+        json!(9),
+        json!(format!("containerd://{}", "8".repeat(64))),
+    ] {
+        let mut bad = pending.clone();
+        bad["status"]["containerStatuses"][0]["containerID"] = value;
+        assert!(publication(&role, &subject, &bad).is_err());
+    }
+    for remove in ["containerStatuses", "phase"] {
+        let mut bad = pending.clone();
+        bad["status"].as_object_mut().unwrap().remove(remove);
+        assert!(publication(&role, &subject, &bad).is_err());
+    }
+    let bytes = serde_json::to_vec(&pending).unwrap();
+    assert!(
+        runtime_profile::publication(
+            &role,
+            &subject,
+            &bytes,
+            "node-seven",
+            &"7".repeat(64),
+            Some(1)
+        )
+        .is_err()
+    );
+    for pointer in ["/spec/containers", "/status/containerStatuses"] {
+        let mut bad = pending.clone();
+        let values = bad.pointer_mut(pointer).unwrap().as_array_mut().unwrap();
+        values.push(values[0].clone());
+        assert!(publication(&role, &subject, &bad).is_err());
+    }
+}
+
+#[test]
+fn cold_publication_keeps_bounded_strict_decoding_and_selected_owner() {
+    let (role, subject, pending) = pending_fixture();
+    let encoded = serde_json::to_vec(&pending).unwrap();
+    let mut oversized = encoded.clone();
+    oversized.resize(65_537, b' ');
+    let text = std::str::from_utf8(&encoded).unwrap();
+    let duplicate = format!("{{\"metadata\":{{}},{}", &text[1..]);
+    for invalid in [
+        b"[]".as_slice(),
+        b"null",
+        b"{",
+        oversized.as_slice(),
+        duplicate.as_bytes(),
+    ] {
+        assert!(
+            runtime_profile::publication(
+                &role,
+                &subject,
+                invalid,
+                "node-seven",
+                &"7".repeat(64),
+                Some(0)
+            )
+            .is_err()
+        );
+    }
+    let mut terminating = pending.clone();
+    terminating["metadata"]["deletionTimestamp"] = json!("2026-10-31T00:00:00Z");
+    assert!(publication(&role, &subject, &terminating).is_err());
+    let mut missing_owner = pending.clone();
+    missing_owner["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ownerReferences");
+    let error = super::identity_protocol::pod(
+        &role,
+        &subject,
+        &serde_json::to_vec(&missing_owner).unwrap(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "epoch_identity_pod_not_running_or_wrong_ksa"
+    );
+    assert!(
+        runtime_profile::publication(
+            &role,
+            &subject,
+            &encoded,
+            "node-seven",
+            &"7".repeat(64),
+            None
+        )
+        .is_err()
+    );
+    let mut stateful = role.clone();
+    stateful.workload_kind =
+        day2_capabilities::security_epoch::bootstrap::WorkloadKind::StatefulSetV1;
+    assert!(publication(&stateful, &subject, &pending).is_err());
+    let mut selected = pending;
+    selected["metadata"]["ownerReferences"][0]["kind"] = json!("StatefulSet");
+    selected["metadata"]["ownerReferences"][0]["name"] = json!(stateful.workload.name);
+    selected["metadata"]["ownerReferences"][0]["uid"] = json!(stateful.workload.uid);
+    assert!(publication(&stateful, &subject, &selected).is_ok());
+}
+
 // The DATA tests cannot construct a native issuer. This finite AST guard binds
 // their projection to its actual caller and rejects the historical duplicate
 // calls. It is not a general alias resolver or call-graph proof.
@@ -133,20 +341,106 @@ fn issuer_pod_projection_shape(native: &str, profile: &str, identity: &str) -> b
         arguments: bool,
     }
 
+    fn argument(expression: &syn::Expr) -> String {
+        match expression {
+            syn::Expr::Path(path) => path
+                .path
+                .segments
+                .iter()
+                .map(|part| part.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
+            syn::Expr::Reference(reference) if reference.mutability.is_none() => {
+                format!("&{}", argument(&reference.expr))
+            }
+            syn::Expr::Field(field) => match &field.member {
+                syn::Member::Named(name) => format!("{}.{}", argument(&field.base), name),
+                _ => String::new(),
+            },
+            syn::Expr::Lit(literal) => match &literal.lit {
+                syn::Lit::Int(number) => number.base10_digits().into(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
     impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let receiver = argument(&call.receiver);
+            if receiver == "self.http" && call.method == "request" {
+                self.events.push("pod_read");
+                self.arguments &= call.args.len() == 4
+                    && argument(&call.args[1]) == "self.authorization"
+                    && argument(&call.args[2]) == "None"
+                    && argument(&call.args[3]) == "original"
+                    && matches!(&call.args[0], syn::Expr::Struct(route)
+                    if route.path.segments.last().is_some_and(|segment| segment.ident == "Pod")
+                        && route.fields.iter().map(|field| (match &field.member {
+                            syn::Member::Named(name) => name.to_string(), _ => String::new(),
+                        }, argument(&field.expr))).collect::<Vec<_>>() == [
+                            ("namespace".into(), "&selected.namespace.name".into()),
+                            ("name".into(), "&self.reviewed.pod_name".into()),
+                        ]);
+            }
+            if call.method == "check_identity" && receiver.starts_with("self.actors.") {
+                let expected = match receiver.as_str() {
+                    "self.actors.runtime" => {
+                        self.events.push("runtime");
+                        "Subject::Containerd"
+                    }
+                    "self.actors.peer" => {
+                        self.events.push("requester");
+                        "Subject::Requester"
+                    }
+                    _ => {
+                        self.arguments = false;
+                        ""
+                    }
+                };
+                self.arguments &= call.args.len() == 2
+                    && argument(&call.args[0]) == "original"
+                    && matches!(&call.args[1], syn::Expr::Reference(reference)
+                        if matches!(&*reference.expr, syn::Expr::MethodCall(hashes)
+                            if hashes.method == "hashes" && argument(&hashes.receiver) == "self.actors.costs"
+                                && hashes.args.len() == 1 && argument(&hashes.args[0]) == expected));
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
             if let syn::Expr::Path(path) = &*node.func {
                 let names = path.path.segments.iter().rev().take(2).collect::<Vec<_>>();
                 if names.len() == 2 {
+                    self.arguments &=
+                        !(names[1].ident == "NativeAcquisition" && names[0].ident == "begin");
                     let args = node.args.iter().collect::<Vec<_>>();
-                    if names[1].ident == "runtime_profile" && names[0].ident == "container" {
-                        self.events.push("container");
-                        self.arguments &= args.len() == 3
-                            && is_name(args[0], "selected")
-                            && is_ref(args[1], "reviewed")
-                            && is_ref(args[2], "pod");
+                    if names[1].ident == "publication" && names[0].ident == "current" {
+                        self.events.push("publication");
+                        self.arguments &= args.len() == 2 && is_name(args[1], "acquisition");
+                    } else if names[1].ident == "runtime_profile" && names[0].ident == "publication"
+                    {
+                        self.events.push("observation");
+                        self.arguments &= node.args.iter().map(argument).collect::<Vec<_>>()
+                            == [
+                                "selected",
+                                "self.reviewed",
+                                "&pod",
+                                "&self.policy.runtime.node_name",
+                                "&self.container.id",
+                                "self.attempt",
+                            ];
                     } else if names[1].ident == "identity_protocol" && names[0].ident == "pod" {
                         self.events.push("pod");
+                        self.arguments &= self.profile
+                            && args.len() == 3
+                            && is_name(args[0], "role")
+                            && is_name(args[1], "reviewed")
+                            && is_name(args[2], "bytes");
+                    } else if names[1].ident == "identity_protocol"
+                        && names[0].ident == "pod_publication"
+                    {
+                        self.events.push("pod_publication");
                         self.arguments &= self.profile
                             && args.len() == 3
                             && is_name(args[0], "role")
@@ -164,6 +458,19 @@ fn issuer_pod_projection_shape(native: &str, profile: &str, identity: &str) -> b
                         self.arguments &= args.len() == 1 && is_name(args[0], "bytes");
                     }
                 }
+                if path.path.is_ident("container_parts") {
+                    self.events.push("parts");
+                }
+                if path.path.is_ident("pending_container") {
+                    self.events.push("pending");
+                }
+                if path.path.is_ident("require_cri") {
+                    self.events.push("cri");
+                    let arguments = node.args.iter().map(argument).collect::<Vec<_>>();
+                    self.arguments &= arguments
+                        == ["container", "cri", "image", "facts.restart_count"]
+                        || arguments == ["self.container", "self.cri", "&selected.container", "0"];
+                }
             }
             syn::visit::visit_expr_call(self, node);
         }
@@ -174,10 +481,19 @@ fn issuer_pod_projection_shape(native: &str, profile: &str, identity: &str) -> b
         let methods = source
             .items
             .iter()
-            .filter_map(|item| match item {
-                syn::Item::Fn(method) if method.sig.ident == name => Some(method),
-                _ => None,
+            .flat_map(|item| match item {
+                syn::Item::Fn(method) => vec![(&method.sig, &*method.block)],
+                syn::Item::Impl(implementation) => implementation
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        syn::ImplItem::Fn(method) => Some((&method.sig, &method.block)),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
             })
+            .filter(|(signature, _)| signature.ident == name)
             .collect::<Vec<_>>();
         assert_eq!(methods.len(), 1, "one actual projection caller/helper");
         let mut result = Calls {
@@ -185,16 +501,25 @@ fn issuer_pod_projection_shape(native: &str, profile: &str, identity: &str) -> b
             events: Vec::new(),
             arguments: true,
         };
-        result.visit_block(&methods[0].block);
+        result.visit_block(methods[0].1);
         result
     }
 
     let caller = calls(native, "kubernetes", false);
     let helper = calls(profile, "container", true);
+    let adapter = calls(native, "observe", false);
+    let codec = calls(profile, "publication", true);
+    let actors = calls(native, "check", false);
     caller.arguments
         && helper.arguments
-        && caller.events == ["container", "workload"]
-        && helper.events == ["pod"]
+        && adapter.arguments
+        && codec.arguments
+        && actors.arguments
+        && caller.events == ["publication", "cri", "workload"]
+        && adapter.events == ["pod_read", "observation", "cri"]
+        && actors.events == ["runtime", "requester"]
+        && helper.events == ["pod", "parts"]
+        && codec.events == ["pod_publication", "parts", "pending"]
         && pod_decode_shape(identity)
 }
 
@@ -218,6 +543,23 @@ fn pod_decode_shape(source: &str) -> bool {
                     self.events.push("bounded");
                     self.args &= call.args.len() == 1
                         && matches!(call.args.first(), Some(syn::Expr::Path(p)) if p.path.is_ident("bytes"));
+                } else if name == "selected_pod" {
+                    self.events.push("selected");
+                    self.args &= call.args.len() == 3
+                        && call
+                            .args
+                            .iter()
+                            .filter_map(|argument| match argument {
+                                syn::Expr::Path(path) => Some(
+                                    path.path
+                                        .get_ident()
+                                        .map(ToString::to_string)
+                                        .unwrap_or_default(),
+                                ),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            == ["role", "subject", "bytes"];
                 } else if name == "controlling_owner" {
                     self.events.push("owner");
                     self.args &= call.args.len() == 1
@@ -231,23 +573,32 @@ fn pod_decode_shape(source: &str) -> bool {
         }
     }
     let source = syn::parse_file(source).unwrap();
-    let functions = source
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(f) if f.sig.ident == "pod" => Some(f),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if functions.len() != 1 {
-        return false;
+    for (name, expected) in [
+        ("selected_pod", vec!["bounded"]),
+        ("pod", vec!["selected", "owner"]),
+        ("pod_publication", vec!["selected", "owner"]),
+    ] {
+        let functions = source
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Fn(function) if function.sig.ident == name => Some(function),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if functions.len() != 1 {
+            return false;
+        }
+        let mut visitor = Decodes {
+            events: Vec::new(),
+            args: true,
+        };
+        visitor.visit_block(&functions[0].block);
+        if !visitor.args || visitor.events != expected {
+            return false;
+        }
     }
-    let mut visitor = Decodes {
-        events: Vec::new(),
-        args: true,
-    };
-    visitor.visit_block(&functions[0].block);
-    visitor.args && visitor.events == ["bounded", "owner"]
+    true
 }
 
 #[test]
@@ -268,11 +619,11 @@ fn issuer_pod_projection_guard_rejects_restored_duplicates_and_decode_reordering
         assert_eq!(source.matches(old).count(), 1, "exact restoration control");
         source.replacen(old, new, 1)
     };
-    let caller = "    let observed = runtime_profile::container(selected, &reviewed, &pod)?;";
+    let caller = "runtime_profile::publication(";
     let restored = replace(
         native,
         caller,
-        &format!("    let _ = identity_protocol::pod(selected, &reviewed, &pod)?;\n{caller}"),
+        &format!("identity_protocol::pod(selected, self.reviewed, &pod)?;\n{caller}"),
     );
     assert!(!issuer_pod_projection_shape(&restored, profile, identity));
 
@@ -285,13 +636,42 @@ fn issuer_pod_projection_guard_rejects_restored_duplicates_and_decode_reordering
     );
     assert!(!issuer_pod_projection_shape(native, &restored, identity));
 
-    let foreign_body = replace(
-        native,
-        caller,
-        "    let observed = runtime_profile::container(selected, &reviewed, &ca)?;",
-    );
+    let foreign_body = replace(native, "&pod,", "&ca,");
     assert!(!issuer_pod_projection_shape(
         &foreign_body,
+        profile,
+        identity
+    ));
+    let foreign_cri = replace(
+        native,
+        "require_cri(container, cri, image, facts.restart_count)?;",
+        "require_cri(container, foreign, image, facts.restart_count)?;",
+    );
+    assert!(!issuer_pod_projection_shape(
+        &foreign_cri,
+        profile,
+        identity
+    ));
+    let foreign_route = replace(
+        native,
+        "namespace: &selected.namespace.name,",
+        "namespace: &foreign.namespace.name,",
+    );
+    assert!(!issuer_pod_projection_shape(
+        &foreign_route,
+        profile,
+        identity
+    ));
+    let start = native.find("impl super::publication::Port").unwrap();
+    let end = start + native[start..].find("\n    fn observe(").unwrap();
+    let (prefix, rest) = native.split_at(start);
+    let (check, suffix) = rest.split_at(end - start);
+    let missing_actor = format!(
+        "{prefix}{}{suffix}",
+        replace(check, "Subject::Containerd", "Subject::Requester")
+    );
+    assert!(!issuer_pod_projection_shape(
+        &missing_actor,
         profile,
         identity
     ));
@@ -308,8 +688,8 @@ fn issuer_pod_projection_guard_rejects_restored_duplicates_and_decode_reordering
     let bounded = "    let value = decode(bytes)?;";
     // Limit the mutation to the actual Pod function: other identity codecs
     // independently retain their same bounded decoder.
-    let start = identity.find("pub(super) fn pod(").unwrap();
-    let end = start + identity[start..].find("\nfn controlling_owner(").unwrap();
+    let start = identity.find("fn selected_pod(").unwrap();
+    let end = start + identity[start..].find("\npub(super) fn pod(").unwrap();
     let (prefix, remaining) = identity.split_at(start);
     let (pod, suffix) = remaining.split_at(end - start);
     for replacement in [
