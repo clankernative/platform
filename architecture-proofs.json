@@ -521,7 +521,7 @@
         },
         {
           "owner": "Sink",
-          "signature": "pub (in crate :: oauth) async fn drive_response < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T >) -> Result < () >"
+          "signature": "async fn drive_response_owner < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T > , start : ResponseStart) -> Result < () >"
         }
       ],
       "material_uses": [
