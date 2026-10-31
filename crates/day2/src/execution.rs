@@ -148,11 +148,55 @@ fn save(
     })
 }
 
-pub(crate) fn advance(runtime: &Runtime, id: &str, fault: Fault) -> Result<bool> {
+pub(crate) fn advance_for_query_or_command(
+    runtime: &Runtime,
+    id: &str,
+    fault: Fault,
+    sql: &mut store::ExecutionSql<'_, '_, '_>,
+) -> Result<bool> {
+    sql.require_runtime(runtime)?;
     if runtime.artifact().contract().format < 13 {
         return Ok(false);
     }
-    let Some(phase) = runtime.sql_read(|connection| phase(connection, id))? else {
+    let (query, saved_phase) = sql.read(|db| {
+        runtime.check_binding(db)?;
+        let operation: String = db.query_row(
+            "SELECT operation FROM day2_invocations WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let kind = runtime.artifact().route(&operation)?.kind.as_str();
+        ensure!(
+            matches!(kind, "query" | "command"),
+            "unknown invocation operation kind"
+        );
+        let query = kind == "query";
+        let saved_phase = phase(db, id)?;
+        if query {
+            ensure!(saved_phase.is_none(), "query_command_continuation_refused");
+            let effects: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            ensure!(!effects, "query_command_effect_refused");
+        }
+        Ok((query, saved_phase))
+    })?;
+    if query {
+        return Ok(false);
+    }
+    sql.require_external_capability()?;
+    advance_command(runtime, id, fault, saved_phase)
+}
+
+fn advance_command(
+    runtime: &Runtime,
+    id: &str,
+    fault: Fault,
+    saved_phase: Option<Phase>,
+) -> Result<bool> {
+    let Some(phase) = saved_phase else {
         return Ok(false);
     };
     if phase == Phase::Complete {

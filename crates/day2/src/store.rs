@@ -572,6 +572,136 @@ pub struct Runtime {
     inputs: crate::host_inputs::Inputs,
 }
 
+/// Borrowed invocation DATA shared by direct acceptance callers, not authority.
+pub(crate) struct InvocationInput<'a> {
+    pub operation: &'a str,
+    pub id: &'a str,
+    pub input: &'a Value,
+    pub at: i64,
+}
+
+/// Explicit SQL composition for the shared invocation engine. The Current
+/// branch keeps existing callers on their real runtime supplier; a Host branch
+/// can only borrow the checked query owner on the actual response future.
+pub(crate) struct ExecutionSql<'borrow, 'scope, 'role> {
+    runtime: &'borrow Runtime,
+    source: ExecutionSource<'borrow, 'scope, 'role>,
+}
+
+enum ExecutionSource<'borrow, 'scope, 'role> {
+    Current,
+    Host(&'borrow mut crate::oauth::native_management::QueryParent<'scope, 'role>),
+}
+
+impl<'borrow, 'scope, 'role> ExecutionSql<'borrow, 'scope, 'role> {
+    pub(crate) fn current(runtime: &'borrow Runtime) -> Self {
+        Self {
+            runtime,
+            source: ExecutionSource::Current,
+        }
+    }
+
+    pub(crate) fn host(
+        runtime: &'borrow Runtime,
+        parent: &'borrow mut crate::oauth::native_management::QueryParent<'scope, 'role>,
+    ) -> Result<Self> {
+        parent.require_runtime(runtime)?;
+        Ok(Self {
+            runtime,
+            source: ExecutionSource::Host(parent),
+        })
+    }
+
+    /// The shared engine cannot pair another Runtime's decisions or providers
+    /// with this context's real SQL, even when their declarative bindings match.
+    pub(crate) fn require_runtime(&mut self, runtime: &Runtime) -> Result<()> {
+        if !std::ptr::eq(self.runtime, runtime) {
+            if let ExecutionSource::Host(parent) = &mut self.source {
+                parent.refuse();
+            }
+            anyhow::bail!("query execution Runtime identity changed");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read<T>(
+        &mut self,
+        operation: impl for<'sql> FnOnce(&'sql Connection) -> Result<T>,
+    ) -> Result<T> {
+        match &mut self.source {
+            ExecutionSource::Current => self.runtime.sql_read(operation),
+            ExecutionSource::Host(parent) => parent.read(operation),
+        }
+    }
+
+    pub(crate) fn write<T>(
+        &mut self,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.decide(|tx| operation(tx).map(SqlDecision::Commit))
+    }
+
+    pub(crate) fn decide<T>(
+        &mut self,
+        operation: impl for<'sql> FnOnce(&'sql Transaction<'_>) -> Result<SqlDecision<T>>,
+    ) -> Result<T> {
+        match &mut self.source {
+            ExecutionSource::Current => self.runtime.sql_decide(operation),
+            ExecutionSource::Host(parent) => parent.write(operation),
+        }
+    }
+
+    pub(crate) fn connection(
+        &mut self,
+        request: &Request,
+        instruction: &Instruction,
+    ) -> Result<String> {
+        match &mut self.source {
+            ExecutionSource::Current => {
+                crate::oauth::usage::execute(self.runtime, request, instruction)
+            }
+            ExecutionSource::Host(parent) => parent.connection(request, instruction),
+        }
+    }
+
+    pub(crate) fn require_external_capability(&mut self) -> Result<()> {
+        ensure!(
+            matches!(self.source, ExecutionSource::Current),
+            "native query external capability requires an explicit owner"
+        );
+        Ok(())
+    }
+
+    /// A failed borrowed parent must not acquire a cleanup owner or obscure the
+    /// primary error with a later mandatory-audit failure.
+    pub(crate) fn check_cleanup(&mut self) -> Result<()> {
+        match &mut self.source {
+            ExecutionSource::Current => Ok(()),
+            ExecutionSource::Host(parent) => parent.check(),
+        }
+    }
+
+    pub(crate) fn observation_header(&mut self) -> Result<Option<axum::http::HeaderValue>> {
+        match &mut self.source {
+            ExecutionSource::Current => Ok(None),
+            ExecutionSource::Host(parent) => parent.observation_header(),
+        }
+    }
+
+    pub(crate) fn bind_query(
+        &mut self,
+        operation: &str,
+        actor: &str,
+        id: &str,
+        input: &Value,
+    ) -> Result<()> {
+        if let ExecutionSource::Host(parent) = &mut self.source {
+            parent.bind_accepted(operation, actor, id, input)?;
+        }
+        Ok(())
+    }
+}
+
 /// Admitted desired schema inputs for a fresh memory-only image. This has no
 /// database pathname, Runtime, writer permission or native holder authority.
 /// Loading it never inspects or creates the installation's serving state.
@@ -1299,29 +1429,62 @@ impl Runtime {
         now: i64,
         origin: Option<&crate::iap::Verified>,
     ) -> Result<()> {
+        self.accept_on_behalf_of_verified_using(
+            InvocationInput {
+                operation,
+                id,
+                input,
+                at: now,
+            },
+            acting,
+            origin,
+            &mut ExecutionSql::current(self),
+        )
+    }
+
+    pub(crate) fn accept_on_behalf_of_verified_using(
+        &self,
+        request: InvocationInput<'_>,
+        acting: ActingAs<'_>,
+        origin: Option<&crate::iap::Verified>,
+        sql: &mut ExecutionSql<'_, '_, '_>,
+    ) -> Result<()> {
+        sql.require_runtime(self)?;
+        let InvocationInput {
+            operation,
+            id,
+            input,
+            at: now,
+        } = request;
         let ActingAs {
             authenticated,
             actor,
             trigger,
         } = acting;
         if let Err(error) = crate::authority::valid_actor(authenticated) {
-            self.audit_admission_rejection(
-                operation,
-                (actor, authenticated),
-                id,
-                now,
-                crate::audit::AttemptReason::InvalidIdentity,
-                trigger,
+            self.audit_admission_rejection_using(
+                crate::audit::AdmissionRejection {
+                    operation,
+                    actor,
+                    initiator: authenticated,
+                    identity: id,
+                    at: now,
+                    reason: crate::audit::AttemptReason::InvalidIdentity,
+                    trigger,
+                },
+                sql,
             )
             .context("mandatory_audit_unavailable")?;
             return Err(error);
         }
-        self.accept_with_caller(
-            operation,
+        self.accept_with_caller_using(
+            InvocationInput {
+                operation,
+                id,
+                input,
+                at: now,
+            },
             actor,
-            id,
-            input,
-            now,
             Cause {
                 trigger,
                 actor,
@@ -1338,6 +1501,7 @@ impl Runtime {
                 remote_fence: true,
                 credential: None,
             },
+            sql,
         )
     }
 
@@ -1406,6 +1570,33 @@ impl Runtime {
         now: i64,
         cause: Cause<'_>,
     ) -> Result<()> {
+        self.accept_with_caller_using(
+            InvocationInput {
+                operation,
+                id,
+                input,
+                at: now,
+            },
+            actor,
+            cause,
+            &mut ExecutionSql::current(self),
+        )
+    }
+
+    fn accept_with_caller_using(
+        &self,
+        request: InvocationInput<'_>,
+        actor: &str,
+        cause: Cause<'_>,
+        sql: &mut ExecutionSql<'_, '_, '_>,
+    ) -> Result<()> {
+        sql.require_runtime(self)?;
+        let InvocationInput {
+            operation,
+            id,
+            input,
+            at: now,
+        } = request;
         let Cause {
             trigger,
             actor: _,
@@ -1439,7 +1630,7 @@ impl Runtime {
             reason = AttemptReason::InvalidInput;
             ensure!(serde_json::to_vec(input)?.len() < 65_536, "input_too_large");
             reason = AttemptReason::AuthorizationRejected;
-            self.authorize(operation, actor)?;
+            sql.read(|db| self.authorize_in(db, operation, actor))?;
             let definition = self.artifact.route(operation)?;
             reason = AttemptReason::InvalidInput;
             self.artifact.contract().schema.inputs[&definition.input_type].validate_input(input)?;
@@ -1451,7 +1642,7 @@ impl Runtime {
                 )?;
             }
             reason = AttemptReason::StorageRejected;
-            self.sql_write(|tx| {
+            sql.write(|tx| {
             self.check_binding(tx)?;
             reason = AttemptReason::AuthorizationRejected;
             let active = crate::authority_state::authorize_in(tx, self, operation, actor)?;
@@ -1638,9 +1829,20 @@ impl Runtime {
             Ok(())
             })
         })();
-        if result.is_err() {
-            self.audit_admission_rejection(operation, (actor, initiator), id, now, reason, trigger)
-                .context("mandatory_audit_unavailable")?;
+        if result.is_err() && sql.check_cleanup().is_ok() {
+            self.audit_admission_rejection_using(
+                crate::audit::AdmissionRejection {
+                    operation,
+                    actor,
+                    initiator,
+                    identity: id,
+                    at: now,
+                    reason,
+                    trigger,
+                },
+                sql,
+            )
+            .context("mandatory_audit_unavailable")?;
         }
         result
     }
@@ -1708,16 +1910,29 @@ impl Runtime {
         self.execute(id, fault)
     }
     pub fn execute(&self, id: &str, fault: Fault) -> Result<Outcome> {
+        self.execute_using(id, fault, &mut ExecutionSql::current(self))
+    }
+
+    pub(crate) fn execute_using(
+        &self,
+        id: &str,
+        fault: Fault,
+        sql: &mut ExecutionSql<'_, '_, '_>,
+    ) -> Result<Outcome> {
+        sql.require_runtime(self)?;
         // Blocking is host-owned execution metadata, not an application failure or
         // permission to rerun already committed work with another identity.
-        let blocked = self.sql_read(|connection| {
+        let blocked = sql.read(|connection| {
             self.check_binding(connection)?;
             crate::authority_state::is_blocked(connection, id)
         })?;
         if blocked {
             return Ok(blocked_outcome(id));
         }
-        let result = self.execute_inner(id, fault);
+        let result = self.execute_inner_using(id, fault, sql);
+        if result.is_err() && sql.check_cleanup().is_err() {
+            return result;
+        }
         let exhausted_send = if result.as_ref().err().is_some_and(|error| {
             matches!(
                 crate::error::classify(error),
@@ -1725,7 +1940,7 @@ impl Runtime {
                     | crate::error::Failure::BudgetExhausted
             )
         }) {
-            self.sql_read(|connection| Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?))?
+            sql.read(|connection| Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM day2_external_effects WHERE invocation=?1 AND observation IS NULL AND json_extract(instruction,'$.model')='app.send.v1')", [id], |row| row.get::<_,bool>(0))?))?
         } else {
             false
         };
@@ -1742,7 +1957,7 @@ impl Runtime {
                         | crate::error::Failure::CredentialAuthorityChanged
                 ))
         {
-            let pending = self.sql_write(|tx| {
+            let pending = sql.write(|tx| {
                 let pending: bool = tx.query_row(
                     "SELECT status='pending' FROM day2_invocations WHERE id=?1",
                     [id],
@@ -1762,18 +1977,24 @@ impl Runtime {
             }
         }
         if result.is_err() {
-            self.audit_execution_interruption(id)
+            self.audit_execution_interruption_using(id, sql)
                 .context("mandatory_audit_unavailable")?;
         }
         result
     }
-    fn execute_inner(&self, id: &str, fault: Fault) -> Result<Outcome> {
-        let credential_keys = self.prepare_credential_keys(id)?;
-        let continuing = crate::execution::advance(self, id, fault)?;
+    fn execute_inner_using(
+        &self,
+        id: &str,
+        fault: Fault,
+        sql: &mut ExecutionSql<'_, '_, '_>,
+    ) -> Result<Outcome> {
+        sql.require_runtime(self)?;
+        let credential_keys = self.prepare_credential_keys_using(id, sql)?;
+        let continuing = crate::execution::advance_for_query_or_command(self, id, fault, sql)?;
         let prepared = if continuing {
             Vec::new()
         } else {
-            crate::preparation::prepare(self, id)?
+            crate::preparation::prepare_using(self, id, sql)?
         };
         if fault == Fault::AfterPrepare {
             return Err(fault.interruption("simulated_process_loss"));
@@ -1783,7 +2004,7 @@ impl Runtime {
             Committed(Outcome),
             Rejected(Box<Trace>, Policy),
         }
-        let decision = self.sql_decide(|tx| {
+        let decision = sql.decide(|tx| {
         self.check_binding(tx)?;
         let (operation, actor, input, artifact, status, completed): (String,String,String,String,String,Option<String>) =
             tx.query_row("SELECT operation,actor,input,artifact,status,outcome FROM day2_invocations WHERE id=?1", [id],
@@ -1959,7 +2180,7 @@ impl Runtime {
             }
             Decision::Rejected(trace, policy) => {
                 let trace = *trace;
-                self.sql_decide(|tx| {
+                sql.decide(|tx| {
                     self.check_binding(tx)?;
                     self.check_authority(tx, &trace.request, &policy)?;
                     let existing: Option<String> = tx.query_row(

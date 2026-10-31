@@ -65,12 +65,17 @@ fn recorded(connection: &Connection, id: &str) -> Result<Vec<Observation>> {
     Ok(observations)
 }
 
-pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
+pub(crate) fn prepare_using(
+    runtime: &Runtime,
+    id: &str,
+    sql: &mut store::ExecutionSql<'_, '_, '_>,
+) -> Result<Vec<Observation>> {
+    sql.require_runtime(runtime)?;
     if runtime.artifact().contract().format < 13 {
         return Ok(Vec::new());
     }
-    let Some((operation, policy, durable, registered_operation, mut request)) = runtime
-        .sql_decide(|tx| {
+    let Some((operation, policy, durable, registered_operation, mut request)) =
+        sql.decide(|tx| {
             runtime.check_binding(tx)?;
             let (operation, input, actor, artifact, status): (
                 String,
@@ -131,7 +136,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
     loop {
         // Keep the authority snapshot valid while pure code consumes recorded
         // inputs. Activation can only commit before or after this replay step.
-        let response = runtime.sql_write(|tx| {
+        let response = sql.write(|tx| {
             crate::authority_state::require_invocation_in(
                 tx,
                 runtime,
@@ -181,11 +186,22 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             request.observations.len() < MAX_OBSERVATIONS,
             "preparation_step_budget"
         );
+        if matches!(step, Step::Observe { .. })
+            && !crate::oauth::usage::observation(&instruction.model)
+            && ![
+                crate::resources::BIND,
+                crate::resources::ATTENUATE,
+                crate::audit::HISTORY,
+            ]
+            .contains(&instruction.model.as_str())
+        {
+            sql.require_external_capability()?;
+        }
         // Ordered pages record host continuation handles and their invocation
         // pins. Reserve the local writer before reading rows, avoiding a deferred
         // snapshot-to-writer race with another preparation. This transaction still
         // ends before any provider call, and permits no application mutation.
-        let (authority, prepared) = runtime.sql_write(|tx| {
+        let (authority, prepared) = sql.write(|tx| {
         runtime.check_binding(tx)?;
         let active = crate::authority_state::require_invocation_in(
             tx,
@@ -330,7 +346,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             PreparedStep::Local(result) => result,
             PreparedStep::Connection { ordinal, attempt } => {
                 connection_attempt = Some((ordinal, attempt));
-                crate::oauth::usage::execute(runtime, &request, &instruction)
+                sql.connection(&request, &instruction)
             }
             PreparedStep::External {
                 ordinal,
@@ -352,6 +368,10 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
                 provider_usage = Some(completed.usage);
                 completed.result
             }
+        };
+        let result = match result {
+            Err(primary) if sql.check_cleanup().is_err() => return Err(primary),
+            other => other,
         };
         let result = if let Some((_, _, _, resource, _, _)) = &admitted_attempt {
             result.and_then(|result| {
@@ -380,7 +400,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             "preparation_result_budget"
         );
         if let Some((ordinal, attempt)) = connection_attempt {
-            runtime.sql_write(|tx| {
+            sql.write(|tx| {
             crate::execution::check_settlement_binding(tx, runtime, id, &authority)?;
             tx.execute(
                 "UPDATE day2_observation_attempts SET observation=?1 WHERE invocation=?2 AND ordinal=?3 AND attempt=?4",
@@ -392,7 +412,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         if let Some((ordinal, attempt, reservation, _, identity, correlation)) = admitted_attempt {
             // Retain provider knowledge even if policy changed during the call.
             // A separate reauthorization below gates use by application code.
-            runtime.sql_write(|tx| {
+            sql.write(|tx| {
             crate::execution::check_settlement_binding(tx, runtime, id, &authority)?;
             crate::resources::record_correlation_in(tx, &identity, &correlation)?;
             tx.execute(
@@ -407,7 +427,7 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
             Ok(())
             })?;
         }
-        let winner = runtime.sql_write(|tx| {
+        let winner = sql.write(|tx| {
             runtime.check_binding(tx)?;
             crate::authority_state::require_invocation_in(
                 tx,

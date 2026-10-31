@@ -10,7 +10,7 @@
     {
       "source": "crates/day2/src/oauth/native_management/request.rs",
       "scope": "const",
-      "fingerprint": "sha256:d96c005c4fe41705aeb5b48ef015116d8fee4a0ac58f6ef4dd9a896776a7bc1e",
+      "fingerprint": "sha256:c8097732738affd07c672be2c3583bc672417b2834b940aaa7f20b85a1205021",
       "registration": null
     },
     {
@@ -753,6 +753,7 @@
         "pub (super) fn check (& mut self) -> Result < () >",
         "pub (super) fn commit (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "pub (super) fn observe_refresh_material (& mut self , connection : & str , version : i64 , expires_at : i64 , observed_at : i64 , threshold_at : i64 , outcome : super :: effects :: RefreshObservation) -> Result < () >",
         "fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
         "pub (super) fn refuse (& mut self)",
         "pub (super) fn require_runtime (& self , runtime : & crate :: store :: Runtime) -> Result < () >",
@@ -770,6 +771,10 @@
         {
           "owner": null,
           "signature": "pub (super) fn with_runtime_consumer < T > (runtime : & crate :: store :: Runtime , phase : RuntimePhase , operation : impl FnOnce (& mut RuntimeConsumer < '_ , '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "fn connection_inner (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >"
         }
       ],
       "material_uses": [
@@ -808,6 +813,10 @@
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
           "signature": "pub (super) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >"
+        },
+        {
+          "owner": "RuntimeConsumer < '_ , '_ >",
+          "signature": "pub (super) fn observe_refresh_material (& mut self , connection : & str , version : i64 , expires_at : i64 , observed_at : i64 , threshold_at : i64 , outcome : super :: effects :: RefreshObservation) -> Result < () >"
         },
         {
           "owner": "RuntimeConsumer < '_ , '_ >",
@@ -920,7 +929,8 @@
       "owning_children": [],
       "methods": [
         "pub (super) fn borrow < 'a > (& 'a mut self , role : & 'a mut EnrolledProcessRoleOwner) -> Result < EnrolledRoleStage < 'a > >",
-        "pub (super) fn finish (mut self , role : & mut EnrolledProcessRoleOwner) -> Result < () >"
+        "pub (super) fn finish (mut self , role : & mut EnrolledProcessRoleOwner) -> Result < () >",
+        "pub (super) fn historical_diagnostic_data (& self) -> Option < EnrolledRequestDiagnosticData >"
       ],
       "factories": [
         {
@@ -936,6 +946,10 @@
         {
           "owner": "Lease",
           "signature": "pub (super) fn finish (mut self , role : & mut EnrolledProcessRoleOwner) -> Result < () >"
+        },
+        {
+          "owner": "Lease",
+          "signature": "pub (super) fn historical_diagnostic_data (& self) -> Option < EnrolledRequestDiagnosticData >"
         }
       ],
       "proof_uses": [],
@@ -946,14 +960,11 @@
     },
     {
       "source": "crates/day2/src/oauth/native_management/response.rs",
-      "type_name": "HostSql",
+      "type_name": "HostRequestOwner",
       "owning_children": [],
       "methods": [
-        "pub (super) fn check_sql (& mut self) -> Result < () >",
-        "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (crate) fn query (& mut self) -> Result < & mut QueryParent < 'scope , 'role > >",
         "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
-        "pub (super) fn refuse (& mut self)",
-        "fn reobserve_outside_sql (& mut self) -> Result < () >",
         "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
       ],
       "factories": [
@@ -964,28 +975,202 @@
       ],
       "material_uses": [
         {
-          "owner": "HostSql < '_ , '_ >",
-          "signature": "fn reobserve_outside_sql (& mut self) -> Result < () >"
+          "owner": "HostRequestOwner < 'scope , 'role >",
+          "signature": "pub (crate) fn query (& mut self) -> Result < & mut QueryParent < 'scope , 'role > >"
         },
         {
-          "owner": "HostSql < '_ , '_ >",
+          "owner": "HostRequestOwner < 'scope , 'role >",
           "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
         },
         {
-          "owner": "HostSql < '_ , '_ >",
+          "owner": "HostRequestOwner < 'scope , 'role >",
+          "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "HostSql",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check_sql (& mut self) -> Result < () >",
+        "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "fn reborrow (& mut self) -> HostSql < '_ , 'role >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn reobserve_outside_sql (& mut self) -> Result < () >",
+        "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "HostSql < 'scope , 'role >",
+          "signature": "fn reborrow (& mut self) -> HostSql < '_ , 'role >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "async fn drive_response_owner < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T > , start : ResponseStart) -> Result < () >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "HostSql < 'scope , 'role >",
+          "signature": "fn reborrow (& mut self) -> HostSql < '_ , 'role >"
+        },
+        {
+          "owner": "HostSql < 'scope , 'role >",
+          "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "HostSql < 'scope , 'role >",
           "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
         },
         {
-          "owner": "HostSql < '_ , '_ >",
+          "owner": "HostSql < 'scope , 'role >",
           "signature": "pub (super) fn check_sql (& mut self) -> Result < () >"
         },
         {
-          "owner": "HostSql < '_ , '_ >",
+          "owner": "HostSql < 'scope , 'role >",
           "signature": "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
         },
         {
-          "owner": "HostSql < '_ , '_ >",
+          "owner": "HostSql < 'scope , 'role >",
           "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "HostSql < 'scope , 'role >",
+          "signature": "pub (super) fn reobserve_outside_sql (& mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "QueryLoan",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check (& mut self) -> Result < () >",
+        "pub (super) fn observe_material (& mut self , connection : & str , version : i64 , expires_at : i64 , observed_at : i64 , threshold_at : i64 , outcome : super :: super :: effects :: RefreshObservation) -> Result < () >",
+        "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (super) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (super) fn refuse (& mut self)",
+        "pub (super) fn reobserve_outside_sql (& mut self) -> Result < () >",
+        "pub (super) fn require_request (& self , request : & crate :: protocol :: Request) -> Result < () >",
+        "pub (super) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "fn connection_inner (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn observe_material (& mut self , connection : & str , version : i64 , expires_at : i64 , observed_at : i64 , threshold_at : i64 , outcome : super :: super :: effects :: RefreshObservation) -> Result < () >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn reobserve_outside_sql (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn require_request (& self , request : & crate :: protocol :: Request) -> Result < () >"
+        },
+        {
+          "owner": "QueryLoan < '_ , '_ >",
+          "signature": "pub (super) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "QueryParent",
+      "owning_children": [],
+      "methods": [
+        "pub (crate) fn bind_accepted (& mut self , operation : & str , actor : & str , id : & str , input : & serde_json :: Value) -> Result < () >",
+        "pub (crate) fn check (& mut self) -> Result < () >",
+        "pub (crate) fn connection (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >",
+        "fn connection_inner (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >",
+        "pub (crate) fn observation_header (& mut self) -> Result < Option < axum :: http :: HeaderValue > >",
+        "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn refuse (& mut self)",
+        "pub (crate) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "HostRequestOwner < 'scope , 'role >",
+          "signature": "pub (crate) fn query (& mut self) -> Result < & mut QueryParent < 'scope , 'role > >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "async fn drive_response_owner < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T > , start : ResponseStart) -> Result < () >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "fn connection_inner (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn bind_accepted (& mut self , operation : & str , actor : & str , id : & str , input : & serde_json :: Value) -> Result < () >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn connection (& mut self , request : & crate :: protocol :: Request , instruction : & crate :: protocol :: Instruction) -> Result < String >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn observation_header (& mut self) -> Result < Option < axum :: http :: HeaderValue > >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn refuse (& mut self)"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn require_runtime (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "QueryParent < '_ , '_ >",
+          "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+        },
+        {
+          "owner": "Sink",
+          "signature": "fn bind_query_correlation (& self , parent : & QueryParent < '_ , '_ >)"
         }
       ],
       "proof_uses": [],
@@ -5885,6 +6070,99 @@
         {
           "owner": "PreparedFileContinuity",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn begin_pending_physical_phase (& mut self) -> Result < PendingPhysicalFilePhase < '_ > >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/store.rs",
+      "type_name": "ExecutionSql",
+      "owning_children": [
+        {
+          "source": "crates/day2/src/store/native_storage.rs",
+          "registration": {
+            "source": "crates/day2/src/store.rs",
+            "module": "native_storage"
+          }
+        }
+      ],
+      "methods": [
+        "pub (crate) fn bind_query (& mut self , operation : & str , actor : & str , id : & str , input : & Value) -> Result < () >",
+        "pub (crate) fn check_cleanup (& mut self) -> Result < () >",
+        "pub (crate) fn connection (& mut self , request : & Request , instruction : & Instruction) -> Result < String >",
+        "pub (crate) fn current (runtime : & 'borrow Runtime) -> Self",
+        "pub (crate) fn decide < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Transaction < '_ >) -> Result < SqlDecision < T > >) -> Result < T >",
+        "pub (crate) fn host (runtime : & 'borrow Runtime , parent : & 'borrow mut crate :: oauth :: native_management :: QueryParent < 'scope , 'role >) -> Result < Self >",
+        "pub (crate) fn observation_header (& mut self) -> Result < Option < axum :: http :: HeaderValue > >",
+        "pub (crate) fn read < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Connection) -> Result < T >) -> Result < T >",
+        "pub (crate) fn require_external_capability (& mut self) -> Result < () >",
+        "pub (crate) fn require_runtime (& mut self , runtime : & Runtime) -> Result < () >",
+        "pub (crate) fn write < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Transaction < '_ >) -> Result < T >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn current (runtime : & 'borrow Runtime) -> Self"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn host (runtime : & 'borrow Runtime , parent : & 'borrow mut crate :: oauth :: native_management :: QueryParent < 'scope , 'role >) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn bind_query (& mut self , operation : & str , actor : & str , id : & str , input : & Value) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn check_cleanup (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn connection (& mut self , request : & Request , instruction : & Instruction) -> Result < String >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn decide < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Transaction < '_ >) -> Result < SqlDecision < T > >) -> Result < T >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn observation_header (& mut self) -> Result < Option < axum :: http :: HeaderValue > >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn require_external_capability (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn require_runtime (& mut self , runtime : & Runtime) -> Result < () >"
+        },
+        {
+          "owner": "ExecutionSql < 'borrow , 'scope , 'role >",
+          "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'sql > FnOnce (& 'sql Transaction < '_ >) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "Runtime",
+          "signature": "fn accept_with_caller_using (& self , request : InvocationInput < '_ > , actor : & str , cause : Cause < '_ > , sql : & mut ExecutionSql < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Runtime",
+          "signature": "fn execute_inner_using (& self , id : & str , fault : Fault , sql : & mut ExecutionSql < '_ , '_ , '_ >) -> Result < Outcome >"
+        },
+        {
+          "owner": "Runtime",
+          "signature": "pub (crate) fn accept_on_behalf_of_verified_using (& self , request : InvocationInput < '_ > , acting : ActingAs < '_ > , origin : Option < & crate :: iap :: Verified > , sql : & mut ExecutionSql < '_ , '_ , '_ >) -> Result < () >"
+        },
+        {
+          "owner": "Runtime",
+          "signature": "pub (crate) fn execute_using (& self , id : & str , fault : Fault , sql : & mut ExecutionSql < '_ , '_ , '_ >) -> Result < Outcome >"
         }
       ],
       "proof_uses": [],

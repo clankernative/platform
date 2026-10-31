@@ -758,11 +758,24 @@ impl Runtime {
     }
 
     /// The read snapshot ends before resolving keys or taking an app writer lock.
+    #[cfg(test)]
     pub(crate) fn prepare_credential_keys(
         &self,
         invocation: &str,
     ) -> Result<Option<PreparedCredential>> {
-        let prepared = self.sql_read(|read| {
+        self.prepare_credential_keys_using(
+            invocation,
+            &mut crate::store::ExecutionSql::current(self),
+        )
+    }
+
+    pub(crate) fn prepare_credential_keys_using(
+        &self,
+        invocation: &str,
+        sql: &mut crate::store::ExecutionSql<'_, '_, '_>,
+    ) -> Result<Option<PreparedCredential>> {
+        sql.require_runtime(self)?;
+        let prepared = sql.read(|read| {
             let (operation, pending): (String, bool) = read.query_row(
                 "SELECT operation,status='pending' FROM day2_invocations WHERE id=?1",
                 [invocation],
@@ -801,6 +814,7 @@ impl Runtime {
         let Some((record, active, now)) = prepared else {
             return Ok(None);
         };
+        sql.require_external_capability()?;
         let proof = &record.confirmation;
         let selected = active
             .document

@@ -60,6 +60,16 @@ impl Signer {
     }
 }
 
+/// Signed identity/parser fixture only; never an enrolled role or native proof.
+pub(crate) fn signed_human(identity: &Verified, at: i64) -> (Verifier, String) {
+    let signer = Signer::new("query-fixture");
+    let keys = Keys::default();
+    keys.publish(&[&signer]);
+    let assertion = signer.sign(json!({"iss":ISSUER,"aud":AUDIENCE,"iat":at-1,"exp":at+60,
+        "sub":identity.subject,"email":identity.email,"hd":"example.com"}));
+    (verifier(&keys), assertion)
+}
+
 fn claims() -> Value {
     json!({
         "iss": ISSUER,

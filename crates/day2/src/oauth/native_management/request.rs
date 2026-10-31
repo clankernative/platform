@@ -595,6 +595,77 @@ const _: () = {
             let _ = <$type as Ambiguous<_>>::check;
         }};
     }
+    assert_not_impl!(super::response::QueryParent<'static, 'static>, Clone);
+    assert_not_impl!(super::response::QueryParent<'static, 'static>, Copy);
+    assert_not_impl!(super::response::QueryParent<'static, 'static>, Default);
+    assert_not_impl!(
+        super::response::QueryParent<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(super::response::QueryParent<'static, 'static>, Send);
+    assert_not_impl!(super::response::QueryParent<'static, 'static>, Sync);
+    assert_not_impl!(
+        super::response::QueryParent<'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::response::QueryParent<'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(super::response::QueryLoan<'static, 'static>, Clone);
+    assert_not_impl!(super::response::QueryLoan<'static, 'static>, Copy);
+    assert_not_impl!(super::response::QueryLoan<'static, 'static>, Default);
+    assert_not_impl!(
+        super::response::QueryLoan<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(super::response::QueryLoan<'static, 'static>, Send);
+    assert_not_impl!(super::response::QueryLoan<'static, 'static>, Sync);
+    assert_not_impl!(
+        super::response::QueryLoan<'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::response::QueryLoan<'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(super::response::HostRequestOwner<'static, 'static>, Clone);
+    assert_not_impl!(super::response::HostRequestOwner<'static, 'static>, Copy);
+    assert_not_impl!(super::response::HostRequestOwner<'static, 'static>, Default);
+    assert_not_impl!(
+        super::response::HostRequestOwner<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(super::response::HostRequestOwner<'static, 'static>, Send);
+    assert_not_impl!(super::response::HostRequestOwner<'static, 'static>, Sync);
+    assert_not_impl!(
+        super::response::HostRequestOwner<'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        super::response::HostRequestOwner<'static, 'static>,
+        serde::Deserialize<'static>
+    );
+    assert_not_impl!(crate::store::ExecutionSql<'static, 'static, 'static>, Clone);
+    assert_not_impl!(crate::store::ExecutionSql<'static, 'static, 'static>, Copy);
+    assert_not_impl!(
+        crate::store::ExecutionSql<'static, 'static, 'static>,
+        Default
+    );
+    assert_not_impl!(
+        crate::store::ExecutionSql<'static, 'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(crate::store::ExecutionSql<'static, 'static, 'static>, Send);
+    assert_not_impl!(crate::store::ExecutionSql<'static, 'static, 'static>, Sync);
+    assert_not_impl!(
+        crate::store::ExecutionSql<'static, 'static, 'static>,
+        serde::Serialize
+    );
+    assert_not_impl!(
+        crate::store::ExecutionSql<'static, 'static, 'static>,
+        serde::Deserialize<'static>
+    );
     assert_not_impl!(Lease, Clone);
     assert_not_impl!(Lease, Copy);
     assert_not_impl!(Lease, Default);
@@ -640,6 +711,14 @@ impl<S, T> Held<S, T> {
 }
 
 impl Lease {
+    /// Copy existing historical labels only, without a native sample/check.
+    pub(super) fn historical_diagnostic_data(&self) -> Option<EnrolledRequestDiagnosticData> {
+        self.held
+            .diagnostic
+            .as_ref()
+            .map(|data| data.native.clone())
+    }
+
     pub(super) fn borrow<'a>(
         &'a mut self,
         role: &'a mut EnrolledProcessRoleOwner,

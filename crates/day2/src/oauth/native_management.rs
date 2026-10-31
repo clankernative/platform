@@ -27,7 +27,8 @@ use std::{
 mod request;
 mod response;
 
-pub(crate) use response::HostSql;
+pub(in crate::oauth) use response::QueryCorrelationData;
+pub(crate) use response::{HostRequestOwner, HostSql, QueryParent};
 
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
@@ -1157,6 +1158,7 @@ pub(crate) struct RuntimeConsumer<'a, 'role> {
 }
 
 enum RuntimeSource<'a, 'role> {
+    HostResponse(response::QueryLoan<'a, 'role>),
     Native {
         current: &'a mut dyn CurrentServingPhase,
         stage: &'a mut EnrolledRoleStage<'role>,
@@ -1308,6 +1310,7 @@ impl RuntimeConsumer<'_, '_> {
         self.require_runtime(runtime)?;
         ensure!(self.phase.is_some(), "native SQL runtime phase absent");
         match &mut self.source {
+            RuntimeSource::HostResponse(loan) => loan.prepare_sql(runtime)?,
             RuntimeSource::Native { stage, .. } => {
                 ensure!(runtime.uses_native_storage(), "native SQL file changed");
                 stage.check_for(&sql_runtime_scope(runtime)?, NativeRole::AppHost)?;
@@ -1437,6 +1440,10 @@ impl RuntimeConsumer<'_, '_> {
         runtime: &crate::store::Runtime,
         operation: impl for<'db> FnOnce(&'db rusqlite::Connection) -> Result<T>,
     ) -> Result<T> {
+        self.require_runtime(runtime)?;
+        if let RuntimeSource::HostResponse(loan) = &mut self.source {
+            return loan.read(operation);
+        }
         crate::store::RuntimeSql::with_owner(runtime, SqlOwner::runtime(self), |sql| {
             sql.read(operation)
         })
@@ -1449,6 +1456,10 @@ impl RuntimeConsumer<'_, '_> {
             &'db rusqlite::Transaction<'_>,
         ) -> Result<crate::store::SqlDecision<T>>,
     ) -> Result<T> {
+        self.require_runtime(runtime)?;
+        if let RuntimeSource::HostResponse(loan) = &mut self.source {
+            return loan.write(operation);
+        }
         crate::store::RuntimeSql::with_owner(runtime, SqlOwner::runtime(self), |sql| {
             sql.write(operation)
         })
@@ -1464,6 +1475,7 @@ impl RuntimeConsumer<'_, '_> {
     }
     pub(super) fn check(&mut self) -> Result<()> {
         match &mut self.source {
+            RuntimeSource::HostResponse(loan) => loan.check(),
             RuntimeSource::Native { current, stage } => current.check(stage),
             RuntimeSource::Ordinary => Ok(()),
             #[cfg(test)]
@@ -1500,10 +1512,38 @@ impl RuntimeConsumer<'_, '_> {
         result
     }
 
+    pub(super) fn observe_refresh_material(
+        &mut self,
+        connection: &str,
+        version: i64,
+        expires_at: i64,
+        observed_at: i64,
+        threshold_at: i64,
+        outcome: super::effects::RefreshObservation,
+    ) -> Result<()> {
+        if let RuntimeSource::HostResponse(loan) = &mut self.source {
+            loan.observe_material(
+                connection,
+                version,
+                expires_at,
+                observed_at,
+                threshold_at,
+                outcome,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn send<T>(&mut self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         let result = (|| {
             self.check()?;
+            if let RuntimeSource::HostResponse(loan) = &mut self.source {
+                loan.reobserve_outside_sql()?;
+            }
             let value = operation()?;
+            if let RuntimeSource::HostResponse(loan) = &mut self.source {
+                loan.reobserve_outside_sql()?;
+            }
             self.check()?;
             Ok(value)
         })();
@@ -1514,6 +1554,9 @@ impl RuntimeConsumer<'_, '_> {
     }
 
     pub(super) fn refuse(&mut self) {
+        if let RuntimeSource::HostResponse(loan) = &mut self.source {
+            loan.refuse();
+        }
         #[cfg(test)]
         if let RuntimeSource::Simulated(stage) = &mut self.source
             && let RoleSource::Simulated(stage) = &mut stage.source
@@ -1526,6 +1569,10 @@ impl RuntimeConsumer<'_, '_> {
     }
 
     fn run<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        ensure!(
+            !matches!(self.source, RuntimeSource::HostResponse(_)),
+            "borrowed query cannot run an owning phase"
+        );
         self.check()?;
         if let RuntimeSource::Native { current, stage } = &mut self.source {
             // SQLite open/recovery is an attempted effect too. No native file
@@ -2318,6 +2365,7 @@ pub(super) struct Sink {
     finite_app_io: Rc<std::cell::Cell<bool>>,
     host: Rc<std::cell::Cell<HostPreparation>>,
     request: request::Request,
+    query_correlation: Rc<response::QueryCorrelation>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2379,6 +2427,7 @@ impl Sink {
             finite_app_io: Rc::new(std::cell::Cell::new(false)),
             host: Rc::new(std::cell::Cell::new(HostPreparation::NotSelected)),
             request: request::Request::new(),
+            query_correlation: Rc::new(response::QueryCorrelation::new()),
         }
     }
 

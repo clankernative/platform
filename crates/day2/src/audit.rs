@@ -657,6 +657,16 @@ fn requested() -> String {
     Trigger::Request.as_str().to_owned()
 }
 
+pub(crate) struct AdmissionRejection<'a> {
+    pub operation: &'a str,
+    pub actor: &'a str,
+    pub initiator: &'a str,
+    pub identity: &'a str,
+    pub at: i64,
+    pub reason: AttemptReason,
+    pub trigger: Trigger,
+}
+
 pub(crate) struct Attempt<'a> {
     pub kind: AttemptKind,
     pub trigger: Trigger,
@@ -1113,12 +1123,41 @@ impl Runtime {
         reason: AttemptReason,
         trigger: Trigger,
     ) -> Result<()> {
+        self.audit_admission_rejection_using(
+            AdmissionRejection {
+                operation,
+                actor,
+                initiator,
+                identity,
+                at: now,
+                reason,
+                trigger,
+            },
+            &mut crate::store::ExecutionSql::current(self),
+        )
+    }
+
+    pub(crate) fn audit_admission_rejection_using(
+        &self,
+        rejection: AdmissionRejection<'_>,
+        sql: &mut crate::store::ExecutionSql<'_, '_, '_>,
+    ) -> Result<()> {
+        sql.require_runtime(self)?;
+        let AdmissionRejection {
+            operation,
+            actor,
+            initiator,
+            identity,
+            at: now,
+            reason,
+            trigger,
+        } = rejection;
         let at_ms = if (0..=253_402_300_799).contains(&now) {
             now.checked_mul(1000).context("audit clock overflow")?
         } else {
             self.host().now_ms()?
         };
-        self.sql_write(|transaction| {
+        sql.write(|transaction| {
             self.check_binding(transaction)?;
             record_attempt(
                 transaction,
@@ -1139,8 +1178,21 @@ impl Runtime {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn audit_execution_interruption(&self, identity: &str) -> Result<()> {
-        self.sql_write(|transaction| {
+        self.audit_execution_interruption_using(
+            identity,
+            &mut crate::store::ExecutionSql::current(self),
+        )
+    }
+
+    pub(crate) fn audit_execution_interruption_using(
+        &self,
+        identity: &str,
+        sql: &mut crate::store::ExecutionSql<'_, '_, '_>,
+    ) -> Result<()> {
+        sql.require_runtime(self)?;
+        sql.write(|transaction| {
             self.check_binding(transaction)?;
             let metadata: Option<(String, String, String)> = transaction
                 .query_row(

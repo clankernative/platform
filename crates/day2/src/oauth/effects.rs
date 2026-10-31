@@ -58,6 +58,14 @@ pub(super) fn provider_observation(data: super::shell_oidc::ProviderObservationD
     Ok(())
 }
 
+/// Public bounded outcome labels; these are observations, never permits.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RefreshObservation {
+    MaterialCurrent,
+    ReplacementCommitted,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RefreshBoundary {
     DispatchCommitted,

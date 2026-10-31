@@ -199,6 +199,13 @@ pub(crate) struct RequestContext<'a> {
     pub origin: &'a str,
     pub at: i64,
 }
+struct Invocation<'a> {
+    operation: &'a crate::artifact::Operation,
+    actor: &'a str,
+    id: String,
+    input: Value,
+}
+
 impl RequestContext<'_> {
     fn actor<'a>(&'a self, headers: &'a HeaderMap) -> Result<&'a str> {
         if !headers.contains_key(ACT_AS_HEADER) {
@@ -340,12 +347,8 @@ impl RequestContext<'_> {
         let record = &self.runtime.artifact().contract().schema.inputs[&operation.input_type];
         let (input, invocation) = if method == Method::GET {
             ensure!(body.is_empty(), crate::error::Failure::InvalidInput);
-            let input = openapi::query_input(record, uri.query().unwrap_or(""))
-                .context(crate::error::Failure::InvalidInput)?;
-            (
-                input,
-                format!("api-query-{}", security::random(self.entropy)?),
-            )
+            let input = self.query_input(&endpoint.operation, uri, body)?;
+            (input, self.query_invocation_id()?)
         } else {
             ensure!(uri.query().is_none(), crate::error::Failure::InvalidInput);
             ensure!(
@@ -401,18 +404,105 @@ impl RequestContext<'_> {
                 json!({"invocation_id":invocation,"status":"awaiting_confirmation","confirmation_url":confirmation_url}),
             ));
         }
-        self.runtime.accept_on_behalf_of_verified(
-            &operation.name,
+        self.dispatch_operation(
+            method,
+            headers,
+            Invocation {
+                operation,
+                actor,
+                id: invocation,
+                input,
+            },
+            &mut crate::store::ExecutionSql::current(self.runtime),
+        )
+    }
+
+    fn query_invocation_id(&self) -> Result<String> {
+        Ok(format!("api-query-{}", security::random(self.entropy)?))
+    }
+
+    fn query_input(
+        &self,
+        operation: &crate::artifact::Operation,
+        uri: &Uri,
+        body: &[u8],
+    ) -> Result<Value> {
+        ensure!(
+            operation.kind == "query" && body.is_empty(),
+            crate::error::Failure::InvalidInput
+        );
+        let record = &self.runtime.artifact().contract().schema.inputs[&operation.input_type];
+        openapi::query_input(record, uri.query().unwrap_or(""))
+            .context(crate::error::Failure::InvalidInput)
+    }
+
+    pub(crate) fn dispatch_query(
+        &self,
+        uri: &Uri,
+        headers: &HeaderMap,
+        body: &[u8],
+        parent: &mut crate::oauth::native_management::QueryParent<'_, '_>,
+    ) -> Result<Response> {
+        parent.require_runtime(self.runtime)?;
+        let endpoint = self
+            .catalog
+            .endpoints
+            .values()
+            .find(|endpoint| endpoint.path() == uri.path() && endpoint.operation.kind == "query")
+            .context("native declared query unavailable")?;
+        // Only these pure actor/input guards become HTTP denial DATA. Entropy,
+        // SQL, native and unknown errors below propagate to the owning future.
+        let prepared = self.actor(headers).and_then(|actor| {
+            self.query_input(&endpoint.operation, uri, body)
+                .map(|input| (actor, input))
+        });
+        let (actor, input) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Ok(failure(&error)),
+        };
+        let invocation = self.query_invocation_id()?;
+        self.dispatch_operation(
+            &Method::GET,
+            headers,
+            Invocation {
+                operation: &endpoint.operation,
+                actor,
+                id: invocation,
+                input,
+            },
+            &mut crate::store::ExecutionSql::host(self.runtime, parent)?,
+        )
+    }
+
+    fn dispatch_operation(
+        &self,
+        method: &Method,
+        headers: &HeaderMap,
+        invocation: Invocation<'_>,
+        sql: &mut crate::store::ExecutionSql<'_, '_, '_>,
+    ) -> Result<Response> {
+        let Invocation {
+            operation,
+            actor,
+            id: invocation,
+            input,
+        } = invocation;
+        self.runtime.accept_on_behalf_of_verified_using(
+            crate::store::InvocationInput {
+                operation: &operation.name,
+                id: &invocation,
+                input: &input,
+                at: self.at,
+            },
             ActingAs {
                 authenticated: &self.session.actor,
                 actor,
                 trigger: crate::audit::Trigger::Request,
             },
-            &invocation,
-            &input,
-            self.at,
             self.session.origin.as_ref(),
+            sql,
         )?;
+        sql.bind_query(&operation.name, actor, &invocation, &input)?;
         let outcome = if method == Method::POST
             && single_header(headers, "prefer") == Some("respond-async")
         {
@@ -422,7 +512,7 @@ impl RequestContext<'_> {
                 error: String::new(),
             }
         } else {
-            self.runtime.execute(&invocation, Fault::None)?
+            self.runtime.execute_using(&invocation, Fault::None, sql)?
         };
         let mut response = if outcome.status == "success" {
             json_response(StatusCode::OK, outcome.result)
@@ -446,6 +536,11 @@ impl RequestContext<'_> {
         response
             .headers_mut()
             .insert("x-day2-invocation", invocation.parse()?);
+        if let Some(observed) = sql.observation_header()? {
+            response
+                .headers_mut()
+                .insert("x-day2-connection-observations", observed);
+        }
         Ok(response)
     }
 }
@@ -647,7 +742,8 @@ fn operation_card(spec: &Value, path: &str, method: &str, operation: &Value) -> 
                     }
                     button.send.primary type="submit" disabled { (if method == "post" { "Run command" } else { "Send request" }) span { "↗" } }
                     noscript { p.hint { "Enable JavaScript to use the request console. Schemas remain available above." } }
-                    div.result hidden { p.result-status role="status" {} pre { code {} } }
+                    div.result hidden { p.result-status role="status" {} pre { code {} }
+                        pre.result-metadata aria-label="Historical request metadata" hidden {} }
                     } }
                 }
             }

@@ -401,7 +401,16 @@ pub(super) fn ensure_current(
         return Ok(Resolution::unavailable("ReauthRequired"));
     }
     if source.expires_at > now.saturating_add(RENEW_SECONDS) {
-        return Resolution::ready(&context, expected.base_version, now);
+        let ready = Resolution::ready(&context, expected.base_version, now)?;
+        serving.observe_refresh_material(
+            registration,
+            expected.base_version,
+            source.expires_at,
+            now,
+            source.expires_at.saturating_sub(RENEW_SECONDS),
+            super::effects::RefreshObservation::MaterialCurrent,
+        )?;
+        return Ok(ready);
     }
     ensure!(
         selection.requirement.capability == google::CAPABILITY
@@ -717,9 +726,24 @@ pub(super) fn ensure_current(
             })
         },
     );
-    serving.check()?;
+    let publication = match (publication, serving.check()) {
+        (Err(primary), Err(_)) => return Err(primary),
+        (Ok(_), Err(error)) => return Err(error),
+        (result, Ok(())) => result,
+    };
     match publication {
-        Ok(true) => Resolution::ready(&context, next, freshest),
+        Ok(true) => {
+            let ready = Resolution::ready(&context, next, freshest)?;
+            serving.observe_refresh_material(
+                registration,
+                next,
+                expires_at,
+                freshest,
+                expires_at.saturating_sub(RENEW_SECONDS),
+                super::effects::RefreshObservation::ReplacementCommitted,
+            )?;
+            Ok(ready)
+        }
         _ => {
             if publication_clock_refused {
                 current_clock_refusal(runtime, serving, &context)?;

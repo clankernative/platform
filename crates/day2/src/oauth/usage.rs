@@ -611,11 +611,9 @@ fn resolve(
     })
 }
 
-pub(crate) fn execute(
-    runtime: &Runtime,
-    request: &Request,
+pub(super) fn instruction_phase(
     instruction: &Instruction,
-) -> Result<String> {
+) -> Result<super::native_management::RuntimePhase> {
     ensure!(
         instruction.kind == "observe",
         "connection read requires observation phase"
@@ -634,17 +632,25 @@ pub(crate) fn execute(
     } else {
         let _: ReadInput = crate::json::decode(instruction.data.as_bytes())?;
     }
-    let phase = if instruction.model == crate::connection_codegen::RESOLVE {
+    Ok(if instruction.model == crate::connection_codegen::RESOLVE {
         super::native_management::RuntimePhase::Refresh
     } else {
         super::native_management::RuntimePhase::Read
-    };
+    })
+}
+
+pub(crate) fn execute(
+    runtime: &Runtime,
+    request: &Request,
+    instruction: &Instruction,
+) -> Result<String> {
+    let phase = instruction_phase(instruction)?;
     super::native_management::with_runtime_consumer(runtime, phase, |serving| {
         execute_current(runtime, request, instruction, serving)
     })
 }
 
-fn execute_current(
+pub(super) fn execute_current(
     runtime: &Runtime,
     request: &Request,
     instruction: &Instruction,

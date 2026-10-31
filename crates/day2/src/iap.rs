@@ -360,4 +360,4 @@ fn parse_keys(raw: &str) -> Result<BTreeMap<String, Vec<u8>>> {
 
 #[cfg(test)]
 #[path = "iap_tests.rs"]
-mod tests;
+pub(crate) mod tests;

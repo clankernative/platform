@@ -91,6 +91,42 @@ function filterOperations() {
 search.addEventListener("input", filterOperations);
 window.addEventListener("pageshow", filterOperations);
 filterOperations();
+// Only these explicit metadata fields are displayed. Cookies and unrelated
+// response headers are never read or copied into the developer console.
+function requestMetadata(headers) {
+  const invocation = headers.get("x-day2-invocation");
+  const raw = headers.get("x-day2-connection-observations");
+  if (invocation === null && raw === null) return "";
+  if (typeof invocation !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(invocation)) {
+    return JSON.stringify({ metadata: "unavailable" });
+  }
+  const result = { invocation_id: invocation };
+  if (raw !== null) {
+    try {
+      if (raw.length > 4096) throw new Error("metadata bound");
+      const value = JSON.parse(raw);
+      const exact = (object, keys) => object !== null && typeof object === "object" && !Array.isArray(object)
+        && Object.keys(object).length === keys.length && keys.every((key) => Object.hasOwn(object, key));
+      const time = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 253402300799;
+      if (!exact(value, ["version", "connections"]) || value.version !== 1
+        || !Array.isArray(value.connections) || value.connections.length < 1 || value.connections.length > 8) throw new Error("metadata shape");
+      for (const record of value.connections) {
+        if (!exact(record, ["connection", "observed_at", "token_version", "token_expires_at", "refresh_threshold_at", "outcome"])
+          || typeof record.connection !== "string" || !/^[A-Za-z0-9._:/-]{1,160}$/.test(record.connection)
+          || typeof record.token_version !== "string" || !/^[1-9][0-9]{0,18}$/.test(record.token_version)
+          || (record.token_version.length === 19 && record.token_version > "9223372036854775807")
+          || !time(record.observed_at) || !time(record.token_expires_at) || !time(record.refresh_threshold_at)
+          || record.token_expires_at <= record.observed_at || record.refresh_threshold_at > record.token_expires_at
+          || !["material_current", "replacement_committed"].includes(record.outcome)) throw new Error("metadata fields");
+      }
+      result.connection_observations = value;
+    } catch {
+      result.connection_observations = "unavailable";
+    }
+  }
+  return JSON.stringify(result, null, 2);
+}
+
 document.querySelectorAll("form.console").forEach((form) => {
   if (document.body.dataset.preview === "true") {
     form.querySelectorAll("input, textarea, button").forEach((control) => { control.disabled = true; });
@@ -107,10 +143,13 @@ document.querySelectorAll("form.console").forEach((form) => {
     const result = form.querySelector(".result");
     const status = form.querySelector(".result-status");
     const output = result.querySelector("code");
+    const metadata = result.querySelector(".result-metadata");
     button.disabled = true;
     result.hidden = false;
     status.textContent = "Sending…";
     output.textContent = "";
+    metadata.textContent = "";
+    metadata.hidden = true;
     const started = performance.now();
     try {
       const url = new URL(form.dataset.path, location.origin);
@@ -141,7 +180,11 @@ document.querySelectorAll("form.console").forEach((form) => {
       status.textContent = `HTTP ${response.status} · ${Math.round(performance.now() - started)} ms`;
       status.dataset.ok = String(response.ok);
       output.textContent = text || "(empty response)";
+      metadata.textContent = requestMetadata(response.headers);
+      metadata.hidden = metadata.textContent === "";
     } catch (error) {
+      metadata.textContent = "";
+      metadata.hidden = true;
       status.textContent = "Request could not be completed";
       status.dataset.ok = "false";
       output.textContent = `${error.message}${key ? "\nKeep this key and the same input when retrying an uncertain response." : ""}`;

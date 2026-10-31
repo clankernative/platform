@@ -49,30 +49,33 @@ fn record_line(
     completed: bool,
     elapsed_us: Option<u64>,
     counts: Counts,
+    query: Option<&super::super::native_management::QueryCorrelationData>,
 ) -> Option<String> {
     if sequence == 0 || sequence > 4096 {
         return None;
     }
     #[derive(serde::Serialize)]
-    struct Record {
+    struct Record<'a> {
         format: &'static str,
         sequence: u32,
         outcome: &'static str,
         clock: &'static str,
         elapsed_us: Option<u64>,
         counts: Counts,
+        query: Option<&'a super::super::native_management::QueryCorrelationData>,
     }
     let record = Record {
-        format: "finite_app_response_delivery_v1",
+        format: "finite_app_response_delivery_v2",
         sequence,
         outcome: if completed { "completed" } else { "refused" },
         clock: "controlled_monotonic_data",
         elapsed_us,
         counts,
+        query,
     };
     let json = serde_json::to_string(&record).ok()?;
     let line = format!("day2-native-response-delivery {json}\n");
-    (line.len() <= 768).then_some(line)
+    (line.len() <= 2048).then_some(line)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -457,11 +460,13 @@ impl Driver {
         let elapsed = ended
             .checked_duration_since(self.0.started)
             .and_then(|elapsed| u64::try_from(elapsed.as_micros()).ok());
+        let query = self.0.sink.query_correlation_data();
         if let Some(line) = record_line(
             sequence,
             self.0.sink.is_complete(),
             elapsed,
             self.0.slot.borrow().counts,
+            query.as_ref(),
         ) {
             let _ = std::io::stderr().lock().write_all(line.as_bytes());
         }
@@ -1116,20 +1121,127 @@ mod tests {
             raw_written_bytes: Some(u64::MAX),
             postchecked_written_bytes: Some(u64::MAX),
         };
+        let query = super::super::super::native_management::QueryCorrelationData::maximal_fixture();
         for complete in [false, true] {
-            let line = record_line(4096, complete, Some(u64::MAX), counts).unwrap();
-            assert!(line.len() <= 768);
+            let line = record_line(4096, complete, Some(u64::MAX), counts, Some(&query)).unwrap();
+            assert!(line.len() <= 2048);
             let row: serde_json::Value =
                 serde_json::from_str(line.strip_prefix("day2-native-response-delivery ").unwrap())
                     .unwrap();
             assert_eq!(row["clock"], "controlled_monotonic_data");
+            assert_eq!(row["format"], "finite_app_response_delivery_v2");
+            assert_eq!(row["query"]["invocation"], "q".repeat(128));
+            assert!(row["query"]["native"]["request_original"].is_string());
+            assert_eq!(
+                row["outcome"],
+                if complete { "completed" } else { "refused" }
+            );
             assert!(row.get("permission").is_none() && row.get("token").is_none());
         }
-        assert!(record_line(4097, true, None, counts).is_none());
+        assert!(record_line(4097, true, None, counts, None).is_none());
         let mut counter = Some(u32::MAX);
         increment(&mut counter);
         increment(&mut counter);
         assert!(counter.is_none());
+    }
+
+    fn historical_join_wiring(source: &str) -> bool {
+        use syn::visit::{self, Visit};
+        fn receiver(expression: &syn::Expr) -> String {
+            match expression {
+                syn::Expr::Path(path) if path.path.is_ident("self") => "self".into(),
+                syn::Expr::Field(field) => {
+                    let member = match &field.member {
+                        syn::Member::Named(name) => name.to_string(),
+                        syn::Member::Unnamed(index) => index.index.to_string(),
+                    };
+                    format!("{}.{}", receiver(&field.base), member)
+                }
+                syn::Expr::MethodCall(call) => {
+                    format!("{}.{}", receiver(&call.receiver), call.method)
+                }
+                _ => "other".into(),
+            }
+        }
+        #[derive(Default)]
+        struct Calls(Vec<String>);
+        impl<'ast> Visit<'ast> for Calls {
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                self.0
+                    .push(format!("{}.{}", receiver(&call.receiver), call.method));
+                visit::visit_expr_method_call(self, call);
+            }
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func
+                    && path.path.is_ident("record_line")
+                {
+                    self.0.push("record_line".into());
+                }
+                visit::visit_expr_call(self, call);
+            }
+        }
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let mut reports = file.items.iter().filter_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if !matches!(&*item.self_ty, syn::Type::Path(path) if path.path.is_ident("Driver")) {
+                return None;
+            }
+            item.items.iter().find_map(|method| match method {
+                syn::ImplItem::Fn(method) if method.sig.ident == "report" => Some(method),
+                _ => None,
+            })
+        });
+        let Some(report) = reports.next() else {
+            return false;
+        };
+        if reports.next().is_some() {
+            return false;
+        }
+        let mut calls = Calls::default();
+        calls.visit_block(&report.block);
+        let at = |text: &str| calls.0.iter().position(|call| call == text);
+        matches!((at("self.0.future.borrow.is_some"), at("self.0.sink.query_correlation_data"),
+                  at("record_line"), calls.0.iter().position(|call| call.ends_with(".write_all"))),
+            (Some(closed), Some(query), Some(record), Some(write))
+                if closed < query && query < record && record < write)
+            && at("self.0.sink.is_complete").is_some()
+            && !calls.0.iter().any(|call| {
+                [
+                    "headers",
+                    "reobserve",
+                    "arm",
+                    "with_runtime_consumer",
+                    "request_diagnostic_data",
+                ]
+                .iter()
+                .any(|name| call.split('.').any(|part| part == *name))
+            })
+    }
+
+    #[test]
+    fn historical_query_join_requires_closed_future_and_actual_sink_completion() {
+        let source = include_str!("response_io.rs");
+        assert!(historical_join_wiring(source));
+        for (from, to) in [
+            ("self.0.future.borrow().is_some()", "false"),
+            ("self.0.sink.is_complete()", "true"),
+            (
+                "self.0.sink.query_correlation_data()",
+                "headers.query_correlation_data()",
+            ),
+        ] {
+            assert_eq!(
+                source.matches(from).count(),
+                2,
+                "production plus mutation literal"
+            );
+            // Only mutate the actual implementation, not the counterexample DATA.
+            assert!(!historical_join_wiring(&source.replacen(from, to, 1)));
+        }
     }
 
     #[test]

@@ -929,7 +929,7 @@ other consumers fail closed rather than borrow that response's grant. This can
 affect concurrent requests and background work and needs native qualification.
 
 The private `day2-native-response-delivery ` prefix carries
-`finite_app_response_delivery_v1` DATA: one process-local sequence, completed or
+`finite_app_response_delivery_v2` DATA: one process-local sequence, completed or
 refused outcome, scope attempts/entries, actual socket and Pending polls, raw
 written bytes and postchecked written bytes. Actual successful byte counts are
 charged even when the following guard refuses; a lost or malformed completion
@@ -941,17 +941,68 @@ NOT admission's original native clock and cannot demonstrate a five-second fit.
 It uses OAuth's existing clock port: the OS monotonic clock in production and
 the selected scripted clock in simulation; a changed clock domain yields null.
 Headers, body contents, URLs, tokens, certificates and process handles are not
-exported. Records are at most 768 bytes and capped at 4,096 per process. Missing
+exported. Records are at most 2,048 bytes and capped at 4,096 per process. Missing
 records or null/overflowed counts are missing evidence, not zero work.
 
 Collect the original App process's private stderr around an isolated user action.
 For a completed eligible response, attempts and entries should both be one;
 compare its actual poll count and elapsed time against the prior per-poll scope
 composition. Handler/credential/read scopes outside delivery and Shell scopes
-remain separate. A list query's two handler scopes are not folded into its one
-delivery scope. Local protocol-model counts do not qualify native exchange cost;
+remain separate. Declared GET API queries use the same owned Response original for admission,
+acceptance, preparation, query execution, connection reads and delivery. Metadata
+handlers cannot turn their SQL loan into query/provider authority. Generic
+external effects and command continuations still require their explicit owner.
+Local protocol-model counts do not qualify native exchange cost;
 that requires the joined native run. These records prove neither browser receipt
 nor human acknowledgement, continued readiness, or a durable product connection.
+
+## Invocation-bound Calendar read observations
+
+The raw native database-open guard remains enforced. A valid-IAP declared GET
+query borrows its checked Response parent rather than opening the database before
+that owner exists. The accepted canonical query binds operation, invocation,
+input, actor, current authority and artifact to that parent. OAuth resolve/refresh
+and Calendar list are closed suboperations within the original Response purpose;
+they acquire no replacement request, clock, role or completion scope. A poisoned
+borrow refuses cleanup/audit/provider work and preserves the primary failure.
+Commands, streams and generic external effects are not added to this seam.
+
+A successful query can return `x-day2-invocation` and
+`x-day2-connection-observations`. The latter is at most 4,096 bytes, with exact
+schema `{ "version": 1, "connections": [...] }` and at most eight records. Each
+record contains only `connection`, `observed_at`, `token_version`,
+`token_expires_at`, `refresh_threshold_at` and `outcome`. Times are UTC epoch
+seconds. The positive token version is a decimal string, preserving all i64
+values in the browser. `material_current` records validated usable material;
+`replacement_committed` is emitted only after actual positive replacement
+publication and its native postcheck. Rejected/losing publication emits no such
+positive observation. No token, Use, private reference, Google account, event
+body or generic response header is included.
+
+The developer console shows only these two allowlisted headers as text in
+`pre.result-metadata` under the actual operation form. An invalid or oversized
+observation displays `unavailable`; it never echoes unknown fields. This DOM
+metadata is historical DATA, including when refresh committed before a later
+query/delivery refusal. It proves neither native completion nor browser receipt.
+
+For qualification, join the exact displayed invocation with the private
+`day2-native-response-delivery` v2 record's `query.invocation`. Its optional
+`query.native` contains the same request's saved enrolled incarnation, original,
+producer, owner/request ordinal, role/purpose and issuer-admission labels. They
+are copied from the actual leased original before its stage borrow, never from
+response headers or a new native sample. Only the genuine accepted QueryParent
+can bind the one-shot correlation to that Sink creator. A missing, conflicting,
+oversized or lost correlation is missing evidence.
+
+The final exporter runs after the driver future closes and reads actual
+`Sink::is_complete()`. Require `outcome = "completed"` with the exact invocation
+and usable original labels; a header, HTTP 200 or earlier request-join Completed
+record alone is insufficient. Refusal cannot become completion through this
+exporter. The bounded best-effort write is historical only: no post-Known
+permission, retry, finalization or result-changing failure is introduced.
+The original five-second and every shorter native deadline remain unchanged.
+These source/local controls do not establish a live Google read, natural refresh,
+Linux qualification or successful native delivery; those need the joined run.
 
 ## Cumulative admission-work observations
 

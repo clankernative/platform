@@ -1,11 +1,11 @@
-//! Closed, finite App metadata handlers on their actual retained HTTP owner.
+//! Finite App metadata and declared GET queries on their retained HTTP owner.
 //! Request/response DATA never construct native authority. Routed app pages,
-//! human/OAuth/command and streaming handlers are deliberately not this lane.
+//! human-management, command and streaming handlers keep their explicit owners.
 use super::{
     Host, QUEUE_WAIT, SignIn, check_request_head, edge_refusal, failure, queued_permit, secure,
     transport_error,
 };
-use crate::{error::Failure, oauth::native_management::HostSql, store::SqlDecision};
+use crate::{error::Failure, oauth::native_management::HostRequestOwner, store::SqlDecision};
 use crate::{
     store::Runtime,
     web_security::{self as security, Session},
@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum HostHandler {
     Docs,
     OpenApi,
@@ -30,6 +30,7 @@ enum HostHandler {
     NoPagesRootRedirect,
     DocsScript,
     DocsStyle,
+    Query { index: usize },
 }
 
 impl HostHandler {
@@ -44,25 +45,35 @@ impl HostHandler {
             crate::openapi::DOCS_PATH => Some(Self::Docs),
             crate::openapi::SPEC_PATH => Some(Self::OpenApi),
             crate::openapi::SESSION_PATH => Some(Self::Session),
-            _ => None,
+            _ => artifact
+                .operations
+                .iter()
+                .enumerate()
+                .find(|(_, operation)| {
+                    operation.kind == "query"
+                        && format!("{}{}", crate::openapi::API_PREFIX, operation.name) == path
+                })
+                .map(|(index, _)| Self::Query { index }),
         }
     }
 
-    fn path(self) -> &'static str {
+    #[cfg(test)]
+    fn path(self) -> Option<&'static str> {
         match self {
-            Self::NoPagesRootRedirect => "/",
-            Self::DocsScript => "/assets/platform/api-docs.js",
-            Self::DocsStyle => "/assets/platform/api-docs.css",
-            Self::Docs => crate::openapi::DOCS_PATH,
-            Self::OpenApi => crate::openapi::SPEC_PATH,
-            Self::Session => crate::openapi::SESSION_PATH,
+            Self::NoPagesRootRedirect => Some("/"),
+            Self::DocsScript => Some("/assets/platform/api-docs.js"),
+            Self::DocsStyle => Some("/assets/platform/api-docs.css"),
+            Self::Docs => Some(crate::openapi::DOCS_PATH),
+            Self::OpenApi => Some(crate::openapi::SPEC_PATH),
+            Self::Session => Some(crate::openapi::SESSION_PATH),
+            Self::Query { .. } => None,
         }
     }
 
     fn category(self) -> &'static str {
         match self {
             Self::Docs => "api_docs",
-            Self::OpenApi | Self::Session => "api",
+            Self::OpenApi | Self::Session | Self::Query { .. } => "api",
             Self::NoPagesRootRedirect => "page",
             Self::DocsScript | Self::DocsStyle => "asset",
         }
@@ -225,18 +236,48 @@ impl Host {
         self.credential_effects.clone()
     }
 
+    /// Recompute checked selection from the actual immutable Host and prepared
+    /// URI. Returned operation text is DATA, never a query/provider permit.
+    pub(crate) fn selected_query_operation(
+        &self,
+        request: &PreparedHostRequest,
+    ) -> Result<Option<String>> {
+        ensure!(
+            std::ptr::eq(self, request.host.as_ref())
+                && HostHandler::select(
+                    &Method::GET,
+                    request.uri.path(),
+                    self.runtime.artifact().contract()
+                ) == Some(request.handler),
+            "native prepared query selection changed"
+        );
+        if let HostHandler::Query { index } = request.handler {
+            let operation = &self.runtime.artifact().contract().operations[index];
+            let endpoint = self
+                .api
+                .endpoints
+                .get(&operation.name)
+                .context("native query endpoint absent")?;
+            ensure!(
+                endpoint.operation.kind == "query" && endpoint.path() == request.uri.path(),
+                "native query catalog changed"
+            );
+            return Ok(Some(operation.name.clone()));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn execute_host_request(
         self: &Arc<Self>,
         request: PreparedHostRequest,
-        sql: &mut HostSql<'_, '_>,
+        sql: &mut HostRequestOwner<'_, '_>,
     ) -> Result<Response> {
         ensure!(
             HostHandler::select(
                 &Method::GET,
-                request.handler.path(),
+                request.uri.path(),
                 self.runtime.artifact().contract()
-            )
-            .is_some(),
+            ) == Some(request.handler),
             "native prepared host route changed"
         );
         ensure!(
@@ -315,7 +356,7 @@ impl Host {
             self.runtime.web_event_in(db, pre)?;
             Ok(SqlDecision::Commit(()))
         })?;
-        let json = crate::web_api::is_json(handler.path());
+        let json = crate::web_api::is_json(uri.path());
         let mut response = match &admission {
             Admitted::Denied(failure) => edge_refusal(json, &anyhow::anyhow!(*failure)),
             Admitted::NeedsSession => anyhow::bail!("native host admission incomplete"),
@@ -329,7 +370,11 @@ impl Host {
                     let checked = match checked {
                         Ok(()) => {
                             self.appearance.check_binding(&self.runtime)?;
-                            check_metadata_actor(&headers)
+                            if matches!(handler, HostHandler::Query { .. }) {
+                                Ok(())
+                            } else {
+                                check_metadata_actor(&headers)
+                            }
                         }
                         Err(error) => Err(error),
                     };
@@ -352,12 +397,22 @@ impl Host {
                         Ok(())
                     }) {
                         Ok(()) => match handler {
+                            HostHandler::Query { .. } => crate::web_api::RequestContext {
+                                runtime: &self.runtime,
+                                catalog: &self.api,
+                                secret: &self.secret,
+                                entropy: self.entropy.as_ref(),
+                                session,
+                                origin: &self.origin,
+                                at,
+                            }
+                            .dispatch_query(&uri, &headers, &body, sql.query()?)?,
                             HostHandler::NoPagesRootRedirect => self.no_pages_root_redirect()?,
                             HostHandler::DocsScript | HostHandler::DocsStyle => {
-                                crate::web_assets::platform(handler.path(), &headers)?
+                                crate::web_assets::platform(uri.path(), &headers)?
                             }
                             HostHandler::Docs | HostHandler::OpenApi | HostHandler::Session => {
-                                self.metadata_response(handler.path(), session)?
+                                self.metadata_response(uri.path(), session)?
                             }
                         },
                         Err(error) => {
@@ -403,7 +458,10 @@ fn check_metadata_body(handler: HostHandler, uri: &Uri, body: &[u8]) -> Result<(
         body.is_empty()
             && (matches!(
                 handler,
-                HostHandler::NoPagesRootRedirect | HostHandler::DocsScript | HostHandler::DocsStyle
+                HostHandler::NoPagesRootRedirect
+                    | HostHandler::DocsScript
+                    | HostHandler::DocsStyle
+                    | HostHandler::Query { .. }
             ) || uri.query().is_none()),
         Failure::InvalidInput
     );
@@ -738,7 +796,10 @@ mod tests {
             ),
         ] {
             assert!(check_metadata_body(handler, &uri, b"").is_ok());
-            let response = crate::web_assets::platform(handler.path(), &HeaderMap::new())?;
+            let response = crate::web_assets::platform(
+                handler.path().context("fixed docs path")?,
+                &HeaderMap::new(),
+            )?;
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()[header::CONTENT_TYPE], kind);
             assert!(expected.len() <= 65_536);
@@ -747,7 +808,8 @@ mod tests {
             assert_eq!(bytes.as_ref(), expected);
             let mut headers = HeaderMap::new();
             headers.insert(header::IF_NONE_MATCH, etag);
-            let unchanged = crate::web_assets::platform(handler.path(), &headers)?;
+            let unchanged =
+                crate::web_assets::platform(handler.path().context("fixed docs path")?, &headers)?;
             assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
             assert!(
                 futures_executor::block_on(to_bytes(unchanged.into_body(), 65_536))?.is_empty()
@@ -756,6 +818,70 @@ mod tests {
         let response = redirect(crate::openapi::DOCS_PATH)?;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers()[header::LOCATION], "/docs");
+        Ok(())
+    }
+    #[test]
+    fn declared_get_query_selection_is_exact_and_never_admits_commands_or_prefixes() -> Result<()> {
+        let (_root, runtime, _) = fixture()?;
+        let mut contract = runtime.artifact().contract().clone();
+        let read = contract
+            .operations
+            .iter()
+            .position(|operation| operation.name == "read")
+            .unwrap();
+        contract.operations[read].name = "oauthcalendar.list_events".into();
+        assert!(matches!(
+            HostHandler::select(&Method::GET, "/api/oauthcalendar.list_events", &contract),
+            Some(HostHandler::Query { .. })
+        ));
+        for path in [
+            "/api/oauthcalendar.list_events/extra",
+            "/api/list_events",
+            "/api/unknown",
+        ] {
+            assert!(HostHandler::select(&Method::GET, path, &contract).is_none());
+        }
+        assert!(
+            HostHandler::select(&Method::POST, "/api/oauthcalendar.list_events", &contract)
+                .is_none()
+        );
+        contract.operations[read].kind = "command".into();
+        assert!(
+            HostHandler::select(&Method::GET, "/api/oauthcalendar.list_events", &contract)
+                .is_none()
+        );
+        assert!(
+            HostHandler::select(&Method::POST, "/api/oauthcalendar.list_events", &contract)
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_admission_verifies_real_signed_iap_before_sql_subject_binding() -> Result<()> {
+        let (_root, runtime, api) = fixture()?;
+        let human = alice();
+        let (verifier, assertion) = crate::iap::tests::signed_human(&human, 100);
+        let verified = verifier.verify(&assertion, 100)?;
+        assert!(matches!(
+            runtime.sql_decide(|tx| Ok(SqlDecision::Commit(admit_host_in(
+                &runtime, &api, tx, &verified, None, 100
+            )?)))?,
+            Admitted::NeedsSession
+        ));
+        let mut forged = assertion.into_bytes();
+        let last = forged.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        assert!(verifier.verify(std::str::from_utf8(&forged)?, 100).is_err());
+        runtime.sql_read(|db| {
+            let subject: String = db.query_row(
+                "SELECT subject FROM day2_principals WHERE email=?1",
+                [&human.email],
+                |row| row.get(0),
+            )?;
+            assert_eq!(subject, human.subject);
+            Ok(())
+        })?;
         Ok(())
     }
 }
