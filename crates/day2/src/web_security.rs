@@ -53,6 +53,10 @@ pub(crate) fn session(
     cookie_name: &str,
     now: i64,
 ) -> Result<Session> {
+    session_for_token(runtime, &session_token(headers, cookie_name)?, now)
+}
+
+pub(crate) fn session_token(headers: &HeaderMap, cookie_name: &str) -> Result<String> {
     let mut token = None;
     for value in headers.get_all("cookie") {
         for cookie in cookie::Cookie::split_parse(value.to_str()?) {
@@ -63,12 +67,9 @@ pub(crate) fn session(
             }
         }
     }
-    session_for_token(
-        runtime,
-        &token.context(crate::error::Failure::SignInRequired)?,
-        now,
-    )
+    token.context(crate::error::Failure::SignInRequired)
 }
+
 /// The live session a token names.
 pub(crate) fn session_for_token(runtime: &Runtime, token: &str, now: i64) -> Result<Session> {
     runtime.sql_read(|db| {
@@ -112,7 +113,7 @@ pub(crate) fn create_session(
     runtime.sql_write(|db| create_session_in(db, actor, now, token))
 }
 
-fn create_session_in(
+pub(crate) fn create_session_in(
     db: &rusqlite::Connection,
     actor: &str,
     now: i64,

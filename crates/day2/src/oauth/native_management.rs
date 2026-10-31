@@ -27,6 +27,8 @@ use std::{
 mod request;
 mod response;
 
+pub(crate) use response::HostSql;
+
 type Role = response::Role<EnrolledProcessRoleOwner>;
 
 /// Checked desired selection DATA. This cannot enroll, open storage, create a
@@ -1181,9 +1183,17 @@ enum SqlOwnerSource<'owner, 'stage, 'role, 'original> {
     Pending(&'owner mut PendingWriter<'stage, 'role>),
     Human(&'owner mut Consumer<'stage, 'role, 'original>),
     Runtime(&'owner mut RuntimeConsumer<'stage, 'role>),
+    HostResponse(&'owner mut response::HostSql<'stage, 'role>),
 }
 
 impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original> {
+    fn host_response(owner: &'owner mut response::HostSql<'stage, 'role>) -> Self {
+        Self {
+            source: SqlOwnerSource::HostResponse(owner),
+            commit: SqlCommit::Intermediate,
+        }
+    }
+
     fn runtime(owner: &'owner mut RuntimeConsumer<'stage, 'role>) -> Self {
         Self {
             source: SqlOwnerSource::Runtime(owner),
@@ -1210,6 +1220,7 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
             SqlOwnerSource::Pending(owner) => owner.prepare_sql(runtime),
             SqlOwnerSource::Human(owner) => owner.prepare_sql(runtime),
             SqlOwnerSource::Runtime(owner) => owner.prepare_sql(runtime),
+            SqlOwnerSource::HostResponse(owner) => owner.prepare_sql(runtime),
         }
     }
 
@@ -1218,6 +1229,7 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
             SqlOwnerSource::Pending(owner) => owner.check(),
             SqlOwnerSource::Human(owner) => owner.check(),
             SqlOwnerSource::Runtime(owner) => owner.check(),
+            SqlOwnerSource::HostResponse(owner) => owner.check_sql(),
         }
     }
 
@@ -1226,6 +1238,7 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
             SqlOwnerSource::Pending(owner) => owner.require_sql_write(),
             SqlOwnerSource::Human(owner) => owner.require_sql_write(),
             SqlOwnerSource::Runtime(owner) => owner.require_sql_write(),
+            SqlOwnerSource::HostResponse(owner) => owner.check_sql(),
         }
     }
 
@@ -1244,7 +1257,7 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
             match &mut self.source {
                 SqlOwnerSource::Pending(owner) => owner.prepare_sql_commit()?,
                 SqlOwnerSource::Human(owner) => owner.prepare_finalization()?,
-                SqlOwnerSource::Runtime(_) => {
+                SqlOwnerSource::Runtime(_) | SqlOwnerSource::HostResponse(_) => {
                     anyhow::bail!("runtime SQL cannot finalize a human or Pending original")
                 }
             }
@@ -1267,6 +1280,7 @@ impl<'owner, 'stage, 'role, 'original> SqlOwner<'owner, 'stage, 'role, 'original
             SqlOwnerSource::Pending(owner) => owner.refuse(),
             SqlOwnerSource::Human(owner) => owner.refuse(),
             SqlOwnerSource::Runtime(owner) => owner.refuse(),
+            SqlOwnerSource::HostResponse(owner) => owner.refuse(),
         }
     }
 }
@@ -2302,6 +2316,7 @@ pub(super) struct Sink {
     runtime: Rc<RefCell<Option<RuntimeBinding>>>,
     prepared: Rc<std::cell::Cell<bool>>,
     finite_app_io: Rc<std::cell::Cell<bool>>,
+    host: Rc<std::cell::Cell<HostPreparation>>,
     request: request::Request,
 }
 
@@ -2310,6 +2325,13 @@ enum SinkState {
     Open,
     Complete,
     Refused,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostPreparation {
+    NotSelected,
+    Preparing,
+    ReplyReady,
 }
 
 pub(super) fn current_sink() -> Result<Sink> {
@@ -2355,6 +2377,7 @@ impl Sink {
             runtime: Rc::new(RefCell::new(None)),
             prepared: Rc::new(std::cell::Cell::new(false)),
             finite_app_io: Rc::new(std::cell::Cell::new(false)),
+            host: Rc::new(std::cell::Cell::new(HostPreparation::NotSelected)),
             request: request::Request::new(),
         }
     }
@@ -2378,6 +2401,64 @@ impl Sink {
         self.request.capture_literal_health(response)
     }
 
+    pub(super) fn begin_host_request(&self, scope: &AuthorityScope) -> Result<()> {
+        ensure!(
+            self.is_open()
+                && self.host.get() == HostPreparation::NotSelected
+                && !self.prepared.get()
+                && !self.uses_retained_app_io()
+                && self.bindings.try_borrow()?.is_empty()
+                && self.runtime.try_borrow()?.is_none(),
+            "native host request already selected or human bound"
+        );
+        self.prepare_response_inner(Some(scope.clone()), false)?;
+        self.host.set(HostPreparation::Preparing);
+        Ok(())
+    }
+
+    fn require_host_preparing(
+        &self,
+        scope: &AuthorityScope,
+        identity: &ResponseIdentity,
+    ) -> Result<()> {
+        ensure!(
+            self.is_open()
+                && self.identity.same(identity)
+                && self.host.get() == HostPreparation::Preparing
+                && !self.prepared.get()
+                && !self.uses_retained_app_io()
+                && self.bindings.try_borrow()?.is_empty()
+                && self
+                    .runtime
+                    .try_borrow()?
+                    .as_ref()
+                    .is_some_and(|held| held.scope == *scope),
+            "native host preparation owner changed"
+        );
+        Ok(())
+    }
+
+    fn host_body_selected(&self, scope: &AuthorityScope) -> Result<()> {
+        self.require_host_preparing(scope, &self.identity)?;
+        // A concrete response now exists. This is still not the finite-body
+        // validation barrier and cannot authorize any transport byte.
+        self.prepared.set(true);
+        Ok(())
+    }
+
+    fn host_reply_ready(&self) -> Result<()> {
+        ensure!(
+            self.is_open()
+                && self.host.get() == HostPreparation::Preparing
+                && self.prepared.get()
+                && self.uses_retained_app_io()
+                && self.bindings.try_borrow()?.is_empty(),
+            "native host reply body not prepared"
+        );
+        self.host.set(HostPreparation::ReplyReady);
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn capture_model_request(&self) -> Result<()> {
         self.request.capture_model()
@@ -2390,6 +2471,10 @@ impl Sink {
         scope: Option<AuthorityScope>,
         finite_app_candidate: bool,
     ) -> Result<()> {
+        ensure!(
+            self.host.get() == HostPreparation::NotSelected,
+            "native host cannot reclassify response"
+        );
         let result = self.prepare_response_inner(scope, finite_app_candidate);
         if result.is_ok() {
             self.prepared.set(true);

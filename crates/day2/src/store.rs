@@ -1172,10 +1172,17 @@ impl Runtime {
         check_storage_binding(connection, &self.artifact, &self.scope)
     }
     pub(crate) fn authority(&self, operation: &str, actor: &str) -> Result<Policy> {
-        self.sql_read(|connection| {
-            let active = crate::authority_state::authorize_in(connection, self, operation, actor)?;
-            Ok(active.policy()?.clone())
-        })
+        self.sql_read(|connection| self.authority_in(connection, operation, actor))
+    }
+
+    pub(crate) fn authority_in(
+        &self,
+        connection: &Connection,
+        operation: &str,
+        actor: &str,
+    ) -> Result<Policy> {
+        let active = crate::authority_state::authorize_in(connection, self, operation, actor)?;
+        Ok(active.policy()?.clone())
     }
     /// The installation's operators, excluded from AnyHuman delegation.
     ///
@@ -1193,17 +1200,32 @@ impl Runtime {
         self.authority(operation, actor).map(|_| ())
     }
 
+    pub(crate) fn authorize_in(
+        &self,
+        connection: &Connection,
+        operation: &str,
+        actor: &str,
+    ) -> Result<()> {
+        self.authority_in(connection, operation, actor).map(|_| ())
+    }
+
     /// A session may belong to a principal whose only permission is acting for
     /// others. This admits the session, never an operation or a chosen target.
     pub(crate) fn may_request_delegation(&self, authenticated: &str) -> Result<bool> {
-        self.sql_read(|db| {
-            self.check_binding(db)?;
-            let active = crate::authority_state::current(db)?;
-            Ok(active.document.enabled
-                && active.policy()?.delegations.values().any(|rule| {
-                    rule.authenticated.contains(authenticated) && rule.paths.contains("request")
-                }))
-        })
+        self.sql_read(|db| self.may_request_delegation_in(db, authenticated))
+    }
+
+    pub(crate) fn may_request_delegation_in(
+        &self,
+        db: &Connection,
+        authenticated: &str,
+    ) -> Result<bool> {
+        self.check_binding(db)?;
+        let active = crate::authority_state::current(db)?;
+        Ok(active.document.enabled
+            && active.policy()?.delegations.values().any(|rule| {
+                rule.authenticated.contains(authenticated) && rule.paths.contains("request")
+            }))
     }
 
     fn check_authority(

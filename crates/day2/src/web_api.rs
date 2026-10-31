@@ -15,12 +15,50 @@ use serde_json::{Value, json};
 pub(crate) const ACT_AS_HEADER: &str = "x-day2-act-as";
 
 pub(crate) fn session_allowed(runtime: &Runtime, catalog: &Catalog, actor: &str) -> bool {
-    catalog
-        .endpoints
-        .keys()
-        .any(|operation| runtime.authorize(operation, actor).is_ok())
-        || runtime.authorize_audit(actor).is_ok()
-        || runtime.may_request_delegation(actor).unwrap_or(false)
+    runtime
+        .sql_read(|db| session_allowed_in(runtime, catalog, db, actor))
+        .unwrap_or(false)
+}
+
+/// Check session eligibility on the caller's actual SQL snapshot. Expected
+/// permission denials are DATA; database, binding and schema errors propagate.
+pub(crate) fn session_allowed_in(
+    runtime: &Runtime,
+    catalog: &Catalog,
+    db: &rusqlite::Connection,
+    actor: &str,
+) -> Result<bool> {
+    fn permitted(result: Result<()>) -> Result<bool> {
+        match result {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::error::Failure>()
+                    .is_some_and(|failure| {
+                        matches!(
+                            failure,
+                            crate::error::Failure::Forbidden
+                                | crate::error::Failure::RequiredAllRowsUnavailable
+                        )
+                    }) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    for operation in catalog.endpoints.keys() {
+        if permitted(runtime.authorize_in(db, operation, actor))? {
+            return Ok(true);
+        }
+    }
+    if permitted(runtime.authorize_audit_in(db, actor))? {
+        return Ok(true);
+    }
+    match runtime.may_request_delegation_in(db, actor) {
+        Ok(allowed) => Ok(allowed),
+        Err(error) => permitted(Err(error)),
+    }
 }
 
 pub(crate) fn is_json(path: &str) -> bool {

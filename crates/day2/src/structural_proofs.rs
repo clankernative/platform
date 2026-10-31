@@ -51,6 +51,23 @@ const _: () = {
         Sync
     );
     assert_secret_references!(crate::store::RuntimeSql<'static, 'static, 'static, 'static>);
+    assert_consuming!(crate::oauth::native_management::HostSql<'static, 'static>);
+    assert_not_impl!(
+        crate::oauth::native_management::HostSql<'static, 'static>,
+        std::fmt::Debug
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::HostSql<'static, 'static>,
+        Send
+    );
+    assert_not_impl!(
+        crate::oauth::native_management::HostSql<'static, 'static>,
+        Sync
+    );
+    assert_secret_references!(crate::oauth::native_management::HostSql<'static, 'static>);
+    assert_consuming!(crate::web::PreparedHostRequest);
+    assert_not_impl!(crate::web::PreparedHostRequest, std::fmt::Debug);
+    assert_secret_references!(crate::web::PreparedHostRequest);
     assert_consuming!(
         crate::oauth::native_management::SqlOwner<'static, 'static, 'static, 'static>
     );

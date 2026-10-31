@@ -439,6 +439,7 @@
     "crates/day2/src/web_assets.rs",
     "crates/day2/src/web_forms.rs",
     "crates/day2/src/web_freetool_credentials.rs",
+    "crates/day2/src/web_host_request.rs",
     "crates/day2/src/web_html.rs",
     "crates/day2/src/web_live.rs",
     "crates/day2/src/web_live_simulation.rs",

@@ -86,6 +86,14 @@ pub(in crate::oauth) enum Operation {
     Complete,
 }
 
+pub(in crate::oauth) fn require_first_io(operation: &Operation) -> Result<()> {
+    ensure!(
+        *operation != Operation::Complete,
+        "native response completed before first I/O"
+    );
+    Ok(())
+}
+
 struct Command {
     sequence: u64,
     operation: Operation,
@@ -113,6 +121,52 @@ pub(in crate::oauth) struct Transport<T> {
 
 type DriverFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
+/// Response DATA only. This local handoff never carries an owner or permit.
+/// Cookies and CSRF values must not gain Debug/log/serialization exposure.
+#[derive(Clone)]
+pub(in crate::oauth) struct HostReplySlot(Rc<RefCell<HostReply>>);
+
+enum HostReply {
+    Pending,
+    Ready(axum::response::Response),
+    Consumed,
+}
+
+impl HostReplySlot {
+    fn new() -> Self {
+        Self(Rc::new(RefCell::new(HostReply::Pending)))
+    }
+
+    pub(in crate::oauth) fn publish(&self, response: axum::response::Response) -> Result<()> {
+        let mut slot = self.0.try_borrow_mut()?;
+        ensure!(
+            matches!(*slot, HostReply::Pending),
+            "native host reply already published"
+        );
+        *slot = HostReply::Ready(response);
+        Ok(())
+    }
+
+    fn take(&self) -> Result<Option<axum::response::Response>> {
+        let mut slot = self.0.try_borrow_mut()?;
+        match &*slot {
+            HostReply::Pending => Ok(None),
+            HostReply::Consumed => anyhow::bail!("native host reply already consumed"),
+            HostReply::Ready(_) => {
+                let HostReply::Ready(response) = std::mem::replace(&mut *slot, HostReply::Consumed)
+                else {
+                    unreachable!()
+                };
+                Ok(Some(response))
+            }
+        }
+    }
+
+    fn consumed(&self) -> bool {
+        matches!(*self.0.borrow(), HostReply::Consumed)
+    }
+}
+
 struct Shared {
     future: RefCell<Option<DriverFuture>>,
     slot: Rc<RefCell<Slot>>,
@@ -122,6 +176,7 @@ struct Shared {
     started: effects::Instant,
     ended: Cell<Option<effects::Instant>>,
     reported: Cell<bool>,
+    reply: Option<HostReplySlot>,
 }
 
 /// Clones address this SAME driver, not a replacement stage. Only the HTTP
@@ -158,7 +213,76 @@ impl Driver {
             started: effects::Instant::now(),
             ended: Cell::new(None),
             reported: Cell::new(false),
+            reply: None,
         }))
+    }
+
+    pub(super) fn for_host<T: rt::Write + Unpin + 'static>(
+        inner: Rc<RefCell<T>>,
+        sink: super::super::native_management::Sink,
+        host: std::sync::Arc<crate::web::Host>,
+        request: crate::web::PreparedHostRequest,
+    ) -> Self {
+        let slot = Rc::new(RefCell::new(Slot {
+            next: 0,
+            command: None,
+            output: None,
+            waiter: None,
+            refused: false,
+            counts: Counts::default(),
+        }));
+        let transport = Transport {
+            inner,
+            slot: slot.clone(),
+        };
+        let reply = HostReplySlot::new();
+        let publish = reply.clone();
+        let owned_sink = sink.clone();
+        let effects = host.prepared_host_effects();
+        Self(Rc::new(Shared {
+            future: RefCell::new(Some(Box::pin(async move {
+                effects
+                    .run_async(owned_sink.drive_host_request(host, request, transport, publish))
+                    .await
+            }))),
+            slot,
+            owner: std::thread::current().id(),
+            sink,
+            finished: Cell::new(false),
+            started: effects::Instant::now(),
+            ended: Cell::new(None),
+            reported: Cell::new(false),
+            reply: Some(reply),
+        }))
+    }
+
+    /// Advance the SAME owning future without inventing a socket operation.
+    pub(super) fn poll_host_reply(
+        &self,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<io::Result<axum::response::Response>> {
+        if self.0.owner != std::thread::current().id()
+            || !self.0.sink.is_open()
+            || self.0.slot.borrow().refused
+            || self.0.slot.borrow().command.is_some()
+            || self.0.finished.get()
+        {
+            return Poll::Ready(Err(self.refuse()));
+        }
+        if let Err(error) = self.advance(cx) {
+            return Poll::Ready(Err(error));
+        }
+        let result = self
+            .0
+            .reply
+            .as_ref()
+            .ok_or(())
+            .and_then(|reply| reply.take().map_err(|_| ()));
+        match result {
+            Ok(Some(response)) => Poll::Ready(Ok(response)),
+            Ok(None) => Poll::Pending,
+            Err(()) => Poll::Ready(Err(self.refuse())),
+        }
     }
 
     fn refuse(&self) -> io::Error {
@@ -174,6 +298,9 @@ impl Driver {
 
     fn poll(&self, cx: &mut TaskContext<'_>, operation: Operation) -> Poll<io::Result<Output>> {
         if self.0.owner != std::thread::current().id() {
+            return Poll::Ready(Err(self.refuse()));
+        }
+        if self.0.reply.as_ref().is_some_and(|reply| !reply.consumed()) {
             return Poll::Ready(Err(self.refuse()));
         }
         {
@@ -213,6 +340,26 @@ impl Driver {
             }
             slot.waiter = Some(cx.waker().clone());
         }
+        if let Err(error) = self.advance(cx) {
+            return Poll::Ready(Err(error));
+        }
+        let mut slot = self.0.slot.borrow_mut();
+        let Some((sequence, result)) = slot.output.take() else {
+            return Poll::Pending;
+        };
+        if slot
+            .command
+            .as_ref()
+            .is_none_or(|command| command.sequence != sequence)
+        {
+            drop(slot);
+            return Poll::Ready(Err(self.refuse()));
+        }
+        slot.command = None;
+        Poll::Ready(result)
+    }
+
+    fn advance(&self, cx: &mut TaskContext<'_>) -> io::Result<()> {
         let completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut future = self.0.future.borrow_mut();
             match future.as_mut().map(|future| future.as_mut().poll(cx)) {
@@ -233,24 +380,11 @@ impl Driver {
         if let Some(result) = completed {
             self.0.ended.set(Some(effects::Instant::now()));
             if result.is_err() {
-                return Poll::Ready(Err(self.refuse()));
+                return Err(self.refuse());
             }
             self.0.finished.set(true);
         }
-        let mut slot = self.0.slot.borrow_mut();
-        let Some((sequence, result)) = slot.output.take() else {
-            return Poll::Pending;
-        };
-        if slot
-            .command
-            .as_ref()
-            .is_none_or(|command| command.sequence != sequence)
-        {
-            drop(slot);
-            return Poll::Ready(Err(self.refuse()));
-        }
-        slot.command = None;
-        Poll::Ready(result)
+        Ok(())
     }
 
     pub(super) fn poll_write(
@@ -561,6 +695,10 @@ mod tests {
     }
 
     fn fixture(events: impl IntoIterator<Item = Event>) -> (Driver, Rc<Model>) {
+        fixture_entry(events, false)
+    }
+
+    fn fixture_entry(events: impl IntoIterator<Item = Event>, host: bool) -> (Driver, Rc<Model>) {
         let model = Rc::new(Model::default());
         let slot = Rc::new(RefCell::new(Slot {
             next: 0,
@@ -578,8 +716,14 @@ mod tests {
             slot: slot.clone(),
         };
         let captured = model.clone();
+        let reply = host.then(HostReplySlot::new);
+        let publish = reply.clone();
         let future = async move {
-            let mut request = transport.next().await?;
+            let first = if publish.is_some() {
+                None
+            } else {
+                Some(transport.next().await?)
+            };
             transport.scope_attempt();
             transport.scope_entered();
             captured.scopes.set(captured.scopes.get() + 1);
@@ -587,6 +731,31 @@ mod tests {
                 model: captured,
                 known: false,
             };
+            if let Some(reply) = publish {
+                guard.check()?;
+                // Real SQLite adapter work, but only model lifetime DATA:
+                // this constructs no native stage or serving permission.
+                {
+                    let mut db = rusqlite::Connection::open_in_memory()?;
+                    db.execute_batch("CREATE TABLE probe(value INTEGER)")?;
+                    let tx = db.transaction()?;
+                    tx.execute("INSERT INTO probe VALUES(1)", [])?;
+                    tx.commit()?;
+                    let count: i64 =
+                        db.query_row("SELECT count(*) FROM probe", [], |row| row.get(0))?;
+                    ensure!(count == 1, "model SQL result changed");
+                    db.close().map_err(|(_, error)| error)?;
+                }
+                guard.check()?;
+                reply.publish(axum::response::Response::new(axum::body::Body::from(
+                    "metadata",
+                )))?;
+            }
+            let mut request = match first {
+                Some(first) => first,
+                None => transport.next().await?,
+            };
+            require_first_io(&request.1)?;
             loop {
                 if request.1 == Operation::Complete {
                     guard.check()?;
@@ -614,6 +783,7 @@ mod tests {
                 started: effects::Instant::now(),
                 ended: Cell::new(None),
                 reported: Cell::new(false),
+                reply,
             })),
             model,
         )
@@ -621,6 +791,131 @@ mod tests {
 
     fn context() -> TaskContext<'static> {
         TaskContext::from_waker(futures_util::task::noop_waker_ref())
+    }
+
+    #[test]
+    fn host_reply_starts_same_pinned_model_without_socket_command_and_settles_after_transport_only()
+    {
+        let (driver, model) = fixture_entry([Event::Pending, Event::Write(4)], true);
+        let mut cx = context();
+        let response = match driver.poll_host_reply(&mut cx) {
+            Poll::Ready(Ok(response)) => response,
+            _ => panic!("host reply did not advance before socket I/O"),
+        };
+        assert_eq!(response.status(), 200);
+        assert!(
+            driver.0.slot.borrow().command.is_none(),
+            "reply polling must not enqueue a fake write"
+        );
+        assert_eq!(
+            (model.scopes.get(), model.polls.get(), model.settled.get()),
+            (1, 0, 0)
+        );
+        assert!(driver.poll_write(&mut cx, b"data").is_pending());
+        assert!(matches!(
+            driver.poll_write(&mut cx, b"data"),
+            Poll::Ready(Ok(4))
+        ));
+        assert!(matches!(driver.poll_flush(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(driver.poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!((model.scopes.get(), model.settled.get()), (1, 0));
+        futures_executor::block_on(driver.finish()).unwrap();
+        assert_eq!((model.scopes.get(), model.settled.get()), (1, 1));
+    }
+
+    #[test]
+    fn host_reply_one_shot_and_pre_reply_transport_refusals_are_terminal() {
+        let slot = HostReplySlot::new();
+        assert!(slot.take().unwrap().is_none());
+        slot.publish(axum::response::Response::new(axum::body::Body::empty()))
+            .unwrap();
+        assert!(
+            slot.publish(axum::response::Response::new(axum::body::Body::empty()))
+                .is_err()
+        );
+        assert!(slot.take().unwrap().is_some());
+        assert!(slot.take().is_err());
+
+        let (driver, model) = fixture_entry([], true);
+        assert!(matches!(
+            driver.poll_write(&mut context(), b"x"),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!((model.scopes.get(), model.polls.get()), (0, 0));
+        assert!(matches!(
+            driver.poll_host_reply(&mut context()),
+            Poll::Ready(Err(_))
+        ));
+        let (driver, model) = fixture_entry([], true);
+        assert!(matches!(
+            driver.poll_host_reply(&mut context()),
+            Poll::Ready(Ok(_))
+        ));
+        assert!(matches!(
+            driver.poll_host_reply(&mut context()),
+            Poll::Ready(Err(_))
+        ));
+        assert!(matches!(
+            driver.poll_write(&mut context(), b"x"),
+            Poll::Ready(Err(_))
+        ));
+        assert_eq!(
+            (model.scopes.get(), model.polls.get(), model.settled.get()),
+            (1, 0, 0)
+        );
+        assert!(model.refused.get());
+
+        let (driver, model) = fixture_entry([], true);
+        assert!(matches!(
+            driver.poll_host_reply(&mut context()),
+            Poll::Ready(Ok(_))
+        ));
+        assert!(
+            futures_executor::block_on(driver.finish()).is_err(),
+            "reply DATA without any socket operation cannot settle delivery"
+        );
+        assert_eq!((model.polls.get(), model.settled.get()), (0, 0));
+        assert!(model.refused.get());
+    }
+
+    #[test]
+    fn seeded_host_reply_pause_abort_epoch_and_deadline_never_reacquire_the_model_parent() {
+        // Fixed replayable schedules include equality and pause/rollback after
+        // SQL and reply production but before the first real socket poll.
+        for seed in 0u64..32 {
+            let (driver, model) = fixture_entry([Event::Pending, Event::Write(1)], true);
+            model.now.set(1);
+            assert!(matches!(
+                driver.poll_host_reply(&mut context()),
+                Poll::Ready(Ok(_))
+            ));
+            assert_eq!(model.settled.get(), 0);
+            match seed % 4 {
+                0 => model.now.set(5),
+                1 => model.now.set(0),
+                2 => model.epoch.set(1),
+                _ => driver.abort(),
+            }
+            assert!(matches!(
+                driver.poll_write(&mut context(), b"x"),
+                Poll::Ready(Err(_))
+            ));
+            assert!(futures_executor::block_on(driver.finish()).is_err());
+            assert_eq!(
+                (model.scopes.get(), model.polls.get(), model.settled.get()),
+                (1, 0, 0),
+                "seed {seed}"
+            );
+            assert!(model.refused.get(), "seed {seed}");
+        }
+        let (driver, model) = fixture_entry([], true);
+        assert!(matches!(
+            driver.poll_host_reply(&mut context()),
+            Poll::Ready(Ok(_))
+        ));
+        drop(driver);
+        assert!(model.refused.get());
+        assert_eq!(model.settled.get(), 0);
     }
 
     #[test]

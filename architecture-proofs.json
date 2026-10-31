@@ -76,7 +76,7 @@
     {
       "source": "crates/day2/src/structural_proofs.rs",
       "scope": "module",
-      "fingerprint": "sha256:75c882a8ff349f2b5236f19a1947469948d914f3243dd5d5c1e122fdafe69c8a",
+      "fingerprint": "sha256:77be12945388137f57c83484756c267f23932940e88e367ccf7e2e7651a93407",
       "registration": {
         "source": "crates/day2/src/lib.rs",
         "module": "structural_proofs"
@@ -839,6 +839,7 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (crate) fn commit_read (& mut self , tx : rusqlite :: Transaction < '_ >) -> Result < () >",
         "pub (crate) fn commit_write (& mut self , tx : crate :: write_queue :: WriteTransaction < '_ >) -> Result < () >",
+        "fn host_response (owner : & 'owner mut response :: HostSql < 'stage , 'role >) -> Self",
         "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self",
         "fn pending (owner : & 'owner mut PendingWriter < 'stage , 'role > , commit : SqlCommit) -> Self",
         "pub (crate) fn prepare (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
@@ -848,6 +849,10 @@
         "fn runtime (owner : & 'owner mut RuntimeConsumer < 'stage , 'role >) -> Self"
       ],
       "factories": [
+        {
+          "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
+          "signature": "fn host_response (owner : & 'owner mut response :: HostSql < 'stage , 'role >) -> Self"
+        },
         {
           "owner": "SqlOwner < 'owner , 'stage , 'role , 'original >",
           "signature": "fn human (owner : & 'owner mut Consumer < 'stage , 'role , 'original > , commit : SqlCommit) -> Self"
@@ -938,6 +943,54 @@
       "consuming_methods": [
         "finish"
       ]
+    },
+    {
+      "source": "crates/day2/src/oauth/native_management/response.rs",
+      "type_name": "HostSql",
+      "owning_children": [],
+      "methods": [
+        "pub (super) fn check_sql (& mut self) -> Result < () >",
+        "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >",
+        "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >",
+        "pub (super) fn refuse (& mut self)",
+        "fn reobserve_outside_sql (& mut self) -> Result < () >",
+        "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+      ],
+      "factories": [
+        {
+          "owner": "Sink",
+          "signature": "async fn drive_response_owner < T : hyper :: rt :: Write + Unpin > (& self , mut transport : Transport < T > , start : ResponseStart) -> Result < () >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "fn reobserve_outside_sql (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "pub (crate) fn read < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Connection) -> Result < T >) -> Result < T >"
+        },
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "pub (crate) fn write < T > (& mut self , operation : impl for < 'db > FnOnce (& 'db rusqlite :: Transaction < '_ > ,) -> Result < crate :: store :: SqlDecision < T > >) -> Result < T >"
+        },
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "pub (super) fn check_sql (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "pub (super) fn prepare_sql (& mut self , runtime : & crate :: store :: Runtime) -> Result < () >"
+        },
+        {
+          "owner": "HostSql < '_ , '_ >",
+          "signature": "pub (super) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/oauth/refresh.rs",

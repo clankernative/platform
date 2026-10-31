@@ -1760,6 +1760,16 @@ impl super::usage::Authority for ArtifactApprovalAuthority {
     }
 }
 
+/// Ordinary real-SQLite test fixture only. It supplies no native stage,
+/// enrolled role, production participant or response authority.
+#[cfg(test)]
+pub(crate) fn host_request_test_runtime(
+    directory: &std::path::Path,
+) -> Result<crate::store::Runtime> {
+    let (runtime, _, _) = tests::management_fixture_with_consumers(directory, true)?;
+    Ok(runtime)
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::super::{approval_registry::ApprovalKeyMaterial, connect::CallbackBindingSpec};

@@ -6,7 +6,7 @@
 use super::fixtures;
 use super::{AppStorage, OWNERS, OriginalPhase, Owners, Phase, PhaseOriginal, Sink, SinkState};
 use crate::oauth::fresh_auth::FreshIntent;
-use crate::oauth::native_http::response_io::{Operation, Transport};
+use crate::oauth::native_http::response_io::{HostReplySlot, Operation, Transport};
 use crate::security_epoch::{
     native_enrollment::{EnrolledRoleStage, NativeRole},
     serving::{CurrentServingPhase, ResponseIdentity},
@@ -308,11 +308,21 @@ impl Lease<Owners> {
         app: &str,
         intent: Option<&FreshIntent>,
         scope: Option<&AuthorityScope>,
+        entry: &ResponseStart,
     ) -> Result<Self> {
-        ensure!(
-            sink.is_open() && sink.prepared.get() && sink.uses_retained_app_io(),
-            "native response not selected"
-        );
+        match entry {
+            ResponseStart::Prepared(_) => ensure!(
+                sink.is_open() && sink.prepared.get() && sink.uses_retained_app_io(),
+                "native response not selected"
+            ),
+            ResponseStart::Host { .. } => {
+                ensure!(intent.is_none(), "native host cannot borrow human original");
+                sink.require_host_preparing(
+                    scope.context("native host scope missing")?,
+                    &sink.identity,
+                )?;
+            }
+        }
         let registry = OWNERS.with(Rc::clone);
         {
             let mut entries = registry.try_borrow_mut()?;
@@ -402,6 +412,122 @@ struct ResponseBorrow<'scope, 'role, 'original> {
     known: bool,
 }
 
+/// A lexical SQL loan from the actual ordinary-host response parent. The
+/// constructor is private to this pinned owner implementation; DATA cannot
+/// construct a Current, stage, response identity or replacement Runtime.
+pub(crate) struct HostSql<'scope, 'role> {
+    runtime: &'scope crate::store::Runtime,
+    stage: &'scope mut EnrolledRoleStage<'role>,
+    current: &'scope mut dyn CurrentServingPhase,
+    policy: &'scope day2_capabilities::security_epoch::bootstrap::InitialBootstrapPolicy,
+    store: &'scope day2_capabilities::security_epoch::EpochStore,
+    scope: &'scope AuthorityScope,
+    sink: &'scope Sink,
+    identity: &'scope ResponseIdentity,
+    refused: Rc<Cell<bool>>,
+}
+
+impl HostSql<'_, '_> {
+    pub(super) fn prepare_sql(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
+        ensure!(
+            std::ptr::eq(self.runtime, runtime)
+                && runtime.uses_native_storage()
+                && super::sql_runtime_scope(runtime)? == *self.scope,
+            "native host SQL Runtime changed"
+        );
+        // The genuine parent was armed before this loan, including SQLite
+        // open/recovery. No per-loan arm or finish_known is permitted.
+        self.check_sql()
+    }
+
+    pub(super) fn check_sql(&mut self) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.refused.get(), "native host SQL parent refused");
+            self.sink
+                .require_host_preparing(self.scope, self.identity)?;
+            self.stage.check_for(self.scope, NativeRole::AppHost)?;
+            self.stage
+                .check_selection(self.policy, self.store, NativeRole::AppHost)?;
+            // Transaction-safe native/retained-observation checks only. In
+            // particular DO NOT call ResponseBorrow::check/reobserve here.
+            self.current.check(self.stage)?;
+            ensure!(!self.refused.get(), "native host SQL parent refused");
+            Ok(())
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(super) fn refuse(&mut self) {
+        self.refused.set(true);
+        self.current.refuse();
+    }
+
+    fn reobserve_outside_sql(&mut self) -> Result<()> {
+        let result = (|| {
+            self.check_sql()?;
+            self.current.reobserve(self.stage)?;
+            self.check_sql()
+        })();
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    pub(crate) fn read<T>(
+        &mut self,
+        operation: impl for<'db> FnOnce(&'db rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.reobserve_outside_sql()?;
+        let runtime = self.runtime;
+        let result = crate::store::RuntimeSql::with_owner(
+            runtime,
+            super::SqlOwner::host_response(self),
+            |sql| sql.read(operation),
+        );
+        match result {
+            Ok(value) => {
+                self.reobserve_outside_sql()?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.refuse();
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn write<T>(
+        &mut self,
+        operation: impl for<'db> FnOnce(
+            &'db rusqlite::Transaction<'_>,
+        ) -> Result<crate::store::SqlDecision<T>>,
+    ) -> Result<T> {
+        self.reobserve_outside_sql()?;
+        let runtime = self.runtime;
+        let result = crate::store::RuntimeSql::with_owner(
+            runtime,
+            super::SqlOwner::host_response(self),
+            |sql| sql.write(operation),
+        );
+        // RuntimeSql has closed the actual connection and transaction before
+        // this provider reobservation or any result can escape.
+        match result {
+            Ok(value) => {
+                self.reobserve_outside_sql()?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.refuse();
+                Err(error)
+            }
+        }
+    }
+}
+
 impl ResponseBorrow<'_, '_, '_> {
     fn check(&mut self) -> Result<()> {
         ensure!(!self.refused.get(), "native response aborted");
@@ -449,6 +575,15 @@ impl Drop for ResponseBorrow<'_, '_, '_> {
     }
 }
 
+enum ResponseStart {
+    Prepared((u64, Operation)),
+    Host {
+        host: std::sync::Arc<crate::web::Host>,
+        request: crate::web::PreparedHostRequest,
+        reply: HostReplySlot,
+    },
+}
+
 impl Sink {
     pub(in crate::oauth) async fn drive_response<T: hyper::rt::Write + Unpin>(
         &self,
@@ -459,10 +594,34 @@ impl Sink {
             self.prepared.get() && self.uses_retained_app_io(),
             "native response barrier not prepared"
         );
-        ensure!(
-            first.1 != Operation::Complete,
-            "native response completed before first I/O"
-        );
+        crate::oauth::native_http::response_io::require_first_io(&first.1)?;
+        self.drive_response_owner(transport, ResponseStart::Prepared(first))
+            .await
+    }
+
+    pub(in crate::oauth) async fn drive_host_request<T: hyper::rt::Write + Unpin>(
+        &self,
+        host: std::sync::Arc<crate::web::Host>,
+        request: crate::web::PreparedHostRequest,
+        transport: Transport<T>,
+        reply: HostReplySlot,
+    ) -> Result<()> {
+        self.drive_response_owner(
+            transport,
+            ResponseStart::Host {
+                host,
+                request,
+                reply,
+            },
+        )
+        .await
+    }
+
+    async fn drive_response_owner<T: hyper::rt::Write + Unpin>(
+        &self,
+        mut transport: Transport<T>,
+        start: ResponseStart,
+    ) -> Result<()> {
         let binding = {
             let bindings = self.bindings.try_borrow()?;
             ensure!(bindings.len() <= 1, "native response owner changed");
@@ -484,7 +643,7 @@ impl Sink {
             .map(|intent| intent.app())
             .or_else(|| scope.as_ref().map(|scope| scope.app.as_str()))
             .context("native response App missing")?;
-        let mut lease = Lease::take(self, app, intent.as_ref(), scope.as_ref())?;
+        let mut lease = Lease::take(self, app, intent.as_ref(), scope.as_ref(), &start)?;
         let refused = lease.refused.clone();
         let owners = lease.owners.as_mut().expect("actual leased owner");
         let scope = owners.selection.scope().clone();
@@ -543,7 +702,48 @@ impl Sink {
                         };
                         guard.check()?;
                         guard.current.arm(guard.stage)?;
-                        let mut request = first;
+                        let mut request = match start {
+                            ResponseStart::Prepared(first) => first,
+                            ResponseStart::Host {
+                                host,
+                                request,
+                                reply,
+                            } => {
+                                ensure!(guard.original.is_none(), "native host original conflict");
+                                let response = {
+                                    let mut sql = HostSql {
+                                        runtime: host.prepared_host_runtime(),
+                                        stage: guard.stage,
+                                        current: guard.current,
+                                        policy: guard.policy,
+                                        store: guard.store,
+                                        scope: &scope,
+                                        sink: self,
+                                        identity: &self.identity,
+                                        refused: guard.refused.clone(),
+                                    };
+                                    host.execute_host_request(request, &mut sql)?
+                                };
+                                // No SQL loan or connection survives body preparation,
+                                // provider reobservation or a transport suspension.
+                                self.host_body_selected(&scope)?;
+                                let response = crate::oauth::native_http::prepare_finite_app_body(
+                                    response, self,
+                                )
+                                .await?;
+                                ensure!(
+                                    self.uses_retained_app_io(),
+                                    "native host body must be finite"
+                                );
+                                guard.check()?;
+                                self.host_reply_ready()?;
+                                reply.publish(response)?;
+                                // DATA publication is not settlement. The same
+                                // future retains all actual native borrows here.
+                                transport.next().await?
+                            }
+                        };
+                        crate::oauth::native_http::response_io::require_first_io(&request.1)?;
                         loop {
                             if request.1 == Operation::Complete {
                                 guard.complete()?;
@@ -592,6 +792,201 @@ impl Sink {
         lease.known = true;
         self.state.set(SinkState::Complete);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_source_tests {
+    use syn::visit::{self, Visit};
+
+    #[derive(Default)]
+    struct Calls {
+        ordered: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.ordered.push(call.method.to_string());
+            visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                self.ordered.push(
+                    path.path
+                        .segments
+                        .iter()
+                        .map(|part| part.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                );
+            }
+            visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+            if value.path.is_ident("HostSql") {
+                self.ordered.push("HostSql".into());
+            }
+            visit::visit_expr_struct(self, value);
+        }
+    }
+
+    fn methods(source: &str, owner: &str, name: &str) -> Vec<Vec<String>> {
+        let Ok(file) = syn::parse_file(source) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        for item in file.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == owner))
+            {
+                for member in item.items {
+                    if let syn::ImplItem::Fn(function) = member
+                        && function.sig.ident == name
+                    {
+                        let mut calls = Calls::default();
+                        calls.visit_block(&function.block);
+                        result.push(calls.ordered);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn one_method(source: &str, owner: &str, name: &str) -> Option<Vec<String>> {
+        let mut methods = methods(source, owner, name);
+        (methods.len() == 1).then(|| methods.remove(0))
+    }
+
+    fn before(calls: &[String], first: &str, last: &str) -> bool {
+        matches!((calls.iter().position(|call| call == first), calls.iter().position(|call| call == last)), (Some(first), Some(last)) if first < last)
+    }
+
+    fn wiring(source: &str) -> bool {
+        let Some(owner) = one_method(source, "Sink", "drive_response_owner") else {
+            return false;
+        };
+        let Some(prepared) = one_method(source, "Sink", "drive_response") else {
+            return false;
+        };
+        if !before(
+            &prepared,
+            "crate::oauth::native_http::response_io::require_first_io",
+            "drive_response_owner",
+        ) {
+            return false;
+        }
+        let count = |calls: &[String], name: &str| {
+            calls.iter().filter(|call| call.as_str() == name).count()
+        };
+        if count(&owner, "arm") != 1
+            || count(&owner, "HostSql") != 1
+            || count(&owner, "crate::security_epoch::serving::with_app_response") != 1
+            || !before(&owner, "arm", "HostSql")
+            || !before(&owner, "execute_host_request", "host_body_selected")
+            || !before(
+                &owner,
+                "host_body_selected",
+                "crate::oauth::native_http::prepare_finite_app_body",
+            )
+            || !before(
+                &owner,
+                "crate::oauth::native_http::prepare_finite_app_body",
+                "publish",
+            )
+            || !before(
+                &owner,
+                "crate::oauth::native_http::response_io::require_first_io",
+                "complete",
+            )
+        {
+            return false;
+        }
+        let Some(check) = one_method(source, "HostSql", "check_sql") else {
+            return false;
+        };
+        if count(&check, "check") != 1
+            || count(&check, "reobserve") != 0
+            || count(&check, "require_host_preparing") != 1
+            || count(&check, "check_for") != 1
+            || count(&check, "check_selection") != 1
+        {
+            return false;
+        }
+        let Some(prepare) = one_method(source, "HostSql", "prepare_sql") else {
+            return false;
+        };
+        if count(&prepare, "std::ptr::eq") != 1
+            || count(&prepare, "uses_native_storage") != 1
+            || count(&prepare, "super::sql_runtime_scope") != 1
+            || count(&prepare, "check_sql") != 1
+        {
+            return false;
+        }
+        for name in ["read", "write"] {
+            let Some(loan) = one_method(source, "HostSql", name) else {
+                return false;
+            };
+            if count(&loan, "reobserve_outside_sql") != 2
+                || !before(
+                    &loan,
+                    "reobserve_outside_sql",
+                    "crate::store::RuntimeSql::with_owner",
+                )
+                || count(&loan, "super::SqlOwner::host_response") != 1
+                || count(&loan, "refuse") != 1
+                || count(&loan, "arm") != 0
+                || count(&loan, "finish_known") != 0
+                || !matches!((loan.iter().position(|call| call == "crate::store::RuntimeSql::with_owner"), loan.iter().rposition(|call| call == "reobserve_outside_sql")), (Some(open), Some(reobserve)) if open < reobserve)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn production_host_owner_wiring_mutants_cannot_remove_arm_identity_or_first_io_checks() {
+        let source = include_str!("response.rs")
+            .split("\n#[cfg(test)]\nmod host_source_tests")
+            .next()
+            .unwrap();
+        assert!(wiring(source));
+        for (from, to) in [
+            ("guard.current.arm(guard.stage)?;", ""),
+            (
+                "self.current.check(self.stage)?;",
+                "self.current.reobserve(self.stage)?;",
+            ),
+            ("require_host_preparing", "removed_host_identity_check"),
+            ("require_first_io", "removed_first_io_check"),
+            ("std::ptr::eq", "removed_runtime_identity_check"),
+            (
+                "super::SqlOwner::host_response(self)",
+                "super::SqlOwner::runtime(self)",
+            ),
+        ] {
+            assert_eq!(
+                source.matches(from).count(),
+                if matches!(
+                    from,
+                    "super::SqlOwner::host_response(self)"
+                        | "require_host_preparing"
+                        | "require_first_io"
+                ) {
+                    2
+                } else {
+                    1
+                },
+                "mutation must bind actual production source"
+            );
+            assert!(
+                !wiring(&source.replace(from, to)),
+                "missing guard must fail: {from}"
+            );
+        }
     }
 }
 

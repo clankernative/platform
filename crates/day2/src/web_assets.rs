@@ -323,7 +323,7 @@ fn if_none_match(headers: &HeaderMap, etag: &[u8]) -> bool {
 
 // Only platform chrome is embedded. No app asset names or company brands live
 // in this catalog; those are resolved exclusively from admitted bundles above.
-fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
+pub(crate) fn platform(path: &str, headers: &HeaderMap) -> Result<Response> {
     let (kind, data): (&str, &[u8]) = match path {
         "/assets/platform/web.css" => ("text/css", include_bytes!("../../../assets/web.css")),
         "/assets/platform/api-docs.css" => {

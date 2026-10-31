@@ -1197,7 +1197,7 @@ impl Runtime {
     pub fn authorize_audit(&self, actor: &str) -> Result<()> {
         self.sql_read(|tx| self.authorize_audit_in(tx, actor))
     }
-    fn authorize_audit_in(&self, db: &Connection, actor: &str) -> Result<()> {
+    pub(crate) fn authorize_audit_in(&self, db: &Connection, actor: &str) -> Result<()> {
         self.check_binding(db)?;
         let active = crate::authority_state::current(db)?;
         active.document.validate(self.artifact())?;
@@ -1242,17 +1242,44 @@ impl Runtime {
         category: &str,
         status: u16,
     ) -> Result<()> {
+        let event = WebEvent::new(at, actor, category, status)?;
+        self.sql_write(|tx| self.web_event_in(tx, event))
+    }
+
+    pub(crate) fn web_event_in(&self, db: &Connection, event: WebEvent<'_>) -> Result<()> {
+        self.check_binding(db)?;
+        db.execute(
+            "INSERT INTO day2_web_events(at,actor,category,status) VALUES(?1,?2,?3,?4)",
+            params![event.at, event.actor, event.category, event.status],
+        )?;
+        Ok(())
+    }
+}
+
+/// Validated host audit DATA. It neither opens SQL nor supplies an owner.
+pub(crate) struct WebEvent<'a> {
+    at: i64,
+    actor: Option<&'a str>,
+    category: &'a str,
+    status: u16,
+}
+
+impl<'a> WebEvent<'a> {
+    pub(crate) fn new(
+        at: i64,
+        actor: Option<&'a str>,
+        category: &'a str,
+        status: u16,
+    ) -> Result<Self> {
         ensure!(
             (100..=599).contains(&status) && at >= 0 && category.len() <= 80,
             "invalid_web_audit_metadata"
         );
-        self.sql_write(|tx| {
-            self.check_binding(tx)?;
-            tx.execute(
-                "INSERT INTO day2_web_events(at,actor,category,status) VALUES(?1,?2,?3,?4)",
-                params![at, actor, category, status],
-            )?;
-            Ok(())
+        Ok(Self {
+            at,
+            actor,
+            category,
+            status,
         })
     }
 }

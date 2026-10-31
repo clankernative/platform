@@ -31,8 +31,11 @@ use tokio::{net::TcpListener, sync::Semaphore};
 
 #[path = "web_freetool_credentials.rs"]
 mod freetool_credentials;
+#[path = "web_host_request.rs"]
+mod host_request;
 #[path = "web_live.rs"]
 pub(crate) mod live;
+pub(crate) use host_request::{PreparedHostRequest, native_host_candidate, prepare_host_request};
 
 struct Grant {
     hash: String,
@@ -1161,6 +1164,23 @@ async fn handle_app_call(host: Arc<Host>, request: Request) -> Response {
         _ => secure((StatusCode::FORBIDDEN, "{\"error\":\"app_call_refused\"}").into_response()),
     }
 }
+fn check_request_head(authority: &str, uri: &Uri, headers: &HeaderMap) -> Result<()> {
+    ensure!(
+        headers.get_all(header::HOST).iter().count() == 1
+            && headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(authority),
+        crate::error::Failure::InvalidHost
+    );
+    ensure!(
+        uri.to_string().len() <= 8192,
+        crate::error::Failure::UriBudget
+    );
+    ensure!(
+        !headers.contains_key("x-http-method-override"),
+        crate::error::Failure::UnsupportedMethod
+    );
+    Ok(())
+}
+
 impl Host {
     fn wall_seconds(&self) -> Result<i64> {
         Ok(i64::try_from(self.clock.wall_time()?.as_secs())?)
@@ -1223,6 +1243,44 @@ impl Host {
         Ok((Some(session), Some(token)))
     }
 
+    /// Pure response construction shared by the two explicit host callers.
+    /// Admission and current SQL authorization are mandatory at each caller.
+    fn metadata_response(&self, path: &str, session: &Session) -> Result<Response> {
+        if path == crate::openapi::SESSION_PATH {
+            return Ok(crate::web_api::json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "actor":session.actor,"csrf_token":security::csrf(&self.secret, session)?
+                }),
+            ));
+        }
+        let spec = self.api.document(
+            self.runtime.artifact().contract(),
+            self.runtime.app(),
+            self.runtime.artifact().id(),
+            &self.cookie_name,
+            &self.origin,
+        );
+        if path == crate::openapi::SPEC_PATH {
+            return Ok(crate::web_api::json_response(StatusCode::OK, spec));
+        }
+        let mut response = html_response(
+            StatusCode::OK,
+            crate::web_api::docs(&spec, &self.origin, Some(&session.actor))?,
+        );
+        response.headers_mut().insert("content-security-policy", format!(
+                    "default-src 'none'; script-src {}/assets/platform/api-docs.js; style-src {}/assets/platform/api-docs.css; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'", self.origin, self.origin).parse()?);
+        Ok(response)
+    }
+
+    fn no_pages_root_redirect(&self) -> Result<Response> {
+        ensure!(
+            self.runtime.artifact().contract().pages.is_empty(),
+            "native host root has application pages"
+        );
+        redirect(crate::openapi::DOCS_PATH)
+    }
+
     fn session_cookie(&self, token: &str) -> String {
         let secure = if matches!(self.sign_in, SignIn::Edge(_)) {
             "; Secure"
@@ -1244,19 +1302,7 @@ impl Host {
         session: Option<&Session>,
         at: i64,
     ) -> Result<Response> {
-        ensure!(
-            headers.get_all(header::HOST).iter().count() == 1
-                && headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(&self.authority),
-            crate::error::Failure::InvalidHost
-        );
-        ensure!(
-            uri.to_string().len() <= 8192,
-            crate::error::Failure::UriBudget
-        );
-        ensure!(
-            !headers.contains_key("x-http-method-override"),
-            crate::error::Failure::UnsupportedMethod
-        );
+        check_request_head(&self.authority, uri, headers)?;
         self.appearance.check_binding(&self.runtime)?;
         if uri
             .path()
@@ -1362,31 +1408,7 @@ impl Host {
                     body.is_empty() && uri.query().is_none(),
                     crate::error::Failure::InvalidInput
                 );
-                if uri.path() == crate::openapi::SESSION_PATH {
-                    return Ok(crate::web_api::json_response(
-                        StatusCode::OK,
-                        serde_json::json!({
-                            "actor":session.actor,"csrf_token":security::csrf(&self.secret, session)?
-                        }),
-                    ));
-                }
-                let spec = self.api.document(
-                    self.runtime.artifact().contract(),
-                    self.runtime.app(),
-                    self.runtime.artifact().id(),
-                    &self.cookie_name,
-                    &self.origin,
-                );
-                if uri.path() == crate::openapi::SPEC_PATH {
-                    return Ok(crate::web_api::json_response(StatusCode::OK, spec));
-                }
-                let mut response = html_response(
-                    StatusCode::OK,
-                    crate::web_api::docs(&spec, &self.origin, Some(&session.actor))?,
-                );
-                response.headers_mut().insert("content-security-policy", format!(
-                    "default-src 'none'; script-src {}/assets/platform/api-docs.js; style-src {}/assets/platform/api-docs.css; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'", self.origin, self.origin).parse()?);
-                return Ok(response);
+                return self.metadata_response(uri.path(), session);
             }
             return crate::web_api::RequestContext {
                 runtime: &self.runtime,
@@ -1469,7 +1491,7 @@ impl Host {
         }
         match (method.as_str(), uri.path()) {
             ("GET", "/") if self.runtime.artifact().contract().pages.is_empty() => {
-                redirect(crate::openapi::DOCS_PATH)
+                self.no_pages_root_redirect()
             }
             ("GET", "/") if self.routes.is_none() => {
                 let page = self

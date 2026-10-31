@@ -645,11 +645,38 @@ async fn run(
                         }
                     }
                     let mut completion = Completion { sink: sink.clone(), known: false };
+                    let service_driver = driver.clone();
+                    let service_inner = connection_io.inner.clone();
                     let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
                         let admitted = admitted.clone();
                         let sink = sink.clone();
+                        let driver_slot = service_driver.clone();
+                        let inner = service_inner.clone();
                         let captured = endpoint.capture_request(&sink, &request);
                         async move {
+                            if matches!(captured, Ok(None))
+                                && let Endpoint::App(host) = endpoint
+                                && crate::web::native_host_candidate(host, &request)
+                            {
+                                let result = host.prepared_host_effects().run_async(sink.scope(async {
+                                    let prepared = crate::web::prepare_host_request(host.clone(), request.map(Body::new)).await?;
+                                    let scope = crate::web::native_runtime_response_scope(host)?.context("native host response scope absent")?;
+                                    sink.begin_host_request(&scope)?;
+                                    let driver = response_io::Driver::for_host(inner, sink.clone(), host.clone(), prepared);
+                                    {
+                                        let mut slot = driver_slot.try_borrow_mut()?;
+                                        ensure!(slot.is_none(), "native host driver already installed");
+                                        *slot = Some(driver.clone());
+                                    }
+                                    // Install BEFORE polling SQL. There is no fake
+                                    // socket command and no first-write dependency.
+                                    Ok::<_, anyhow::Error>(std::future::poll_fn(|cx| driver.poll_host_reply(cx)).await?)
+                                })).await;
+                                return result.map_err(|_| {
+                                    sink.abort();
+                                    io::Error::other("native host request authority unavailable")
+                                });
+                            }
                             let response = match captured {
                                 Ok(Some(literal)) => literal,
                                 Ok(None) => sink.scope(endpoint.handle(request.map(Body::new), admitted)).await,
@@ -744,6 +771,9 @@ impl<T> OwnerIo<T> {
 
 impl<T: rt::Write + Unpin + 'static> OwnerIo<T> {
     fn response_driver(&self) -> Option<response_io::Driver> {
+        if let Some(driver) = self.driver.borrow().as_ref() {
+            return Some(driver.clone());
+        }
         if !self.sink.uses_retained_app_io() {
             return None;
         }
@@ -814,7 +844,7 @@ impl<T: rt::Write + Unpin + 'static> rt::Write for OwnerIo<T> {
 /// Only a bounded, fully prepared App body enters a retained delivery scope.
 /// Unknown-length/live bodies retain their existing admission choreography: do
 /// not lease an owner that their producer still needs to render the next frame.
-async fn prepare_finite_app_body(
+pub(in crate::oauth) async fn prepare_finite_app_body(
     response: Response,
     sink: &super::native_management::Sink,
 ) -> Result<Response> {
@@ -1186,6 +1216,45 @@ mod finite_response_tests {
                 let response = Response::new(Body::new(PreparedBody { frames, remaining }));
                 assert!(prepare_finite_app_body(response, &sink).await.is_err());
                 assert!(!sink.uses_retained_app_io());
+            }
+        });
+    }
+
+    #[test]
+    fn docs_asset_not_modified_keeps_empty_finite_body_and_representation_length() {
+        futures_executor::block_on(async {
+            for path in [
+                "/assets/platform/api-docs.js",
+                "/assets/platform/api-docs.css",
+            ] {
+                let selected =
+                    crate::web_assets::platform(path, &axum::http::HeaderMap::new()).unwrap();
+                let original_length =
+                    selected.headers()[axum::http::header::CONTENT_LENGTH].clone();
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    axum::http::header::IF_NONE_MATCH,
+                    selected.headers()[axum::http::header::ETAG].clone(),
+                );
+                let response = crate::web_assets::platform(path, &headers).unwrap();
+                assert_eq!(response.status(), axum::http::StatusCode::NOT_MODIFIED);
+                let sink = metadata_sink();
+                let response = prepare_finite_app_body(response, &sink).await.unwrap();
+                assert!(sink.uses_retained_app_io());
+                assert_eq!(
+                    response.headers()[axum::http::header::CONTENT_LENGTH],
+                    original_length
+                );
+                assert_eq!(response.body().size_hint().exact(), Some(0));
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 65_536)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                // This fixture supplies only classification DATA. A passing
+                // body check never creates a native owner or settles delivery.
+                assert!(!sink.is_complete());
             }
         });
     }
