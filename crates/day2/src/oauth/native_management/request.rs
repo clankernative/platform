@@ -1633,7 +1633,25 @@ mod tests {
     #[test]
     fn finite_response_moves_the_same_request_and_finishes_before_result_publication() {
         let source = include_str!("response.rs");
-        let calls = methods(&selected_body(source, Some("Sink"), "drive_response"));
+        let entries_use_one_shared_owner = |source: &str| {
+            ["drive_response", "drive_host_request"]
+                .into_iter()
+                .all(|entry| {
+                    let calls = methods(&selected_body(source, Some("Sink"), entry));
+                    calls
+                        .iter()
+                        .filter(|name| *name == "drive_response_owner")
+                        .count()
+                        == 1
+                        && !calls.iter().any(|name| {
+                            matches!(name.as_str(), "borrow" | "prepare_current" | "finish")
+                        })
+                })
+        };
+        assert!(entries_use_one_shared_owner(source));
+        let bypassed = source.replacen("self.drive_response_owner(", "self.drive_response(", 1);
+        assert!(!entries_use_one_shared_owner(&bypassed));
+        let calls = methods(&selected_body(source, Some("Sink"), "drive_response_owner"));
         assert!(!calls.iter().any(|name| name == "begin_current_stage"));
         let borrow = calls.iter().position(|name| name == "borrow").unwrap();
         let prepare = calls
@@ -1644,8 +1662,18 @@ mod tests {
         let finish = calls.iter().rposition(|name| name == "finish").unwrap();
         let complete = calls.iter().rposition(|name| name == "complete").unwrap();
         assert!(finish < complete);
+        assert_eq!(
+            source
+                .matches("request_owner.finish(role.owner())?;")
+                .count(),
+            1
+        );
         let removed = source.replacen("request_owner.finish(role.owner())?;", "", 1);
-        let calls = methods(&selected_body(&removed, Some("Sink"), "drive_response"));
+        let calls = methods(&selected_body(
+            &removed,
+            Some("Sink"),
+            "drive_response_owner",
+        ));
         assert!(!calls.iter().any(|name| name == "finish"));
     }
 
