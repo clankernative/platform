@@ -490,7 +490,7 @@ impl NativeAcquisition {
             || now >= self.deadline
         {
             self.refuse();
-            anyhow::bail!("epoch_native_clock_rewind_or_expired");
+            anyhow::bail!(crate::error::NativeClockError::RewindOrExpired);
         }
         self.observation.set(OriginalObservation {
             latest: now,
@@ -845,6 +845,85 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_clock_rejection_is_typed_and_preserves_exclusive_deadline_and_refusal() {
+        use crate::error::{Failure, NativeClockError};
+
+        for rejected in [
+            Duration::from_secs(99),
+            Duration::from_secs(101),
+            Duration::from_secs(105),
+            Duration::from_secs(105) + Duration::from_nanos(1),
+        ] {
+            let mut original = NativeAcquisition::fixture(
+                Digest::new(b"typed-clock-refusal"),
+                std::process::id(),
+                Duration::from_secs(100),
+                MAX_ACQUISITION,
+            );
+            let origin = original.origin;
+            let deadline = original.deadline;
+            let domain = original.domain.clone();
+            original.fixture_time = Some(Duration::from_secs(102));
+            original.sample().unwrap();
+            original.fixture_time = Some(rejected);
+            let primary = original
+                .sample()
+                .err()
+                .unwrap()
+                .context("actual clock observation");
+            assert_eq!(
+                primary.downcast_ref::<NativeClockError>(),
+                Some(&NativeClockError::RewindOrExpired)
+            );
+            assert_eq!(
+                primary.root_cause().to_string(),
+                "epoch_native_clock_rewind_or_expired"
+            );
+            assert_eq!(crate::error::classify(&primary), Failure::Internal);
+            assert_eq!(original.origin, origin);
+            assert_eq!(original.deadline, deadline);
+            assert_eq!(original.domain, domain);
+            assert_eq!(original.observation.get().latest, Duration::from_secs(102));
+            assert!(original.observation.get().refused);
+            assert!(!original.valid);
+
+            // Returning to a formerly valid instant cannot recover the owner
+            // or change the first actual error into a newly inferred cause.
+            original.fixture_time = Some(Duration::from_secs(104));
+            let later = original.remaining().err().unwrap();
+            assert!(later.downcast_ref::<NativeClockError>().is_none());
+            assert_eq!(later.to_string(), "epoch_native_acquisition_refused");
+            assert_eq!(
+                primary.downcast_ref::<NativeClockError>(),
+                Some(&NativeClockError::RewindOrExpired)
+            );
+        }
+
+        let mut before_deadline = NativeAcquisition::fixture(
+            Digest::new(b"exclusive-deadline"),
+            std::process::id(),
+            Duration::from_secs(100),
+            MAX_ACQUISITION,
+        );
+        before_deadline.fixture_time = Some(Duration::from_secs(105) - Duration::from_nanos(1));
+        assert_eq!(
+            before_deadline.remaining().unwrap(),
+            Duration::from_nanos(1)
+        );
+    }
+
+    #[test]
+    fn matching_text_is_not_a_typed_native_clock_error() {
+        let untyped = anyhow::anyhow!("epoch_native_clock_rewind_or_expired")
+            .context("foreign error with identical text");
+        assert!(
+            untyped
+                .downcast_ref::<crate::error::NativeClockError>()
+                .is_none()
+        );
+    }
 
     #[test]
     fn fixture_observation_cannot_replace_a_native_clock() {

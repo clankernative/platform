@@ -126,6 +126,23 @@ impl std::fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
+/// The actual native observation rejected a rewind or its exclusive deadline.
+/// This closed category does not distinguish the two causes or grant a retry.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeClockError {
+    RewindOrExpired,
+}
+
+impl std::fmt::Display for NativeClockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RewindOrExpired => f.write_str("epoch_native_clock_rewind_or_expired"),
+        }
+    }
+}
+
+impl std::error::Error for NativeClockError {}
+
 pub(crate) fn classify(error: &anyhow::Error) -> Failure {
     if let Some(failure) = error.downcast_ref::<Failure>() {
         return *failure;
