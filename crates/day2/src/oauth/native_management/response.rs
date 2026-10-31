@@ -797,6 +797,7 @@ impl Sink {
 
 #[cfg(test)]
 mod host_source_tests {
+    use syn::parse::Parser;
     use syn::visit::{self, Visit};
 
     #[derive(Default)]
@@ -829,6 +830,24 @@ mod host_source_tests {
                 self.ordered.push("HostSql".into());
             }
             visit::visit_expr_struct(self, value);
+        }
+
+        fn visit_expr_macro(&mut self, value: &'ast syn::ExprMacro) {
+            // syn keeps ensure!'s condition as tokens. Parse its actual
+            // expression arguments so Runtime/native checks in that condition
+            // participate in the same AST mutation control.
+            if value.mac.path.is_ident("ensure") {
+                let arguments =
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                        .parse2(value.mac.tokens.clone())
+                        .expect("production ensure arguments");
+                for argument in &arguments {
+                    let mut nested = Calls::default();
+                    nested.visit_expr(argument);
+                    self.ordered.extend(nested.ordered);
+                }
+            }
+            visit::visit_expr_macro(self, value);
         }
     }
 
