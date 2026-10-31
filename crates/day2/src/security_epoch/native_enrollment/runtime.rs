@@ -2,6 +2,7 @@
 //! The selected trusted containerd/shim/runc and node init are in the TCB. This
 //! profile admits only task-init native hosts, never ancestor/cgroup guesses.
 
+use super::issuer_costs::FailureStage;
 use super::issuer_costs::{Costs, Operation, Subject};
 use crate::security_epoch::native_enrollment::{
     NativeRole, policy::EnrollmentPolicy, process::MessageProcess, runtime_wire as wire,
@@ -84,7 +85,11 @@ pub(super) fn current(
             role,
             &container.0,
             &container.1,
-            peer.data(),
+            PublicationActors {
+                peer: &mut *peer,
+                runtime: &mut runtime,
+                costs,
+            },
             acquisition,
         )
     })?;
@@ -154,10 +159,11 @@ fn kubernetes(
     role: NativeRole,
     container: &wire::Container,
     cri: &wire::CriStatus,
-    process: &super::protocol::ProcessData,
+    mut actors: PublicationActors<'_>,
     acquisition: &mut NativeAcquisition,
 ) -> Result<RuntimeBinding> {
     let selected = policy.workload(role);
+    let process = actors.peer.data().clone();
     let image = &selected.container;
     ensure!(
         label(container, "io.kubernetes.pod.namespace")? == selected.namespace.name
@@ -209,51 +215,29 @@ fn kubernetes(
             acquisition,
         )?,
     )?;
-    let pod = Zeroizing::new(http.request(
-        Route::Pod {
-            namespace: ns,
-            name: &reviewed.pod_name,
+    let observed = super::publication::current(
+        &mut PodPublication {
+            policy,
+            role,
+            reviewed: &reviewed,
+            container,
+            attempt: cri.metadata.as_ref().map(|metadata| metadata.attempt),
+            cri,
+            http: &http,
+            authorization: &authorization,
+            actors: &mut actors,
         },
-        &authorization,
-        None,
         acquisition,
-    )?);
-    let observed = runtime_profile::container(selected, &reviewed, &pod)?;
+    )?;
     let owner = observed.owner;
     let facts = observed.facts;
-    ensure!(
+    require_join(
         facts.container_id == format!("containerd://{}", container.id)
             && facts.node_name == policy.runtime.node_name,
-        "native_enrollment_runtime_pod_join"
-    );
-    let metadata = cri
-        .metadata
-        .as_ref()
-        .context("native_enrollment_cri_metadata")?;
-    ensure!(
-        cri.id == container.id
-            && cri.state == 1
-            && metadata.name == image.name
-            && u64::from(metadata.attempt) == facts.restart_count,
-        "native_enrollment_cri_lifecycle"
-    );
-    for name in [
-        "io.kubernetes.pod.namespace",
-        "io.kubernetes.pod.name",
-        "io.kubernetes.pod.uid",
-        "io.kubernetes.container.name",
-    ] {
-        ensure!(
-            cri.labels.get(name) == container.labels.get(name),
-            "native_enrollment_cri_pod_join"
-        );
-    }
-    let digest = image.image.as_str();
-    ensure!(
-        container.image.ends_with(&format!("@{digest}"))
-            && (cri.image_ref == digest || cri.image_ref.ends_with(&format!("@{digest}"))),
-        "native_enrollment_runtime_image_join"
-    );
+        "native_enrollment_runtime_pod_join",
+        FailureStage::PodRuntimeJoin,
+    )?;
+    require_cri(container, cri, image, facts.restart_count)?;
     use day2_capabilities::security_epoch::bootstrap::WorkloadKind;
     let replica = match selected.workload_kind {
         WorkloadKind::DeploymentV1 => Some(
@@ -335,4 +319,213 @@ fn kubernetes(
         node_uid: policy.runtime.node_uid.clone(),
         boot: process.boot.clone(),
     })
+}
+
+struct PublicationActors<'a> {
+    peer: &'a mut MessageProcess,
+    runtime: &'a mut MessageProcess,
+    costs: &'a Costs,
+}
+
+fn require_join(condition: bool, reason: &'static str, stage: FailureStage) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(reason).context(stage))
+    }
+}
+
+fn require_cri(
+    container: &wire::Container,
+    cri: &wire::CriStatus,
+    image: &day2_capabilities::security_epoch::bootstrap::ContainerSelection,
+    restart_count: u64,
+) -> Result<()> {
+    let metadata = cri
+        .metadata
+        .as_ref()
+        .context("native_enrollment_cri_metadata")
+        .context(FailureStage::CriLifecycle)?;
+    require_join(
+        cri.id == container.id
+            && cri.state == 1
+            && metadata.name == image.name
+            && u64::from(metadata.attempt) == restart_count,
+        "native_enrollment_cri_lifecycle",
+        FailureStage::CriLifecycle,
+    )?;
+    for name in [
+        "io.kubernetes.pod.namespace",
+        "io.kubernetes.pod.name",
+        "io.kubernetes.pod.uid",
+        "io.kubernetes.container.name",
+    ] {
+        require_join(
+            cri.labels.get(name) == container.labels.get(name),
+            "native_enrollment_cri_pod_join",
+            FailureStage::CriLabels,
+        )?;
+    }
+    let digest = image.image.as_str();
+    require_join(
+        container.image.ends_with(&format!("@{digest}"))
+            && (cri.image_ref == digest || cri.image_ref.ends_with(&format!("@{digest}"))),
+        "native_enrollment_runtime_image_join",
+        FailureStage::RuntimeImageJoin,
+    )
+}
+
+struct PodPublication<'a, 'actors> {
+    policy: &'a EnrollmentPolicy,
+    role: NativeRole,
+    reviewed: &'a ReviewedSubject,
+    container: &'a wire::Container,
+    attempt: Option<u32>,
+    cri: &'a wire::CriStatus,
+    http: &'a NativeHttp,
+    authorization: &'a reqwest::header::HeaderValue,
+    actors: &'a mut PublicationActors<'actors>,
+}
+
+impl super::publication::Port for PodPublication<'_, '_> {
+    fn check(&mut self, original: &mut NativeAcquisition) -> Result<()> {
+        self.actors
+            .runtime
+            .check_identity(original, &self.actors.costs.hashes(Subject::Containerd))?;
+        self.actors
+            .peer
+            .check_identity(original, &self.actors.costs.hashes(Subject::Requester))
+    }
+
+    fn observe(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<runtime_profile::ContainerPublication> {
+        let selected = self.policy.workload(self.role);
+        let pod = Zeroizing::new(
+            self.http
+                .request(
+                    Route::Pod {
+                        namespace: &selected.namespace.name,
+                        name: &self.reviewed.pod_name,
+                    },
+                    self.authorization,
+                    None,
+                    original,
+                )
+                .context(FailureStage::PodRead)?,
+        );
+        let observed = runtime_profile::publication(
+            selected,
+            self.reviewed,
+            &pod,
+            &self.policy.runtime.node_name,
+            &self.container.id,
+            self.attempt,
+        )?;
+        if matches!(
+            &observed,
+            runtime_profile::ContainerPublication::AwaitPublication
+        ) {
+            require_cri(self.container, self.cri, &selected.container, 0)?;
+        }
+        Ok(observed)
+    }
+
+    fn wait(
+        &mut self,
+        duration: std::time::Duration,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let timeout = rustix::event::Timespec::try_from(original.remaining()?.min(duration))?;
+        // No grant or filesystem/epoch effect occurs here. The same actual
+        // actors are checked before and after this bounded kernel wait.
+        rustix::event::poll(&mut [], Some(&timeout))?;
+        original.remaining()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use day2_capabilities::{Digest, security_epoch::bootstrap::ContainerSelection};
+
+    // Wire DATA only; this fixture cannot construct a process, issuer or role.
+    fn cri_fixture() -> (wire::Container, wire::CriStatus, ContainerSelection) {
+        let image = ContainerSelection {
+            name: "native".into(),
+            image: Digest::new(b"image"),
+        };
+        let labels = [
+            ("io.kubernetes.pod.namespace", "namespace"),
+            ("io.kubernetes.pod.name", "selected"),
+            ("io.kubernetes.pod.uid", "selected-uid"),
+            ("io.kubernetes.container.name", "native"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let container = wire::Container {
+            id: "7".repeat(64),
+            labels,
+            image: format!("registry/native@{}", image.image.as_str()),
+            runtime: None,
+        };
+        let cri = wire::CriStatus {
+            id: container.id.clone(),
+            metadata: Some(wire::CriMetadata {
+                name: image.name.clone(),
+                attempt: 0,
+            }),
+            state: 1,
+            image_ref: image.image.as_str().into(),
+            labels: container.labels.clone(),
+        };
+        (container, cri, image)
+    }
+
+    #[test]
+    fn cri_publication_guards_refuse_lifecycle_identity_labels_and_image_replacement() {
+        let (container, cri, image) = cri_fixture();
+        assert!(require_cri(&container, &cri, &image, 0).is_ok());
+        for change in 0..11 {
+            let mut bad = cri.clone();
+            match change {
+                0 => bad.id = "8".repeat(64),
+                1 => bad.state = 0,
+                2 => bad.state = 2,
+                3 => bad.metadata = None,
+                4 => bad.metadata.as_mut().unwrap().name = "foreign".into(),
+                5 => bad.metadata.as_mut().unwrap().attempt = 1,
+                6 => {
+                    bad.labels.remove("io.kubernetes.pod.namespace");
+                }
+                7 => {
+                    bad.labels
+                        .insert("io.kubernetes.pod.name".into(), "foreign".into());
+                }
+                8 => {
+                    bad.labels
+                        .insert("io.kubernetes.pod.uid".into(), "foreign".into());
+                }
+                9 => {
+                    bad.labels
+                        .insert("io.kubernetes.container.name".into(), "foreign".into());
+                }
+                _ => bad.image_ref = Digest::new(b"foreign").as_str().into(),
+            }
+            assert!(
+                require_cri(&container, &bad, &image, 0).is_err(),
+                "change {change}"
+            );
+        }
+        assert!(require_cri(&container, &cri, &image, 1).is_err());
+        let mut replacement = container.clone();
+        replacement.image = format!("registry/foreign@{}", Digest::new(b"foreign").as_str());
+        assert!(require_cri(&replacement, &cri, &image, 0).is_err());
+        let mut restarted = cri;
+        restarted.metadata.as_mut().unwrap().attempt = 1;
+        assert!(require_cri(&container, &restarted, &image, 1).is_ok());
+    }
 }

@@ -215,6 +215,34 @@ pub(super) enum Outcome {
     ParentAfterError,
 }
 
+/// Closed diagnostic DATA attached to an actual failed Result. No provider
+/// body, foreign error text or last-entered-phase inference is exported.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::security_epoch) enum FailureStage {
+    PublicationBefore,
+    PodRead,
+    PodIdentity,
+    PendingContainer,
+    ContainerFacts,
+    PublicationAfterRead,
+    PublicationWait,
+    PublicationAfterWait,
+    PublicationLimit,
+    PodRuntimeJoin,
+    CriLifecycle,
+    CriLabels,
+    RuntimeImageJoin,
+}
+
+impl std::fmt::Display for FailureStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native_enrollment_runtime_refused")
+    }
+}
+
+impl std::error::Error for FailureStage {}
+
 pub(super) struct Recorder<W> {
     output: W,
     records: u8,
@@ -230,9 +258,18 @@ pub(super) struct WorkCapture {
     ordinal: Option<u64>,
     before: crate::security_epoch::admission_work::Snapshot,
     signed_grant: Option<day2_capabilities::Digest>,
+    request_failure_stage: Option<FailureStage>,
 }
 
 impl WorkCapture {
+    pub(super) fn record_request_result(&mut self, result: &anyhow::Result<()>) {
+        self.request_failure_stage = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<FailureStage>())
+            .copied();
+    }
+
     pub(super) fn bind_grant(&mut self, grant: &super::protocol::SignedStage) {
         // No raw public key, nonce, process, runtime or provider value is
         // exported. Missing serialization is unknown diagnostic provenance.
@@ -256,6 +293,7 @@ impl<W: Write> Recorder<W> {
             ordinal: self.work_records,
             before: crate::security_epoch::admission_work::snapshot(),
             signed_grant: None,
+            request_failure_stage: None,
         }
     }
 
@@ -294,14 +332,16 @@ impl<W: Write> Recorder<W> {
             format: &'static str,
             connection_ordinal: Option<u64>,
             signed_grant: Option<day2_capabilities::Digest>,
+            request_failure_stage: Option<FailureStage>,
             outcome: Outcome,
             before: crate::security_epoch::admission_work::Snapshot,
             after: crate::security_epoch::admission_work::Snapshot,
         }
         let json = serde_json::to_string(&Record {
-            format: "day2_native_issuer_work_v1",
+            format: "day2_native_issuer_work_v2",
             connection_ordinal: capture.ordinal,
             signed_grant: capture.signed_grant,
+            request_failure_stage: capture.request_failure_stage,
             outcome,
             before: capture.before,
             after,
@@ -396,6 +436,38 @@ pub(super) fn preserve_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn request_failure_stage_comes_from_actual_error_and_never_formats_foreign_error() {
+        #[derive(Debug)]
+        struct Foreign;
+        impl std::fmt::Display for Foreign {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("foreign display must never run")
+            }
+        }
+        impl std::error::Error for Foreign {}
+        let mut recorder = Recorder::new(Vec::new());
+        recorder.records = RECORD_LIMIT;
+        let costs = recorder.connection();
+        let mut capture = recorder.begin_work_capture();
+        capture.record_request_result(&Err(
+            anyhow::Error::new(Foreign).context(FailureStage::PodRead)
+        ));
+        assert_eq!(capture.request_failure_stage, Some(FailureStage::PodRead));
+        recorder
+            .emit_connection(&costs, capture, Outcome::RequestError)
+            .unwrap();
+        let text = std::str::from_utf8(&recorder.output).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(text.trim().strip_prefix(WORK_PREFIX).unwrap()).unwrap();
+        assert_eq!(record["request_failure_stage"], "pod_read");
+        let mut capture = recorder.begin_work_capture();
+        capture.record_request_result(&Err(anyhow::Error::new(Foreign)));
+        assert_eq!(capture.request_failure_stage, None);
+        capture.record_request_result(&Ok(()));
+        assert_eq!(capture.request_failure_stage, None);
+    }
+
     fn production_capture_order(source: &str) -> bool {
         use syn::visit::Visit;
 
@@ -439,9 +511,17 @@ mod tests {
             captures: usize,
             exports: usize,
             serve: usize,
+            results: usize,
         }
         impl<'ast> Visit<'ast> for Wiring {
             fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if named(&call.receiver, "capture") && call.method == "record_request_result" {
+                    self.results += usize::from(
+                        call.args.len() == 1
+                            && matches!(&call.args[0], syn::Expr::Reference(reference)
+                            if reference.mutability.is_none() && named(&reference.expr, "served")),
+                    );
+                }
                 if named(&call.receiver, "recorder") {
                     self.captures += usize::from(call.method == "begin_work_capture");
                     self.exports += usize::from(
@@ -486,7 +566,11 @@ mod tests {
                     && call.args.len() == 1
                     && matches!(&call.args[0], syn::Expr::Reference(reference)
                         if reference.mutability.is_none() && named(&reference.expr, "stage")));
-        wiring.captures == 1 && wiring.exports == 2 && wiring.serve == 1 && joined
+        wiring.captures == 1
+            && wiring.exports == 2
+            && wiring.serve == 1
+            && wiring.results == 1
+            && joined
     }
 
     #[test]
@@ -515,6 +599,10 @@ mod tests {
             (
                 "capture.bind_grant(&stage);",
                 "if false { capture.bind_grant(&stage); }",
+            ),
+            (
+                "capture.record_request_result(&served);",
+                "capture.record_request_result(&unrelated);",
             ),
         ] {
             let changed = source.replacen(before, after, 1);
@@ -567,6 +655,7 @@ mod tests {
                     ordinal: Some(u64::MAX),
                     before: crate::security_epoch::admission_work::Snapshot::maximal_fixture(),
                     signed_grant: Some(day2_capabilities::Digest::new(b"diagnostic-only")),
+                    request_failure_stage: Some(FailureStage::PublicationAfterRead),
                 },
                 Outcome::Completed,
                 crate::security_epoch::admission_work::Snapshot::maximal_fixture(),
@@ -605,7 +694,7 @@ mod tests {
             usize::from(RECORD_LIMIT)
         );
         for (index, record) in work.iter().enumerate() {
-            assert_eq!(record["format"], "day2_native_issuer_work_v1");
+            assert_eq!(record["format"], "day2_native_issuer_work_v2");
             assert_eq!(record["connection_ordinal"], index + 1);
             assert_eq!(record["outcome"], "completed");
             assert!(record["signed_grant"].is_null()); // No native grant fixture.

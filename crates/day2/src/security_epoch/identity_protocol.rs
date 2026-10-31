@@ -247,11 +247,7 @@ impl PodObservation {
     }
 }
 
-pub(super) fn pod(
-    role: &GkeRoleSelection,
-    subject: &ReviewedSubject,
-    bytes: &[u8],
-) -> Result<PodObservation> {
+fn selected_pod(role: &GkeRoleSelection, subject: &ReviewedSubject, bytes: &[u8]) -> Result<Value> {
     let value = decode(bytes)?;
     live_object(
         &value,
@@ -262,8 +258,36 @@ pub(super) fn pod(
         Some(&role.namespace.name),
     )?;
     ensure!(
-        string(&value, "/spec/serviceAccountName")? == role.kubernetes_service_account.name
-            && string(&value, "/status/phase")? == "Running",
+        string(&value, "/spec/serviceAccountName")? == role.kubernetes_service_account.name,
+        "epoch_identity_pod_not_running_or_wrong_ksa"
+    );
+    Ok(value)
+}
+
+pub(super) fn pod(
+    role: &GkeRoleSelection,
+    subject: &ReviewedSubject,
+    bytes: &[u8],
+) -> Result<PodObservation> {
+    let value = selected_pod(role, subject, bytes)?;
+    ensure!(
+        string(&value, "/status/phase")? == "Running",
+        "epoch_identity_pod_not_running_or_wrong_ksa"
+    );
+    let owner = controlling_owner(&value)?;
+    Ok(PodObservation { value, owner })
+}
+
+/// Selected lifecycle DATA, never an admitted container. Ordinary consumers
+/// still require Running through `pod`; only cold publication may await Pending.
+pub(super) fn pod_publication(
+    role: &GkeRoleSelection,
+    subject: &ReviewedSubject,
+    bytes: &[u8],
+) -> Result<PodObservation> {
+    let value = selected_pod(role, subject, bytes)?;
+    ensure!(
+        matches!(string(&value, "/status/phase")?, "Running" | "Pending"),
         "epoch_identity_pod_not_running_or_wrong_ksa"
     );
     let owner = controlling_owner(&value)?;

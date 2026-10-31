@@ -812,6 +812,16 @@ impl NativeAcquisition {
             fixture_time: Some(origin),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn fixture_observe(&mut self, now: Duration) -> Result<()> {
+        if self.fixture_time.is_none() {
+            self.refuse();
+            anyhow::bail!("epoch_native_clock_fixture_required");
+        }
+        self.fixture_time = Some(now);
+        self.sample().map(|_| ())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -835,6 +845,19 @@ pub(super) fn boottime() -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_observation_cannot_replace_a_native_clock() {
+        let mut original = NativeAcquisition::fixture(
+            Digest::new(b"test-only"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        original.fixture_time = None;
+        assert!(original.fixture_observe(Duration::from_secs(100)).is_err());
+        assert!(original.remaining().is_err());
+    }
 
     #[test]
     fn missing_diagnostic_identity_serializes_only_unknown_values() {
