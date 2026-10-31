@@ -1211,10 +1211,6 @@ impl Runtime {
 
     /// A session may belong to a principal whose only permission is acting for
     /// others. This admits the session, never an operation or a chosen target.
-    pub(crate) fn may_request_delegation(&self, authenticated: &str) -> Result<bool> {
-        self.sql_read(|db| self.may_request_delegation_in(db, authenticated))
-    }
-
     pub(crate) fn may_request_delegation_in(
         &self,
         db: &Connection,

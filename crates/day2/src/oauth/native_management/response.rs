@@ -579,7 +579,7 @@ enum ResponseStart {
     Prepared((u64, Operation)),
     Host {
         host: std::sync::Arc<crate::web::Host>,
-        request: crate::web::PreparedHostRequest,
+        request: Box<crate::web::PreparedHostRequest>,
         reply: HostReplySlot,
     },
 }
@@ -610,7 +610,7 @@ impl Sink {
             transport,
             ResponseStart::Host {
                 host,
-                request,
+                request: Box::new(request),
                 reply,
             },
         )
@@ -722,7 +722,7 @@ impl Sink {
                                         identity: &self.identity,
                                         refused: guard.refused.clone(),
                                     };
-                                    host.execute_host_request(request, &mut sql)?
+                                    host.execute_host_request(*request, &mut sql)?
                                 };
                                 // No SQL loan or connection survives body preparation,
                                 // provider reobservation or a transport suspension.
