@@ -593,6 +593,11 @@ pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationEr
             Counter::MetadataFlavor => Category::ResponseMetadataFlavor,
         };
     }
+    if let Some(clock) = error.downcast_ref::<crate::error::NativeClockError>() {
+        return match clock {
+            crate::error::NativeClockError::RewindOrExpired => Category::ClockExpiredOrRewound,
+        };
+    }
     // Inspect only stored message DATA against a closed list. Never format the
     // error, walk Display causes, or emit an unrecognized string.
     let code = error
@@ -627,8 +632,7 @@ pub(super) fn preparation_error_category(error: &anyhow::Error) -> PreparationEr
             | "native_enrollment_process_leader",
         ) => return Category::ProcessIdentityChanged,
         Some(
-            "epoch_native_clock_rewind_or_expired"
-            | "epoch_native_acquisition_expired"
+            "epoch_native_acquisition_expired"
             | "epoch_native_narrowed_acquisition_expired"
             | "epoch_counter_credential_expired"
             | "epoch_counter_connection_clock_rewind"
@@ -2558,7 +2562,7 @@ mod tests {
         recorder
             .refuse(Some(&PreparationFailure::at(
                 PreparationStep::OriginalRetention,
-                anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+                anyhow::anyhow!(crate::error::NativeClockError::RewindOrExpired),
             )))
             .unwrap();
         assert_eq!(records(&recorder.output).len(), 3);
@@ -2722,10 +2726,7 @@ mod tests {
                 Category::RemoteStageExpired,
             ),
             ("storage_peer_remote_stage_expired /SECRET", Category::Other),
-            (
-                "epoch_native_clock_rewind_or_expired",
-                Category::ClockExpiredOrRewound,
-            ),
+            ("epoch_native_clock_rewind_or_expired", Category::Other),
             (
                 "native_enrollment_stage_expired",
                 Category::ClockExpiredOrRewound,
@@ -2840,7 +2841,7 @@ mod tests {
     fn preparation_progress_keeps_inner_boundary_and_fixed_private_record_bound() {
         let error = PreparationFailure::with_progress(
             PreparationStep::OriginalRetentionBefore,
-            anyhow::anyhow!("epoch_native_clock_rewind_or_expired"),
+            anyhow::anyhow!(crate::error::NativeClockError::RewindOrExpired),
             PreparationProgress {
                 last_checked_us: Some(u32::MAX),
                 ..PreparationProgress::default()
@@ -2857,8 +2858,8 @@ mod tests {
             },
         );
         assert_eq!(
-            error.downcast_ref::<&'static str>(),
-            Some(&"epoch_native_clock_rewind_or_expired")
+            error.downcast_ref::<crate::error::NativeClockError>(),
+            Some(&crate::error::NativeClockError::RewindOrExpired)
         );
         let (mut recorder, _, _, _, _, _) = fixture();
         recorder.enrolled(Digest::new(b"Controller")).unwrap();
@@ -2891,6 +2892,42 @@ mod tests {
         }
     }
     impl std::error::Error for MustNotDisplay {}
+
+    #[test]
+    fn actual_typed_clock_failure_keeps_its_category_without_formatting_context() {
+        use crate::error::NativeClockError;
+        use crate::security_epoch::NativeAcquisition;
+        use std::time::Duration;
+
+        let mut clock = NativeAcquisition::fixture(
+            Digest::new(b"typed-clock-category"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        );
+        let error = clock
+            .fixture_observe(Duration::from_secs(105))
+            .unwrap_err()
+            .context(MustNotDisplay);
+        assert_eq!(
+            preparation_error_category(&error),
+            PreparationErrorCategory::ClockExpiredOrRewound
+        );
+        let error = PreparationFailure::at(PreparationStep::OriginalRetention, error);
+        assert_eq!(
+            error.downcast_ref::<NativeClockError>(),
+            Some(&NativeClockError::RewindOrExpired)
+        );
+        let (mut recorder, _, _, _, _, _) = fixture();
+        recorder.enrolled(Digest::new(b"Controller")).unwrap();
+        recorder.enter(FailurePhase::Preparation);
+        recorder.refuse(Some(&error)).unwrap();
+        let rows = records(&recorder.output);
+        assert_eq!(
+            rows[1]["observation"]["preparation"]["category"],
+            "clock_expired_or_rewound"
+        );
+    }
 
     #[test]
     fn receive_boundary_categories_preserve_causes_without_exporting_error_text() {
@@ -3167,13 +3204,13 @@ mod tests {
             (FailurePhase::ActivateDispatch, "activate_dispatch"),
             (FailurePhase::ActivateSettle, "activate_settle"),
         ] {
-            let cause =
-                anyhow::anyhow!("epoch_native_clock_rewind_or_expired").context(MustNotDisplay);
+            let cause = anyhow::anyhow!(crate::error::NativeClockError::RewindOrExpired)
+                .context(MustNotDisplay);
             let error = PreparationFailure::at(PreparationStep::BootstrapPeer, cause);
             let error = PreparationFailure::at(PreparationStep::BootstrapFilePeer, error);
             assert_eq!(
-                error.downcast_ref::<&str>(),
-                Some(&"epoch_native_clock_rewind_or_expired")
+                error.downcast_ref::<crate::error::NativeClockError>(),
+                Some(&crate::error::NativeClockError::RewindOrExpired)
             );
             let (mut recorder, _, _, _, _, _) = fixture();
             recorder.enrolled(Digest::new(b"Controller")).unwrap();
