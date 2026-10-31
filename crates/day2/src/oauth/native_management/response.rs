@@ -799,7 +799,11 @@ fn accepted_query_in(
 
 impl QueryParent<'_, '_> {
     pub(crate) fn require_runtime(&mut self, runtime: &crate::store::Runtime) -> Result<()> {
-        self.sql.prepare_sql(runtime)
+        let result = self.sql.prepare_sql(runtime);
+        if result.is_err() {
+            self.sql.refuse();
+        }
+        result
     }
 
     pub(crate) fn refuse(&mut self) {
@@ -2178,6 +2182,14 @@ mod query_tests {
         {
             return false;
         }
+        let Some(require_runtime) = one_method(source, "QueryParent", "require_runtime") else {
+            return false;
+        };
+        if !require_runtime.iter().any(|call| call == "prepare_sql")
+            || !require_runtime.iter().any(|call| call == "refuse")
+        {
+            return false;
+        }
         let Some(connection) = one_method(source, "QueryParent", "connection_inner") else {
             return false;
         };
@@ -2214,6 +2226,10 @@ mod query_tests {
     {
         let source = include_str!("response.rs");
         assert!(query_owner_wiring(source));
+        assert!(!query_owner_wiring(&source.replace(
+            "let result = self.sql.prepare_sql(runtime);",
+            "let result = Ok(());"
+        )));
         for (from, to) in [
             (
                 "host.selected_query_operation(&request)",
