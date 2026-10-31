@@ -832,14 +832,14 @@ mod host_source_tests {
             visit::visit_expr_struct(self, value);
         }
 
-        fn visit_expr_macro(&mut self, value: &'ast syn::ExprMacro) {
+        fn visit_macro(&mut self, value: &'ast syn::Macro) {
             // syn keeps ensure!'s condition as tokens. Parse its actual
             // expression arguments so Runtime/native checks in that condition
             // participate in the same AST mutation control.
-            if value.mac.path.is_ident("ensure") {
+            if value.path.is_ident("ensure") {
                 let arguments =
                     syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
-                        .parse2(value.mac.tokens.clone())
+                        .parse2(value.tokens.clone())
                         .expect("production ensure arguments");
                 for argument in &arguments {
                     let mut nested = Calls::default();
@@ -847,8 +847,29 @@ mod host_source_tests {
                     self.ordered.extend(nested.ordered);
                 }
             }
-            visit::visit_expr_macro(self, value);
+            visit::visit_macro(self, value);
         }
+    }
+
+    #[test]
+    fn production_macro_visitor_covers_semicolon_statements_and_expression_arguments_once() {
+        let file = syn::parse_file(
+            r#"fn example() {
+            ensure!(std::ptr::eq(left, right), "statement");
+            let _ = ensure!(runtime.uses_native_storage(), "expression");
+        }"#,
+        )
+        .unwrap();
+        let syn::Item::Fn(function) = &file.items[0] else {
+            panic!("fixture function");
+        };
+        assert!(
+            matches!(function.block.stmts[0], syn::Stmt::Macro(_)),
+            "retain the actual production statement shape"
+        );
+        let mut calls = Calls::default();
+        calls.visit_file(&file);
+        assert_eq!(calls.ordered, ["std::ptr::eq", "uses_native_storage"]);
     }
 
     fn methods(source: &str, owner: &str, name: &str) -> Vec<Vec<String>> {
