@@ -805,7 +805,10 @@ fn history(seed: u64) -> Result<Vec<Value>> {
                         anyhow::bail!("history impersonation accepted");
                     };
                     ensure!(
-                        error.to_string() == "invalid_notification",
+                        matches!(
+                            error.downcast_ref::<crate::error::Failure>(),
+                            Some(crate::error::Failure::ResourceForbidden)
+                        ),
                         "impersonation refused at the wrong boundary"
                     );
                     false
