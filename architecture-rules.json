@@ -213,6 +213,7 @@
     "crates/day2/src/integrations/linear_coverage_tests.rs",
     "crates/day2/src/integrations/linear_work.rs",
     "crates/day2/src/integrations/mod.rs",
+    "crates/day2/src/integrations/notifications_coverage_tests.rs",
     "crates/day2/src/integrations/object_store.rs",
     "crates/day2/src/integrations/openai.rs",
     "crates/day2/src/integrations/parity_tests.rs",

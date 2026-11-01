@@ -99,3 +99,10 @@ it. A provider can declare `world: "stripe.simulated.sqlite"` with nothing behin
 it and compile — verified by adding exactly that and watching it build. Closing it
 is the coverage assertion's job: every provider's world must actually be exercised.
 Until then the compiler guarantees a simulation is *declared*, not that it *runs*.
+
+The [local Notifications harness](NOTIFICATIONS-SIMULATION.md) exercises the
+actual operation/resource authorization and SQLite adapter. Recipient resolution
+is checked as a current-actor projection; mailbox reads and sends must reflect
+their own world. Constant, missing and wrong-world substitutes fail the same
+checker. This retires only Notifications' three reviewed pending-action records;
+other providers keep their explicit debt until their own harnesses land.

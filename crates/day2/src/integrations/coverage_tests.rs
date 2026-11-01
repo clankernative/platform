@@ -28,9 +28,9 @@
 //! against two different worlds has not demonstrated a world at all.
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
-//! live Carta native capture/read pipelines, and delegation's admitted-resource
-//! offline handler and the scoped synthetic Linear and operator-alert handlers. Remaining pending
-//! native/synthetic providers have explicit debt below.
+//! live Carta native capture/read pipelines, the admitted local mailbox, delegation's
+//! admitted-resource offline handler and the scoped synthetic Linear and operator-alert
+//! handlers. Remaining pending native/synthetic providers have explicit debt below.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -61,6 +61,8 @@ mod alerts;
 mod delegation;
 #[path = "linear_coverage_tests.rs"]
 mod linear;
+#[path = "notifications_coverage_tests.rs"]
+mod notifications;
 
 /// How an action demonstrates that its declared world is real.
 ///
@@ -106,6 +108,9 @@ enum Demonstration {
     LinearAdapter,
     /// Real scoped operator-alert capability admission and committed world.
     OperatorAlertsAdapter,
+    /// The real resource/operation-authorized SQLite mailbox. Recipient lookup
+    /// is a local actor projection; latest/send demonstrate provider state.
+    NotificationsAdapter,
 }
 
 fn demonstration(action: Action) -> Demonstration {
@@ -148,10 +153,10 @@ fn demonstration(action: Action) -> Demonstration {
         Action::OpenAiGenerate => Demonstration::ResultReflectsWorld,
         Action::LinearEnsureAccess | Action::LinearSuspend => Demonstration::LinearAdapter,
         Action::OperatorAlertsSend => Demonstration::OperatorAlertsAdapter,
-        Action::NotificationsResolve
-        | Action::NotificationsLatest
-        | Action::NotificationsSend
-        | Action::GoogleDirectorySnapshot
+        Action::NotificationsResolve | Action::NotificationsLatest | Action::NotificationsSend => {
+            Demonstration::NotificationsAdapter
+        }
+        Action::GoogleDirectorySnapshot
         | Action::GoogleDirectoryRecord
         | Action::GoogleDirectoryCreateUser
         | Action::GoogleDirectoryPatchAttributes
@@ -186,24 +191,6 @@ const ADAPTER_REMOVAL: &str = "Remove when every action of this provider is driv
 // Keep individual action keys: adding an action to an existing pending provider
 // must also fail until its exact debt and removal condition receive review.
 const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
-    PendingDebt {
-        action: Action::NotificationsResolve,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::NotificationsLatest,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::NotificationsSend,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
     PendingDebt {
         action: Action::GoogleDirectorySnapshot,
         owner: "platform Google directory/people adapter",
@@ -679,6 +666,17 @@ fn worlds_in_scope(
                 &path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
+            if *provider == Provider::LocalNotifications {
+                state.insert(
+                    world,
+                    Some(connection.query_row(
+                        "SELECT state FROM notification_world WHERE id=1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?),
+                );
+                continue;
+            }
             if matches!(
                 provider,
                 Provider::SyntheticGoogleDirectory
@@ -762,6 +760,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     }
     if action.provider() == Provider::SyntheticOperatorAlerts {
         return alerts::observe(action, variant);
+    }
+    if action.provider() == Provider::LocalNotifications {
+        return notifications::observe(action, variant);
     }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
@@ -1240,6 +1241,7 @@ fn check(
     match demonstration(action) {
         Demonstration::LinearAdapter => linear::check(action, observe),
         Demonstration::OperatorAlertsAdapter => alerts::check(action, observe),
+        Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
         Demonstration::NativeAdapterRead => {
@@ -1494,7 +1496,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 8);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 5);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 
