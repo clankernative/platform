@@ -203,6 +203,79 @@ fn interactive_failure_campaign_confirms_both_profiles_without_staging_credentia
 }
 
 #[test]
+fn pure_authority_projection_matches_final_manifest_and_rejects_each_contract_drift() -> Result<()>
+{
+    let path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("credential fixture required")?,
+    );
+    let loaded = LoadedArtifact::load(&path)?;
+    let artifact = loaded.contract();
+    let definitions = artifact
+        .app_contract
+        .as_ref()
+        .context("checked app contract")?
+        .operations
+        .iter()
+        .map(|(name, operation)| {
+            (
+                name.clone(),
+                day2::credential_authority::Definition {
+                    execution: operation.execution.clone(),
+                    credential_access: operation.credential_access.clone(),
+                    required_all_rows: operation.required_all_rows.clone(),
+                    export_version: operation.export_version,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let derive = |definitions: &BTreeMap<String, day2::credential_authority::Definition>| {
+        day2::credential_authority::manifest_from_projection(
+            &artifact.credential_declarations,
+            &artifact.operations,
+            &artifact.schema,
+            &artifact.outputs,
+            definitions,
+        )
+    };
+    let expected = &artifact.credential_manifest;
+    assert!(!expected.is_empty());
+    assert_eq!(derive(&definitions)?, *expected);
+    let root = expected[0].roots.keys().next().context("credential root")?;
+    for mutation in [
+        "version", "access", "internal", "all_rows", "missing", "foreign",
+    ] {
+        let mut changed = definitions.clone();
+        match mutation {
+            "version" => changed.get_mut(root).unwrap().export_version += 1,
+            "access" => changed.get_mut(root).unwrap().credential_access.enabled = false,
+            "internal" => changed.get_mut(root).unwrap().execution.internal = true,
+            "all_rows" => changed
+                .get_mut(root)
+                .unwrap()
+                .required_all_rows
+                .push("missing_model".into()),
+            "missing" => {
+                changed.remove(root);
+            }
+            "foreign" => {
+                changed.insert("foreign.operation".into(), definitions[root].clone());
+            }
+            _ => unreachable!(),
+        }
+        if let Ok(observed) = derive(&changed) {
+            assert_ne!(observed, *expected, "unbound {mutation}");
+        }
+    }
+    // A valid version change must derive a different full contract, rather
+    // than only making an invalid projection fail to parse.
+    let mut changed = definitions.clone();
+    changed.get_mut(root).unwrap().export_version += 1;
+    assert_ne!(derive(&changed)?, *expected);
+    Ok(())
+}
+
+#[test]
 fn ordinary_creation_refuses_credentials_before_output_and_verification_preserves_complete_selection()
 -> Result<()> {
     use day2_capabilities::credentials::ManagementPredicate;

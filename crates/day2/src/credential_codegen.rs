@@ -37,9 +37,17 @@ pub fn provisional_module<'a>(names: impl IntoIterator<Item = &'a str>) -> Resul
 
 /// Evaluate only pure App.definition metadata, never an application handler.
 pub fn probe(catalog: &crate::registry::Catalog) -> String {
-    let projection = crate::credential_declaration::projection(catalog, "App.definition");
+    let projection = crate::credential_declaration::projection(catalog, "product");
+    let mut operations = Vec::new();
+    for (kind, definitions) in [("command", &catalog.commands), ("query", &catalog.queries)] {
+        for name in definitions.keys() {
+            let execution = crate::app_contract::execution_projection("operation", kind);
+            operations.push(format!("{{\n        operation = product.operations.{name}\n        {execution}\n        {{ operation: product.namespace.concat(\".{name}\"), definition: {{ execution: execution_metadata, credential_access: operation.credential_access(), required_all_rows: operation.required_all_rows(), export_version: operation.export_version() }} }}\n}}"));
+        }
+    }
+    let operations = operations.join(", ");
     format!(
-        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport App\nstep : Str -> Str\nstep = |_| {projection}\n"
+        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport App\nimport pf.Api\nstep : Str -> Str\nstep = |_| {{\n    product = App.definition\n    Json.to_str({{ families: {projection}, operations: [{operations}] }})\n}}\n"
     )
 }
 

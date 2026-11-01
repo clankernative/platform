@@ -1002,6 +1002,28 @@ fn inferred_catalog(table: &Table) -> Result<Catalog> {
 }
 
 impl Catalog {
+    pub fn operation_inventory(&self, namespace: &str) -> Result<Vec<crate::artifact::Operation>> {
+        day2_contracts::names::identifier(namespace)?;
+        let mut names = BTreeSet::new();
+        let mut operations = Vec::new();
+        for (kind, entries) in [("command", &self.commands), ("query", &self.queries)] {
+            for (name, operation) in entries {
+                day2_contracts::names::identifier(name)?;
+                ensure!(
+                    names.insert(name),
+                    "ambiguous checked operation registration"
+                );
+                operations.push(crate::artifact::Operation {
+                    name: format!("{namespace}.{name}"),
+                    kind: kind.into(),
+                    input_type: operation.input.clone(),
+                    output_type: operation.output.clone(),
+                });
+            }
+        }
+        Ok(operations)
+    }
+
     pub fn modules(
         &self,
         schema: &Schema,

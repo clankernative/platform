@@ -36,6 +36,7 @@ struct Bound {
     declarations: day2::registry::Catalog,
     connections: Vec<day2::connection_declaration::ConnectionDeclaration>,
     credentials: Vec<day2::credential_declaration::FamilyDeclaration>,
+    credential_manifest: Vec<day2::credential_authority::ManifestFamily>,
 }
 
 fn prepare(
@@ -225,6 +226,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
         declarations: day2::registry::Catalog::default(),
         connections: Vec::new(),
         credentials: Vec::new(),
+        credential_manifest: Vec::new(),
     })
 }
 
@@ -331,6 +333,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         declarations,
         connections,
         credentials,
+        credential_manifest,
     } = bound;
     let mut worker = Worker::start(&stage.join("worker"))?;
     let raw_manifest = worker.exchange(b"manifest")?;
@@ -398,9 +401,15 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
     );
     if !credentials.is_empty() {
         artifact["credential_declarations"] = serde_json::to_value(credentials)?;
-        let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
-        artifact["credential_manifest"] =
-            serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
+    }
+    let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
+    let final_manifest = day2::credential_authority::manifest(&with_declarations)?;
+    ensure!(
+        final_manifest == *credential_manifest,
+        "credential authority changed after SDK binding"
+    );
+    if !final_manifest.is_empty() {
+        artifact["credential_manifest"] = serde_json::to_value(final_manifest)?;
     }
     let final_connections =
         day2::connection_declaration::decode(&worker.exchange(b"connection-contract")?, &checked)?;
@@ -786,11 +795,20 @@ pub fn execute(
                             budget,
                         )?;
                         let raw = Worker::start(&executable)?.exchange(b"credential-contract")?;
-                        bound.credentials = day2::credential_declaration::decode_catalog(
+                        let discovery = day2::credential_declaration::decode_discovery(
                             &raw,
                             &catalog,
                             &prepared.namespace,
                         )?;
+                        bound.credentials = discovery.families;
+                        bound.credential_manifest =
+                            day2::credential_authority::manifest_from_projection(
+                                &bound.credentials,
+                                &catalog.operation_inventory(&prepared.namespace)?,
+                                &bound.schema,
+                                &bound.outputs,
+                                &discovery.operations,
+                            )?;
                         fs::remove_file(source)?;
                         fs::remove_file(executable)?;
                     }

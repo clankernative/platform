@@ -34,8 +34,11 @@ The normal build evaluates pure credential declarations in an isolated compiled
 probe after binding checked operation handles and before binding the complete SDK. Target codecs are checked against the compiler's
 registration inventory. The final worker must return exactly those same family
 IDs, profiles, grant modes, roots and lifetimes before artifact publication;
-the probe does not execute handlers or supply authority. Full root eligibility
-and authority derivation still happen against the final checked app contract.
+the probe does not execute handlers or supply authority. It also projects complete
+operation authority metadata, using the same canonical interpreter as the final
+checked app contract. The build derives the full manifest before SDK binding and
+requires exact equality with the final worker-derived manifest before publication.
+Root eligibility and complete child/path closures are checked in both derivations.
 Artifact load recompares the declarations with the native worker. The build rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked

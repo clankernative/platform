@@ -1061,6 +1061,16 @@ fn fields_expression(shape: &serde_json::Value, accessor: &str) -> String {
     format!("[{}]", fields.join(", "))
 }
 
+pub(crate) fn execution_projection(receiver: &str, kind: &str) -> String {
+    if kind == "command" {
+        format!(
+            "execution = {receiver}.execution()\n        execution_metadata = {{ internal: execution.internal, model: execution.model, id_field: execution.id_field, version_field: execution.version_field, effects: execution.effects }}"
+        )
+    } else {
+        "execution_metadata : Api.ExecutionMetadata\n        execution_metadata = { internal: Bool.False, model: \"\", id_field: \"\", version_field: \"\", effects: [] }".into()
+    }
+}
+
 pub fn modules(
     catalog: &registry::Catalog,
     schema: &Schema,
@@ -1114,13 +1124,7 @@ pub fn modules(
             ));
             metadata.push(format!("contract_{name}(product)?"));
             verification.push_str(&format!("        if request.operation == {handle}.{name}.name() {{\n            checks = product.operations.{name}.verification()\n            if request.action == \"input\" {{\n                value = (checks.input)(request.snapshot, request.seed)?\n                encoded = Inputs.{}.encode(value)\n                _ = Inputs.{}.decode(encoded)?\n                return Ok(encoded)\n            }}\n            if request.action == \"check\" {{\n                output = Outputs.decode_{}(request.output)?\n                passed = (checks.check)(request.before, output, request.snapshot)?\n                if !passed {{ return Err(\"operation verification failed\") }}\n                return Ok(\"true\")\n            }}\n        }}\n", operation.input, operation.input, operation.output));
-            let execution = if kind == "command" {
-                format!(
-                    "execution = product.operations.{name}.execution()\n        execution_metadata = {{ internal: execution.internal, model: execution.model, id_field: execution.id_field, version_field: execution.version_field, effects: execution.effects }}"
-                )
-            } else {
-                "execution_metadata : Api.ExecutionMetadata\n        execution_metadata = { internal: Bool.False, model: \"\", id_field: \"\", version_field: \"\", effects: [] }".into()
-            };
+            let execution = execution_projection(&format!("product.operations.{name}"), kind);
             let inputs = fields_expression(
                 &crate::operation_catalog::record_schema(input),
                 "contract.inputs",
