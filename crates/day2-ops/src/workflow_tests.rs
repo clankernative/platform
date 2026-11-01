@@ -138,6 +138,8 @@ fn credential_discovery_is_required_before_binding_and_refusal_stops_the_build()
         let position = |name: &str| effects.iter().position(|effect| effect == name).unwrap();
         assert!(position("build-app-types") < position("build-credential-contract"));
         assert!(position("build-host") < position("build-credential-contract"));
+        assert!(position("build-connection-contract") < position("build-operation-handles"));
+        assert!(position("build-operation-handles") < position("build-credential-contract"));
         if refused {
             assert!(result.is_err());
             assert_eq!(

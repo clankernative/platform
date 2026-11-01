@@ -256,7 +256,7 @@ fn checked_app(prepared: &Prepared, bound: &Bound) -> Result<(Vec<u8>, day2::reg
     Ok((checked, catalog))
 }
 
-fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
+fn bind_codecs(prepared: &Prepared, bound: &mut Bound) -> Result<day2::registry::Catalog> {
     let (checked, catalog) = checked_app(prepared, bound)?;
     bound.checked_types = checked;
     bound.schema = Schema::from_checked_types(&bound.checked_types)?;
@@ -265,16 +265,21 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
     for output in bound.outputs.values_mut() {
         output.shape.bind_identities(&bound.schema)?;
     }
-    bound.declarations = catalog;
     let stage = &prepared.stage;
-    for (name, source) in &prepared.inference_sources {
-        fs::write(stage.join("sdk").join(name), source)?;
-    }
     fs::write(stage.join("app/Inputs.roc"), bound.schema.inputs_module()?)?;
     fs::write(
         stage.join("app/Outputs.roc"),
         day2::output_schema::roc_module(&bound.outputs)?,
     )?;
+    Ok(catalog)
+}
+
+fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
+    bound.declarations = bind_codecs(prepared, bound)?;
+    let stage = &prepared.stage;
+    for (name, source) in &prepared.inference_sources {
+        fs::write(stage.join("sdk").join(name), source)?;
+    }
     fs::write(
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
@@ -763,8 +768,8 @@ pub fn execute(
                 }
                 "build-credential-contract" => {
                     ensure!(
-                        done.contains("build-app-types") && done.contains("build-host"),
-                        "checked registration inventory and pure host required"
+                        done.contains("build-operation-handles"),
+                        "checked operation handles required for credential target codecs"
                     );
                     let bound = bound.as_mut().context("bound data required")?;
                     let (_, catalog) = checked_app(prepared, bound)?;
@@ -794,6 +799,23 @@ pub fn execute(
                         stage.join("credentials.json"),
                         serde_json::to_vec(&bound.credentials)?,
                     )?;
+                }
+                "build-operation-handles" => {
+                    ensure!(
+                        done.contains("build-connection-contract"),
+                        "checked connections and operation inventory required"
+                    );
+                    let bound = bound.as_mut().context("bound data required")?;
+                    let catalog = bind_codecs(prepared, bound)?;
+                    let modules = catalog.modules(
+                        &bound.schema,
+                        &bound.outputs,
+                        &bound.connections,
+                        false,
+                    )?;
+                    for name in ["Commands.roc", "Reads.roc"] {
+                        fs::write(stage.join("app").join(name), &modules[name])?;
+                    }
                 }
                 "build-admission" => {
                     ensure!(

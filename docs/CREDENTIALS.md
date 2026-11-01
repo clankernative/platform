@@ -31,7 +31,7 @@ selectable API and confirmation/ingress wiring remain subsequent work; this
 contract alone does not enable selectable issuance or any native purpose.
 
 The normal build evaluates pure credential declarations in an isolated compiled
-probe before binding the SDK. Target codecs are checked against the compiler's
+probe after binding checked operation handles and before binding the complete SDK. Target codecs are checked against the compiler's
 registration inventory. The final worker must return exactly those same family
 IDs, profiles, grant modes, roots and lifetimes before artifact publication;
 the probe does not execute handlers or supply authority. Full root eligibility
