@@ -85,6 +85,27 @@ workspace paths and executable digests remain host-specific. The original
 campaign budgets and coverage remain required. A retry cannot mix preparation
 or outcomes from different attempts.
 
+### Rerunning sharded verification
+
+Use **Re-run all jobs** for a failed Platform CI verification run. From the CLI:
+
+```console
+gh run rerun RUN_ID --repo clankernative/platform
+```
+
+Failed-jobs-only (`--failed`) and individual-job retries are not supported for
+rerunning the sharded verification pipeline. Artifact names include the producing
+`github.run_attempt`, and consumers request their own attempt's artifacts. A
+retry can retain green producer jobs from an earlier attempt without producing
+the new Linux verifier, prepared outputs or shard receipts that consumers need.
+The final `verify` job then fails despite those earlier green results.
+
+For ordinary sharded verification, a full rerun executes the campaigns and
+produces a complete set of artifacts for one attempt. Keep earlier artifacts
+under their original identities.
+Admitted compilation caches can still speed the rerun; runtime outcomes remain
+fresh, and the complete verification receipt is required before handoff.
+
 ## Completed build outputs
 
 The `day2-fixtures-v3-bazel` and `day2-test-outputs-v2-bazel` caches contain
