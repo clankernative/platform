@@ -1275,7 +1275,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 360
+    timeout-minutes: 60
     env:
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
@@ -1338,9 +1338,18 @@ jobs:
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask fmt
       - run: git diff --binary > /tmp/day2-format.patch
+      - name: Require empty formatter output
+        run: git diff --exit-code
       - run: build-out/bin/xtask architecture-inventory > /tmp/day2-architecture-inventory.json
       - run: build-out/bin/xtask architecture-dependencies > /tmp/day2-architecture-dependencies.json
       - run: build-out/bin/xtask architecture-proof-inventory > /tmp/day2-architecture-proofs.json
+      - name: Admit current source, effects, dependencies and proof roles
+        run: build-out/bin/xtask architecture-check
+      - name: Strict whole-workspace all-target Clippy
+        run: build-out/bin/xtask lint
+      - name: Actual operator alerts and common provider world coverage controls
+        run: |
+          build-out/bin/xtask test-rust //crates/day2:unit_lib integrations::coverage_tests:: --test-threads=1 --nocapture
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
@@ -1351,6 +1360,8 @@ jobs:
             /tmp/day2-architecture-dependencies.json
             /tmp/day2-architecture-proofs.json
             artifacts/bazel-compiler-inputs.json
+            artifacts/alerts-provider-simulation/campaign-*/receipt.json
+            artifacts/alerts-provider-simulation/failure-*/failure.json
           if-no-files-found: error
           retention-days: 3
 
