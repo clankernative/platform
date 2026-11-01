@@ -334,15 +334,12 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
             origin_attempt > 0 && origin_attempt <= attempt,
             "artifact attempt is outside the current run history"
         );
-        if !jobs.contains_key(&origin_attempt) {
-            jobs.insert(
-                origin_attempt,
-                pages(
-                    root,
-                    &format!("actions/runs/{run_id}/attempts/{origin_attempt}/jobs"),
-                    "jobs",
-                )?,
-            );
+        if let std::collections::btree_map::Entry::Vacant(entry) = jobs.entry(origin_attempt) {
+            entry.insert(pages(
+                root,
+                &format!("actions/runs/{run_id}/attempts/{origin_attempt}/jobs"),
+                "jobs",
+            )?);
         }
         let origin_jobs = &jobs[&origin_attempt];
         let job = successful_job(origin_jobs, role, &run, origin_attempt)?;
