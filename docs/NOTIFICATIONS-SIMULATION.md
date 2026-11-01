@@ -22,8 +22,12 @@ retry run through real authorization and a reopened committed mailbox.
 Eight fixed seeds each run 24 steps twice against an independent accepted-request
 history. Every step compares the complete provider state and all other declared
 worlds; the reference never calls the production send/latest transitions.
-Observed sends, duplicates, conflicts, impersonation refusals, scoped reads and
-discarded-reply retries must all be nonempty. Missing campaign output fails its
+Observed sends, duplicates, conflicts, impersonation refusals, scoped reads,
+discarded-reply retries and unknown-usage budget quarantine must all be nonempty.
+The existing local-error contract retains its full reservation on unknown usage.
+The oracle models that quarantine: later otherwise-valid calls must fail at the
+one-slot concurrency budget and leave the mailbox unchanged. The harness never
+releases an uncertain reservation or raises the budget to continue. Missing campaign output fails its
 CI artifact step, including if the seeded test stops running.
 
 CI retains `day2-notifications-coverage-<run>-<attempt>` and, on failure,
