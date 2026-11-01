@@ -253,7 +253,7 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
         } => {
             ensure!(
                 (1..=64).contains(&selection.roots().len())
-                    && selection.roots().iter().all(|root| root.len() <= 80),
+                    && selection.roots().iter().all(|root| root.len() <= 160),
                 "credential selection structure budget"
             );
             8 + selection.roots().len()
@@ -1252,6 +1252,43 @@ mod tests {
                 "invalid selected record {case}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_confirmation_accepts_the_complete_portable_root_name_bound() -> Result<()> {
+        use day2_capabilities::oauth::{AuthorityNode, OperationAuthorityContract, OperationKind};
+        fn record(root: &str) -> Result<String> {
+            let (mut proof, original) = golden()?;
+            let selection = serde_json::from_value(serde_json::json!({
+                "family_contract": Digest::new(b"bounded public root fixture"), "roots": [root]
+            }))?;
+            proof.intent = Intent::Issue {
+                label: "Golden key".into(),
+                grant: lifecycle::IssueGrant::Selected { selection },
+            };
+            encode_record(proof, original)
+        }
+        for root in [
+            format!("{}.{}", "a".repeat(48), "b".repeat(48)),
+            "r".repeat(160),
+        ] {
+            let contract = OperationAuthorityContract::derive(
+                root.clone(),
+                1,
+                Digest::new(b"bounded operation contract"),
+                OperationKind::Query,
+                AuthorityNode {
+                    actions: Default::default(),
+                    children: Default::default(),
+                },
+            )?;
+            contract.verify()?;
+            assert!(root.len() > 80);
+            let encoded = record(&root)?;
+            decode_record("invocation-1", encoded.as_bytes())?;
+        }
+        assert!(record(&"r".repeat(161)).is_err());
         Ok(())
     }
 
