@@ -139,6 +139,12 @@ restoration both precede any Current check, the campaign makes no claim to detec
 the historical change. A control outside all documents in the selected coherent
 read leaves the selected lifecycle unchanged. These external fixture edits use
 separate SQLite transactions and expose no production restoration operation.
+Same-version substitution is an injected content fault, not a legal Firestore
+write history. Adversarial and property-generated tails also interleave these
+edits with bootstrap steps, observation and reopen at reachable prefixes.
+Each completed oracle/replay history contributes its observed state changes and
+accepted/refused results to the existing storage-lifecycle CI observation path,
+including fault histories rather than only the successful baseline campaign.
 The existing source-bound failure bundle retains the full event ordering and can
 be replayed with `DAY2_STORAGE_LIFECYCLE_REPLAY` in the lifecycle library tests.
 

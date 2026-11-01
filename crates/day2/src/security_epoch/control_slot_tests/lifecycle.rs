@@ -51,6 +51,16 @@ enum CounterRecord {
     OutsideSelection,
 }
 
+impl CounterRecord {
+    const ALL: [Self; 5] = [
+        Self::Authority,
+        Self::Sentinel,
+        Self::CreateReceipt,
+        Self::ActivationReceipt,
+        Self::OutsideSelection,
+    ];
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::security_epoch) enum FileChange {
@@ -499,7 +509,10 @@ impl World {
             .context("fixture bootstrap incarnation")?;
         ensure!(incarnation.is_string(), "fixture incarnation shape");
         let foreign = json!(Digest::new(b"external-provider-record-replacement"));
-        ensure!(*incarnation != foreign, "fixture replacement unchanged");
+        ensure!(
+            record == CounterRecord::OutsideSelection || *incarnation != foreign,
+            "fixture replacement unchanged"
+        );
         *incarnation = foreign;
         // Retain the version deliberately: a provider substituting canonical
         // DATA cannot evade the semantic check merely by retaining updateTime.
@@ -1075,7 +1088,10 @@ struct Bundle {
 
 fn check(program: &Program) -> Result<Vec<Record>> {
     let failure = match replayed(program)? {
-        Ok(records) => return Ok(records),
+        Ok(records) => {
+            record_history(program.seed, &records)?;
+            return Ok(records);
+        }
         Err(failure) => failure,
     };
     let mut reduced = program.clone();
@@ -1213,32 +1229,35 @@ fn independent_observation_after_semantic_refusal_never_revives_the_writer() -> 
     Ok(())
 }
 
+fn record_history(seed: u64, records: &[Record]) -> Result<()> {
+    dst::record(
+        Campaign::StorageLifecycle,
+        seed,
+        [
+            (
+                Transition::StateChanged,
+                records
+                    .windows(2)
+                    .filter(|w| w[0].state != w[1].state)
+                    .count() as u64,
+            ),
+            (
+                Transition::Accepted,
+                records.iter().filter(|r| r.accepted).count() as u64,
+            ),
+            (
+                Transition::Refused,
+                records.iter().filter(|r| !r.accepted).count() as u64,
+            ),
+        ],
+    )
+}
+
 #[test]
 fn seeded_storage_first_holder_activation_and_current_histories_replay() -> Result<()> {
     let mut coverage = BTreeSet::new();
     for seed in 0..32 {
         let records = check(&successful(seed))?;
-        dst::record(
-            Campaign::StorageLifecycle,
-            seed,
-            [
-                (
-                    Transition::StateChanged,
-                    records
-                        .windows(2)
-                        .filter(|w| w[0].state != w[1].state)
-                        .count() as u64,
-                ),
-                (
-                    Transition::Accepted,
-                    records.iter().filter(|r| r.accepted).count() as u64,
-                ),
-                (
-                    Transition::Refused,
-                    records.iter().filter(|r| !r.accepted).count() as u64,
-                ),
-            ],
-        )?;
         let final_state = &records.last().unwrap().state;
         ensure!(
             final_state.current == 3 && final_state.continuation,
@@ -1350,13 +1369,7 @@ fn generated_canonical_provider_replacement_and_restore_preserve_observed_refusa
             .collect::<Vec<_>>();
         let mut random = seed;
         let prefix = currents[next(&mut random) as usize % currents.len()];
-        for record in [
-            CounterRecord::Authority,
-            CounterRecord::Sentinel,
-            CounterRecord::CreateReceipt,
-            CounterRecord::ActivationReceipt,
-            CounterRecord::OutsideSelection,
-        ] {
+        for record in CounterRecord::ALL {
             for observed in [false, true] {
                 let mut program = baseline.clone();
                 program.events.truncate(prefix);
@@ -1456,6 +1469,83 @@ fn generated_canonical_provider_replacement_and_restore_preserve_observed_refusa
 }
 
 #[test]
+fn generated_provider_replacements_fence_each_remaining_bootstrap_boundary() -> Result<()> {
+    let mut coverage = BTreeSet::new();
+    for seed in 0..4 {
+        let baseline = successful(seed);
+        for (index, event) in baseline.events.iter().enumerate() {
+            let Event::Bootstrap {
+                stage, operation, ..
+            } = *event
+            else {
+                continue;
+            };
+            // These are precisely the boundaries with an existing initial
+            // authority; the activation receipt first exists before Settle1.
+            if stage == 0 && operation != Operation::Settle {
+                continue;
+            }
+            for record in CounterRecord::ALL {
+                if record == CounterRecord::ActivationReceipt
+                    && !(stage == 1 && operation == Operation::Settle)
+                {
+                    continue;
+                }
+                for observed in [false, true] {
+                    let mut program = baseline.clone();
+                    program.events.truncate(index);
+                    let before = program.events.len() - 1;
+                    let replace = program.events.len();
+                    program.events.push(Event::CounterReplace { record });
+                    let boundary = program.events.len();
+                    if observed {
+                        program.events.push(*event);
+                    }
+                    program.events.push(Event::CounterRestore { record });
+                    program
+                        .events
+                        .extend_from_slice(&baseline.events[index + usize::from(observed)..]);
+                    let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
+                    let records = check(&program)?;
+                    let refused = observed && record != CounterRecord::OutsideSelection;
+                    ensure!(
+                        records[replace].accepted,
+                        "bootstrap replacement was not injected"
+                    );
+                    if observed {
+                        ensure!(
+                            records[boundary].accepted != refused,
+                            "bootstrap replacement boundary not exercised"
+                        );
+                        if refused {
+                            ensure!(
+                                records[boundary].state.counter_posts
+                                    == records[before].state.counter_posts
+                                    && records[boundary].state.slot_posts
+                                        == records[before].state.slot_posts,
+                                "invalid selected state dispatched a bootstrap write"
+                            );
+                        }
+                    }
+                    let final_state = &records.last().unwrap().state;
+                    ensure!(
+                        final_state.continuation != refused
+                            && final_state.current == if refused { 0 } else { 3 },
+                        "bootstrap restoration revived refusal or blocked an unobserved edit"
+                    );
+                    coverage.insert(format!("{stage}-{operation:?}-{record:?}-{observed}"));
+                }
+            }
+        }
+    }
+    ensure!(
+        coverage.len() == 34,
+        "bootstrap provider replacement coverage"
+    );
+    Ok(())
+}
+
+#[test]
 fn generated_peer_death_and_provider_rewrite_cannot_rearm_current_continuity() -> Result<()> {
     for seed in 0..32 {
         let mut random = seed;
@@ -1506,7 +1596,7 @@ fn seeded_adversarial_multistep_histories_check_every_result_and_durable_row() -
         program.events.truncate(prefix);
         for _ in 0..40 {
             let stage = next(&mut random) as usize % 2;
-            let event = match next(&mut random) % 8 {
+            let event = match next(&mut random) % 10 {
                 0 => Event::Reopen,
                 1 => Event::RestoreClock,
                 2 => Event::Observe { stage },
@@ -1519,7 +1609,7 @@ fn seeded_adversarial_multistep_histories_check_every_result_and_durable_row() -
                     death_cut: None,
                     rewrite_provider: next(&mut random).is_multiple_of(2),
                 },
-                n => Event::Bootstrap {
+                n @ (6 | 7) => Event::Bootstrap {
                     stage,
                     operation: [Operation::Reserve, Operation::Dispatch, Operation::Settle]
                         [next(&mut random) as usize % 3],
@@ -1528,6 +1618,14 @@ fn seeded_adversarial_multistep_histories_check_every_result_and_durable_row() -
                     } else {
                         Fault::LostSlotReply
                     },
+                },
+                8 => Event::CounterReplace {
+                    record: CounterRecord::ALL
+                        [next(&mut random) as usize % CounterRecord::ALL.len()],
+                },
+                _ => Event::CounterRestore {
+                    record: CounterRecord::ALL
+                        [next(&mut random) as usize % CounterRecord::ALL.len()],
                 },
             };
             program.events.push(event);
@@ -1580,17 +1678,19 @@ proptest::proptest! {
         let mut program = successful(seed);
         program.events.truncate(seed as usize % program.events.len());
         for choice in choices {
-            program.events.push(match choice % 7 {
+            program.events.push(match choice % 9 {
                 0 => Event::Reopen,
                 1 => Event::RestoreClock,
                 2 => Event::Observe { stage: usize::from(choice % 2) },
                 3 => Event::Current { death_cut: None, rewrite_provider: false },
                 4 => Event::FirstHolder { death_cut: Some(usize::from(choice)) },
-                _ => Event::Bootstrap {
+                5 | 6 => Event::Bootstrap {
                     stage: usize::from(choice % 2),
                     operation: [Operation::Reserve, Operation::Dispatch, Operation::Settle][usize::from(choice % 3)],
                     fault: Fault::None,
                 },
+                7 => Event::CounterReplace { record: CounterRecord::ALL[usize::from(choice) % CounterRecord::ALL.len()] },
+                _ => Event::CounterRestore { record: CounterRecord::ALL[usize::from(choice) % CounterRecord::ALL.len()] },
             });
         }
         let result = check(&program);

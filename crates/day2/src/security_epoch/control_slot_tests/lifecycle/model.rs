@@ -174,7 +174,11 @@ impl Model {
     }
 
     fn bootstrap(&mut self, stage: usize, operation: Operation, fault: Fault) -> bool {
-        if !self.state.first_holder || self.expired || fault == Fault::ReplaceCandidate {
+        if !self.state.first_holder
+            || self.expired
+            || fault == Fault::ReplaceCandidate
+            || !self.observed_documents_match()
+        {
             return false;
         }
         let current = self.slots[stage]
