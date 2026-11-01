@@ -1315,6 +1315,7 @@ mod tests {
     fn credential_modes_remain_distinct_for_two_families_of_the_same_profile() -> Result<()> {
         use day2_capabilities::credentials::GrantMode;
         let mut document = checked();
+        document[0]["types"][6]["name"] = json!("Api.CommandDef");
         let types = document[0]["types"].as_array_mut().unwrap();
         let mut append = |node: Value| {
             let id = types.len();
