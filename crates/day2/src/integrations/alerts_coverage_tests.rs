@@ -577,8 +577,24 @@ fn alerts_use_the_same_common_gate_and_reject_constant_missing_landless_and_wron
 fn foreign_topics_handles_actors_and_malformed_payloads_refuse_before_provider_changes()
 -> Result<()> {
     let fixture = Fixture::new(world(true), 17)?;
-    let before = serde_json::to_value(fixture.state()?)?;
     let protected = fixture.protected()?;
+    // Accounts are created on the first reservation. Establish a real admitted
+    // baseline before checking that rejected inputs leave accounting unchanged.
+    let baseline: Value = serde_json::from_str(&fixture.call(
+        Action::OperatorAlertsSend,
+        "alice",
+        "negative-baseline",
+        "negative-baseline",
+        json!({"topic":"incident","body":"Synthetic baseline"}),
+    )?)?;
+    ensure!(
+        baseline
+            == json!({"Accepted":format!("alert_{}", &crate::digest(b"negative-baseline")[7..31])}),
+        "negative-control admitted baseline failed"
+    );
+    fixture.assert_budget_state(false)?;
+    fixture.require_protected(&protected)?;
+    let before = serde_json::to_value(fixture.state()?)?;
     forbidden(fixture.call(
         Action::OperatorAlertsSend,
         "alice",
