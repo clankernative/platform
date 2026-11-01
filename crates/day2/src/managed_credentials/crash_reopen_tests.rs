@@ -4,7 +4,7 @@
 #![cfg(unix)]
 
 use super::{Model, Step, World, effects};
-use crate::store::{Fault, Runtime};
+use crate::store::{Fault, Runtime, SqlDecision};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::{
@@ -514,7 +514,7 @@ fn capture(db: &Connection, e: &Expected) -> Result<Snapshot> {
             String,
             String,
             String,
-            i64,
+            Vec<u8>,
         ) = db.query_row(
             "SELECT family,lineage,head,revision FROM key_receipts",
             [],
@@ -525,7 +525,9 @@ fn capture(db: &Connection, e: &Expected) -> Result<Snapshot> {
                 && product_family == e.profile.registration()
                 && product_lineage == public_lineage
                 && product_head == head
-                && product_revision == 1,
+                // Product U64 fields use the ordinary exact big-endian BLOB
+                // codec; the private lineage revision remains an INTEGER.
+                && product_revision == 1_u64.to_be_bytes(),
             "credential product registration differs"
         );
         projection.revision = u64::try_from(revision)?;
@@ -1055,7 +1057,7 @@ async fn fixed_client_and_personal_issuance_survive_real_process_loss_and_reopen
         let fixture = Fixture::new(baseline_case)?;
         child(&fixture, baseline_case, Behavior::Complete, false).await?;
         let ports = Ports::new(12);
-        effects::scope(ports, || {
+        effects::scope(ports, || -> Result<()> {
             let runtime = load_runtime(&fixture.instance, 11)?;
             let e = expected(&runtime, profile)?;
             let state = runtime.sql_read(|db| capture(db, &e))?;
@@ -1064,7 +1066,32 @@ async fn fixed_client_and_personal_issuance_survive_real_process_loss_and_reopen
                 ..Model::default()
             };
             model.apply(Step::Issue);
-            check(&model, &state.projection)
+            check(&model, &state.projection)?;
+            // A valid native fixture must pass first; then the same reader
+            // must refuse another validly encoded product revision.
+            runtime.sql_decide(|tx| {
+                ensure!(
+                    tx.execute(
+                        "UPDATE key_receipts SET revision=?1",
+                        [2_u64.to_be_bytes().to_vec()],
+                    )? == 1,
+                    "credential product revision control missed its row"
+                );
+                let failure = capture(tx, &e)
+                    .err()
+                    .context("credential reader accepted wrong product revision")?;
+                ensure!(
+                    failure.to_string() == "credential product registration differs",
+                    "credential product revision refused at wrong boundary"
+                );
+                Ok(SqlDecision::Rollback(()))
+            })?;
+            let restored = runtime.sql_read(|db| capture(db, &e))?;
+            ensure!(
+                restored.private == state.private && restored.public == state.public,
+                "credential product revision control escaped rollback"
+            );
+            Ok(())
         })?;
         for cut in [Cut::BeforeCommit, Cut::AfterCommit] {
             for seed in [1, 19, 401] {

@@ -29,6 +29,8 @@ issuance after COMMIT. Reopen compares product rows, lineage/version/material,
 delivery and the public receipt. Same-intent recovery and repeated receipt
 lookup must preserve the exact opaque private/product rows. The latter must
 request no new private entropy. A changed duplicate input must be refused.
+A passing real fixture baseline is followed by a rollback mutation to a
+different encoded product revision; the same reader must refuse it.
 Identifiers use a replayable port; material entropy is a separate OS port, so a
 rewound synthetic stream cannot conceal replacement of an existing secret.
 
