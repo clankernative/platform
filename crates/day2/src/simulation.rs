@@ -1,6 +1,8 @@
 //! Host-side simulation controls. These are not Roc capabilities or app inputs.
 //! The same admitted runtime, SQLite journals and capability adapter execute each
 //! action; the scheduler supplies entropy, time and worker failure observations.
+pub mod coverage;
+
 use crate::{
     execution,
     host::{Host, WorkerAction},

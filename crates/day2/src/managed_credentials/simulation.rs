@@ -3,6 +3,7 @@
 //! verifier/ciphertext bytes, key bytes or the private synthetic entropy state.
 
 use super::{crypto::KeyLease, effects, store};
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef, Digest, Name,
@@ -674,7 +675,29 @@ fn credential_lifecycle_and_consuming_sink_replay_exactly() -> Result<()> {
                 id_seed: seed,
                 steps,
             };
-            checked(&program)?;
+            let trace = checked(&program)?;
+            dst::record(
+                Campaign::CredentialLifecycle,
+                seed,
+                [
+                    (
+                        Transition::StateChanged,
+                        trace
+                            .observations
+                            .windows(2)
+                            .filter(|w| w[0].revision != w[1].revision || w[0].state != w[1].state)
+                            .count() as u64,
+                    ),
+                    (
+                        Transition::Accepted,
+                        trace.observations.iter().filter(|o| o.accepted).count() as u64,
+                    ),
+                    (
+                        Transition::Refused,
+                        trace.observations.iter().filter(|o| !o.accepted).count() as u64,
+                    ),
+                ],
+            )?;
         }
     }
     Ok(())

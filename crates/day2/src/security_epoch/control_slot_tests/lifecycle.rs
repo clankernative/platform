@@ -9,6 +9,7 @@ use crate::security_epoch::{
     storage_authority::lifecycle_fixture,
     tests::lifecycle_provider as counter_fixture,
 };
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -1124,6 +1125,27 @@ fn seeded_storage_first_holder_activation_and_current_histories_replay() -> Resu
     let mut coverage = BTreeSet::new();
     for seed in 0..32 {
         let records = check(&successful(seed))?;
+        dst::record(
+            Campaign::StorageLifecycle,
+            seed,
+            [
+                (
+                    Transition::StateChanged,
+                    records
+                        .windows(2)
+                        .filter(|w| w[0].state != w[1].state)
+                        .count() as u64,
+                ),
+                (
+                    Transition::Accepted,
+                    records.iter().filter(|r| r.accepted).count() as u64,
+                ),
+                (
+                    Transition::Refused,
+                    records.iter().filter(|r| !r.accepted).count() as u64,
+                ),
+            ],
+        )?;
         let final_state = &records.last().unwrap().state;
         ensure!(
             final_state.current == 3 && final_state.continuation,

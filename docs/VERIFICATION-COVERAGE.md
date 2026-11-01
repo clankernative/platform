@@ -1,5 +1,49 @@
 # Public verification coverage
 
+## CI simulation evidence
+
+Every full Linux `workspace-day2` campaign admits fresh observations from the
+required portable DST campaigns: OAuth and inbound OAuth, the three registration
+drivers, credential lifecycle, host-loop scheduling, the four native handshake
+models, storage lifecycle, native OAuth consumers, App/Shell connection-request
+models, and fixed/generated command crash schedules. The existing simulation
+shard independently admits the control-world corpus and generated schedules.
+
+Download `day2-dst-workspace-day2-<run>-<attempt>` and
+`day2-dst-simulation-<run>-<attempt>` from the CI run. Their `coverage.json` files
+list actual seeds, completed histories, and witnessed transition/result counts.
+Individual `.complete` files retain only closed campaign/transition enums and
+numeric counts. They contain no arguments, environments, provider values or
+error strings. Counts are observations, not generated-action counts. The
+control report separates scheduled transitions from recovery-drain progress.
+These reports describe the named portable models, not exhaustive subsystem
+coverage, kernel/native qualification, live providers, or proof that every
+possible transition was exercised.
+
+The verifier creates a fresh directory for each test phase. A missing declared
+campaign, missing required seed, incomplete generated command campaign, or zero
+observed state/commit/provider/registration progress fails the phase before its
+verification receipt. Merely accepting/refusing calls cannot satisfy the
+progress guard. A test failure can leave partial observations; absence of a
+passing `coverage.json` means incomplete coverage, never a successful campaign.
+No simulation results enter the compiled-action caches.
+
+On failure, `day2-dst-replays-<shard>-<run>-<attempt>` retains existing redacted
+OAuth, credential, handshake, host-loop and offline control counterexamples,
+plus campaign-bound numeric command crash/replay seeds, for 14 days. Existing dedicated storage,
+native OAuth consumer and connection/request artifacts remain. Use each bundle's
+source-bound replay command; keep regression promotion a reviewed source change.
+Raw command journals, subprocess diagnostics, environments, and private provider
+captures are deliberately not uploaded by this step. CI does not fabricate a
+counterexample if execution stopped before one could be persisted.
+
+Replay a command seed bundle on its exact source with
+`DAY2_COMMAND_REPLAY=<failure.json> bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration command_simulation::replay_saved_crash_schedule --exact`.
+The replay reruns the existing offline Reports crash schedule and refuses a
+changed compiled campaign, unknown fields or an oversized bundle before execution.
+Use the CI revision and its Reports fixture: this small seed bundle does not
+independently bind every runtime/compiler input or qualify native execution.
+
 `ops/Verify.roc` is the executable regression policy. `xtask verify` builds only
 the public Reports example and fixtures under `fixtures/`. It runs platform,
 SDK, CLI, real SQLite, native worker, HTTP, authority, migration, simulation and

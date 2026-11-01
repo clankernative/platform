@@ -4,6 +4,7 @@
 
 use super::registration;
 use super::{connect, effects, exchange, external, outbound, profiles};
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use rusqlite::Connection;
@@ -753,6 +754,28 @@ fn composed_oauth_histories_replay_exactly_without_network() -> Result<()> {
                 "private OAuth material escaped into replay evidence"
             );
         }
+        dst::record(
+            Campaign::Oauth,
+            seed,
+            [
+                (
+                    Transition::StateChanged,
+                    first
+                        .observations
+                        .windows(2)
+                        .filter(|w| w[0].state != w[1].state)
+                        .count() as u64,
+                ),
+                (
+                    Transition::Accepted,
+                    first.observations.iter().filter(|o| o.accepted).count() as u64,
+                ),
+                (
+                    Transition::Refused,
+                    first.observations.iter().filter(|o| !o.accepted).count() as u64,
+                ),
+            ],
+        )?;
     }
     for steps in [
         vec![
@@ -1035,7 +1058,7 @@ fn checked_registration(
     fault: Option<usize>,
     expires: bool,
     driver: RegistrationDriver,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     let first = registration_campaign(seed, fault, expires, driver)?;
     let replay = registration_campaign(seed, fault, expires, driver)?;
     if first != replay {
@@ -1045,7 +1068,7 @@ fn checked_registration(
         }
         .into());
     }
-    Ok(())
+    Ok(first)
 }
 
 fn verify_registration(
@@ -1053,8 +1076,9 @@ fn verify_registration(
     fault: Option<usize>,
     expires: bool,
     driver: RegistrationDriver,
-) -> Result<()> {
-    if let Err(error) = checked_registration(seed, fault, expires, driver) {
+) -> Result<serde_json::Value> {
+    let result = checked_registration(seed, fault, expires, driver);
+    if let Err(error) = &result {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/oauth-simulation");
         std::fs::create_dir_all(&directory)?;
@@ -1072,7 +1096,7 @@ fn verify_registration(
             path.display()
         );
     }
-    Ok(())
+    result
 }
 
 #[test]
@@ -1108,7 +1132,24 @@ fn registration_protocol_and_faults_replay_without_network_or_real_time() -> Res
                 std::iter::once(None).chain((0..driver.calls().iter().sum::<usize>()).map(Some))
             {
                 for expires in [false, true] {
-                    verify_registration(seed, fault, expires, driver)?;
+                    let observed = verify_registration(seed, fault, expires, driver)?;
+                    let completed = observed["steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|step| **step == true)
+                        .count() as u64;
+                    dst::record(
+                        match driver {
+                            RegistrationDriver::GoogleMapped => Campaign::GoogleMappedRegistration,
+                            RegistrationDriver::GoogleExternal => {
+                                Campaign::GoogleExternalRegistration
+                            }
+                            RegistrationDriver::GitlabExternal => Campaign::GitlabRegistration,
+                        },
+                        seed,
+                        [(Transition::RegistrationStepCompleted, completed)],
+                    )?;
                 }
             }
         }

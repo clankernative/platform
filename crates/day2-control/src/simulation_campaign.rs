@@ -442,6 +442,34 @@ pub fn verify_receipt(directory: &Path, expected: &Digest, seed: u64, cases: u32
     Ok(())
 }
 
+/// Publish only verified, observed scheduled coverage. Recovery-drain activity
+/// remains separate and cannot satisfy the existing non-vacuity gate.
+pub fn publish_coverage(directory: &Path, expected: &Digest, seed: u64, cases: u32) -> Result<()> {
+    verify_receipt(directory, expected, seed, cases)?;
+    ensure!(
+        cases >= CI_CASES,
+        "exploratory simulation is not CI coverage"
+    );
+    let receipt: Receipt = day2::json::decode(&read_json(&directory.join("receipt.json"))?)?;
+    let mut seeds = Vec::new();
+    for case in 0..cases {
+        let program: simulation::generation::Program = day2::json::decode(&read_json(
+            &directory.join(format!("generated-{case:03}.program.json")),
+        )?)?;
+        seeds.push(json!({"case":case,"seed":program.seed}));
+    }
+    write_json(
+        &directory.join("coverage.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "format":1,"status":"passed","campaign":"control_plane",
+            "scope":"offline_control_model_not_native_or_provider_qualification",
+            "model":receipt.model,"workflow":receipt.workflow,"seeds":seeds,
+            "generated_coverage":receipt.generated_coverage,
+            "regression_coverage":receipt.regression_coverage,
+        }))?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +540,11 @@ mod tests {
         session.effect(request("simulation-check-replay", json!({})))?;
         session.effect(request("simulation-receipt", json!({})))?;
         verify_receipt(&path, &session.receipt_digest()?, DEFAULT_SEED, 1)?;
+        assert!(publish_coverage(&path, &session.receipt_digest()?, DEFAULT_SEED, 1).is_err());
+        assert!(
+            !path.join("coverage.json").exists(),
+            "exploratory run claimed CI coverage"
+        );
         assert!(
             session
                 .effect(request("simulation-receipt", json!({})))

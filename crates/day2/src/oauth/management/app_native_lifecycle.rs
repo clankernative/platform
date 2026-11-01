@@ -1,6 +1,7 @@
 // Composed DATA simulation. Native permissions are never constructed here.
 // The storage and both transcript models remain independent of OAuth's oracle.
 use super::*;
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use crate::{
     oauth::native_management,
     protocol::{Instruction, Request},
@@ -1301,6 +1302,17 @@ fn seeded_native_oauth_failures_cannot_restore_originals_or_current_authority() 
             steps,
         };
         let records = verify(&program)?;
+        dst::record(
+            Campaign::NativeOauthConsumer,
+            seed,
+            [(
+                Transition::StateChanged,
+                records
+                    .windows(2)
+                    .filter(|w| w[0]["projection"] != w[1]["projection"])
+                    .count() as u64,
+            )],
+        )?;
         let encoded = serde_json::to_string(&records)?;
         for secret in [
             "private-provider-code",

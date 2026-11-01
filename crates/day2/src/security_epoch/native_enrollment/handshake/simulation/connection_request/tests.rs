@@ -1,4 +1,5 @@
 use super::*;
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
 use serde_json::Value;
@@ -395,6 +396,24 @@ fn reference_connection_request_campaign() -> Result<()> {
         for role in [Role::App, Role::Shell] {
             let base = successful(seed, role);
             let states = checked(&base)?;
+            dst::record(
+                match role {
+                    Role::App => Campaign::AppConnectionRequest,
+                    Role::Shell => Campaign::ShellConnectionRequest,
+                },
+                seed,
+                [(
+                    Transition::StateChanged,
+                    states
+                        .windows(2)
+                        .filter(|w| {
+                            w[0]["counts"] != w[1]["counts"]
+                                || w[0]["active"] != w[1]["active"]
+                                || w[0]["refused"] != w[1]["refused"]
+                        })
+                        .count() as u64,
+                )],
+            )?;
             let last = states.last().unwrap();
             assert_eq!(last["counts"]["admissions"], 1);
             assert_eq!(last["counts"]["requests"], 2);

@@ -3,6 +3,7 @@
 use crate::support::commands as support;
 use crate::support::evidence;
 use anyhow::{Context, Result, ensure};
+use day2::simulation::coverage::{self as dst, Campaign, Transition};
 use day2::{
     capabilities::NotificationWorld,
     invocations,
@@ -10,6 +11,7 @@ use day2::{
     store::{Fault, replay},
 };
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use support::World;
 
@@ -471,11 +473,84 @@ fn recorded<T>(
 }
 
 fn campaign(seed: u64) -> Result<Value> {
-    recorded(
+    let result = recorded(
         "crash_schedule",
         json!({"seed":seed,"entropy":vec![42;32],"now_ms":100_000,"steps":18}),
         |evidence| campaign_recorded(seed, evidence),
-    )
+    );
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let retained = (|| -> Result<()> {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/command-simulation-replay");
+                std::fs::create_dir_all(&root)?;
+                let directory = tempfile::Builder::new()
+                    .prefix("failure-")
+                    .tempdir_in(root)?
+                    .keep();
+                let bundle = ReplaySeed {
+                    format: 1,
+                    campaign_source: day2::digest(include_bytes!("command_simulation.rs")),
+                    seed,
+                };
+                std::fs::write(directory.join("failure.json"), serde_json::to_vec(&bundle)?)?;
+                Ok(())
+            })();
+            if let Err(retention) = retained {
+                return Err(error
+                    .context(retention)
+                    .context("redacted command replay retention failed"));
+            }
+            Err(error)
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaySeed {
+    format: u32,
+    campaign_source: String,
+    seed: u64,
+}
+
+fn replay_seed(bytes: &[u8]) -> Result<u64> {
+    ensure!(bytes.len() <= 4096, "command replay byte bound");
+    let replay: ReplaySeed = day2::json::decode(bytes)?;
+    ensure!(
+        replay.format == 1
+            && replay.campaign_source == day2::digest(include_bytes!("command_simulation.rs")),
+        "command replay source or format differs"
+    );
+    Ok(replay.seed)
+}
+
+#[test]
+fn replay_saved_crash_schedule() -> Result<()> {
+    let Some(path) = std::env::var_os("DAY2_COMMAND_REPLAY") else {
+        return Ok(());
+    };
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    campaign(replay_seed(&bytes)?)?;
+    Ok(())
+}
+
+#[test]
+fn command_replay_admits_only_closed_current_source_seed_bundles() -> Result<()> {
+    let mut value = json!({"format":1,"campaign_source":day2::digest(include_bytes!("command_simulation.rs")),"seed":42});
+    assert_eq!(replay_seed(&serde_json::to_vec(&value)?)?, 42);
+    value["campaign_source"] = json!("changed");
+    assert!(replay_seed(&serde_json::to_vec(&value)?).is_err());
+    value["campaign_source"] = json!(day2::digest(include_bytes!("command_simulation.rs")));
+    value["provider_payload"] = json!("refuse unknown fields");
+    assert!(replay_seed(&serde_json::to_vec(&value)?).is_err());
+    assert!(replay_seed(&[b' '; 4097]).is_err());
+    Ok(())
 }
 
 fn campaign_recorded(seed: u64, evidence: &mut evidence::Evidence) -> Result<Value> {
@@ -609,12 +684,14 @@ fn seeded_crash_schedules_converge_on_the_same_business_and_provider_state() -> 
         expected,
         "identical schedules reproduce the complete logical trace"
     );
+    record_coverage(Campaign::CommandFixed, 0, &expected)?;
     for seed in [1, 42, 3664912422, 0xdeadbeef] {
+        let observed = campaign(seed)?;
         assert_eq!(
-            campaign(seed)?["business"],
-            expected["business"],
+            observed["business"], expected["business"],
             "schedule {seed}"
         );
+        record_coverage(Campaign::CommandFixed, seed, &observed)?;
     }
     Ok(())
 }
@@ -877,6 +954,28 @@ fn two_executors_interleave_provider_calls_and_settlement_without_duplicate_deli
     Ok(())
 }
 
+fn record_coverage(campaign: Campaign, seed: u64, observed: &Value) -> Result<()> {
+    dst::record(
+        campaign,
+        seed,
+        [
+            (
+                Transition::DecisionCommitted,
+                observed["business"]["snapshot"]["reports"]
+                    .as_array()
+                    .context("observed reports")?
+                    .len() as u64,
+            ),
+            (
+                Transition::ProviderAccepted,
+                observed["business"]["delivery"]["count"]
+                    .as_u64()
+                    .context("observed provider acceptance")?,
+            ),
+        ],
+    )
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 12,
@@ -889,7 +988,8 @@ proptest::proptest! {
     #[test]
     fn generated_crash_schedules_preserve_the_reference_invariants(seed in proptest::prelude::any::<u64>()) {
         let result = campaign(seed);
-        proptest::prop_assert!(result.is_ok(), "{:#}", result.unwrap_err());
+        proptest::prop_assert!(result.is_ok(), "{:#}", result.as_ref().unwrap_err());
+        record_coverage(Campaign::CommandGenerated, seed, &result.unwrap()).unwrap();
     }
 }
 

@@ -2,6 +2,7 @@
 //! or stored state predicts acceptance. Custody failure must roll back issuance.
 use super::{World, effects, implementation, next, snapshot};
 use crate::oauth::{custody, inbound};
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Result, ensure};
 use day2_capabilities::{
     BindingRef, Name,
@@ -381,9 +382,10 @@ fn category(error: &anyhow::Error) -> String {
         .map_or_else(|| error.to_string(), |failure| failure.category.into())
 }
 
-fn verify(program: &Program) -> Result<()> {
-    if let Err(error) = checked(program) {
-        let failure = category(&error);
+fn verify(program: &Program) -> Result<Vec<Observation>> {
+    let result = checked(program);
+    if let Err(error) = &result {
+        let failure = category(error);
         let (steps, observed) =
             super::reduce_steps(&program.steps, 128, &failure, category, |steps| {
                 checked(&Program {
@@ -396,7 +398,7 @@ fn verify(program: &Program) -> Result<()> {
             steps,
             ..program.clone()
         };
-        let minimized = observed.as_ref().unwrap_or(&error);
+        let minimized = observed.as_ref().unwrap_or(error);
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/oauth-simulation");
         std::fs::create_dir_all(&directory)?;
@@ -415,7 +417,7 @@ fn verify(program: &Program) -> Result<()> {
             path.display()
         );
     }
-    Ok(())
+    result
 }
 
 pub(super) fn replay(evidence: &serde_json::Value) -> Result<()> {
@@ -473,11 +475,32 @@ fn inbound_histories_match_independent_oracle_and_replay_complete_snapshots() ->
         for _ in 0..48 {
             steps.push(choices[next(&mut schedule) as usize % choices.len()]);
         }
-        verify(&Program {
+        let observations = verify(&Program {
             version: 1,
             seed,
             steps,
         })?;
+        dst::record(
+            Campaign::InboundOauth,
+            seed,
+            [
+                (
+                    Transition::StateChanged,
+                    observations
+                        .windows(2)
+                        .filter(|w| w[0].snapshot != w[1].snapshot)
+                        .count() as u64,
+                ),
+                (
+                    Transition::Accepted,
+                    observations.iter().filter(|o| o.accepted).count() as u64,
+                ),
+                (
+                    Transition::Refused,
+                    observations.iter().filter(|o| !o.accepted).count() as u64,
+                ),
+            ],
+        )?;
     }
     Ok(())
 }
