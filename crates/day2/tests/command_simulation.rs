@@ -3,6 +3,7 @@
 use crate::support::commands as support;
 use crate::support::evidence;
 use anyhow::{Context, Result, ensure};
+use day2::simulation::coverage::{self as dst, Campaign, Transition};
 use day2::{
     capabilities::NotificationWorld,
     invocations,
@@ -609,12 +610,14 @@ fn seeded_crash_schedules_converge_on_the_same_business_and_provider_state() -> 
         expected,
         "identical schedules reproduce the complete logical trace"
     );
+    record_coverage(Campaign::CommandFixed, 0, &expected)?;
     for seed in [1, 42, 3664912422, 0xdeadbeef] {
+        let observed = campaign(seed)?;
         assert_eq!(
-            campaign(seed)?["business"],
-            expected["business"],
+            observed["business"], expected["business"],
             "schedule {seed}"
         );
+        record_coverage(Campaign::CommandFixed, seed, &observed)?;
     }
     Ok(())
 }
@@ -877,6 +880,28 @@ fn two_executors_interleave_provider_calls_and_settlement_without_duplicate_deli
     Ok(())
 }
 
+fn record_coverage(campaign: Campaign, seed: u64, observed: &Value) -> Result<()> {
+    dst::record(
+        campaign,
+        seed,
+        [
+            (
+                Transition::DecisionCommitted,
+                observed["business"]["snapshot"]["reports"]
+                    .as_array()
+                    .context("observed reports")?
+                    .len() as u64,
+            ),
+            (
+                Transition::ProviderAccepted,
+                observed["business"]["delivery"]["count"]
+                    .as_u64()
+                    .context("observed provider acceptance")?,
+            ),
+        ],
+    )
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 12,
@@ -889,7 +914,8 @@ proptest::proptest! {
     #[test]
     fn generated_crash_schedules_preserve_the_reference_invariants(seed in proptest::prelude::any::<u64>()) {
         let result = campaign(seed);
-        proptest::prop_assert!(result.is_ok(), "{:#}", result.unwrap_err());
+        proptest::prop_assert!(result.is_ok(), "{:#}", result.as_ref().unwrap_err());
+        record_coverage(Campaign::CommandGenerated, seed, &result.unwrap()).unwrap();
     }
 }
 

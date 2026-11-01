@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod dst;
 mod shards;
 
 const CACHE_FORMAT: u32 = 2;
@@ -303,6 +304,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             let session = simulation.as_mut().context("simulation session")?;
             let result = session.effect(request)?;
             if session.is_complete() {
+                day2_control::simulation_campaign::publish_coverage(
+                    session.directory(),
+                    &session.receipt_digest()?,
+                    day2_control::simulation_campaign::DEFAULT_SEED,
+                    day2_control::simulation_campaign::VERIFY_CASES,
+                )?;
                 ensure!(
                     passed.insert("control-simulation".into()),
                     "duplicate simulation campaign"
@@ -1273,6 +1280,7 @@ fn tests(
     fixtures: &BTreeMap<String, PathBuf>,
     budget: std::time::Duration,
 ) -> Result<()> {
+    let dst = dst::Session::start(root, suite)?;
     let selection = test_selection(suite)?;
     let started = std::time::Instant::now();
     let catalog = crate::bazel::targets(root)?;
@@ -1325,10 +1333,16 @@ fn tests(
             command.env("DAY2_TEST_RUSTC", crate::bazel::tool(root, "rustc")?);
         }
         configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
+        if let Some(dst) = &dst {
+            dst.configure(&mut command);
+        }
         let remaining = budget
             .checked_sub(started.elapsed())
             .context("test campaign budget exhausted")?;
         run_with_budget(root, &mut command, remaining)?;
+    }
+    if let Some(dst) = dst {
+        dst.finish()?;
     }
     Ok(())
 }

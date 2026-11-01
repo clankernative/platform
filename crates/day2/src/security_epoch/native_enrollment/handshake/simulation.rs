@@ -7,6 +7,7 @@ use super::{
     Actor, Direction, Frame, Observation, PollObservation, Protocol, Transcript, Transport,
     TransportDecision,
 };
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::Digest;
 use serde::{Deserialize, Serialize};
@@ -805,6 +806,60 @@ fn successful(seed: u64, protocol: Protocol, purpose: StagePurpose) -> Program {
     }
 }
 
+fn record_coverage(program: &Program, purpose: StagePurpose, records: &[Record]) -> Result<()> {
+    let campaign = match (program.protocol, purpose) {
+        (Protocol::Enrollment, _) => Campaign::EnrollmentHandshake,
+        (Protocol::InitialStorage, StagePurpose::StorageBootstrap) => {
+            Campaign::StorageBootstrapHandshake
+        }
+        (Protocol::InitialStorage, _) => Campaign::StorageCurrentHandshake,
+        (Protocol::InitialServing, _) => Campaign::ServingHandshake,
+        _ => anyhow::bail!("undeclared handshake coverage campaign"),
+    };
+    dst::record(
+        campaign,
+        program.seed,
+        [
+            (
+                Transition::StateChanged,
+                records
+                    .windows(2)
+                    .filter(|w| {
+                        w[0].snapshot["endpoints"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .zip(w[1].snapshot["endpoints"].as_array().unwrap())
+                            .any(|(a, b)| a["machine"] != b["machine"])
+                    })
+                    .count() as u64,
+            ),
+            (
+                Transition::Accepted,
+                records
+                    .iter()
+                    .filter(|r| r.outcome == Outcome::Accepted)
+                    .count() as u64,
+            ),
+            (
+                Transition::Retried,
+                records
+                    .iter()
+                    .filter(|r| r.outcome == Outcome::Retry)
+                    .count() as u64,
+            ),
+            (
+                Transition::Waited,
+                records
+                    .iter()
+                    .filter(|r| r.outcome == Outcome::Wait)
+                    .count() as u64,
+            ),
+        ],
+    )?;
+    Ok(())
+}
+
 #[test]
 fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_model() -> Result<()>
 {
@@ -818,6 +873,7 @@ fn seeded_enrollment_storage_and_serving_transcripts_replay_against_independent_
                     .all(|record| record.outcome != Outcome::Refused),
                 "positive transcript refused"
             );
+            record_coverage(&program, purpose, &records)?;
             let last = &records.last().unwrap().snapshot;
             let expected = if protocol == Protocol::Enrollment {
                 4
@@ -1017,7 +1073,8 @@ fn seeded_adversarial_schedules_keep_complete_bounded_state_and_terminal_refusal
                 };
                 program.events.push(event);
             }
-            check(&program)?;
+            let records = check(&program)?;
+            record_coverage(&program, purpose, &records)?;
         }
     }
     Ok(())

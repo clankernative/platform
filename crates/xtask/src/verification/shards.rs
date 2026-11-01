@@ -1061,6 +1061,7 @@ pub(super) fn tests(
     budget: Duration,
 ) -> Result<BTreeSet<PathBuf>> {
     ensure!(valid(shard) && shard != "simulation", "test shard required");
+    let dst = super::dst::Session::start(root, shard)?;
     let suite = if shard.starts_with("workspace-") {
         "workspace-runtime"
     } else {
@@ -1078,6 +1079,9 @@ pub(super) fn tests(
         let mut command = Command::new(root.join(&binary.executable));
         command.args(&arguments);
         configure_tests(root, suite, fixtures, private_build.as_ref(), &mut command)?;
+        if let Some(dst) = &dst {
+            dst.configure(&mut command);
+        }
         // Manifest and supporting executable paths are workspace-relative and
         // admitted by the current Bazel graph and prepared-byte identity.
         let remaining = budget
@@ -1097,6 +1101,9 @@ pub(super) fn tests(
         executed == expected_binaries(prepared, shard),
         "test executable campaign incomplete"
     );
+    if let Some(dst) = dst {
+        dst.finish()?;
+    }
     Ok(executed)
 }
 

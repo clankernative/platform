@@ -1,4 +1,5 @@
 use super::*;
+use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 
@@ -346,6 +347,19 @@ fn bounded_seeded_schedules_match_independent_history_and_replay() {
         check(&mut trace, &path);
         replay(&path).unwrap();
         assert!(trace.observations.last().unwrap().drained);
+        dst::record(
+            Campaign::HostLoop,
+            seed,
+            [(
+                Transition::StateChanged,
+                trace
+                    .observations
+                    .windows(2)
+                    .filter(|w| w[0] != w[1])
+                    .count() as u64,
+            )],
+        )
+        .unwrap();
         let mut before = reference(trace.declared, &[]);
         for (event, after) in trace.events.iter().zip(&trace.observations) {
             match event {

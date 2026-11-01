@@ -978,6 +978,36 @@ jobs:
         run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-shard ${{ matrix.shard }}
+      - name: Publish fresh DST campaigns, seeds and observed transitions
+        if: ${{ always() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-dst-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/dst/run-*/coverage.json
+            artifacts/dst/run-*/*.complete
+            artifacts/control-simulation/run-*/campaign/coverage.json
+            artifacts/control-simulation/run-*/campaign/receipt.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain redacted DST counterexamples for replay
+        if: ${{ failure() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-dst-replays-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oauth-simulation/*.json
+            artifacts/credential-simulation/failure-*.json
+            artifacts/native-handshake-simulation/*.json
+            artifacts/control-simulation/run-*/campaign/counterexamples/**/*.json
+            artifacts/control-simulation/run-*/campaign/*.program.json
+            artifacts/control-simulation/run-*/campaign/*.scenario.json
+            artifacts/control-simulation/run-*/campaign/*.trace.json
+            artifacts/control-simulation/run-*/campaign/*.failure.json
+            artifacts/command-simulation/seeds.txt
+            /tmp/dst-platform-host-loops/**/*.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Retain failed storage lifecycle replay bundles
         if: ${{ failure() && matrix.shard == 'workspace-day2' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
