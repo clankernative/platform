@@ -28,9 +28,10 @@
 //! against two different worlds has not demonstrated a world at all.
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
-//! live Carta native capture/read pipelines, the admitted local mailbox, delegation's
-//! admitted-resource offline handler and the scoped synthetic Linear and operator-alert
-//! handlers. Remaining pending native/synthetic providers have explicit debt below.
+//! admitted Carta native capture/read pipeline, the admitted local mailbox,
+//! delegation's admitted-resource offline handler and the scoped synthetic Linear
+//! and operator-alert handlers. Remaining pending native/synthetic providers have
+//! explicit debt below.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -57,6 +58,8 @@ const SCOPE: &str = "coverage/app";
 
 #[path = "alerts_coverage_tests.rs"]
 mod alerts;
+#[path = "carta_coverage_tests.rs"]
+mod carta;
 #[path = "delegation_coverage_tests.rs"]
 mod delegation;
 #[path = "linear_coverage_tests.rs"]
@@ -89,6 +92,9 @@ enum Demonstration {
     /// Reaches the native capture/page pipeline against the provider's scoped
     /// world; source-world attribution is checked independently of cache writes.
     NativeAdapterRead,
+    /// Admitted instance, exact resource handle, real capture and local reader.
+    /// Uses the supplied observer so constant/wrong-world controls reach the gate.
+    AdmittedAdapterRead,
     /// The action makes no provider call: it computes an authorization locally
     /// from the credential and the clock, so there is no world to reflect and no
     /// effect to land. A presigned URL is the case.
@@ -167,7 +173,7 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::WorkspaceDirectoryPage => Demonstration::NativeAdapterRead,
         // The live capture pipeline against Carta's own wire world, then a
         // local read of the published capture.
-        Action::CartaSnapshot | Action::CartaRecord => Demonstration::NativeAdapterRead,
+        Action::CartaSnapshot | Action::CartaRecord => Demonstration::AdmittedAdapterRead,
         Action::FreetoolFingerprint
         | Action::FreetoolStatus
         | Action::FreetoolResultPage
@@ -764,6 +770,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     if action.provider() == Provider::LocalNotifications {
         return notifications::observe(action, variant);
     }
+    if action.provider() == Provider::Carta {
+        return carta::observe(action, variant);
+    }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -1037,61 +1046,6 @@ fn observe_native_directory(action: Action, variant: Variant) -> Result<Observed
     })
 }
 
-fn observe_native_carta(action: Action, variant: Variant) -> Result<Observed> {
-    use day2_capabilities::{integrations::CartaEnvironment, resources::CartaChildren};
-    ensure!(
-        matches!(action, Action::CartaSnapshot | Action::CartaRecord),
-        "not a live Carta read"
-    );
-    let directory = tempfile::tempdir()?;
-    let database = directory.path().join("app.sqlite");
-    seed(&database, SCOPE, &fixture(variant))?;
-    let before = worlds(&database)?;
-    let plan = crate::carta_live::CapturePlan::authorize(
-        SCOPE,
-        &reference(),
-        &LiveConnection::Carta {
-            credential_ref: reference(),
-            client_id: "coverage-client".into(),
-            environment: CartaEnvironment::Playground,
-            max_pages_per_collection: 2,
-        },
-        CARTA_ISSUER,
-        CartaChildren::Include,
-        true,
-    )?;
-    let mut port = crate::carta_live::SimulatedCartaPort::new(&database, SCOPE, CARTA_ISSUER)?;
-    let complete = crate::carta_live::collect_complete(
-        &plan,
-        &mut port,
-        crate::carta_live::MAX_PAGE_RESPONSE_BYTES,
-    )
-    .0?;
-    let store = database.with_file_name(crate::carta_live::STORE);
-    crate::carta_live::publish(&store, &complete, 1_700_000_000, 1_700_000_001)?;
-    let result = if action == Action::CartaSnapshot {
-        serde_json::to_string(complete.snapshot())?
-    } else {
-        let instruction = crate::protocol::Instruction {
-            kind: "observe".into(),
-            model: action.capability().into(),
-            data: json!({"handle":"opaque","snapshot_id":complete.snapshot().id,"cursor":0})
-                .to_string(),
-            ..Default::default()
-        };
-        crate::carta_live::read_record(
-            &store,
-            &crate::carta_live::RecordRead::authorize(&plan, &instruction)?,
-        )?
-    };
-    let after = worlds(&database)?;
-    Ok(Observed {
-        result,
-        before,
-        after,
-    })
-}
-
 fn check_freetool_executor(action: Action) -> std::result::Result<(), String> {
     use crate::freetool_executor::{
         ExecutionIdentity, ExecutionPlan, ServiceRequest, response_json, sha256, simulated_call,
@@ -1244,16 +1198,25 @@ fn check(
         Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
-        Demonstration::NativeAdapterRead => {
-            let native = if action.provider() == Provider::Carta {
-                observe_native_carta
+        Demonstration::AdmittedAdapterRead => {
+            let first = run(Variant::A)?;
+            let second = run(Variant::B)?;
+            if first.result != second.result
+                && first.changed().is_empty()
+                && second.changed().is_empty()
+            {
+                Ok(())
             } else {
-                observe_native_directory
-            };
-            let first =
-                native(action, Variant::A).map_err(|error| format!("{action:?}: {error:#}"))?;
-            let second =
-                native(action, Variant::B).map_err(|error| format!("{action:?}: {error:#}"))?;
+                Err(format!(
+                    "{action:?} must reflect its admitted provider world without mutating any world"
+                ))
+            }
+        }
+        Demonstration::NativeAdapterRead => {
+            let first = observe_native_directory(action, Variant::A)
+                .map_err(|error| format!("{action:?}: {error:#}"))?;
+            let second = observe_native_directory(action, Variant::B)
+                .map_err(|error| format!("{action:?}: {error:#}"))?;
             if first.result != second.result
                 && first.changed().is_empty()
                 && second.changed().is_empty()
