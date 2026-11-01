@@ -154,8 +154,8 @@ impl effects::Hooks for Ports {
 
 fn host_seed(seed: u64) -> [u8; 32] {
     let mut bytes = [0; 32];
-    for chunk in bytes.chunks_exact_mut(8) {
-        chunk.copy_from_slice(&seed.to_le_bytes());
+    for chunk in bytes.as_chunks_mut::<8>().0 {
+        *chunk = seed.to_le_bytes();
     }
     bytes
 }
