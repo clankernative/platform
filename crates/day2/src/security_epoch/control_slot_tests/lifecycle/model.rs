@@ -17,6 +17,7 @@ pub(super) struct Model {
     slots: [Option<Value>; 2],
     versions: [u64; 2],
     documents: BTreeMap<String, (Value, u64)>,
+    replaced: BTreeMap<CounterRecord, Option<(Value, u64)>>,
     applied: usize,
     expired: bool,
     active: bool,
@@ -156,6 +157,7 @@ impl Model {
             slots: [None, None],
             versions: [0, 0],
             documents: BTreeMap::new(),
+            replaced: BTreeMap::new(),
             applied: 0,
             expired: false,
             active: false,
@@ -172,7 +174,11 @@ impl Model {
     }
 
     fn bootstrap(&mut self, stage: usize, operation: Operation, fault: Fault) -> bool {
-        if !self.state.first_holder || self.expired || fault == Fault::ReplaceCandidate {
+        if !self.state.first_holder
+            || self.expired
+            || fault == Fault::ReplaceCandidate
+            || !self.observed_documents_match()
+        {
             return false;
         }
         let current = self.slots[stage]
@@ -261,8 +267,99 @@ impl Model {
         fault == Fault::None
     }
 
+    fn counter_name(&self, record: CounterRecord) -> String {
+        match record {
+            CounterRecord::Authority => self.names[0].clone(),
+            CounterRecord::Sentinel => self.names[1].clone(),
+            CounterRecord::CreateReceipt => self.names[2].clone(),
+            CounterRecord::ActivationReceipt => self.names[3].clone(),
+            CounterRecord::OutsideSelection => format!("{}/unrelated/record", self.names[0]),
+        }
+    }
+
+    fn replace_counter(&mut self, record: CounterRecord) -> bool {
+        if self.replaced.contains_key(&record) {
+            return false;
+        }
+        let name = self.counter_name(record);
+        let original = self.documents.get(&name).cloned();
+        let source = if record == CounterRecord::OutsideSelection {
+            self.documents.get(&self.names[0])
+        } else {
+            original.as_ref()
+        };
+        let Some((mut value, version)) = source.cloned() else {
+            return false;
+        };
+        let bootstrap = if matches!(
+            record,
+            CounterRecord::CreateReceipt | CounterRecord::ActivationReceipt
+        ) {
+            &mut value["request"]["bootstrap"]
+        } else {
+            &mut value["bootstrap"]
+        };
+        bootstrap["record_incarnation"] =
+            json!(Digest::new(b"external-provider-record-replacement"));
+        self.documents.insert(name, (value, version));
+        self.replaced.insert(record, original);
+        true
+    }
+
+    fn restore_counter(&mut self, record: CounterRecord) -> bool {
+        let Some(original) = self.replaced.remove(&record) else {
+            return false;
+        };
+        let name = self.counter_name(record);
+        if let Some(original) = original {
+            self.documents.insert(name, original);
+        } else {
+            self.documents.remove(&name);
+        }
+        true
+    }
+
+    fn active_documents_match(&self) -> bool {
+        let expected = [
+            (&self.records[1][0], 2),
+            (&self.records[1][1], 2),
+            (&self.receipts[0], 1),
+            (&self.receipts[1], 2),
+        ];
+        self.names
+            .iter()
+            .zip(expected)
+            .all(|(name, (value, version))| {
+                self.documents
+                    .get(name)
+                    .is_some_and(|actual| actual.0 == *value && actual.1 == version)
+            })
+    }
+
+    fn observed_documents_match(&self) -> bool {
+        if self.applied == 0 {
+            return self
+                .names
+                .iter()
+                .all(|name| !self.documents.contains_key(name));
+        }
+        let stage = self.applied - 1;
+        let expected = [
+            Some(&self.records[stage][0]),
+            Some(&self.records[stage][1]),
+            Some(&self.receipts[0]),
+            (stage == 1).then_some(&self.receipts[1]),
+        ];
+        self.names
+            .iter()
+            .zip(expected)
+            .all(|(name, expected)| self.documents.get(name).map(|(value, _)| value) == expected)
+    }
+
     pub(super) fn step(&mut self, event: Event) -> Result<(bool, State)> {
         let accepted = match event {
+            Event::CounterReplace { record } => self.replace_counter(record),
+            Event::CounterRestore { record } => self.restore_counter(record),
             Event::Reopen => true,
             Event::RestoreClock => {
                 self.expired = false;
@@ -270,7 +367,9 @@ impl Model {
             }
             // An independent read-only DATA observation may use a fresh read
             // budget. It is never a replacement execution/continuation owner.
-            Event::Observe { stage } => stage == 0 || self.applied > 0,
+            Event::Observe { stage } => {
+                (stage == 0 || self.applied > 0) && self.observed_documents_match()
+            }
             Event::File { change } => {
                 let file = self
                     .state
@@ -319,7 +418,7 @@ impl Model {
                             death_cut,
                             rewrite_provider,
                         } => {
-                            if !self.active || self.expired {
+                            if !self.active || self.expired || !self.active_documents_match() {
                                 false
                             } else {
                                 if rewrite_provider && death_cut.is_none() {
