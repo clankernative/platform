@@ -1036,6 +1036,22 @@ jobs:
             artifacts/native-connection-request-simulation/failure-*/failure.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Publish actual Linear campaign coverage
+        if: ${{ always() && matrix.shard == 'workspace-day2' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linear-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/linear-provider-simulation/campaign-*/receipt.json
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+          retention-days: 14
+      - name: Retain redacted Linear replay seeds
+        if: ${{ failure() && matrix.shard == 'workspace-day2' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linear-replays-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/linear-provider-simulation/failure-*/failure.json
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: day2-result-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}

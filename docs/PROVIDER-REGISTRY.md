@@ -79,6 +79,11 @@ That is the job of the gates that remain:
 
 ## Outstanding
 
+The synthetic Linear actions now exercise real host authorization and committed
+SQLite worlds against an independent seeded oracle; see
+[LINEAR-SIMULATION.md](LINEAR-SIMULATION.md) for the precise coverage and replay
+limits. Synthetic coverage does not establish live-provider conformance.
+
 Every provider now has a simulation. `Slack`, `Snowflake` and `OpenAi` — the three
 admitted live-first — are served by `integrations::simulated` at the transport seam,
 so the offline lane and the live lane differ only in the socket.
