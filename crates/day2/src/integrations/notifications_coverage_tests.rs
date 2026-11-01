@@ -172,6 +172,32 @@ impl Fixture {
         Ok((request, bound))
     }
 
+    fn assert_budget_state(&self, held: bool) -> Result<()> {
+        let mut db = store::open(self.runtime.db())?;
+        let tx = db.transaction()?;
+        let status = crate::budget::inspect_in(&tx)?;
+        ensure!(
+            status.unknown_usage.len() == if held { 1 } else { 0 },
+            "unexpected unknown notification usage"
+        );
+        let account = status
+            .accounts
+            .iter()
+            .find(|a| a.budget_id == "mail" && a.unit == "concurrency")
+            .context("notification concurrency account")?;
+        ensure!(
+            account.limit == 1 && account.used == 0 && account.reserved == if held { 1 } else { 0 },
+            "notification concurrency accounting differs"
+        );
+        if held {
+            ensure!(
+                status.unknown_usage[0].quote.concurrency == 1,
+                "unknown usage lost its quote"
+            );
+        }
+        Ok(())
+    }
+
     fn call(
         &self,
         action: Action,
@@ -444,6 +470,19 @@ fn lost_reply_retry_and_conflicting_payload_use_the_persisted_provider_world() -
         reply == accepted && worlds(fixture.runtime.db())? == committed,
         "duplicate changed provider acceptance"
     );
+    let result: Value = serde_json::from_str(&fixture.call(
+        Action::NotificationsLatest,
+        "alice",
+        "read-original",
+        "read-effect",
+        json!({"topic":TOPIC}),
+    )?)?;
+    let accepted: Value = serde_json::from_str(&accepted)?;
+    ensure!(
+        result["id"] == accepted["id"] && result["count"] == 2,
+        "latest lost original acceptance or crossed actor/scope/topic"
+    );
+    fixture.assert_budget_state(false)?;
     ensure!(
         fixture
             .call(
@@ -460,17 +499,19 @@ fn lost_reply_retry_and_conflicting_payload_use_the_persisted_provider_world() -
         worlds(fixture.runtime.db())? == committed,
         "conflicting retry changed provider world"
     );
-    let result: Value = serde_json::from_str(&fixture.call(
+    // Generic local errors deliberately keep the quote until reconciliation.
+    // Do not free it in the fixture or increase the one-slot budget.
+    fixture.assert_budget_state(true)?;
+    require_budget_refusal(fixture.call(
         Action::NotificationsLatest,
         "alice",
-        "read-original",
-        "read-effect",
+        "quarantined-read",
+        "quarantined-read-effect",
         json!({"topic":TOPIC}),
-    )?)?;
-    let accepted: Value = serde_json::from_str(&accepted)?;
+    ))?;
     ensure!(
-        result["id"] == accepted["id"] && result["count"] == 2,
-        "latest lost original acceptance or crossed actor/scope/topic"
+        worlds(fixture.runtime.db())? == committed,
+        "quarantined call changed provider state"
     );
     Ok(())
 }
@@ -615,6 +656,20 @@ impl MailboxOracle {
     }
 }
 
+fn require_budget_refusal(result: Result<String>) -> Result<()> {
+    let Err(error) = result else {
+        anyhow::bail!("quarantined notification call was admitted");
+    };
+    ensure!(
+        matches!(
+            error.downcast_ref::<crate::error::Failure>(),
+            Some(crate::error::Failure::BudgetExhausted)
+        ) && error.to_string() == "budget_exhausted:mail:concurrency",
+        "notification call refused at the wrong budget boundary"
+    );
+    Ok(())
+}
+
 fn history(seed: u64) -> Result<Vec<Value>> {
     let fixture = Fixture::new(Variant::A, seed)?;
     let mut oracle = MailboxOracle(starting_messages(Variant::A));
@@ -622,6 +677,7 @@ fn history(seed: u64) -> Result<Vec<Value>> {
     let mut observed = Vec::new();
     let mut random = seed;
     let mut previous = None;
+    let mut held = false;
     for index in 0..24 {
         random = random
             .wrapping_mul(6364136223846793005)
@@ -633,116 +689,144 @@ fn history(seed: u64) -> Result<Vec<Value>> {
         };
         let invocation = format!("history-{seed}-{index}");
         let mut lost_reply = false;
-        let allowed = match choice {
-            0 | 1 | 3 => {
-                let effect = format!("history-effect-{seed}-{index}");
-                let body = format!("synthetic-body-{}", random % 11);
-                let input = json!({"actor":"alice","topic":TOPIC,"body":body});
-                if choice == 3 {
-                    let _ = fixture.call(
+        let quarantined = held && choice != 5;
+        let allowed = if quarantined {
+            let action = if choice == 6 {
+                Action::NotificationsLatest
+            } else {
+                Action::NotificationsSend
+            };
+            let input = if choice == 6 {
+                json!({"topic":TOPIC})
+            } else {
+                json!({"actor":"alice","topic":TOPIC,"body":"valid quarantined attempt"})
+            };
+            require_budget_refusal(fixture.call(
+                action,
+                "alice",
+                &invocation,
+                &format!("quarantined-effect-{seed}-{index}"),
+                input,
+            ))?;
+            false
+        } else {
+            match choice {
+                0 | 1 | 3 => {
+                    let effect = format!("history-effect-{seed}-{index}");
+                    let body = format!("synthetic-body-{}", random % 11);
+                    let input = json!({"actor":"alice","topic":TOPIC,"body":body});
+                    if choice == 3 {
+                        let _ = fixture.call(
+                            Action::NotificationsSend,
+                            "alice",
+                            &invocation,
+                            &effect,
+                            input.clone(),
+                        )?;
+                        lost_reply = true;
+                    }
+                    let result: Value = serde_json::from_str(&fixture.call(
                         Action::NotificationsSend,
                         "alice",
                         &invocation,
                         &effect,
-                        input.clone(),
-                    )?;
-                    lost_reply = true;
+                        input,
+                    )?)?;
+                    ensure!(
+                        result == accepted(&effect),
+                        "notification send response differs"
+                    );
+                    ensure!(
+                        oracle.send(
+                            &effect,
+                            capabilities::Message {
+                                scope: SCOPE.into(),
+                                actor: "alice".into(),
+                                topic: TOPIC.into(),
+                                body: body.clone()
+                            }
+                        ),
+                        "new request unexpectedly conflicted"
+                    );
+                    previous = Some((effect, body));
+                    true
                 }
-                let result: Value = serde_json::from_str(&fixture.call(
-                    Action::NotificationsSend,
-                    "alice",
-                    &invocation,
-                    &effect,
-                    input,
-                )?)?;
-                ensure!(
-                    result == accepted(&effect),
-                    "notification send response differs"
-                );
-                ensure!(
-                    oracle.send(
+                2 | 4 => {
+                    let (effect, body) = previous.clone().context("prior accepted effect")?;
+                    let body = if choice == 4 {
+                        format!("conflict-{body}")
+                    } else {
+                        body
+                    };
+                    let expected = oracle.send(
                         &effect,
                         capabilities::Message {
                             scope: SCOPE.into(),
                             actor: "alice".into(),
                             topic: TOPIC.into(),
-                            body: body.clone()
+                            body: body.clone(),
+                        },
+                    );
+                    let result = fixture.call(
+                        Action::NotificationsSend,
+                        "alice",
+                        &invocation,
+                        &effect,
+                        json!({"actor":"alice","topic":TOPIC,"body":body}),
+                    );
+                    ensure!(
+                        result.is_ok() == expected,
+                        "notification idempotency differs"
+                    );
+                    match result {
+                        Ok(value) => ensure!(
+                            serde_json::from_str::<Value>(&value)? == accepted(&effect),
+                            "duplicate receipt differs"
+                        ),
+                        Err(error) => {
+                            ensure!(
+                                error.to_string() == "notification_idempotency_conflict",
+                                "conflict refused at the wrong boundary"
+                            );
+                            held = true;
                         }
-                    ),
-                    "new request unexpectedly conflicted"
-                );
-                previous = Some((effect, body));
-                true
-            }
-            2 | 4 => {
-                let (effect, body) = previous.clone().context("prior accepted effect")?;
-                let body = if choice == 4 {
-                    format!("conflict-{body}")
-                } else {
-                    body
-                };
-                let expected = oracle.send(
-                    &effect,
-                    capabilities::Message {
-                        scope: SCOPE.into(),
-                        actor: "alice".into(),
-                        topic: TOPIC.into(),
-                        body: body.clone(),
-                    },
-                );
-                let result = fixture.call(
-                    Action::NotificationsSend,
-                    "alice",
-                    &invocation,
-                    &effect,
-                    json!({"actor":"alice","topic":TOPIC,"body":body}),
-                );
-                ensure!(
-                    result.is_ok() == expected,
-                    "notification idempotency differs"
-                );
-                match result {
-                    Ok(value) => ensure!(
-                        serde_json::from_str::<Value>(&value)? == accepted(&effect),
-                        "duplicate receipt differs"
-                    ),
-                    Err(error) => ensure!(
-                        error.to_string() == "notification_idempotency_conflict",
-                        "conflict refused at the wrong boundary"
-                    ),
+                    }
+                    expected
                 }
-                expected
-            }
-            5 => {
-                ensure!(
-                    fixture
-                        .call(
-                            Action::NotificationsSend,
-                            "alice",
-                            &invocation,
-                            "denied-actor",
-                            json!({"actor":"bob","topic":TOPIC,"body":"denied"})
-                        )
-                        .is_err(),
-                    "history impersonation accepted"
-                );
-                false
-            }
-            _ => {
-                let result: Value = serde_json::from_str(&fixture.call(
-                    Action::NotificationsLatest,
-                    "alice",
-                    &invocation,
-                    "history-read",
-                    json!({"topic":TOPIC}),
-                )?)?;
-                ensure!(
-                    result == oracle.latest(),
-                    "notification latest crossed scope/actor/topic or lost ordering"
-                );
-                true
+                5 => {
+                    let result = fixture.call(
+                        Action::NotificationsSend,
+                        "alice",
+                        &invocation,
+                        "denied-actor",
+                        json!({"actor":"bob","topic":TOPIC,"body":"denied"}),
+                    );
+                    let Err(error) = result else {
+                        anyhow::bail!("history impersonation accepted");
+                    };
+                    ensure!(
+                        error.to_string() == "invalid_notification",
+                        "impersonation refused at the wrong boundary"
+                    );
+                    false
+                }
+                _ => {
+                    let result: Value = serde_json::from_str(&fixture.call(
+                        Action::NotificationsLatest,
+                        "alice",
+                        &invocation,
+                        "history-read",
+                        json!({"topic":TOPIC}),
+                    )?)?;
+                    ensure!(
+                        result == oracle.latest(),
+                        "notification latest crossed scope/actor/topic or lost ordering"
+                    );
+                    true
+                }
             }
         };
+        fixture.assert_budget_state(held)?;
         // Reopen the actual committed store and compare every row/message; do
         // not derive expectations from this readback or truncate the snapshot.
         let store = rusqlite::Connection::open_with_flags(
@@ -769,7 +853,7 @@ fn history(seed: u64) -> Result<Vec<Value>> {
                 .all(|(name, state)| after.get(name) == Some(state)),
             "notification history changed another provider world"
         );
-        observed.push(json!({"choice":choice,"accepted":allowed,"discarded_reply":lost_reply,"world":crate::digest(encoded.as_bytes())}));
+        observed.push(json!({"choice":choice,"accepted":allowed,"discarded_reply":lost_reply,"budget_quarantined":quarantined,"world":crate::digest(encoded.as_bytes())}));
     }
     Ok(observed)
 }
@@ -845,13 +929,18 @@ fn seeded_admitted_mailbox_histories_match_independent_oracle_and_replay() -> Re
             let accepted = step["accepted"]
                 .as_bool()
                 .context("observed notification acceptance")?;
-            let category = match (step["choice"].as_u64(), accepted) {
-                (Some(0 | 1 | 3), true) => "send_accepted",
-                (Some(2), true) => "duplicate_accepted_once",
-                (Some(4), false) => "conflicting_payload_refused",
-                (Some(5), false) => "impersonation_refused",
-                (Some(6), true) => "scoped_latest_read",
-                _ => anyhow::bail!("unclassified observed notification step"),
+            let category = if step["budget_quarantined"] == true {
+                ensure!(!accepted, "quarantined history accepted work");
+                "unknown_usage_quarantines_budget"
+            } else {
+                match (step["choice"].as_u64(), accepted) {
+                    (Some(0 | 1 | 3), true) => "send_accepted",
+                    (Some(2), true) => "duplicate_accepted_once",
+                    (Some(4), false) => "conflicting_payload_refused",
+                    (Some(5), false) => "impersonation_refused",
+                    (Some(6), true) => "scoped_latest_read",
+                    _ => anyhow::bail!("unclassified observed notification step"),
+                }
             };
             *counts.entry(category).or_default() += 1;
             if step["discarded_reply"] == true {
@@ -863,7 +952,7 @@ fn seeded_admitted_mailbox_histories_match_independent_oracle_and_replay() -> Re
         seeds.push(seed);
     }
     ensure!(
-        seeds == (0..8).collect::<Vec<_>>() && counts.len() == 6 && counts.values().all(|n| *n > 0),
+        seeds == (0..8).collect::<Vec<_>>() && counts.len() == 7 && counts.values().all(|n| *n > 0),
         "declared notification campaign/fault family did not run"
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
