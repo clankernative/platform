@@ -2,7 +2,7 @@
 //! This never executes downloaded binaries or turns a PR receipt into queue proof.
 use super::{
     BuildCache, BuildIdentity, Identity, Prepared, Receipt, Targets, admit_join, build_identity,
-    combine_parts, compiler_targets, identity,
+    compiler_targets, identity,
 };
 use crate::run_with_budget;
 use anyhow::{Context, Result, ensure};
@@ -67,7 +67,7 @@ fn number(value: &Value, key: &str) -> Result<u64> {
     Ok(number)
 }
 
-fn api(root: &Path, endpoint: &str) -> Result<Value> {
+pub(super) fn api(root: &Path, endpoint: &str) -> Result<Value> {
     // Fixed repository endpoints only; no response-supplied URL or credential output.
     let file = tempfile::NamedTempFile::new()?;
     run_with_budget(
@@ -83,7 +83,7 @@ fn api(root: &Path, endpoint: &str) -> Result<Value> {
     read_json(&file.path().canonicalize()?)
 }
 
-fn read_json(path: &Path) -> Result<Value> {
+pub(super) fn read_json(path: &Path) -> Result<Value> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && metadata.len() <= 1024 * 1024 && path.canonicalize()? == path,
@@ -92,12 +92,12 @@ fn read_json(path: &Path) -> Result<Value> {
     day2::json::decode_evidence(&fs::read(path)?)
 }
 
-fn output(name: &str, value: &str) -> Result<()> {
+pub(super) fn output(name: &str, value: &str) -> Result<()> {
     ensure!(
-        ["run", "artifact", "attempt", "reused"].contains(&name)
+        ["run", "artifact", "attempt", "reused", "inputs", "tests", "common", "binaries", "results", "mac", "reuse_artifact"].contains(&name)
             && (value == "true"
                 || value == "false"
-                || value.bytes().all(|byte| byte.is_ascii_digit())),
+                || value.split(',').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))),
         "closed workflow output required"
     );
     let path = PathBuf::from(std::env::var("GITHUB_OUTPUT")?);
@@ -326,14 +326,15 @@ fn admit_full(
     mac_snapshot: &str,
 ) -> Result<()> {
     ensure!(
-        files.len() == 6
+        files.len() == 7
             && [
                 "verification.json",
                 "ci-prepared.json",
                 "ci-preparation-inputs.json",
                 "ci-preparation-tests.json",
                 "ci-verification.json",
-                "ci-test-build-cache.json"
+                "ci-test-build-cache.json",
+                "ci-artifact-selection.json"
             ]
             .iter()
             .all(|name| files.contains_key(*name)),
@@ -356,11 +357,24 @@ fn admit_full(
             && compiler.architecture == current.architecture,
         "compiler proof must bind to current source and host"
     );
+    let selection: super::artifacts::Selection =
+        serde_json::from_value(files["ci-artifact-selection.json"].clone())?;
+    let selection = &selection;
     ensure!(
-        prepared.identity == expected
-            && joined.identity == expected
-            && serde_json::to_value(combine_parts(inputs, tests, &expected)?)?
-                == serde_json::to_value(&prepared)?,
+        selection.consumer == expected,
+        "original full composition consumer changed"
+    );
+    let common = super::artifacts::origin(&expected, selection, super::artifacts::Role::Common)?;
+    ensure!(
+        prepared.identity == common
+            && joined.identity == common
+            && serde_json::to_value(super::combine_origins(
+                inputs,
+                tests,
+                &common,
+                &super::artifacts::origin(&expected, selection, super::artifacts::Role::Inputs)?,
+                &super::artifacts::origin(&expected, selection, super::artifacts::Role::Tests)?
+            )?)? == serde_json::to_value(&prepared)?,
         "complete current-source queue preparation required"
     );
     ensure!(
@@ -404,7 +418,13 @@ fn admit_full(
         expected.host == "linux" && expected.architecture == "x86_64",
         "Linux portable full origin required"
     );
-    super::mac::admit(&joined.mac, &expected, mac_snapshot, compiler, targets)?;
+    super::mac::admit(
+        &joined.mac,
+        &super::artifacts::origin(&expected, selection, super::artifacts::Role::Mac)?,
+        mac_snapshot,
+        compiler,
+        targets,
+    )?;
     let timings = admit_join(&prepared, &joined.shards, Some(&joined.mac))?;
     let effects: BTreeSet<_> = timings.keys().cloned().collect();
     ensure!(
@@ -445,6 +465,7 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
         "ci-preparation-tests.json",
         "ci-verification.json",
         "ci-test-build-cache.json",
+        "ci-artifact-selection.json",
     ] {
         files.insert(name.into(), read_json(&downloaded.join(name))?);
     }
@@ -456,6 +477,9 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
         &files,
         &super::super::verification_snapshot_for(root, "verify", "macos", "aarch64")?,
     )?;
+    let selection: super::artifacts::Selection =
+        serde_json::from_value(files["ci-artifact-selection.json"].clone())?;
+    super::artifacts::refresh(root, &selection)?;
     // A newer failed/in-progress attempt invalidates an earlier success. Recheck
     // authenticated metadata after artifact admission, never an older attempt URL.
     let latest = api(
@@ -499,6 +523,7 @@ pub(in super::super) fn admit(root: &Path, snapshot: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::combine_parts;
     use super::super::tests::{sample_identity, sample_part};
     use super::super::{Binary, SHARDS, effects, expected_binaries, program_output};
     use super::*;
@@ -704,6 +729,7 @@ mod tests {
             ("ci-prepared.json",serde_json::to_value(&prepared)?),("ci-preparation-inputs.json",serde_json::to_value(inputs)?),
             ("ci-preparation-tests.json",serde_json::to_value(tests)?),("ci-verification.json",joined),
             ("ci-test-build-cache.json",serde_json::to_value(cache)?),
+            ("ci-artifact-selection.json",serde_json::to_value(super::super::artifacts::sample(&current))?),
         ].into_iter().map(|(name,value)|(name.into(),value)).collect();
         let targets = Targets {
             auxiliaries: super::super::auxiliary_targets("linux"),

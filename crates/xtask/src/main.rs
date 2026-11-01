@@ -940,6 +940,14 @@ fn main() -> Result<()> {
             );
             verification::execute(&root, &format!("verify-prepare-part-{part}"))?;
         }
+        "verify-artifact-plan" => {
+            let phase = args.next().context("artifact consumer required")?;
+            ensure!(
+                args.next().is_none(),
+                "artifact selection accepts one closed consumer"
+            );
+            verification::artifact_plan(&root, &phase)?;
+        }
         "verify-transport-plan" => {
             let phase = args
                 .next()
