@@ -1063,6 +1063,10 @@ pub fn transport_plan(root: &Path, phase: &str) -> Result<()> {
     shards::transport::plan(root, &snapshot, phase)
 }
 
+pub fn artifact_plan(root: &Path, phase: &str) -> Result<()> {
+    shards::artifacts::plan(root, &verification_snapshot(root, "verify")?, phase)
+}
+
 fn cached_fixture(root: &Path, artifact: &str) -> Result<Option<PathBuf>> {
     ensure!(
         artifact.len() == 71
