@@ -8,6 +8,8 @@ import KeyFamilies
 import Credentials
 import Data
 import Selectors
+import Commands
+import Errors
 
 CreatePersonal :: [].{
 	Output : { lineage : Str, version : Str, label : Str, expires_at : I64 }
@@ -43,7 +45,7 @@ CreatePersonal :: [].{
 						expires_at: 3600,
 					},
 				}),
-			errors: [],
+			errors: [Errors.personal_refused],
 			input_sources: |_| [],
 			follow_ups: [],
 			deprecated: Bool.False,
@@ -67,6 +69,7 @@ CreatePersonal :: [].{
 
 	handle : InteractiveContext, CreatePersonalTypes.Input -> Tx(Output)
 	handle = |context, input| match Credential.Label.from_str(input.label) {
+		Ok(_) if input.label == "Refuse issuance" => Tx.reject(Errors.personal_refused)
 		Err(_) => Tx.succeed({ lineage: "", version: "", label: "", expires_at: 0 })
 		Ok(label) => (Credentials.personal.issue)(
 			context,
@@ -97,4 +100,13 @@ CreatePersonal :: [].{
 			},
 		)
 	}
+
+	refused = Api.error({
+		description: "The app refused this credential label.",
+		recovery: "Choose a different label.",
+		verification: |_| Api.failed_command(
+			Commands.create_personal,
+			|_snapshot, _seed| Ok({ label: "Refuse issuance" }),
+		),
+	})
 }

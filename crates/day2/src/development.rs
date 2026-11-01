@@ -33,11 +33,13 @@ mod verification_failure_tests;
 /// repeatable epoch; local serving uses the runtime clock for fresh providers.
 /// Interactive credential confirmations always use the runtime clock.
 ///
-/// Error cases run after the latest recorded success step, interactive ones
-/// included, one second apart. Verification starts them at a fixed offset from
-/// its epoch. A local campaign starts them at the current runtime clock, or just
-/// after a success step that ran ahead of it, so an instance seeded and then
-/// served is stamped no later than its own campaign's steps imply.
+/// Non-interactive error cases run after the latest recorded success step,
+/// interactive successes included, one second apart. Verification starts them
+/// at a fixed offset from its epoch. A local campaign starts them at the current
+/// runtime clock, or just after a success step that ran ahead of it. Interactive
+/// failures instead use the runtime clock and explicit disposable confirmation,
+/// just like interactive successes; synthetic error-phase time cannot mint or
+/// extend that confirmation.
 #[derive(Clone, Copy)]
 pub enum CampaignTime {
     Verification,
@@ -4395,7 +4397,16 @@ impl Campaign {
                                 let input: Value = serde_json::from_str(&input)?;
                                 let ordinal = self.evidence.error_traces.len();
                                 let id = format!("failure-{ordinal}");
-                                let now = error_start + ordinal as i64;
+                                let interactive = crate::managed_credentials::issuance::access(
+                                    &self.runtime,
+                                    &target.operation,
+                                )?
+                                .interactive;
+                                let now = if interactive {
+                                    self.runtime.host().now_ms()?.div_euclid(1000)
+                                } else {
+                                    error_start + ordinal as i64
+                                };
                                 // Error cases may select only an artifact-declared host
                                 // fixture. Direct cases remain direct; no input field can
                                 // select the caller or authentication path.
@@ -4404,6 +4415,23 @@ impl Campaign {
                                     target,
                                     self.runtime.integrations().is_simulated(),
                                 )?;
+                                if interactive {
+                                    ensure!(
+                                        delegation.is_none(),
+                                        "interactive credential failure requires direct disposable verification"
+                                    );
+                                    // Use the same explicit disposable producer as
+                                    // successful interactive cases. An ordinary
+                                    // acceptance path cannot invent confirmation.
+                                    crate::managed_credentials::verification::confirm(
+                                        &self.runtime,
+                                        &target.operation,
+                                        verification_actor,
+                                        &id,
+                                        &input,
+                                        now,
+                                    )?;
+                                }
                                 if let Some(delegation) = delegation {
                                     let authenticated = format!("app:{}", delegation.application);
                                     self.runtime.accept_delegated(

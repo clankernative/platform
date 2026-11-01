@@ -36,7 +36,10 @@ App :: [].{
 			use_receipts: MetadataInvariants.use_receipts,
 			key_receipts: MetadataInvariants.key_receipts,
 		},
-		errors: {},
+		errors: {
+			client_refused: CreateClient.refused,
+			personal_refused: CreatePersonal.refused,
+		},
 		examples: [],
 		presentation: { stylesheet: "", script: "app.js" },
 	}

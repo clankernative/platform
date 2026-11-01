@@ -131,6 +131,78 @@ fn lifecycle_admission_rejects_unbound_or_ambiguous_management_intent() -> Resul
 }
 
 #[test]
+fn interactive_failure_campaign_confirms_both_profiles_without_staging_credentials() -> Result<()> {
+    let artifact_path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("credential fixture required")?,
+    );
+    let directory = tempfile::tempdir()?;
+    let instance = directory.path().join("campaign");
+    let evidence = day2::development::verify(&artifact_path, &instance, 9182, 2)?;
+    ensure!(evidence.verification_complete && evidence.failure.is_none());
+    assert_eq!(evidence.error_traces.len(), 4);
+    let runtime = Runtime::load(&instance.join("instance.json"), "app")?;
+    let db = rusqlite::Connection::open(runtime.db())?;
+    let mut observed = BTreeMap::<String, usize>::new();
+    for trace in &evidence.error_traces {
+        let expected = match trace.request.operation.as_str() {
+            "credential_metadata.create_client" => "app:credential_metadata.client_refused",
+            "credential_metadata.create_personal" => "app:credential_metadata.personal_refused",
+            _ => anyhow::bail!("unexpected interactive failure operation"),
+        };
+        assert_eq!(trace.outcome.status, "failure");
+        assert_eq!(trace.outcome.error, expected);
+        assert!(trace.request.observations.iter().all(|observation| {
+            !matches!(
+                observation.instruction.kind.as_str(),
+                "external" | "credential_issue"
+            )
+        }));
+        let invocation = &trace.request.context.invocation_id;
+        let raw: String = db.query_row(
+            "SELECT confirmation FROM day2_credential_confirmations WHERE invocation=?1",
+            [invocation],
+            |row| row.get(0),
+        )?;
+        let record: Value = serde_json::from_str(&raw)?;
+        assert_eq!(record["original"]["kind"], "disposable_verification");
+        assert_eq!(record["confirmation"]["operation"], trace.request.operation);
+        assert_eq!(record["confirmation"]["actor"], trace.request.context.actor);
+        assert_eq!(
+            record["confirmation"]["input"],
+            serde_json::from_str::<Value>(&trace.request.input)?
+        );
+        assert_eq!(
+            record["confirmation"]["authenticated_at"],
+            trace.request.context.now
+        );
+        assert_eq!(
+            record["confirmation"]["approved_at"],
+            trace.request.context.now
+        );
+        assert_eq!(
+            record["confirmation"]["expires_at"],
+            trace.request.context.now + 300
+        );
+        let staged: i64 = db.query_row(
+            "SELECT count(*) FROM day2_credential_receipts WHERE invocation=?1",
+            [invocation],
+            |row| row.get(0),
+        )?;
+        assert_eq!(staged, 0);
+        *observed.entry(trace.request.operation.clone()).or_default() += 1;
+    }
+    assert_eq!(
+        observed,
+        BTreeMap::from([
+            ("credential_metadata.create_client".into(), 2),
+            ("credential_metadata.create_personal".into(), 2),
+        ])
+    );
+    Ok(())
+}
+
+#[test]
 fn ordinary_creation_refuses_credentials_before_output_and_verification_preserves_complete_selection()
 -> Result<()> {
     use day2_capabilities::credentials::ManagementPredicate;

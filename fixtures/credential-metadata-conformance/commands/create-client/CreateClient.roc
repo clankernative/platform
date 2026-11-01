@@ -8,6 +8,8 @@ import KeyFamilies
 import Credentials
 import Data
 import Selectors
+import Commands
+import Errors
 
 CreateClient :: [].{
 	Output : { lineage : Str, version : Str, label : Str, expires_at : I64 }
@@ -43,7 +45,7 @@ CreateClient :: [].{
 						expires_at: 3600,
 					},
 				}),
-			errors: [],
+			errors: [Errors.client_refused],
 			input_sources: |_| [],
 			follow_ups: [],
 			deprecated: Bool.False,
@@ -65,6 +67,7 @@ CreateClient :: [].{
 
 	handle : InteractiveContext, CreateClientTypes.Input -> Tx(Output)
 	handle = |context, input| match Credential.Label.from_str(input.label) {
+		Ok(_) if input.label == "Refuse issuance" => Tx.reject(Errors.client_refused)
 		Err(_) => Tx.succeed({ lineage: "", version: "", label: "", expires_at: 0 })
 		Ok(label) => (Credentials.clients.issue)(
 			context,
@@ -95,4 +98,13 @@ CreateClient :: [].{
 			},
 		)
 	}
+
+	refused = Api.error({
+		description: "The app refused this credential label.",
+		recovery: "Choose a different label.",
+		verification: |_| Api.failed_command(
+			Commands.create_client,
+			|_snapshot, _seed| Ok({ label: "Refuse issuance" }),
+		),
+	})
 }
