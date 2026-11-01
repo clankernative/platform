@@ -28,8 +28,8 @@
 //! against two different worlds has not demonstrated a world at all.
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
-//! live Carta native capture/read pipelines. Three native/synthetic providers
-//! and local delegation still need adapter/callee harnesses and remain pending.
+//! live Carta native capture/read pipelines, and delegation's admitted-resource
+//! offline handler. Four native/synthetic providers remain pending.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -53,6 +53,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SCOPE: &str = "coverage/app";
+
+#[path = "delegation_coverage_tests.rs"]
+mod delegation;
 
 /// How an action demonstrates that its declared world is real.
 ///
@@ -98,7 +101,11 @@ enum Demonstration {
 
 fn demonstration(action: Action) -> Demonstration {
     match action {
-        Action::SlackRead | Action::SnowflakeRead => Demonstration::ResultReflectsWorld,
+        Action::SlackRead
+        | Action::SnowflakeRead
+        | Action::DelegateQuery
+        | Action::DelegateStatus => Demonstration::ResultReflectsWorld,
+        Action::DelegateSend => Demonstration::EffectLandsInWorld,
         Action::SlackPost | Action::SlackWebhookPost => Demonstration::EffectLandsInWorld,
         // Head reads the object record; a grant refuses a key the world does not
         // hold, so both depend on the world's contents rather than only on config.
@@ -120,7 +127,12 @@ fn demonstration(action: Action) -> Demonstration {
         // Both are reads whose answers are the repository's contents: a job's
         // conclusion, and where its log lives.
         Action::GitHubJob | Action::GitHubJobLog => Demonstration::ResultReflectsWorld,
-        Action::GiteaRuns | Action::GiteaRun | Action::GiteaRunJobs | Action::GiteaJob | Action::GiteaJobLog | Action::GiteaRunners => Demonstration::ResultReflectsWorld,
+        Action::GiteaRuns
+        | Action::GiteaRun
+        | Action::GiteaRunJobs
+        | Action::GiteaJob
+        | Action::GiteaJobLog
+        | Action::GiteaRunners => Demonstration::ResultReflectsWorld,
         Action::LinearWorkReassign => Demonstration::EffectLandsInWorld,
         // Billable but stateless: its dependence on the world is visible in the
         // usage the simulated account reports, not in a record it leaves behind.
@@ -135,12 +147,7 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::GoogleDirectoryEnsureGroupMember
         | Action::LinearEnsureAccess
         | Action::LinearSuspend
-        | Action::OperatorAlertsSend
-        // A delegated read is answered by the callee application, not by a
-        // transport this gate can drive: there is no socket to seed two worlds
-        // behind. Pending here rather than silently absent, and it shrinks when
-        // the delegation harness can stand up a second application.
-        | Action::DelegateQuery | Action::DelegateSend | Action::DelegateStatus => Demonstration::PendingAdapterSeam,
+        | Action::OperatorAlertsSend => Demonstration::PendingAdapterSeam,
         Action::WorkspaceDirectoryCapture
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
@@ -166,8 +173,6 @@ struct PendingDebt {
 
 const ADAPTER_REASON: &str = "This action runs at the native/synthetic adapter seam and needs an admitted instance/policy harness.";
 const ADAPTER_REMOVAL: &str = "Remove when every action of this provider is driven through its real offline handler against distinguishable own worlds, with read/effect attribution and constant/wrong-world negatives.";
-const DELEGATION_REASON: &str = "The transport harness cannot establish the admitted caller/callee boundary for query, send and status.";
-const DELEGATION_REMOVAL: &str = "The delegation owner must cover all three actions with an admitted caller/callee harness demonstrating exact target authority, responses and effects in the appropriate world.";
 
 // Existing coverage debt, not permission to admit a provider without evidence.
 // Keep individual action keys: adding an action to an existing pending provider
@@ -238,24 +243,6 @@ const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
         owner: "platform operator-alert adapter",
         reason: ADAPTER_REASON,
         remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::DelegateQuery,
-        owner: "platform delegation boundary",
-        reason: DELEGATION_REASON,
-        remove_when: DELEGATION_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::DelegateSend,
-        owner: "platform delegation boundary",
-        reason: DELEGATION_REASON,
-        remove_when: DELEGATION_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::DelegateStatus,
-        owner: "platform delegation boundary",
-        reason: DELEGATION_REASON,
-        remove_when: DELEGATION_REMOVAL,
     },
 ];
 
@@ -686,6 +673,13 @@ fn invocation(action: Action, variant: Variant) -> (LiveConnection, ResourceTarg
 /// including reads. A read that appends to the call log has not changed the
 /// provider; conflating the two would make every read look like a write.
 fn worlds(database: &std::path::Path) -> Result<BTreeMap<&'static str, Option<String>>> {
+    worlds_in_scope(database, SCOPE)
+}
+
+fn worlds_in_scope(
+    database: &std::path::Path,
+    scope: &str,
+) -> Result<BTreeMap<&'static str, Option<String>>> {
     let mut state = BTreeMap::new();
     for provider in Provider::ALL {
         let world = provider.world().expect("every provider declares a world");
@@ -698,7 +692,7 @@ fn worlds(database: &std::path::Path) -> Result<BTreeMap<&'static str, Option<St
             let stored: Option<String> = connection
                 .query_row(
                     "SELECT state FROM simulated_provider WHERE scope=?1",
-                    [SCOPE],
+                    [scope],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
@@ -739,6 +733,9 @@ impl Observed {
 /// Invoke one action against one seeded world, through the real adapter, and
 /// capture both what it returned and what it changed.
 fn observe(action: Action, variant: Variant) -> Result<Observed> {
+    if action.provider() == Provider::LocalDelegation {
+        return delegation::observe(action, variant);
+    }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -1468,7 +1465,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 14);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 11);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 
