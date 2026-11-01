@@ -19,6 +19,9 @@ use day2_capabilities::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+#[path = "rewrap.rs"]
+pub(crate) mod rewrap;
+
 const CREDENTIAL_DDL: &str = "
         CREATE TABLE IF NOT EXISTS day2_credential_schema_version (
             version INTEGER PRIMARY KEY
@@ -3550,7 +3553,7 @@ mod tests {
         Name::try_from(value.to_owned()).unwrap()
     }
 
-    fn lease() -> KeyLease {
+    pub(super) fn lease() -> KeyLease {
         KeyLease::new(
             &[3u8; 32],
             &[4u8; 32],
@@ -3560,7 +3563,7 @@ mod tests {
         .unwrap()
     }
 
-    fn namespace() -> Namespace {
+    pub(super) fn namespace() -> Namespace {
         Namespace {
             installation: name("wonderly"),
             environment: name("dev"),
@@ -3594,7 +3597,7 @@ mod tests {
         .unwrap()
     }
 
-    fn family() -> ManifestFamily {
+    pub(super) fn family() -> ManifestFamily {
         ManifestFamily::derive(
             FamilyDeclaration {
                 registration: name("transcription"),
@@ -3642,14 +3645,14 @@ mod tests {
         }
     }
 
-    fn database() -> Result<(TempDir, Connection)> {
+    pub(super) fn database() -> Result<(TempDir, Connection)> {
         let dir = tempfile::tempdir()?;
         let db = Connection::open(dir.path().join("app.sqlite"))?;
         install_schema(&db)?;
         Ok((dir, db))
     }
 
-    fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
+    pub(super) fn committed_issue(db: &mut Connection) -> Result<PublicReceipt> {
         let prepared = prepare_issue(&lease(), &family(), issue("invocation-1"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let receipt = stage_issue(&tx, prepared)?.public_identity().clone();
@@ -3679,7 +3682,7 @@ mod tests {
         }
     }
 
-    fn snapshot(receipt: &PublicReceipt) -> ManagementSnapshot {
+    pub(super) fn snapshot(receipt: &PublicReceipt) -> ManagementSnapshot {
         let lineage = LineageRef {
             namespace: namespace(),
             family: name("transcription-client"),

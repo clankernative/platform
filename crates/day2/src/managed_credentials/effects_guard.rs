@@ -191,6 +191,7 @@ const REVIEWED_SOURCES: &[&str] = &[
     "issuance.rs",
     "lifecycle.rs",
     "mod.rs",
+    "rewrap.rs",
     "simulation.rs",
     "store.rs",
     "verification.rs",
@@ -238,6 +239,7 @@ fn managed_credential_ambient_effects_are_confined_to_the_reviewed_adapter() {
         ("ingress", include_str!("ingress.rs")),
         ("issuance", include_str!("issuance.rs")),
         ("lifecycle", include_str!("lifecycle.rs")),
+        ("rewrap", include_str!("rewrap.rs")),
         ("store", include_str!("store.rs")),
         ("verification", include_str!("verification.rs")),
     ] {

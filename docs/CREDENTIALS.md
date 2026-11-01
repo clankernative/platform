@@ -261,6 +261,32 @@ before calling them. A host-only runtime adapter now performs those checks for
 a live browser session in one app database snapshot before list or inspect. It
 refuses an inactive family, artifact mismatch or changed app scope.
 
+### Conditional one-row encryption maintenance
+
+The private managed-row rewrap core preserves the exact canonical token,
+material identity and revision, verifier, grant, expiry and delivery state. It
+changes only the envelope revision, encryption-key version, nonce and
+ciphertext. Preparation authenticates the existing envelope and reseals in a
+closed zeroizing workspace; no plaintext getter or callback is added.
+
+Independent maintenance authorization is checked on the actual current target
+before exact-version key access, after provider work, and again in the caller's
+transaction immediately before the conditional update. Key-provider and nonce
+work require preparation outside that connection's transaction. The update
+requires the unchanged active head, namespace, family, lineage revision, epoch,
+material identity/revision and complete old envelope. Rotation, revocation,
+new material or another rewrap defeats stale preparation. Readiness and version
+expiry remain unchanged, with equality refused and the latest preparation
+clock retained. A pending marker proves staging only; rollback and ambiguous
+commit do not establish maintenance success.
+
+This is a controlled-port core, without a production maintenance authorizer,
+native-purpose factory, operator command or route. A future adapter must supply
+genuine maintenance permission and the existing SQL owner; issuance/reveal
+permission and a copied selection are insufficient. OAuth custody uses a
+different storage format and is not wired to this core. Key retirement and
+verifier maintenance remain separate work.
+
 ### Interactive issuance through the ordinary command runtime
 
 `Handler.interactive` specializes a local command's handler to the nominal
