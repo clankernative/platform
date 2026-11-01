@@ -136,7 +136,104 @@ pub struct ManifestFamily {
     pub contract: Digest,
 }
 
+/// Portable selection DATA, not issuance or execution authority. Only an exact
+/// current family can interpret it; current instance and principal checks remain
+/// the caller's responsibility. Canonical roots are never supplied contracts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantSelection {
+    family_contract: Digest,
+    roots: Vec<String>,
+}
+
+impl GrantSelection {
+    pub fn new(family: &ManifestFamily, roots: Vec<String>) -> Result<Self> {
+        family.verify()?;
+        ensure!(
+            matches!(
+                family.profile,
+                ManagedProfile::Client | ManagedProfile::Personal
+            ),
+            "unsupported credential selection profile"
+        );
+        ensure!(
+            matches!(family.grant, GrantMode::Selectable),
+            "credential family does not allow grant selection"
+        );
+        ensure!(
+            !roots.is_empty() && roots.len() <= 64,
+            "credential selection root budget"
+        );
+        let mut selected = BTreeSet::new();
+        for root in roots {
+            ensure!(
+                family.roots.contains_key(&root),
+                "unknown credential selection root"
+            );
+            ensure!(selected.insert(root), "duplicate credential selection root");
+        }
+        Ok(Self {
+            family_contract: family.contract.clone(),
+            roots: selected.into_iter().collect(),
+        })
+    }
+}
+
+/// Closed permission modes. A fixed family cannot consume caller selection,
+/// and a selectable family cannot interpret omission as its complete grant.
+pub enum IssuanceGrant<'a> {
+    Fixed,
+    Selected(&'a GrantSelection),
+}
+
 impl ManifestFamily {
+    /// Resolve only admitted canonical contracts, preserving every selected
+    /// root's complete child/path authority. No member is dropped or widened.
+    pub fn issuance_roots(
+        &self,
+        request: IssuanceGrant<'_>,
+    ) -> Result<BTreeMap<String, OperationAuthorityContract>> {
+        self.verify()?;
+        ensure!(
+            matches!(
+                self.profile,
+                ManagedProfile::Client | ManagedProfile::Personal
+            ),
+            "unsupported credential issuance profile"
+        );
+        ensure!(
+            !self.roots.is_empty() && self.roots.len() <= 64,
+            "credential family root budget"
+        );
+        match (&self.grant, request) {
+            (GrantMode::Fixed, IssuanceGrant::Fixed) => Ok(self.roots.clone()),
+            (GrantMode::Selectable, IssuanceGrant::Selected(selection)) => {
+                ensure!(
+                    selection.family_contract == self.contract,
+                    "credential selection family changed"
+                );
+                ensure!(
+                    *selection == GrantSelection::new(self, selection.roots.clone())?,
+                    "noncanonical credential selection"
+                );
+                selection
+                    .roots
+                    .iter()
+                    .map(|name| {
+                        Ok((
+                            name.clone(),
+                            self.roots
+                                .get(name)
+                                .context("credential selection root missing")?
+                                .clone(),
+                        ))
+                    })
+                    .collect()
+            }
+            _ => anyhow::bail!("credential grant mode mismatch"),
+        }
+    }
+
     pub fn derive(
         declaration: FamilyDeclaration,
         catalog: &BTreeMap<String, CredentialRoot>,
@@ -644,6 +741,145 @@ mod tests {
             ),
             ("GetTranscription".into(), root("GetTranscription", false)),
         ])
+    }
+
+    fn selectable(profile: ManagedProfile) -> ManifestFamily {
+        let mut definition = declaration("local-keys", "keys", 1);
+        definition.profile = profile;
+        definition.grant = GrantMode::Selectable;
+        ManifestFamily::derive(definition, &catalog()).unwrap()
+    }
+
+    #[test]
+    fn local_selection_preserves_exact_canonical_contracts_for_each_nonempty_subset() -> Result<()>
+    {
+        for profile in [ManagedProfile::Client, ManagedProfile::Personal] {
+            let family = selectable(profile);
+            let candidates = [
+                vec!["GetTranscription".to_owned()],
+                vec!["SubmitTranscription".to_owned()],
+                vec![
+                    "SubmitTranscription".to_owned(),
+                    "GetTranscription".to_owned(),
+                ],
+            ];
+            for names in candidates {
+                let selection = GrantSelection::new(&family, names.clone())?;
+                let expected = names
+                    .into_iter()
+                    .map(|name| (name.clone(), catalog()[&name].authority.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let actual = family.issuance_roots(IssuanceGrant::Selected(&selection))?;
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    selection.roots,
+                    expected.keys().cloned().collect::<Vec<_>>()
+                );
+                let round_trip: GrantSelection =
+                    serde_json::from_slice(&serde_json::to_vec(&selection)?)?;
+                assert_eq!(
+                    family.issuance_roots(IssuanceGrant::Selected(&round_trip))?,
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selection_rejects_omission_duplicates_unknown_members_and_excess_without_fallback()
+    -> Result<()> {
+        let family = selectable(ManagedProfile::Client);
+        assert!(family.issuance_roots(IssuanceGrant::Fixed).is_err());
+        for roots in [
+            Vec::new(),
+            vec!["GetTranscription".into(), "GetTranscription".into()],
+            vec!["GetTranscription".into(), "UnknownOperation".into()],
+            vec!["*".into()],
+            vec!["GetTranscription".into(); 65],
+        ] {
+            assert!(GrantSelection::new(&family, roots).is_err());
+        }
+        let fixed = ManifestFamily::derive(declaration("local-keys", "keys", 1), &catalog())?;
+        assert_eq!(fixed.issuance_roots(IssuanceGrant::Fixed)?, fixed.roots);
+        assert!(GrantSelection::new(&fixed, vec!["GetTranscription".into()]).is_err());
+        let selection = GrantSelection::new(&family, vec!["GetTranscription".into()])?;
+        assert!(
+            fixed
+                .issuance_roots(IssuanceGrant::Selected(&selection))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restored_selection_cannot_retarget_a_family_or_reinterpret_an_old_contract() -> Result<()> {
+        let family = selectable(ManagedProfile::Client);
+        let selected = GrantSelection::new(&family, vec!["GetTranscription".into()])?;
+        let mut definition = declaration("foreign-family", "foreign", 1);
+        definition.grant = GrantMode::Selectable;
+        let foreign = ManifestFamily::derive(definition.clone(), &catalog())?;
+        assert!(
+            foreign
+                .issuance_roots(IssuanceGrant::Selected(&selected))
+                .is_err()
+        );
+        definition.id = family.id.clone();
+        definition.lifetime_seconds -= 1;
+        let changed = ManifestFamily::derive(definition, &catalog())?;
+        assert!(
+            changed
+                .issuance_roots(IssuanceGrant::Selected(&selected))
+                .is_err()
+        );
+        let personal = selectable(ManagedProfile::Personal);
+        assert!(
+            personal
+                .issuance_roots(IssuanceGrant::Selected(&selected))
+                .is_err()
+        );
+        let mut corrupted = family.clone();
+        corrupted.roots.remove("SubmitTranscription");
+        assert!(
+            corrupted
+                .issuance_roots(IssuanceGrant::Selected(&selected))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selection_wire_is_data_and_cannot_bypass_canonical_family_validation() -> Result<()> {
+        let family = selectable(ManagedProfile::Client);
+        for roots in [
+            vec![],
+            vec!["GetTranscription", "GetTranscription"],
+            vec!["GetTranscription", "UnknownOperation"],
+            vec!["SubmitTranscription", "GetTranscription"],
+        ] {
+            let raw = serde_json::json!({"family_contract":family.contract,"roots":roots});
+            let decoded: GrantSelection = serde_json::from_value(raw)?;
+            assert!(
+                family
+                    .issuance_roots(IssuanceGrant::Selected(&decoded))
+                    .is_err()
+            );
+        }
+        let mut raw = serde_json::to_value(GrantSelection::new(
+            &family,
+            vec!["GetTranscription".into()],
+        )?)?;
+        raw["authorized"] = true.into();
+        assert!(serde_json::from_value::<GrantSelection>(raw).is_err());
+        assert!(
+            family
+                .issuance_roots(IssuanceGrant::Selected(&GrantSelection {
+                    family_contract: Digest::of(&"foreign")?,
+                    roots: vec!["GetTranscription".into()],
+                }))
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]
