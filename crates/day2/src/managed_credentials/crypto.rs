@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use day2_capabilities::credentials::Namespace;
 use ring::{aead, hmac};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 const PREFIX: &str = "d2c1";
 const SECRET_BYTES: usize = 32;
@@ -27,6 +28,106 @@ pub(crate) struct KeyLease {
 pub(crate) struct VerifierLease {
     key: hmac::Key,
     pub verifier_version: String,
+}
+
+/// Maintenance borrows encryption authority only, never a verifier or a human
+/// response permit. The selected maintenance adapter supplies exact key bytes.
+pub(super) struct RewrapKey {
+    key: aead::LessSafeKey,
+    version: String,
+}
+
+impl RewrapKey {
+    pub(super) fn new(bytes: &[u8; 32], version: String) -> Result<Self> {
+        validate_id(&version)?;
+        let key = aead::UnboundKey::new(&aead::AES_256_GCM, bytes)
+            .map_err(|_| anyhow::anyhow!("invalid encryption key"))?;
+        Ok(Self {
+            key: aead::LessSafeKey::new(key),
+            version,
+        })
+    }
+}
+
+/// Historical encrypted DATA selected by the maintenance owner, not authority.
+pub(super) struct RewrapSource<'a> {
+    pub identity: &'a MaterialIdentity,
+    pub selector: &'a str,
+    pub envelope_revision: u64,
+    pub encryption_version: &'a str,
+    pub nonce: [u8; NONCE_BYTES],
+    pub ciphertext: &'a [u8],
+}
+
+/// This contains no plaintext, verifier, new material identity or renewed time.
+/// Only the owning maintenance transition may publish it with its exact CAS.
+pub(super) struct RewrappedEnvelope {
+    pub envelope_revision: u64,
+    pub encryption_version: String,
+    pub nonce: [u8; NONCE_BYTES],
+    pub ciphertext: Vec<u8>,
+}
+
+/// Authenticate the independently expected identity, then reseal the SAME
+/// canonical token. No plaintext getter or callback leaves this closed body.
+/// Provider key acquisition and this fresh nonce precede the writer transaction.
+pub(super) fn prepare_rewrap(
+    previous: &RewrapKey,
+    replacement: &RewrapKey,
+    expected: &MaterialIdentity,
+    source: RewrapSource<'_>,
+) -> Result<RewrappedEnvelope> {
+    ensure!(
+        expected == source.identity
+            && source.encryption_version == previous.version
+            && previous.version != replacement.version,
+        "credential rewrap identity or key selection changed"
+    );
+    ensure!(
+        (32..=512).contains(&source.ciphertext.len()),
+        "invalid protected credential envelope size"
+    );
+    let envelope_revision = source
+        .envelope_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("credential envelope revision exhausted"))?;
+    // Zeroizing owns the in-place plaintext on every error and success path.
+    let mut buffer = Zeroizing::new(source.ciphertext.to_vec());
+    let plaintext = previous
+        .key
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(source.nonce),
+            aead::Aad::from(expected.aad(source.envelope_revision, &previous.version)?),
+            &mut buffer,
+        )
+        .map_err(|_| anyhow::anyhow!("credential rewrap authentication failed"))?;
+    let (selector, _secret) = parse_token(
+        std::str::from_utf8(plaintext)
+            .map_err(|_| anyhow::anyhow!("invalid protected credential material"))?,
+    )?;
+    ensure!(
+        selector == source.selector,
+        "credential rewrap selector changed"
+    );
+    let length = plaintext.len();
+    buffer.truncate(length);
+    let mut nonce = [0; NONCE_BYTES];
+    super::effects::fill_secret(&mut nonce)?;
+    replacement
+        .key
+        .seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(expected.aad(envelope_revision, &replacement.version)?),
+            &mut *buffer,
+        )
+        .map_err(|_| anyhow::anyhow!("credential rewrap encryption failed"))?;
+    Ok(RewrappedEnvelope {
+        envelope_revision,
+        encryption_version: replacement.version.clone(),
+        nonce,
+        // Only ciphertext escapes the zeroizing workspace.
+        ciphertext: buffer.to_vec(),
+    })
 }
 
 impl VerifierLease {
@@ -300,7 +401,7 @@ fn verifier_message(
     ))?)
 }
 
-fn parse_token(token: &str) -> Result<(String, [u8; SECRET_BYTES])> {
+fn parse_token(token: &str) -> Result<(String, Zeroizing<[u8; SECRET_BYTES]>)> {
     ensure!(token.len() <= MAX_TOKEN_BYTES, "invalid credential format");
     let mut parts = token.split('.');
     let (Some(PREFIX), Some(selector), Some(secret), None) =
@@ -311,19 +412,21 @@ fn parse_token(token: &str) -> Result<(String, [u8; SECRET_BYTES])> {
     let selector_bytes = URL_SAFE_NO_PAD
         .decode(selector)
         .map_err(|_| anyhow::anyhow!("invalid credential format"))?;
-    let secret_bytes = URL_SAFE_NO_PAD
-        .decode(secret)
-        .map_err(|_| anyhow::anyhow!("invalid credential format"))?;
+    let secret_bytes = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|_| anyhow::anyhow!("invalid credential format"))?,
+    );
     ensure!(
         selector_bytes.len() == SELECTOR_BYTES && secret_bytes.len() == SECRET_BYTES,
         "invalid credential format"
     );
     ensure!(
         URL_SAFE_NO_PAD.encode(&selector_bytes) == selector
-            && URL_SAFE_NO_PAD.encode(&secret_bytes) == secret,
+            && Zeroizing::new(URL_SAFE_NO_PAD.encode(&*secret_bytes)).as_str() == secret,
         "noncanonical credential format"
     );
-    let mut bytes = [0u8; SECRET_BYTES];
+    let mut bytes = Zeroizing::new([0u8; SECRET_BYTES]);
     bytes.copy_from_slice(&secret_bytes);
     Ok((selector.to_owned(), bytes))
 }
@@ -370,6 +473,177 @@ mod tests {
             "encrypt-v1".into(),
         )
         .unwrap()
+    }
+
+    fn rewrap_source(material: &PreparedMaterial) -> RewrapSource<'_> {
+        RewrapSource {
+            identity: &material.identity,
+            selector: &material.selector,
+            envelope_revision: material.envelope_revision,
+            encryption_version: &material.encryption_version,
+            nonce: material.nonce,
+            ciphertext: &material.ciphertext,
+        }
+    }
+
+    #[test]
+    fn rewrap_preserves_exact_token_and_verifier_without_a_plaintext_result() -> Result<()> {
+        let identity = identity();
+        let material = prepare_managed(&lease(), identity.clone())?;
+        let old_token = decrypt_for_human(
+            &lease(),
+            &identity,
+            &identity,
+            1,
+            "encrypt-v1",
+            material.nonce,
+            &material.ciphertext,
+        )?;
+        let next = KeyLease::new(
+            &[7; 32],
+            &[11; 32],
+            "verifier-v1".into(),
+            "encrypt-v2".into(),
+        )?;
+        let envelope = prepare_rewrap(
+            &RewrapKey::new(&[9; 32], "encrypt-v1".into())?,
+            &RewrapKey::new(&[11; 32], "encrypt-v2".into())?,
+            &identity,
+            rewrap_source(&material),
+        )?;
+        assert_eq!(envelope.envelope_revision, 2);
+        assert_eq!(envelope.encryption_version, "encrypt-v2");
+        let token = decrypt_for_human(
+            &next,
+            &identity,
+            &identity,
+            envelope.envelope_revision,
+            &envelope.encryption_version,
+            envelope.nonce,
+            &envelope.ciphertext,
+        )?;
+        assert_eq!(token, old_token);
+        assert!(verify_managed(
+            &lease(),
+            &identity,
+            &material.selector,
+            &material.verifier,
+            &material.verifier_version,
+            &token,
+        )?);
+        assert!(
+            decrypt_for_human(
+                &next,
+                &identity,
+                &identity,
+                1,
+                "encrypt-v2",
+                envelope.nonce,
+                &envelope.ciphertext,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rewrap_rejects_substitution_bad_aead_and_revision_exhaustion() -> Result<()> {
+        let identity = identity();
+        let material = prepare_managed(&lease(), identity.clone())?;
+        let previous = RewrapKey::new(&[9; 32], "encrypt-v1".into())?;
+        let next = RewrapKey::new(&[11; 32], "encrypt-v2".into())?;
+        let mut foreign = identity.clone();
+        foreign.security_epoch += 1;
+        assert!(prepare_rewrap(&previous, &next, &foreign, rewrap_source(&material)).is_err());
+        assert!(prepare_rewrap(&previous, &previous, &identity, rewrap_source(&material)).is_err());
+        assert!(
+            prepare_rewrap(
+                &RewrapKey::new(&[9; 32], "wrong-version".into())?,
+                &next,
+                &identity,
+                rewrap_source(&material),
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_rewrap(
+                &RewrapKey::new(&[12; 32], "encrypt-v1".into())?,
+                &next,
+                &identity,
+                rewrap_source(&material),
+            )
+            .is_err()
+        );
+        let mut ciphertext = material.ciphertext.clone();
+        ciphertext[0] ^= 1;
+        assert!(
+            prepare_rewrap(
+                &previous,
+                &next,
+                &identity,
+                RewrapSource {
+                    ciphertext: &ciphertext,
+                    ..rewrap_source(&material)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_rewrap(
+                &previous,
+                &next,
+                &identity,
+                RewrapSource {
+                    selector: "foreign-selector",
+                    ..rewrap_source(&material)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_rewrap(
+                &previous,
+                &next,
+                &identity,
+                RewrapSource {
+                    envelope_revision: u64::MAX,
+                    ..rewrap_source(&material)
+                }
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rewrap_does_not_restamp_an_authenticated_foreign_payload_format() -> Result<()> {
+        let identity = identity();
+        let material = prepare_managed(&lease(), identity.clone())?;
+        let mut nonce = [0; NONCE_BYTES];
+        super::super::effects::fill_secret(&mut nonce)?;
+        let mut ciphertext = b"foreign-payload-format-not-a-managed-token".to_vec();
+        lease()
+            .encryption_key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(identity.aad(1, "encrypt-v1")?),
+                &mut ciphertext,
+            )
+            .map_err(|_| anyhow::anyhow!("fixture encryption failed"))?;
+        assert!(
+            prepare_rewrap(
+                &RewrapKey::new(&[9; 32], "encrypt-v1".into())?,
+                &RewrapKey::new(&[11; 32], "encrypt-v2".into())?,
+                &identity,
+                RewrapSource {
+                    nonce,
+                    ciphertext: &ciphertext,
+                    ..rewrap_source(&material)
+                },
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]
