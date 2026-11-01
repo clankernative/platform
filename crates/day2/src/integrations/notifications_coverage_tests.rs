@@ -112,24 +112,18 @@ impl Fixture {
             )),
             ..Default::default()
         };
-        let runtime = Runtime {
-            integrations: Arc::new(crate::integration_host::Host::simulated(&database, SCOPE)),
-            app_calls: None,
-            credentials: None,
-            connections: None,
+        let runtime = Runtime::from_artifact_for_tests(
             instance_path,
-            app: "app".into(),
-            db: database,
-            scope: SCOPE.into(),
-            hosted_domain: None,
-            artifact: Arc::new(LoadedArtifact::from_contract_for_tests(
+            "app".into(),
+            database.clone(),
+            LoadedArtifact::from_contract_for_tests(
                 "notification-seam-test".into(),
                 artifact_directory,
                 contract,
-            )),
-            host: Arc::new(crate::host::System(inputs.clone())),
-            inputs,
-        };
+            ),
+        )?
+        .with_integrations(crate::integration_host::Host::simulated(&database, SCOPE))
+        .with_inputs(inputs);
         runtime.initialize()?;
         // Other provider worlds are independently visible to the same checker.
         seed(runtime.db(), super::SCOPE, &fixture(Variant::A))?;
