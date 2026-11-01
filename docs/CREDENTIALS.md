@@ -19,6 +19,16 @@ in seconds; registration names remain separate from IDs. Generated metadata read
 and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
 lifecycle inputs remain absent.
 
+The shared local-family contract now resolves fixed and selected requests
+through one closed `IssuanceGrant` mode. A `GrantSelection` is portable DATA:
+it binds a nonempty canonical root set to the exact family contract and the
+resolver rejects missing, duplicated, unknown, foreign or stale selections.
+It copies the admitted operation contracts and complete child/path ceilings;
+it never accepts supplied authority or substitutes the entire family.
+Fixed issuance uses that same resolver without a selection input. The generated
+selectable API and confirmation/ingress wiring remain subsequent work; this
+contract alone does not enable selectable issuance or any native purpose.
+
 The normal build reflects registered families into the artifact and recompares
 them with the native worker at artifact load. It rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,

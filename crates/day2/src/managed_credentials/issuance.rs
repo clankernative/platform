@@ -981,7 +981,7 @@ pub(crate) fn stage(
         binding.approved_authority.clone(),
         principal.clone(),
         binding.audience.clone(),
-        family.roots.clone(),
+        family.issuance_roots(day2_capabilities::credentials::IssuanceGrant::Fixed)?,
     )?;
     let expires_at = proof
         .approved_at
