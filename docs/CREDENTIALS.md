@@ -13,8 +13,9 @@ and acknowledgement. An ordinary app session starts navigation only.
 Unified apps can now register `credentials` in `App.definition`. The sealed
 `pf.Credential` module supports `client_family` and `personal_family` with fixed
 or selectable grants over canonical `Api.write(Commands.<name>)` and
-`Api.read(Reads.<name>)` targets. The family constructor fixes the profile in
-the checked compiler type. The app supplies a stable ID and a bounded lifetime
+`Api.read(Reads.<name>)` targets. The family constructor fixes the profile and grant mode in
+the checked compiler type. Nominal mode witnesses are declaration DATA, not
+runtime permission; final metadata must match both checked choices. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. Generated metadata reads
 and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
 lifecycle inputs remain absent.

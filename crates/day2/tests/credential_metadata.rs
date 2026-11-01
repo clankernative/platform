@@ -1249,5 +1249,28 @@ step = |raw| raw
             "forged return reference: {diagnostics}"
         );
     }
+    let modes = format!(
+        "{base}\nfixed_client : Credential.ClientFamily(Credential.FixedGrantMode)\nfixed_client = Credential.client_family({{ id: \"fixed\", grant: Credential.fixed([]), lifetime_seconds: 3600 }})\nselected_client : Credential.ClientFamily(Credential.SelectableGrantMode)\nselected_client = Credential.client_family({{ id: \"selected\", grant: Credential.selectable([]), lifetime_seconds: 3600 }})\nselected_personal : Credential.PersonalFamily(Credential.SelectableGrantMode)\nselected_personal = Credential.personal_family({{ id: \"personal\", grant: Credential.selectable([]), lifetime_seconds: 3600 }})\n"
+    );
+    for directory in [&stage, &restricted] {
+        fs::write(directory.join("app/main.roc"), &modes)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "closed family grant modes: {diagnostics}");
+        for wrong in [
+            "wrong : Credential.ClientFamily(Credential.FixedGrantMode)\nwrong = selected_client",
+            "wrong : Credential.ClientFamily(Credential.SelectableGrantMode)\nwrong = fixed_client",
+            "wrong : Credential.PersonalFamily(Credential.FixedGrantMode)\nwrong = selected_personal",
+        ] {
+            fs::write(
+                directory.join("app/main.roc"),
+                format!("{modes}\n{wrong}\n"),
+            )?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains("GrantMode"),
+                "mixed family modes accepted: {diagnostics}"
+            );
+        }
+    }
     Ok(())
 }
