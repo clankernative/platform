@@ -32,11 +32,12 @@ const SHARDS: &[&str] = &[
     "installation-build",
 ];
 
+pub(super) mod artifacts;
 pub(super) mod mac;
 pub(super) mod reuse;
 pub(super) mod transport;
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Identity {
     checkout: String,
@@ -935,9 +936,20 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     Ok(())
 }
 
-fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> Result<Prepared> {
+#[cfg(test)]
+fn combine_parts(inputs: Prepared, tests: Prepared, expected: &Identity) -> Result<Prepared> {
+    combine_origins(inputs, tests, expected, expected, expected)
+}
+
+fn combine_origins(
+    mut inputs: Prepared,
+    tests: Prepared,
+    combined: &Identity,
+    input_origin: &Identity,
+    test_origin: &Identity,
+) -> Result<Prepared> {
     ensure!(
-        inputs.identity == *expected && tests.identity == *expected,
+        inputs.identity == *input_origin && tests.identity == *test_origin,
         "preparation parts belong to another checkout, run, attempt or host"
     );
     validate_preparation(&inputs, "inputs")?;
@@ -951,6 +963,9 @@ fn combine_parts(mut inputs: Prepared, tests: Prepared, expected: &Identity) -> 
     inputs.auxiliaries = tests.auxiliaries;
     inputs.passed.extend(tests.passed);
     inputs.timings_ms.extend(tests.timings_ms);
+    // This identity describes the join. The original part receipts retain their
+    // producer identities, and the authenticated selection is retained at compose.
+    inputs.identity = combined.clone();
     validate_preparation(&inputs, "all")?;
     Ok(inputs)
 }
@@ -961,7 +976,16 @@ pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
     )?)?;
     let tests: Prepared =
         day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
-    let prepared = combine_parts(inputs, tests, &identity(root, snapshot)?)?;
+    let current = identity(root, snapshot)?;
+    let selected = artifacts::read(&current)?;
+    artifacts::refresh(root, &selected)?;
+    let prepared = combine_origins(
+        inputs,
+        tests,
+        &current,
+        &artifacts::origin(&current, &selected, artifacts::Role::Inputs)?,
+        &artifacts::origin(&current, &selected, artifacts::Role::Tests)?,
+    )?;
     fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
     // Admit all transported executable bytes and every native fixture before
     // the workflow can publish the complete workspace to runtime campaigns.
@@ -973,8 +997,16 @@ pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
 
 pub(super) fn load(root: &Path, snapshot: &str, shard: Option<&str>) -> Result<Prepared> {
     let prepared: Prepared = day2::json::decode(&fs::read(root.join(PREPARED))?)?;
+    let current = identity(root, snapshot)?;
+    let selected = artifacts::read(&current)?;
+    artifacts::refresh(root, &selected)?;
+    let expected = if selected.origins.contains_key(&artifacts::Role::Common) {
+        artifacts::origin(&current, &selected, artifacts::Role::Common)?
+    } else {
+        current
+    };
     ensure!(
-        prepared.identity == identity(root, snapshot)?,
+        prepared.identity == expected,
         "prepared verification belongs to another checkout, run, attempt or host"
     );
     validate_preparation(&prepared, "all")?;
@@ -1255,9 +1287,12 @@ pub(super) fn join(
         "bounded regular native Mac proof required"
     );
     let mac: mac::Proof = day2::json::decode(&fs::read(&mac_path)?)?;
+    let current = identity(root, &prepared.identity.snapshot)?;
+    let selected = artifacts::read(&current)?;
+    artifacts::refresh(root, &selected)?;
     mac::admit(
         &mac,
-        &prepared.identity,
+        &artifacts::origin(&current, &selected, artifacts::Role::Mac)?,
         &super::verification_snapshot_for(root, "verify", "macos", "aarch64")?,
         &build_identity(root, &prepared.identity.snapshot)?,
         &compiler_targets(root)?,
@@ -1279,6 +1314,7 @@ pub(super) fn join(
     }
     let timings = admit_join(prepared, &receipts, Some(&mac))?;
     let passed: BTreeSet<_> = timings.keys().cloned().collect();
+    artifacts::retain(root, &selected)?;
     fs::write(
         root.join("artifacts/ci-verification.json"),
         serde_json::to_vec_pretty(&json!({
@@ -1411,6 +1447,46 @@ mod tests {
             timings_ms: passed.iter().map(|step| (step.clone(), 100)).collect(),
             passed,
         })
+    }
+
+    #[test]
+    fn mixed_attempt_parts_require_exact_authenticated_origins_and_keep_original_receipts()
+    -> Result<()> {
+        let inputs = sample_part("inputs")?;
+        let mut tests = sample_part("tests")?;
+        tests.identity.attempt = "2".into();
+        let input_origin = inputs.identity.clone();
+        let test_origin = tests.identity.clone();
+        let mut consumer = input_origin.clone();
+        consumer.attempt = "3".into();
+        let mixed = combine_origins(inputs, tests, &consumer, &input_origin, &test_origin)?;
+        assert_eq!(mixed.identity, consumer);
+        assert_eq!(input_origin.attempt, "1");
+        assert_eq!(test_origin.attempt, "2");
+        for field in [
+            "run",
+            "checkout",
+            "tree",
+            "source_identity",
+            "workflow",
+            "snapshot",
+            "attempt",
+        ] {
+            let mut forged = serde_json::to_value(sample_part("inputs")?)?;
+            forged["identity"][field] = json!("foreign");
+            assert!(
+                combine_origins(
+                    serde_json::from_value(forged)?,
+                    sample_part("tests")?,
+                    &consumer,
+                    &input_origin,
+                    &input_origin
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

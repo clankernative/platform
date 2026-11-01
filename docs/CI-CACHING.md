@@ -56,8 +56,8 @@ CLI compilation, all required fixture builds and lint checks in their existing
 Roc order. Tests builds the complete selected normal-program/harness graph once,
 then executes documentation tests. The join requires exact current-run
 identities, disjoint and exhaustive effects, admitted fixtures and a complete
-executable inventory. Permission-preserving transport belongs to that run and
-attempt; it is separate from persistent build caches.
+executable inventory. Permission-preserving transport records its original run
+and producer attempt; it is separate from persistent build caches.
 
 Five Linux campaigns execute the disjoint day2, control and remaining-package
 suites, control simulation and the reviewed parallel compiler probes. The three
@@ -82,8 +82,31 @@ from the production Mac private builder; no Linux production builder is added.
 The native join binds checkout/tree, source catalog, workflow, run/attempt and
 all required Linux and Mac evidence. Snapshots, compiler/configuration identities,
 workspace paths and executable digests remain host-specific. The original
-campaign budgets and coverage remain required. A retry cannot mix preparation
-or outcomes from different attempts.
+campaign budgets and coverage remain required. Retried jobs can consume successful
+outputs from earlier attempts of the same run and exact source. They never consume
+another run's preparation or substitute a different prepared executable set.
+
+### Rerunning sharded verification
+
+GitHub's **Re-run failed jobs**, individual job reruns and **Re-run all jobs** are
+supported. The preparation join, runtime shards and final `verify` job select the
+latest successful producer artifact for each required role across attempts of
+that same run. Download still has a two-minute deadline and one automatic retry.
+
+The selector authenticates the repository, workflow, run ID, head SHA and latest
+attempt, including the actual merge checkout for a pull request. Each immutable
+artifact ID must belong to a successful producer job with a matching GitHub
+Actions check. Missing, expired, duplicate or foreign artifacts fail admission;
+an earlier success cannot hide a newer failed producer. Common metadata and
+binary partitions must share their preparation origin, and every Linux receipt
+must match the exact prepared-output digest.
+
+`ci-artifact-selection.json` in the final verification receipt records the current
+consumer and each original producer attempt, job, check, artifact ID and digest.
+Earlier receipts retain their execution identity; a retry does not claim that
+successful campaigns executed again. The selector rechecks live metadata before
+joining all unchanged Linux and Mac obligations. If a required artifact has
+expired, use **Re-run all jobs** to regenerate the complete run.
 
 ### Rerunning sharded verification
 
