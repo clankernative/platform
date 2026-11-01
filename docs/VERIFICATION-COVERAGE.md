@@ -30,12 +30,19 @@ No simulation results enter the compiled-action caches.
 
 On failure, `day2-dst-replays-<shard>-<run>-<attempt>` retains existing redacted
 OAuth, credential, handshake, host-loop and offline control counterexamples,
-plus command proptest replay seeds, for 14 days. Existing dedicated storage,
+plus campaign-bound numeric command crash/replay seeds, for 14 days. Existing dedicated storage,
 native OAuth consumer and connection/request artifacts remain. Use each bundle's
 source-bound replay command; keep regression promotion a reviewed source change.
 Raw command journals, subprocess diagnostics, environments, and private provider
 captures are deliberately not uploaded by this step. CI does not fabricate a
 counterexample if execution stopped before one could be persisted.
+
+Replay a command seed bundle on its exact source with
+`DAY2_COMMAND_REPLAY=<failure.json> bazel run //crates/xtask:xtask -- test-rust //crates/day2:day2_integration command_simulation::replay_saved_crash_schedule --exact`.
+The replay reruns the existing offline Reports crash schedule and refuses a
+changed compiled campaign, unknown fields or an oversized bundle before execution.
+Use the CI revision and its Reports fixture: this small seed bundle does not
+independently bind every runtime/compiler input or qualify native execution.
 
 `ops/Verify.roc` is the executable regression policy. `xtask verify` builds only
 the public Reports example and fixtures under `fixtures/`. It runs platform,

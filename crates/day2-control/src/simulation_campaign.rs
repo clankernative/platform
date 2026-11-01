@@ -540,6 +540,11 @@ mod tests {
         session.effect(request("simulation-check-replay", json!({})))?;
         session.effect(request("simulation-receipt", json!({})))?;
         verify_receipt(&path, &session.receipt_digest()?, DEFAULT_SEED, 1)?;
+        assert!(publish_coverage(&path, &session.receipt_digest()?, DEFAULT_SEED, 1).is_err());
+        assert!(
+            !path.join("coverage.json").exists(),
+            "exploratory run claimed CI coverage"
+        );
         assert!(
             session
                 .effect(request("simulation-receipt", json!({})))

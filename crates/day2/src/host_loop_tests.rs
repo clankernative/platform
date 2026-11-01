@@ -355,7 +355,13 @@ fn bounded_seeded_schedules_match_independent_history_and_replay() {
                 trace
                     .observations
                     .windows(2)
-                    .filter(|w| w[0] != w[1])
+                    .filter(|w| {
+                        w[0].phases != w[1].phases
+                            || w[0].stopping != w[1].stopping
+                            || w[0].ready != w[1].ready
+                            || w[0].poll != w[1].poll
+                            || w[0].drained != w[1].drained
+                    })
                     .count() as u64,
             )],
         )

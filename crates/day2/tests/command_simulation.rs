@@ -11,6 +11,7 @@ use day2::{
     store::{Fault, replay},
 };
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use support::World;
 
@@ -472,11 +473,84 @@ fn recorded<T>(
 }
 
 fn campaign(seed: u64) -> Result<Value> {
-    recorded(
+    let result = recorded(
         "crash_schedule",
         json!({"seed":seed,"entropy":vec![42;32],"now_ms":100_000,"steps":18}),
         |evidence| campaign_recorded(seed, evidence),
-    )
+    );
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let retained = (|| -> Result<()> {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/command-simulation-replay");
+                std::fs::create_dir_all(&root)?;
+                let directory = tempfile::Builder::new()
+                    .prefix("failure-")
+                    .tempdir_in(root)?
+                    .keep();
+                let bundle = ReplaySeed {
+                    format: 1,
+                    campaign_source: day2::digest(include_bytes!("command_simulation.rs")),
+                    seed,
+                };
+                std::fs::write(directory.join("failure.json"), serde_json::to_vec(&bundle)?)?;
+                Ok(())
+            })();
+            if let Err(retention) = retained {
+                return Err(error
+                    .context(retention)
+                    .context("redacted command replay retention failed"));
+            }
+            Err(error)
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaySeed {
+    format: u32,
+    campaign_source: String,
+    seed: u64,
+}
+
+fn replay_seed(bytes: &[u8]) -> Result<u64> {
+    ensure!(bytes.len() <= 4096, "command replay byte bound");
+    let replay: ReplaySeed = day2::json::decode(bytes)?;
+    ensure!(
+        replay.format == 1
+            && replay.campaign_source == day2::digest(include_bytes!("command_simulation.rs")),
+        "command replay source or format differs"
+    );
+    Ok(replay.seed)
+}
+
+#[test]
+fn replay_saved_crash_schedule() -> Result<()> {
+    let Some(path) = std::env::var_os("DAY2_COMMAND_REPLAY") else {
+        return Ok(());
+    };
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    campaign(replay_seed(&bytes)?)?;
+    Ok(())
+}
+
+#[test]
+fn command_replay_admits_only_closed_current_source_seed_bundles() -> Result<()> {
+    let mut value = json!({"format":1,"campaign_source":day2::digest(include_bytes!("command_simulation.rs")),"seed":42});
+    assert_eq!(replay_seed(&serde_json::to_vec(&value)?)?, 42);
+    value["campaign_source"] = json!("changed");
+    assert!(replay_seed(&serde_json::to_vec(&value)?).is_err());
+    value["campaign_source"] = json!(day2::digest(include_bytes!("command_simulation.rs")));
+    value["provider_payload"] = json!("refuse unknown fields");
+    assert!(replay_seed(&serde_json::to_vec(&value)?).is_err());
+    assert!(replay_seed(&[b' '; 4097]).is_err());
+    Ok(())
 }
 
 fn campaign_recorded(seed: u64, evidence: &mut evidence::Evidence) -> Result<Value> {
