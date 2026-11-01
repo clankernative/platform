@@ -35,6 +35,7 @@ struct Bound {
     outputs: day2::output_schema::Catalog,
     declarations: day2::registry::Catalog,
     connections: Vec<day2::connection_declaration::ConnectionDeclaration>,
+    credentials: Vec<day2::credential_declaration::FamilyDeclaration>,
 }
 
 fn prepare(
@@ -223,6 +224,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
         outputs,
         declarations: day2::registry::Catalog::default(),
         connections: Vec::new(),
+        credentials: Vec::new(),
     })
 }
 
@@ -254,7 +256,7 @@ fn checked_app(prepared: &Prepared, bound: &Bound) -> Result<(Vec<u8>, day2::reg
     Ok((checked, catalog))
 }
 
-fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
+fn bind_codecs(prepared: &Prepared, bound: &mut Bound) -> Result<day2::registry::Catalog> {
     let (checked, catalog) = checked_app(prepared, bound)?;
     bound.checked_types = checked;
     bound.schema = Schema::from_checked_types(&bound.checked_types)?;
@@ -263,16 +265,21 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
     for output in bound.outputs.values_mut() {
         output.shape.bind_identities(&bound.schema)?;
     }
-    bound.declarations = catalog;
     let stage = &prepared.stage;
-    for (name, source) in &prepared.inference_sources {
-        fs::write(stage.join("sdk").join(name), source)?;
-    }
     fs::write(stage.join("app/Inputs.roc"), bound.schema.inputs_module()?)?;
     fs::write(
         stage.join("app/Outputs.roc"),
         day2::output_schema::roc_module(&bound.outputs)?,
     )?;
+    Ok(catalog)
+}
+
+fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
+    bound.declarations = bind_codecs(prepared, bound)?;
+    let stage = &prepared.stage;
+    for (name, source) in &prepared.inference_sources {
+        fs::write(stage.join("sdk").join(name), source)?;
+    }
     fs::write(
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
@@ -323,6 +330,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         outputs,
         declarations,
         connections,
+        credentials,
     } = bound;
     let mut worker = Worker::start(&stage.join("worker"))?;
     let raw_manifest = worker.exchange(b"manifest")?;
@@ -382,12 +390,14 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "sources": &*hashes, "admission": "local-spike-only",
     });
     let checked: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
-    if !declarations.credentials.is_empty() {
-        artifact["credential_declarations"] =
-            serde_json::to_value(day2::credential_declaration::decode(
-                &worker.exchange(b"credential-contract")?,
-                &checked,
-            )?)?;
+    let final_credentials =
+        day2::credential_declaration::decode(&worker.exchange(b"credential-contract")?, &checked)?;
+    ensure!(
+        final_credentials == *credentials,
+        "credential requirements changed after SDK binding"
+    );
+    if !credentials.is_empty() {
+        artifact["credential_declarations"] = serde_json::to_value(credentials)?;
         let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
         artifact["credential_manifest"] =
             serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
@@ -712,8 +722,9 @@ pub fn execute(
                 }
                 "build-bind" => {
                     ensure!(
-                        done.contains("build-connection-contract"),
-                        "checked connection metadata required"
+                        done.contains("build-connection-contract")
+                            && done.contains("build-credential-contract"),
+                        "checked connection and credential metadata required"
                     );
                     bind(
                         root,
@@ -754,6 +765,57 @@ pub fn execute(
                         stage.join("connections.json"),
                         serde_json::to_vec(&bound.connections)?,
                     )?;
+                }
+                "build-credential-contract" => {
+                    ensure!(
+                        done.contains("build-operation-handles"),
+                        "checked operation handles required for credential target codecs"
+                    );
+                    let bound = bound.as_mut().context("bound data required")?;
+                    let (_, catalog) = checked_app(prepared, bound)?;
+                    if !catalog.credentials.is_empty() {
+                        let source = stage.join("app/credential-probe.roc");
+                        let executable = stage.join("credential-probe");
+                        fs::write(&source, day2::credential_codegen::probe(&catalog))?;
+                        run_build(
+                            root,
+                            day2::sandbox::compiler(root, stage, roc)?
+                                .arg("build")
+                                .arg(&source)
+                                .arg(format!("--output={}", executable.display())),
+                            budget,
+                        )?;
+                        let raw = Worker::start(&executable)?.exchange(b"credential-contract")?;
+                        bound.credentials = day2::credential_declaration::decode_catalog(
+                            &raw,
+                            &catalog,
+                            &prepared.namespace,
+                        )?;
+                        fs::remove_file(source)?;
+                        fs::remove_file(executable)?;
+                    }
+                    day2::credential_declaration::validate_catalog(&bound.credentials, &catalog)?;
+                    fs::write(
+                        stage.join("credentials.json"),
+                        serde_json::to_vec(&bound.credentials)?,
+                    )?;
+                }
+                "build-operation-handles" => {
+                    ensure!(
+                        done.contains("build-connection-contract"),
+                        "checked connections and operation inventory required"
+                    );
+                    let bound = bound.as_mut().context("bound data required")?;
+                    let catalog = bind_codecs(prepared, bound)?;
+                    let modules = catalog.modules(
+                        &bound.schema,
+                        &bound.outputs,
+                        &bound.connections,
+                        false,
+                    )?;
+                    for name in ["Commands.roc", "Reads.roc"] {
+                        fs::write(stage.join("app").join(name), &modules[name])?;
+                    }
                 }
                 "build-admission" => {
                     ensure!(

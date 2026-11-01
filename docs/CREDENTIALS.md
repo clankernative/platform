@@ -30,8 +30,13 @@ Fixed issuance uses that same resolver without a selection input. The generated
 selectable API and confirmation/ingress wiring remain subsequent work; this
 contract alone does not enable selectable issuance or any native purpose.
 
-The normal build reflects registered families into the artifact and recompares
-them with the native worker at artifact load. It rejects duplicate IDs,
+The normal build evaluates pure credential declarations in an isolated compiled
+probe after binding checked operation handles and before binding the complete SDK. Target codecs are checked against the compiler's
+registration inventory. The final worker must return exactly those same family
+IDs, profiles, grant modes, roots and lifetimes before artifact publication;
+the probe does not execute handlers or supply authority. Full root eligibility
+and authority derivation still happen against the final checked app contract.
+Artifact load recompares the declarations with the native worker. The build rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked
 operation catalog. Resource and impersonation families remain unsupported.

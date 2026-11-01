@@ -1158,21 +1158,11 @@ pub fn modules(
             "        if raw == \"connection-contract\" { return \"[]\" }\n        if raw == \"examples\"", 1);
     }
     if !catalog.credentials.is_empty() {
-        let families = catalog
-            .credentials
-            .iter()
-            .map(|(name, registration)| {
-                let profile = &registration.profile;
-                format!(
-                    "{{ registration: \"{name}\", profile: \"{profile}\", id: product.credentials.{name}.metadata().id, grant_mode: product.credentials.{name}.metadata().grant.mode, roots: product.credentials.{name}.metadata().grant.roots.map(|root| \"${{root.operation}}|${{root.input_type}}|${{root.output_type}}\"), lifetime_seconds: product.credentials.{name}.metadata().lifetime_seconds }}"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let projection = crate::credential_declaration::projection(catalog, "product");
         source = source.replacen(
             "        if raw == \"examples\"",
             &format!(
-                "        if raw == \"credential-contract\" {{ return Json.to_str([{families}]) }}\n        if raw == \"examples\""
+                "        if raw == \"credential-contract\" {{ return {projection} }}\n        if raw == \"examples\""
             ),
             1,
         );
