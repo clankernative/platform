@@ -1008,7 +1008,7 @@ fn native_compiler_preserves_family_types_and_seals_host_read_constructors() -> 
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
     fs::write(
         stage.join("app/Credentials.roc"),
-        day2::credential_codegen::module(["clients", "personal"], false)?,
+        day2::credential_codegen::module(&fixture.contract().credential_manifest, false)?,
     )?;
     let base = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.Observe
@@ -1131,7 +1131,7 @@ expect (Credentials.clients.ref_from_str)("cr1_personal_abc") == Err(InvalidRef)
     )?;
     fs::write(
         restricted.join("app/Credentials.roc"),
-        day2::credential_codegen::module(["clients", "personal"], true)?,
+        day2::credential_codegen::module(&fixture.contract().credential_manifest, true)?,
     )?;
     let (success, diagnostics) = run(&restricted, "check")?;
     ensure!(
@@ -1332,7 +1332,7 @@ step = |raw| raw
             output_schema::roc_module(&navigation_outputs)?,
         )?;
         let modules =
-            navigation_catalog.modules(&navigation_schema, &navigation_outputs, &[], false)?;
+            navigation_catalog.modules(&navigation_schema, &navigation_outputs, &[], &[], false)?;
         for module in ["SecurityActions.roc", "ProductReturns.roc"] {
             fs::write(directory.join("app").join(module), &modules[module])?;
         }
@@ -1423,6 +1423,148 @@ step = |raw| raw
                 "mixed family modes accepted: {diagnostics}"
             );
         }
+    }
+    for (directory, admission) in [(&stage, false), (&restricted, true)] {
+        for (probe, expected) in [
+            (
+                "probe = (Credentials.clients.selection_from_str)(\"{}\")",
+                "selection_from_str",
+            ),
+            (
+                "probe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant })",
+                "grant",
+            ),
+        ] {
+            fs::write(directory.join("app/main.roc"), format!("{base}\n{probe}\n"))?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "fixed selection exclusion: {diagnostics}"
+            );
+        }
+        let selectable = fixture
+            .contract()
+            .credential_manifest
+            .iter()
+            .map(|family| {
+                use day2_capabilities::credentials::{
+                    CredentialRoot, FamilyDeclaration, GrantMode, ManifestFamily,
+                };
+                let roots = family
+                    .roots
+                    .iter()
+                    .map(|(name, authority)| {
+                        (
+                            name.clone(),
+                            CredentialRoot {
+                                authority: authority.clone(),
+                                direct_ingress: true,
+                                interactive_security: false,
+                                single_resource_model: None,
+                            },
+                        )
+                    })
+                    .collect();
+                ManifestFamily::derive(
+                    FamilyDeclaration {
+                        registration: family.registration.clone(),
+                        id: family.id.clone(),
+                        profile: family.profile.clone(),
+                        grant: GrantMode::Selectable,
+                        roots: family.roots.keys().cloned().collect(),
+                        lifetime_seconds: family.lifetime_seconds,
+                        source: family.source.clone(),
+                    },
+                    &roots,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        fs::write(
+            directory.join("app/Credentials.roc"),
+            day2::credential_codegen::module(&selectable, admission)?,
+        )?;
+        for (probe, expected) in [
+            (
+                "probe = (Credentials.clients.selection_from_options)(Credentials.personal.grant_options)",
+                "GrantOption_personal",
+            ),
+            (
+                "probe : Credentials.GrantSelection_clients -> Credentials.GrantSelection_personal\nprobe = |value| value",
+                "GrantSelection_personal",
+            ),
+            (
+                "probe : Credentials.GrantOption_clients\nprobe = { family_contract: \"foreign\", root: \"foreign.read\" }",
+                "GrantOption_clients",
+            ),
+            (
+                "probe : Credentials.GrantSelection_clients\nprobe = { value: { family_contract: \"foreign\", roots: [] } }",
+                "GrantSelection_clients",
+            ),
+        ] {
+            fs::write(directory.join("app/main.roc"), format!("{base}\n{probe}\n"))?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "nominal selection exclusion: {diagnostics}"
+            );
+        }
+        let mut stale = selectable.clone();
+        stale[0].contract = Digest::new(b"stale generated family");
+        assert!(day2::credential_codegen::module(&stale, admission).is_err());
+        let family = selectable
+            .iter()
+            .find(|family| family.registration.as_str() == "clients")
+            .context("client fixture missing")?;
+        let roots = family.roots.keys().cloned().collect::<Vec<_>>();
+        let selected = json!({"family_contract":family.contract, "roots":[roots[0]]}).to_string();
+        let mut rejected = Vec::new();
+        for names in [
+            vec![],
+            vec![roots[0].clone(); 2],
+            vec!["unknown.operation".into()],
+            vec![roots[0].clone(); 65],
+        ] {
+            rejected.push(json!({"family_contract":family.contract, "roots":names}).to_string());
+        }
+        rejected.push(json!({"family_contract":"foreign","roots":[roots[0]]}).to_string());
+        rejected.push(
+            json!({"family_contract":Digest::new(b"stale family contract"),"roots":[roots[0]]})
+                .to_string(),
+        );
+        rejected.push(
+            json!({"family_contract":family.contract,"roots":[roots[1],roots[0]]}).to_string(),
+        );
+        rejected.push(
+            json!({"family_contract":family.contract,"roots":[roots[0]],"subject":"someone-else"})
+                .to_string(),
+        );
+        rejected.push(format!(
+            "{{\"family_contract\":\"{}\",\"roots\":[\"{}\"],\"roots\":[\"{}\"]}}",
+            family.contract.as_str(),
+            roots[1],
+            roots[0]
+        ));
+        let mut expectations = format!(
+            "expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => selection.to_str() == {}\n Err(_) => Bool.False }}\n",
+            serde_json::to_string(&selected)?,
+            serde_json::to_string(&selected)?
+        );
+        for bad in rejected {
+            expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(_) => Bool.False\n Err(_) => Bool.True }}\n", serde_json::to_string(&bad)?));
+        }
+        expectations.push_str("expect match (Credentials.clients.selection_from_options)([]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n");
+        expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => match (Credentials.clients.selection_from_options)(selection.options()) {{ Ok(copy) => copy.to_str() == selection.to_str()\n Err(_) => Bool.False }}\n Err(_) => Bool.False }}\n", serde_json::to_string(&selected)?));
+        expectations.push_str("expect match Credentials.clients.grant_options { [first, second] => match (Credentials.clients.selection_from_options)([second, first]) { Ok(selection) => selection.options().map(|option| option.operation()) == [first.operation(), second.operation()]\n Err(_) => Bool.False }\n _ => Bool.False }\n");
+        expectations.push_str("expect match Credentials.clients.grant_options { [first, ..] => match (Credentials.clients.selection_from_options)([first, first]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n _ => Bool.False }\n");
+        fs::write(
+            directory.join("app/main.roc"),
+            format!("{base}\n{expectations}"),
+        )?;
+        let (success, diagnostics) = run(directory, "test")?;
+        ensure!(
+            success && diagnostics.contains("All (14) tests passed"),
+            "compiled selection controls: {diagnostics}"
+        );
     }
     Ok(())
 }

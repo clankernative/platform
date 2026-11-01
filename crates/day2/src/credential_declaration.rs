@@ -259,6 +259,33 @@ pub fn validate_catalog(
     Ok(())
 }
 
+pub fn validate_manifest_catalog(
+    families: &[crate::credential_authority::ManifestFamily],
+    catalog: &crate::registry::Catalog,
+) -> Result<()> {
+    let mut declarations = Vec::new();
+    for family in families {
+        family.verify()?;
+        for (name, root) in &family.roots {
+            root.verify()?;
+            ensure!(
+                *name == root.operation,
+                "credential option root identity changed"
+            );
+        }
+        declarations.push(FamilyDeclaration {
+            registration: family.registration.clone(),
+            id: family.id.clone(),
+            profile: family.profile.clone(),
+            grant: family.grant.clone(),
+            roots: family.roots.keys().cloned().collect(),
+            lifetime_seconds: family.lifetime_seconds,
+            source: family.source.clone(),
+        });
+    }
+    validate_catalog(&declarations, catalog)
+}
+
 /// One projection is shared by the discovery probe and the final worker.
 pub(crate) fn projection(catalog: &crate::registry::Catalog, product: &str) -> String {
     let families = catalog.credentials.iter().map(|(name, registration)| {

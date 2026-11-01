@@ -286,11 +286,13 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
     )?;
-    for (name, source) in
-        bound
-            .declarations
-            .modules(&bound.schema, &bound.outputs, &bound.connections, false)?
-    {
+    for (name, source) in bound.declarations.modules(
+        &bound.schema,
+        &bound.outputs,
+        &bound.connections,
+        &bound.credential_manifest,
+        false,
+    )? {
         fs::write(stage.join("app").join(name), source)?;
     }
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
@@ -814,8 +816,8 @@ pub fn execute(
                     }
                     day2::credential_declaration::validate_catalog(&bound.credentials, &catalog)?;
                     fs::write(
-                        stage.join("credentials.json"),
-                        serde_json::to_vec(&bound.credentials)?,
+                        stage.join("credential-manifest.json"),
+                        serde_json::to_vec(&bound.credential_manifest)?,
                     )?;
                 }
                 "build-operation-handles" => {
@@ -825,15 +827,15 @@ pub fn execute(
                     );
                     let bound = bound.as_mut().context("bound data required")?;
                     let catalog = bind_codecs(prepared, bound)?;
-                    let modules = catalog.modules(
-                        &bound.schema,
-                        &bound.outputs,
-                        &bound.connections,
-                        false,
-                    )?;
+                    let modules =
+                        catalog.operation_modules(&bound.schema, &bound.outputs, false)?;
                     for name in ["Commands.roc", "Reads.roc"] {
                         fs::write(stage.join("app").join(name), &modules[name])?;
                     }
+                    fs::write(
+                        stage.join("app/Credentials.roc"),
+                        day2::credential_codegen::probe_module(&catalog)?,
+                    )?;
                 }
                 "build-admission" => {
                     ensure!(

@@ -2471,7 +2471,7 @@ mod selector_tests {
         let mut inspected = 0;
         for admission in [false, true] {
             let generated = modules(&catalog, &schema, &outputs, "", admission)?;
-            let registry_only = catalog.modules(&schema, &outputs, &[], admission)?;
+            let registry_only = catalog.modules(&schema, &outputs, &[], &[], admission)?;
             for source in generated.values().chain(registry_only.values()) {
                 for literal in contract_literals(source) {
                     inspected += 1;

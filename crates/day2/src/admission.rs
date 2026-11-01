@@ -537,7 +537,14 @@ pub fn prepare(
         } else {
             serde_json::from_slice(&fs::read(stage.join("connections.json"))?)?
         };
-        for (module, source) in catalog.modules(schema, outputs, &connections, true)? {
+        let credentials = if catalog.credentials.is_empty() {
+            Vec::new()
+        } else {
+            crate::json::decode(&fs::read(stage.join("credential-manifest.json"))?)?
+        };
+        for (module, source) in
+            catalog.modules(schema, outputs, &connections, &credentials, true)?
+        {
             fs::write(target.join("app").join(module), source)?;
         }
         fs::write(

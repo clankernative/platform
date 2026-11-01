@@ -39,6 +39,13 @@ operation authority metadata, using the same canonical interpreter as the final
 checked app contract. The build derives the full manifest before SDK binding and
 requires exact equality with the final worker-derived manifest before publication.
 Root eligibility and complete child/path closures are checked in both derivations.
+Both normal and restricted generated credential modules receive that same complete
+manifest. Selectable client and personal families expose family-specific opaque
+`GrantOption` and `GrantSelection` DATA and pure bounded codecs. A selection pins
+the complete family contract and a nonempty canonical subset of declared roots;
+foreign families, stale contracts and unknown or duplicate/discarded input refuse.
+These values carry no runtime authority. Selectable issuance and rotation remain
+unsupported until their explicit host and confirmation paths are implemented.
 Artifact load recompares the declarations with the native worker. The build rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked
