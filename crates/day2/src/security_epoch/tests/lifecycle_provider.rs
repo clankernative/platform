@@ -58,6 +58,26 @@ pub(in crate::security_epoch) fn snapshot(provider: &Provider) -> Value {
     json!({"documents":documents,"sends":provider.sends(),"calls":provider.calls})
 }
 
+/// External fixture corruption/restoration, never an admitted writer action.
+/// Each edit has its own real SQLite transaction and changes neither send log.
+pub(in crate::security_epoch) fn replace_document(
+    provider: &mut Provider,
+    name: &str,
+    document: Option<&Value>,
+) -> Result<()> {
+    let transaction = provider.db.transaction()?;
+    if let Some(document) = document {
+        transaction.execute(
+            "INSERT INTO documents(name,fields,version) VALUES(?1,?2,?3) ON CONFLICT(name) DO UPDATE SET fields=excluded.fields,version=excluded.version",
+            params![name, serde_json::to_string(&document["fields"])?, document["version"].as_i64().context("fixture version")?],
+        )?;
+    } else {
+        transaction.execute("DELETE FROM documents WHERE name=?1", [name])?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 pub(in crate::security_epoch) fn lose_before(provider: &mut Provider, enabled: bool) {
     provider.fault = if enabled {
         Fault::LoseBefore

@@ -122,6 +122,26 @@ compares complete bounded state and retains source-bound failure histories.
 See [native handshake simulation](NATIVE-HANDSHAKE-SIMULATION.md) for coverage,
 replay and the separate kernel/storage qualification requirements.
 
+The storage lifecycle campaign joins those transcript decisions to the real
+conditional-write kernel and SQLite-backed provider fixture, with an independent
+oracle for every result and durable row. Seeded histories cover first-holder
+selection, both bootstrap stages, uncertain completion, candidate substitution,
+provider reopen and permanent Current refusal. The Linux-only variant additionally
+uses the actual original-file fixture; portable passes do not construct native
+roles, P3 or writer owners.
+
+Canonical provider-replacement histories separately substitute each selected
+authority, sentinel and receipt record while retaining its version, then restore
+the exact original rows. This tests semantic substitution, not merely changed
+provider timestamps. An actual Current refusal stays permanent after restoration;
+a failed independent DATA read alone cannot poison that owner. If replacement and
+restoration both precede any Current check, the campaign makes no claim to detect
+the historical change. A control outside all documents in the selected coherent
+read leaves the selected lifecycle unchanged. These external fixture edits use
+separate SQLite transactions and expose no production restoration operation.
+The existing source-bound failure bundle retains the full event ordering and can
+be replayed with `DAY2_STORAGE_LIFECYCLE_REPLAY` in the lifecycle library tests.
+
 The selected [native connection/request contract](CREDENTIAL-NATIVE-ENROLLMENT.md#admitted-connections-and-fresh-requests)
 requires additional composed evidence while its port is in progress: full
 admission before an owner escapes, followed by two fresh requests on that same

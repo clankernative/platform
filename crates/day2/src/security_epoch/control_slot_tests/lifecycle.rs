@@ -11,7 +11,7 @@ use crate::security_epoch::{
 };
 use crate::simulation::coverage::{self as dst, Campaign, Transition};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod model;
 
@@ -39,6 +39,16 @@ enum Fault {
     AbandonClaim,
     ReplaceCandidate,
     RewriteSlot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CounterRecord {
+    Authority,
+    Sentinel,
+    CreateReceipt,
+    ActivationReceipt,
+    OutsideSelection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +89,12 @@ enum Event {
     },
     Reopen,
     RestoreClock,
+    CounterReplace {
+        record: CounterRecord,
+    },
+    CounterRestore {
+        record: CounterRecord,
+    },
     File {
         change: FileChange,
     },
@@ -130,6 +146,7 @@ struct World {
     first_holder: bool,
     current: usize,
     activation: Option<Digest>,
+    replaced: BTreeMap<CounterRecord, Option<Value>>,
     handshake: LifecycleHandshake,
     #[cfg(target_os = "linux")]
     file: Option<crate::security_epoch::storage_authority::FileFixture>,
@@ -225,6 +242,7 @@ impl World {
             first_holder: false,
             current: 0,
             activation: None,
+            replaced: BTreeMap::new(),
             handshake: LifecycleHandshake::new(seed)?,
             #[cfg(target_os = "linux")]
             file,
@@ -427,12 +445,87 @@ impl World {
         Ok(())
     }
 
+    fn counter_name(&self, record: CounterRecord) -> Result<String> {
+        let Request::CompleteInitialFirstActivation { operation, .. } = &self.cores[1].counter
+        else {
+            unreachable!()
+        };
+        let names = crate::security_epoch::firestore::Names::new(
+            &self.selection,
+            self.cores[1].counter.bootstrap(),
+            Some(operation),
+        )?;
+        Ok(match record {
+            CounterRecord::Authority => names.root,
+            CounterRecord::Sentinel => names.sentinel,
+            CounterRecord::CreateReceipt => names.create,
+            CounterRecord::ActivationReceipt => names.activate.unwrap(),
+            // Outside every document in the selected coherent read, not just
+            // a different field or a different selected receipt.
+            CounterRecord::OutsideSelection => format!("{}/unrelated/record", names.root),
+        })
+    }
+
+    fn replace_counter(&mut self, record: CounterRecord) -> Result<bool> {
+        if self.replaced.contains_key(&record) {
+            return Ok(false);
+        }
+        let name = self.counter_name(record)?;
+        let snapshot = counter_fixture::snapshot(&self.port.counter);
+        let rows = snapshot["documents"].as_array().unwrap();
+        let original = rows.iter().find(|row| row["name"] == name).cloned();
+        let source = if record == CounterRecord::OutsideSelection {
+            rows.iter()
+                .find(|row| row["name"] == self.counter_name(CounterRecord::Authority).unwrap())
+        } else {
+            original.as_ref()
+        };
+        let Some(mut replacement) = source.cloned() else {
+            return Ok(false);
+        };
+        replacement["name"] = json!(name);
+        let prefix = if matches!(
+            record,
+            CounterRecord::CreateReceipt | CounterRecord::ActivationReceipt
+        ) {
+            "/request/mapValue/fields"
+        } else {
+            ""
+        };
+        let pointer =
+            format!("/fields{prefix}/bootstrap/mapValue/fields/record_incarnation/stringValue");
+        let incarnation = replacement
+            .pointer_mut(&pointer)
+            .context("fixture bootstrap incarnation")?;
+        ensure!(incarnation.is_string(), "fixture incarnation shape");
+        let foreign = json!(Digest::new(b"external-provider-record-replacement"));
+        ensure!(*incarnation != foreign, "fixture replacement unchanged");
+        *incarnation = foreign;
+        // Retain the version deliberately: a provider substituting canonical
+        // DATA cannot evade the semantic check merely by retaining updateTime.
+        counter_fixture::replace_document(&mut self.port.counter, &name, Some(&replacement))?;
+        self.replaced.insert(record, original);
+        Ok(true)
+    }
+
+    fn restore_counter(&mut self, record: CounterRecord) -> Result<bool> {
+        let name = self.counter_name(record)?;
+        let Some(original) = self.replaced.get(&record) else {
+            return Ok(false);
+        };
+        counter_fixture::replace_document(&mut self.port.counter, &name, original.as_ref())?;
+        self.replaced.remove(&record);
+        Ok(true)
+    }
+
     fn step(&mut self, event: Event) -> Result<Record> {
         self.step_peer(event, 0)
     }
 
     fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<Record> {
         let accepted = match event {
+            Event::CounterReplace { record } => self.replace_counter(record)?,
+            Event::CounterRestore { record } => self.restore_counter(record)?,
             Event::Reopen => {
                 counter_fixture::reopen(
                     &mut self.port.counter,
@@ -1241,6 +1334,124 @@ fn every_bootstrap_cut_keeps_unknown_completion_candidate_and_refusal_across_reo
         "fault cuts not actually observed: {}",
         coverage.len()
     );
+    Ok(())
+}
+
+#[test]
+fn generated_canonical_provider_replacement_and_restore_preserve_observed_refusal() -> Result<()> {
+    let mut coverage = BTreeSet::new();
+    for seed in 0..8 {
+        let baseline = successful(seed);
+        let currents = baseline
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, event)| matches!(event, Event::Current { .. }).then_some(i))
+            .collect::<Vec<_>>();
+        let mut random = seed;
+        let prefix = currents[next(&mut random) as usize % currents.len()];
+        for record in [
+            CounterRecord::Authority,
+            CounterRecord::Sentinel,
+            CounterRecord::CreateReceipt,
+            CounterRecord::ActivationReceipt,
+            CounterRecord::OutsideSelection,
+        ] {
+            for observed in [false, true] {
+                let mut program = baseline.clone();
+                program.events.truncate(prefix);
+                if record != CounterRecord::OutsideSelection {
+                    // A row outside every selected read input must survive
+                    // the selected-row replacement and exact restoration.
+                    program.events.push(Event::CounterReplace {
+                        record: CounterRecord::OutsideSelection,
+                    });
+                }
+                let before = program.events.len() - 1;
+                let replace = program.events.len();
+                program.events.push(Event::CounterReplace { record });
+                program.events.push(Event::Reopen);
+                let data_check = program.events.len();
+                program.events.push(Event::Observe { stage: 1 });
+                let first_check = program.events.len();
+                if observed {
+                    program.events.push(Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    });
+                }
+                let restore = program.events.len();
+                program.events.extend([
+                    Event::CounterRestore { record },
+                    Event::RestoreClock,
+                    Event::Observe { stage: 1 },
+                    Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    },
+                    Event::Reopen,
+                    Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    },
+                ]);
+                // The exact serialized program, including replacement target
+                // and ordering, is the replay input; no test-only side channel.
+                let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
+                let records = check(&program)?;
+                let prior = &records[before].state;
+                let final_record = records.last().unwrap();
+                let refused = observed && record != CounterRecord::OutsideSelection;
+                ensure!(
+                    records[replace].accepted && records[restore].accepted,
+                    "external replacement/restore fixture did not complete"
+                );
+                ensure!(
+                    records[data_check].accepted == (record == CounterRecord::OutsideSelection),
+                    "independent DATA read did not check selected contents"
+                );
+                if observed {
+                    ensure!(
+                        records[first_check].accepted != refused,
+                        "replacement observation not exercised"
+                    );
+                }
+                ensure!(
+                    records[restore + 2].accepted,
+                    "restored DATA observation failed"
+                );
+                ensure!(
+                    records[restore + 3].accepted != refused,
+                    "restored same-port Current decision changed before reopen"
+                );
+                ensure!(
+                    final_record.accepted != refused && final_record.state.continuation != refused,
+                    "restoration changed the retained continuation decision"
+                );
+                ensure!(
+                    final_record.state.counter == prior.counter
+                        && final_record.state.slots == prior.slots,
+                    "external restoration altered durable rows or send history"
+                );
+                ensure!(
+                    final_record.state.slot_posts == prior.slot_posts
+                        && final_record.state.counter_posts == prior.counter_posts,
+                    "read-only replacement history dispatched a writer send"
+                );
+                let increments = if refused {
+                    0
+                } else {
+                    2 + usize::from(observed)
+                };
+                ensure!(
+                    final_record.state.current == prior.current + increments,
+                    "replacement released an unexpected Current"
+                );
+                coverage.insert((record, observed));
+            }
+        }
+    }
+    ensure!(coverage.len() == 10, "replacement observation coverage");
     Ok(())
 }
 
