@@ -174,6 +174,8 @@ fn render<'a>(
             "snapshot_from_parts",
             "selection_from_options",
             "selection_from_str",
+            "issue_selected",
+            "issue_request",
             "known_grant_root",
             "valid_grant_contract",
         ] {
@@ -192,6 +194,10 @@ fn render<'a>(
         };
         let issue = if provisional {
             "|_context, _request| Tx.host_reject(\"credential_issuance_unavailable\")".into()
+        } else if selectable {
+            format!(
+                "|context, request| {prefix}day2_issue_selected_{name}(\"{name}\", context, request.label, request.grant)"
+            )
         } else {
             format!(
                 "|context, request| {prefix}day2_issue_fixed_{name}(\"{name}\", context, request.label)"
@@ -211,10 +217,13 @@ fn render<'a>(
                 "|context, request| {prefix}day2_revoke_lineage_{name}(\"{name}\", context, request.lineage)"
             )
         };
-        // This compiler-only slice preserves the existing issuance callback.
-        // Selection DATA is not executable permission; selectable lifecycle
-        // actions remain rejected by the existing admission/runtime guards.
-        let issue_input = "{ label : Credential.Label }";
+        let issue_input = if provisional && mode.is_none() {
+            "_".to_owned()
+        } else if selectable {
+            format!("{{ label : Credential.Label, grant : GrantSelection_{name} }}")
+        } else {
+            "{ label : Credential.Label }".to_owned()
+        };
         let (selection_fields, selection_values) = if selectable {
             (
                 format!(
@@ -238,6 +247,12 @@ fn render<'a>(
         let family_api = format!(
             "    {name} : {{ issue : InteractiveContext, {issue_input} -> Tx(Issued_{name}), rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]){selection_fields} }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n{selection_values}    }}\n\n"
         );
+        let family_api = if selectable && !provisional {
+            family_api.replace(&format!(" rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}),"), "")
+                .replace(&format!("        rotate: {rotate},\n"), "")
+        } else {
+            family_api
+        };
         source.push_str(&family_api);
     }
     source.push_str("}\n");
@@ -308,9 +323,14 @@ Credentials :: [].{
     }
 
     $PREFIX$issue_fixed : Str, InteractiveContext, Credential.Label -> Tx(Issued(family))
-    $PREFIX$issue_fixed = |registration, context, label| Tx.$PREFIX$capability(
+    $PREFIX$issue_fixed = |registration, context, label| $PREFIX$issue_request(registration,
+        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str(), grant: { mode: "fixed" } }),
+    )
+
+    $PREFIX$issue_request : Str, Str -> Tx(Issued(family))
+    $PREFIX$issue_request = |registration, request| Tx.$PREFIX$capability(
         "credential_issue", "credential.issue.v1",
-        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str() }),
+        request,
     ).and_then(|raw| {
         parsed : Try({ lineage : Str, version : Str, label : Str, expires_at : I64 }, _)
         parsed = Json.parse(raw)
@@ -545,5 +565,10 @@ const SELECTABLE: &str = r#"
         if Json.to_str(selected.value) != raw { return Err(InvalidGrantSelection) }
         Ok(selected)
     }
+
+    $PREFIX$issue_selected : Str, InteractiveContext, Credential.Label, GrantSelection(family) -> Tx(Issued(family))
+    $PREFIX$issue_selected = |registration, context, label, selection| $PREFIX$issue_request(registration,
+        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str(), grant: { mode: "selected", selection: selection.value } }),
+    )
 
 "#;

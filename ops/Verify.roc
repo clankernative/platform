@@ -51,6 +51,7 @@ Verify :: [].{
 			"delegation-peer",
 			"delegation",
 			"credential-metadata",
+			"credential-selectable",
 			"connection-declaration",
 			"oauth-calendar",
 			"oauth-gitlab",

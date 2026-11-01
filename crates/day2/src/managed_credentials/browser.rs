@@ -119,6 +119,15 @@ pub(crate) fn start(
     runtime.artifact().contract().schema.inputs[&op.input_type].validate_input(input)?;
     let intent = lifecycle::intent(access, input)?;
     let (_, family) = access.mutation().context("credential action missing")?;
+    intent.check_family(
+        runtime
+            .artifact()
+            .contract()
+            .credential_manifest
+            .iter()
+            .find(|declared| declared.id.as_str() == family)
+            .context("credential family missing")?,
+    )?;
     let instance = Instance::load(runtime.instance_path())?;
     let (_, edge) = instance.security_edge()?;
     if let Some(page) = product_return {
@@ -283,6 +292,15 @@ pub(crate) fn fresh_intent(
     pending: &Pending,
     identity: &iap::Verified,
 ) -> Result<crate::oauth::fresh_auth::FreshIntent> {
+    pending.intent.check_family(
+        runtime
+            .artifact()
+            .contract()
+            .credential_manifest
+            .iter()
+            .find(|family| family.id.as_str() == pending.family)
+            .context("credential family missing")?,
+    )?;
     let instance = Instance::load(runtime.instance_path())?;
     ensure!(
         instance.scope(runtime.app())? == runtime.scope(),

@@ -2,7 +2,7 @@
 
 This document records the implemented foundation for
 `proposals/app-identity/03-CREDENTIALS.md`. The implementation is staged. No
-managed credential is enabled by default. Fixed-grant client/personal issuance
+managed credential is enabled by default. Fixed and selectable client/personal issuance
 runs through a host-confirmed interactive command. Managed bearer admission
 uses an explicitly selected host verifier and the ordinary operation runtime.
 The isolated security shell supplies fresh confirmation, protected POST reveal
@@ -18,7 +18,8 @@ the checked compiler type. Nominal mode witnesses are declaration DATA, not
 runtime permission; final metadata must match both checked choices. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. Generated metadata reads
 and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
-lifecycle inputs remain absent.
+families expose `issue` and `revoke`; selectable rotation remains unsupported
+until its closed keep-existing/narrow choice is implemented.
 
 The shared local-family contract now resolves fixed and selected requests
 through one closed `IssuanceGrant` mode. A `GrantSelection` is portable DATA:
@@ -26,9 +27,14 @@ it binds a nonempty canonical root set to the exact family contract and the
 resolver rejects missing, duplicated, unknown, foreign or stale selections.
 It copies the admitted operation contracts and complete child/path ceilings;
 it never accepts supplied authority or substitutes the entire family.
-Fixed issuance uses that same resolver without a selection input. The generated
-selectable API and confirmation/ingress wiring remain subsequent work; this
-contract alone does not enable selectable issuance or any native purpose.
+Fixed issuance uses that same resolver without a selection input. Selectable
+issuance requires an explicit selection; omission never means the whole family.
+The security shell displays the exact selected roots and binds them, the family
+contract and complete original input to confirmation. The host checks those same
+values before key preparation, staging and product commit. The lineage freezes
+only those complete admitted root contracts. Ingress checks that immutable
+ceiling and current authority, so an unselected root stays denied even when it
+belongs to the current family maximum. This local path adds no native purpose.
 
 The normal build evaluates pure credential declarations in an isolated compiled
 probe after binding checked operation handles and before binding the complete SDK. Target codecs are checked against the compiler's
@@ -44,8 +50,14 @@ manifest. Selectable client and personal families expose family-specific opaque
 `GrantOption` and `GrantSelection` DATA and pure bounded codecs. A selection pins
 the complete family contract and a nonempty canonical subset of declared roots;
 foreign families, stale contracts and unknown or duplicate/discarded input refuse.
-These values carry no runtime authority. Selectable issuance and rotation remain
-unsupported until their explicit host and confirmation paths are implemented.
+These values carry no runtime authority. A selectable issuing handler accepts
+`{ label : Credential.Label, grant : Credentials.GrantSelection_<registration> }`;
+fixed issuance has no grant field or option catalog. The application binds the
+serialized selection input with `.credential_grant(Selectors.<input_field>)`.
+The text codec accepts only its complete canonical encoding, so discarded JSON
+members cannot silently become a typed selection. The host independently
+rechecks the input against the current admitted manifest. Selectable rotation
+remains unsupported.
 Artifact load recompares the declarations with the native worker. The build rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked
@@ -309,12 +321,24 @@ verifier maintenance remain separate work.
 `pf.InteractiveContext`; an ordinary `Context` cannot be passed to generated
 `Credentials.<registration>.issue`. Context construction and raw issue instructions
 are sealed through both compiler admission profiles. The reflected operation is
-interactive-only and requires exactly one fixed client/personal issue declaration:
+interactive-only and requires exactly one client/personal issue declaration:
 
 ```roc
 .credentials(Credential.issue_access(KeyFamilies.clients))
 .credential_label(Selectors.create_client_input_label)
 ```
+
+A selectable operation also binds a distinct canonical text input:
+
+```roc
+.credential_grant(Selectors.create_client_input_grant)
+```
+
+Its handler decodes that input with its own generated family's
+`selection_from_str` and passes the typed selection to `issue`. Fixed issuance
+rejects a selection binding or payload. Wrong families, changed contracts,
+unknown roots, empty selections and any change to the confirmed input refuse;
+there is no implicit full-family fallback.
 
 The label selector is a generated `Path(Input, Str)` from the canonical input
 codec. Admission requires a supported top-level text field; the host checks the
@@ -345,6 +369,13 @@ The disposable verification campaign explicitly installs random in-memory test k
 and simulated interaction evidence for app-owned properties. Ordinary runtime/web
 loading does not install this adapter. These campaigns test composition and atomicity;
 they do not qualify a real key provider, browser session or non-rollback epoch store.
+
+The dedicated `credential-selectable-conformance` overlay uses that ordinary
+build and required verification path for both local profiles. It exercises
+explicit root subsets, atomic product/credential writes, declared app failures,
+retry/replay, confirmation changes and denial at unselected bearer roots.
+The local fixture does not qualify a genuine native CredentialIntent, reveal,
+acknowledgement, or live key/epoch supplier.
 
 Normal builds now generate `Credentials.<registration>.list` and `inspect`
 for client and personal families. These return `Observe(Try(...))`, accept no

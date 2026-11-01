@@ -9,9 +9,7 @@ use crate::{authority_state, protocol, store::Runtime};
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
-    credentials::{
-        CredentialFamilyBinding, GrantMode, ManagedProfile, ManagementPolicy, ManagementPredicate,
-    },
+    credentials::{CredentialFamilyBinding, ManagedProfile, ManagementPolicy, ManagementPredicate},
     oauth::GrantCeiling,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -244,7 +242,22 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
         Ok(())
     }
     let intent_nodes = match &proof.intent {
-        Intent::Issue { .. } | Intent::Revoke { .. } => 3,
+        Intent::Revoke { .. } => 3,
+        Intent::Issue {
+            grant: lifecycle::IssueGrant::Fixed {},
+            ..
+        } => 5,
+        Intent::Issue {
+            grant: lifecycle::IssueGrant::Selected { selection },
+            ..
+        } => {
+            ensure!(
+                (1..=64).contains(&selection.roots().len())
+                    && selection.roots().iter().all(|root| root.len() <= 80),
+                "credential selection structure budget"
+            );
+            8 + selection.roots().len()
+        }
         Intent::Rotate { .. } => 5,
     };
     let original_nodes = match original {
@@ -351,12 +364,16 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
     impl Serialize for CanonicalIntent<'_> {
         fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
             let mut map = serializer.serialize_map(Some(match self.0 {
-                Intent::Issue { .. } | Intent::Revoke { .. } => 2,
+                Intent::Issue { .. } => 3,
+                Intent::Revoke { .. } => 2,
                 Intent::Rotate { .. } => 4,
             }))?;
             map.serialize_entry("action", self.0.action())?;
             match self.0 {
-                Intent::Issue { label } => map.serialize_entry("label", label)?,
+                Intent::Issue { label, grant } => {
+                    map.serialize_entry("grant", grant)?;
+                    map.serialize_entry("label", label)?;
+                }
                 Intent::Rotate {
                     lineage,
                     head,
@@ -645,6 +662,15 @@ pub(super) fn require_runtime_record(
         "credential confirmation runtime changed"
     );
     let access = access(runtime, &record.confirmation.operation)?;
+    record.confirmation.intent.check_family(
+        runtime
+            .artifact()
+            .contract()
+            .credential_manifest
+            .iter()
+            .find(|family| family.id.as_str() == record.confirmation.family)
+            .context("credential confirmation family missing")?,
+    )?;
     ensure!(
         access.interactive
             && access.mutation()
@@ -684,6 +710,7 @@ pub(crate) fn access<'a>(
             rotations: Vec::new(),
             revocations: Vec::new(),
             issue_label: String::new(),
+            issue_grant: String::new(),
             management_lineage: String::new(),
             rotation_head: String::new(),
             rotation_revision: String::new(),
@@ -899,11 +926,10 @@ pub(crate) fn stage(
         })
         .context("credential issue family mismatch")?;
     ensure!(
-        matches!(family.grant, GrantMode::Fixed)
-            && matches!(
-                family.profile,
-                ManagedProfile::Client | ManagedProfile::Personal
-            ),
+        matches!(
+            family.profile,
+            ManagedProfile::Client | ManagedProfile::Personal
+        ),
         "unsupported credential issuance profile"
     );
     let active = authority_state::require_invocation_in(
@@ -938,7 +964,7 @@ pub(crate) fn stage(
     if !matches!(proof.intent, Intent::Issue { .. }) {
         return lifecycle::stage(tx, request, &proof, family, selected, ready);
     }
-    let Intent::Issue { label } = &proof.intent else {
+    let Intent::Issue { label, grant } = &proof.intent else {
         unreachable!()
     };
     ensure!(
@@ -981,7 +1007,7 @@ pub(crate) fn stage(
         binding.approved_authority.clone(),
         principal.clone(),
         binding.audience.clone(),
-        family.issuance_roots(day2_capabilities::credentials::IssuanceGrant::Fixed)?,
+        family.issuance_roots(grant.request())?,
     )?;
     let expires_at = proof
         .approved_at
@@ -1090,9 +1116,9 @@ mod tests {
 
     // Literal preimage/hash authored independently of the Rust codec. These
     // values are synthetic DATA, never a signed original pending/proof owner.
-    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","label":"Golden key"},"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
+    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","grant":{"mode":"fixed"},"label":"Golden key"},"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
     const GOLDEN_DIGEST: &str =
-        "sha256:10950b7c4fd37f242ec258ebe9c2c98f4d077a15c1a2e0587fcc07cc07f1400f";
+        "sha256:e3dd7767ffc3a5316476b73e19e24ede9117d5d5c1a7c66475d04bc75b2cd40a";
 
     fn golden() -> Result<(Confirmation, ConfirmationOrigin)> {
         let value: Value = crate::json::decode(GOLDEN_PREIMAGE.as_bytes())?;
@@ -1174,6 +1200,58 @@ mod tests {
             r#"{"zeta":{"z":2,"a":[true,null,"text"]},"label":"Golden key","alpha":7}"#,
         )?;
         assert_eq!(commitment(&reordered, &original)?.as_str(), GOLDEN_DIGEST);
+        Ok(())
+    }
+
+    #[test]
+    fn selected_confirmation_binds_mode_contract_and_every_root_without_fixed_fallback()
+    -> Result<()> {
+        let (mut proof, original) = golden()?;
+        let selection: day2_capabilities::credentials::GrantSelection = serde_json::from_value(
+            serde_json::json!({
+                "family_contract":Digest::new(b"public selection fixture"), "roots":["fixture.read","fixture.save"]
+            }),
+        )?;
+        proof.input["grant"] = serde_json::to_string(&selection)?.into();
+        proof.intent = Intent::Issue {
+            label: "Golden key".into(),
+            grant: lifecycle::IssueGrant::Selected { selection },
+        };
+        let encoded = encode_record(proof, original)?;
+        let original: Value = crate::json::decode(encoded.as_bytes())?;
+        decode_record("invocation-1", encoded.as_bytes())?;
+        for pointer in [
+            "/confirmation/intent/grant/selection/family_contract",
+            "/confirmation/intent/grant/selection/roots/0",
+            "/confirmation/intent/grant/selection/roots/1",
+        ] {
+            let mut changed = original.clone();
+            let value = changed.pointer_mut(pointer).unwrap();
+            *value = if pointer.ends_with("family_contract") {
+                Digest::new(b"different contract").as_str().into()
+            } else {
+                "fixture.other".into()
+            };
+            let before = changed["commitment"].clone();
+            rehash_fixture_value(&mut changed)?;
+            assert_ne!(before, changed["commitment"], "unbound {pointer}");
+        }
+        for case in 0..4 {
+            let mut changed = original.clone();
+            let grant = &mut changed["confirmation"]["intent"]["grant"];
+            match case {
+                0 => grant["mode"] = "fixed".into(),
+                1 => {
+                    grant.as_object_mut().unwrap().remove("selection");
+                }
+                2 => grant["selection"]["roots"] = serde_json::json!([]),
+                _ => grant["selection"]["roots"] = serde_json::json!(vec!["fixture.read"; 65]),
+            }
+            assert!(
+                rehash_fixture_value(&mut changed).is_err(),
+                "invalid selected record {case}"
+            );
+        }
         Ok(())
     }
 
@@ -1398,8 +1476,13 @@ mod tests {
     }
 
     fn world() -> Result<(tempfile::TempDir, Runtime)> {
-        let artifact = PathBuf::from(std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
-            .context("build credential-metadata-conformance and set DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")?);
+        world_for("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+    }
+
+    fn world_for(fixture: &str) -> Result<(tempfile::TempDir, Runtime)> {
+        let artifact = PathBuf::from(
+            std::env::var_os(fixture).context("compiled credential fixture required")?,
+        );
         let directory = tempfile::tempdir()?;
         let runtime = crate::development::create_verification_for(
             &artifact,
@@ -2262,6 +2345,229 @@ mod tests {
     }
 
     #[test]
+    fn selectable_app_failure_preserves_private_and_product_state() -> Result<()> {
+        use day2_capabilities::credentials::GrantSelection;
+        for (registration, operation, failure) in [
+            (
+                "clients",
+                "credential_metadata.create_client",
+                "app:credential_metadata.invalid_client_selection",
+            ),
+            (
+                "personal",
+                "credential_metadata.create_personal",
+                "app:credential_metadata.invalid_personal_selection",
+            ),
+        ] {
+            let (_directory, runtime) = world_for("DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT")?;
+            let family = runtime
+                .artifact()
+                .contract()
+                .credential_manifest
+                .iter()
+                .find(|family| family.registration.as_str() == registration)
+                .context("fixture family")?;
+            let grant = GrantSelection::new(family, vec!["credential_metadata.ping".into()])?;
+            let input = serde_json::json!({"label":"Refuse issuance", "grant":serde_json::to_string(&grant)?});
+            confirm_input(&runtime, operation, "selected-refusal", &input)?;
+            let outcome = runtime.execute("selected-refusal", Fault::None)?;
+            assert_eq!(outcome.status, "failure");
+            assert_eq!(outcome.error, failure);
+            assert_eq!(runtime.execute("selected-refusal", Fault::None)?, outcome);
+            assert_eq!(counts(&runtime)?, (0, 0));
+            let db = open(runtime.db())?;
+            for table in [
+                "day2_credential_versions",
+                "day2_credential_material",
+                "day2_credential_deliveries",
+                "day2_credential_receipts",
+                "key_receipts",
+            ] {
+                let count: i64 =
+                    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(count, 0, "{registration} {table}");
+            }
+            replay(runtime.artifact(), &runtime.trace("selected-refusal")?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selectable_native_issuance_is_atomic_exact_and_idempotent_for_both_profiles() -> Result<()> {
+        use day2_capabilities::credentials::GrantSelection;
+        let (_directory, runtime) = world_for("DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT")?;
+        for (index, registration, operation) in [
+            (0, "clients", "credential_metadata.create_client"),
+            (1, "personal", "credential_metadata.create_personal"),
+        ] {
+            let family = runtime
+                .artifact()
+                .contract()
+                .credential_manifest
+                .iter()
+                .find(|family| family.registration.as_str() == registration)
+                .context("selectable fixture family")?;
+            let selection = GrantSelection::new(family, vec!["credential_metadata.ping".into()])?;
+            let input = serde_json::json!({"label":"Only readiness", "grant":serde_json::to_string(&selection)?});
+            let id = format!("selected-{registration}");
+            confirm_input(&runtime, operation, &id, &input)?;
+            assert!(runtime.execute(&id, Fault::BeforeCommit).is_err());
+            assert_eq!(counts(&runtime)?, (index, index));
+            assert!(runtime.execute(&id, Fault::AfterCommit).is_err());
+            let outcome = runtime.execute(&id, Fault::None)?;
+            assert_eq!(outcome.status, "success");
+            assert_eq!(outcome, runtime.execute(&id, Fault::None)?);
+            assert_eq!(counts(&runtime)?, (index + 1, index + 1));
+            let db = open(runtime.db())?;
+            let (grant, principal, lifetime, material, envelope): (String, String, i64, i64, i64) = db.query_row(
+                "SELECT l.grant_json,l.principal,v.expires_at-v.issued_at,m.material_revision,m.envelope_revision
+                 FROM day2_credential_lineages l JOIN day2_credential_versions v ON v.id=l.head
+                 JOIN day2_credential_material m ON m.version=v.id WHERE l.family=?1",
+                [family.id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))?;
+            let ceiling: GrantCeiling = crate::json::decode(grant.as_bytes())?;
+            assert_eq!(
+                ceiling.roots.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["credential_metadata.ping"]
+            );
+            assert_eq!(
+                ceiling.roots["credential_metadata.ping"],
+                family.roots["credential_metadata.ping"]
+            );
+            assert_eq!((material, envelope), (1, 1));
+            assert_eq!(u64::try_from(lifetime)?, family.lifetime_seconds);
+            if registration == "clients" {
+                assert_eq!(
+                    crate::authority::client_family(&principal),
+                    Some("client_keys")
+                );
+            } else {
+                assert!(principal.starts_with("verification/"));
+            }
+            let revision: Vec<u8> = db.query_row(
+                "SELECT revision FROM key_receipts WHERE family=?1",
+                [registration],
+                |row| row.get(0),
+            )?;
+            assert_eq!(revision, 1_u64.to_be_bytes());
+            let trace = runtime.trace(&id)?;
+            replay(runtime.artifact(), &trace)?;
+            let redacted = serde_json::to_string(&trace)?;
+            assert!(!redacted.contains("d2c1."));
+            assert!(!redacted.contains("ciphertext"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selectable_native_stage_refuses_changed_selection_before_any_staging() -> Result<()> {
+        use day2_capabilities::credentials::GrantSelection;
+        for registration in ["clients", "personal"] {
+            let (_directory, runtime) = world_for("DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT")?;
+            let family = runtime
+                .artifact()
+                .contract()
+                .credential_manifest
+                .iter()
+                .find(|family| family.registration.as_str() == registration)
+                .context("fixture family")?;
+            let selection = GrantSelection::new(family, vec!["credential_metadata.ping".into()])?;
+            let input = serde_json::json!({"label":"Only readiness", "grant":serde_json::to_string(&selection)?});
+            let operation = if registration == "clients" {
+                "credential_metadata.create_client"
+            } else {
+                "credential_metadata.create_personal"
+            };
+            confirm_input(&runtime, operation, "selected-hostile", &input)?;
+            let prepared = runtime
+                .prepare_credential_keys("selected-hostile")?
+                .context("prepared keys")?;
+            let mut db = open(runtime.db())?;
+            let tx = db.transaction()?;
+            let request = protocol::Request {
+                operation: operation.into(),
+                input: input.to_string(),
+                context: crate::store::invocation_context(&tx, "selected-hostile")?,
+                observations: Vec::new(),
+            };
+            let proof = load(&tx, "selected-hostile")?
+                .context("confirmation")?
+                .confirmation;
+            let expected = proof.intent.instruction(registration, "selected-hostile");
+            for mutation in [
+                "missing",
+                "empty",
+                "duplicate",
+                "different",
+                "unknown",
+                "stale",
+                "fixed",
+                "foreign_family",
+            ] {
+                let mut wire = expected.clone();
+                match mutation {
+                    "missing" => {
+                        wire.as_object_mut().unwrap().remove("grant");
+                    }
+                    "empty" => wire["grant"]["selection"]["roots"] = serde_json::json!([]),
+                    "duplicate" => {
+                        wire["grant"]["selection"]["roots"] = serde_json::json!([
+                            "credential_metadata.ping",
+                            "credential_metadata.ping"
+                        ])
+                    }
+                    "different" => {
+                        wire["grant"]["selection"]["roots"] =
+                            serde_json::json!(["credential_metadata.record_use"])
+                    }
+                    "unknown" => {
+                        wire["grant"]["selection"]["roots"] = serde_json::json!(["foreign.ping"])
+                    }
+                    "stale" => {
+                        wire["grant"]["selection"]["family_contract"] =
+                            serde_json::json!(Digest::new(b"stale"))
+                    }
+                    "fixed" => wire["grant"] = serde_json::json!({"mode":"fixed"}),
+                    "foreign_family" => {
+                        wire["registration"] = serde_json::json!(if registration == "clients" {
+                            "personal"
+                        } else {
+                            "clients"
+                        })
+                    }
+                    _ => unreachable!(),
+                }
+                let instruction = protocol::Instruction {
+                    kind: "credential_issue".into(),
+                    model: crate::credential_codegen::ISSUE.into(),
+                    data: wire.to_string(),
+                    ..Default::default()
+                };
+                assert!(
+                    stage(&tx, &runtime, &request, &instruction, &prepared).is_err(),
+                    "{registration} {mutation}"
+                );
+                let rows: i64 =
+                    tx.query_row("SELECT count(*) FROM day2_credential_lineages", [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(rows, 0, "staged {mutation}");
+            }
+            let instruction = protocol::Instruction {
+                kind: "credential_issue".into(),
+                model: crate::credential_codegen::ISSUE.into(),
+                data: expected.to_string(),
+                ..Default::default()
+            };
+            stage(&tx, &runtime, &request, &instruction, &prepared)?;
+            tx.rollback()?;
+            assert_eq!(counts(&runtime)?, (0, 0));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_issuance_rolls_back_and_recovers_the_same_public_receipt() -> Result<()> {
         let (_directory, runtime) = world()?;
         let operation = "credential_metadata.create_client";
@@ -2350,13 +2656,15 @@ mod tests {
             observations: Vec::new(),
         };
         let mut instruction = protocol::Instruction { kind: "credential_issue".into(), model: crate::credential_codegen::ISSUE.into(),
-            data: serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"changed"}).to_string(), ..Default::default() };
+            data: serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"changed", "grant":{"mode":"fixed"}}).to_string(), ..Default::default() };
         assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
-        instruction.data = serde_json::json!({"registration":"personal", "invocation":"hostile", "label":"Transcription client"}).to_string();
+        instruction.data = serde_json::json!({"registration":"personal", "invocation":"hostile", "label":"Transcription client", "grant":{"mode":"fixed"}}).to_string();
         assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
-        instruction.data = serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"Transcription client", "subject":"someone-else"}).to_string();
+        instruction.data = serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"Transcription client", "grant":{"mode":"fixed"}, "subject":"someone-else"}).to_string();
         assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
         instruction.data = serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"Transcription client"}).to_string();
+        assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());
+        instruction.data = serde_json::json!({"registration":"clients", "invocation":"hostile", "label":"Transcription client", "grant":{"mode":"fixed"}}).to_string();
         let original_actor = request.context.actor.clone();
         request.context.actor = "bob@example.com".into();
         assert!(stage(&tx, &runtime, &request, &instruction, &ready).is_err());

@@ -636,6 +636,10 @@ fn build_fixture(
     fixture_build(root, fixture, fixtures)?.build(root)
 }
 
+pub(crate) fn build_credential_selectable(root: &Path) -> Result<PathBuf> {
+    build_fixture(root, "credential-selectable", &BTreeMap::new())
+}
+
 fn fixture_build(
     root: &Path,
     fixture: &str,
@@ -718,6 +722,11 @@ fn fixture_build(
         "credential-metadata" => {
             FixtureBuild::plain(root, "fixtures/credential-metadata-conformance")
         }
+        "credential-selectable" => FixtureBuild::overlay(
+            root,
+            "fixtures/credential-metadata-conformance",
+            "fixtures/credential-selectable-conformance",
+        ),
         "connection-declaration" => {
             FixtureBuild::plain(root, "fixtures/connection-declaration-conformance")
         }
@@ -1433,6 +1442,22 @@ fn configure_tests(
     // full workspace campaign with its artifact, while metadata-free fast and
     // Reports campaigns do not claim that coverage. Exact names preserve the
     // full gate and make new/renamed cases fail rather than silently disappear.
+    if !fixtures.contains_key("credential-selectable")
+        || !fixtures.contains_key("credential-metadata")
+    {
+        command.args(["--skip", "app_contract::credential_binding_tests::issuance_bindings_require_exact_mode_and_distinct_text_selection"]);
+    }
+    if !fixtures.contains_key("credential-selectable") {
+        for test in [
+            "managed_credentials::issuance::tests::selectable_app_failure_preserves_private_and_product_state",
+            "oauth::security_shell::tests::selectable_navigation_refuses_invalid_or_foreign_selection_before_key_load",
+            "oauth::security_shell::tests::selectable_credential_confirmation_and_ingress_preserve_the_exact_subset",
+            "managed_credentials::issuance::tests::selectable_native_issuance_is_atomic_exact_and_idempotent_for_both_profiles",
+            "managed_credentials::issuance::tests::selectable_native_stage_refuses_changed_selection_before_any_staging",
+        ] {
+            command.args(["--skip", test]);
+        }
+    }
     if !fixtures.contains_key("credential-metadata") {
         for test in [
             "managed_credentials::simulation::actual_credential_http_inherits_ports_and_replays_exact_ids",
@@ -1501,6 +1526,10 @@ fn configure_tests(
         (
             "credential-metadata",
             "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT",
+        ),
+        (
+            "credential-selectable",
+            "DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT",
         ),
         ("delegation-peer", "DAY2_TEST_DELEGATION_PEER_ARTIFACT"),
         ("stock-ledger", "DAY2_TEST_STOCK_LEDGER_ARTIFACT"),
@@ -1572,6 +1601,7 @@ fn receipt(
         let web = artifact("http")?;
         let redirect = artifact("redirect")?;
         let credential_metadata = artifact("credential-metadata")?;
+        let credential_selectable = artifact("credential-selectable")?;
         let connection_declaration = artifact("connection-declaration")?;
         let oauth_calendar = artifact("oauth-calendar")?;
         let oauth_gitlab = artifact("oauth-gitlab")?;
@@ -1597,6 +1627,7 @@ fn receipt(
             "lifecycle":artifact_id(&lifecycle),
             "redirect":artifact_id(&redirect),
             "credential_metadata":artifact_id(&credential_metadata),
+            "credential_selectable":artifact_id(&credential_selectable),
             "connection_declaration":artifact_id(&connection_declaration),
             "oauth_calendar":artifact_id(&oauth_calendar),
             "oauth_gitlab":artifact_id(&oauth_gitlab),
@@ -1729,6 +1760,7 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
             "build-http",
             "build-delegation",
             "build-credential-metadata",
+            "build-credential-selectable",
             "build-connection-declaration",
             "build-oauth-calendar",
             "build-oauth-gitlab",
@@ -2352,6 +2384,7 @@ mod tests {
         for obligation in [
             "build-delegation",
             "build-credential-metadata",
+            "build-credential-selectable",
             "build-connection-declaration",
             "build-oauth-calendar",
             "build-oauth-gitlab",

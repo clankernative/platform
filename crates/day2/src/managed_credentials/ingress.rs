@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
-    credentials::{GrantMode, ManagedProfile, Namespace},
+    credentials::{ManagedProfile, Namespace},
     oauth::GrantCeiling,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -323,7 +323,7 @@ pub(crate) fn prepare(
         matches!(
             manifest.profile,
             ManagedProfile::Client | ManagedProfile::Personal
-        ) && matches!(manifest.grant, GrantMode::Fixed),
+        ),
         Failure::CredentialRejected
     );
     let contract = crate::credential_authority::operation(runtime.artifact().contract(), operation)

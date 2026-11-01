@@ -1,0 +1,127 @@
+import pf.Api
+import pf.Handler
+import pf.InteractiveContext
+import pf.Credential
+import pf.Tx
+import CreatePersonalTypes
+import KeyFamilies
+import Credentials
+import Data
+import Selectors
+import Commands
+import Errors
+
+CreatePersonal :: [].{
+	Output : { lineage : Str, version : Str, label : Str, expires_at : I64 }
+
+	example_grant : {} -> Try(Str, Str)
+	example_grant = |_| {
+		selection = (Credentials.personal.selection_from_options)(Credentials.personal.grant_options)
+			.map_err(|_| "fixture selection unavailable")?
+		Ok(selection.to_str())
+	}
+
+	definition = Api.command({
+		handler: Handler.interactive(handle),
+		contract: {
+			title: "Create a selected personal credential",
+			usage: {
+				purpose: "Issue only selected permissions for the freshly confirmed human.",
+				use_when: ["The recipient needs a bounded personal selection."],
+				avoid_when: ["Choosing another human or treating selection as authority."],
+				preconditions: ["Current family contract, confirmed subject and ready custody."],
+				effects: ["One personal lineage and one public product registration."],
+				result: "Public metadata with a fixed confirmed human subject.",
+			},
+			inputs: { label: "Confirmed label.", grant: "Serialized current family selection." },
+			outputs: {
+				lineage: "Public family reference.",
+				version: "Public version identity.",
+				label: "Confirmed label.",
+				expires_at: "Unix expiry.",
+			},
+			example: |_| {
+				grant = example_grant({})?
+				Ok({
+					input: { label: "Selected personal", grant },
+					output: {
+						lineage: "cr1_personal_example",
+						version: "example",
+						label: "Selected personal",
+						expires_at: 3600,
+					},
+				})
+			},
+			errors: [Errors.invalid_personal_selection],
+			input_sources: |_| [],
+			follow_ups: [],
+			deprecated: Bool.False,
+		},
+		execution: Api.current_state([Api.create(Data.entries), Api.create(Data.key_receipts)]),
+		verification: {
+			input: |_snapshot, seed| {
+				grant = example_grant({})?
+				Ok({ label: "Personal ${seed.to_str()}", grant })
+			},
+			check: |before, output, after| {
+				old = Data.verification_snapshot(before)?.live
+				next = Data.verification_snapshot(after)?.live
+				Ok(
+					next.entries.len()
+						== old.entries.len() + 1
+						and next.entries.keep_if(|row| row.value.note == output.lineage).len() == 1,
+				)
+			},
+		},
+	}).credentials(Credential.issue_access(KeyFamilies.personal))
+		.credential_label(Selectors.create_personal_input_label)
+		.credential_grant(Selectors.create_personal_input_grant)
+
+	handle : InteractiveContext, CreatePersonalTypes.Input -> Tx(Output)
+	handle =
+		|
+			context,
+			input,
+		| match (Credential.Label.from_str(input.label), (Credentials.personal.selection_from_str)(input.grant)) {
+			(Ok(_), Ok(_)) if input.label == "Refuse issuance" => Tx.reject(Errors.invalid_personal_selection)
+			(Ok(label), Ok(grant)) => (Credentials.personal.issue)(context, { label, grant }).and_then(
+				|issued| {
+					lineage = issued.lineage().to_str()
+					Tx.create(Data.entries, { note: lineage })
+						.and_then(
+							|
+								_,
+							|
+								Tx.create(
+									Data.key_receipts,
+									{ family: "personal", lineage, head: issued.version().id(), revision: 1 },
+								),
+						)
+						.map(
+							|
+								_,
+							|
+								{
+									lineage,
+									version: issued.version().id(),
+									label: issued.label(),
+									expires_at: issued.expires_at(),
+								},
+						)
+				},
+			)
+			_ => Tx.reject(Errors.invalid_personal_selection)
+		}
+
+	invalid_selection = Api.error({
+		description: "The app refused the credential label or selected grant.",
+		recovery: "Choose a valid current selection and a different label.",
+		verification: |_| Api.failed_command(
+			Commands.create_personal,
+			|_snapshot, _seed| {
+				grant = example_grant({})?
+				Ok({ label: "Refuse issuance", grant })
+			},
+		),
+	})
+}

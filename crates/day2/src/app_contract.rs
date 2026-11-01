@@ -46,6 +46,8 @@ pub struct CredentialAccess {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub issue_label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub issue_grant: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub management_lineage: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rotation_head: String,
@@ -699,13 +701,30 @@ impl CredentialAccess {
                     family.profile,
                     day2_capabilities::credentials::ManagedProfile::Client
                         | day2_capabilities::credentials::ManagedProfile::Personal
-                ) && matches!(
-                    family.grant,
-                    day2_capabilities::credentials::GrantMode::Fixed
                 ),
-                "only fixed client and personal lifecycle management is supported"
+                "only client and personal lifecycle management is supported"
             );
             let fields = &artifact.schema.inputs[&registered.input_type].fields;
+            ensure!(
+                !(family.grant == day2_capabilities::credentials::GrantMode::Selectable
+                    && action == "rotate"),
+                "selectable rotation requires a closed grant choice and is not supported yet"
+            );
+            match (&family.grant, action) {
+                (day2_capabilities::credentials::GrantMode::Selectable, "issue") => ensure!(
+                    self.issue_grant != self.issue_label
+                        && matches!(fields.get(&self.issue_grant), Some(Kind::Text)),
+                    "selectable issuance requires a distinct canonical grant text input path"
+                ),
+                (_, "issue") => ensure!(
+                    self.issue_grant.is_empty(),
+                    "fixed issuance has no grant selection input"
+                ),
+                _ => ensure!(
+                    self.issue_grant.is_empty(),
+                    "grant selection requires issuance"
+                ),
+            }
             ensure!(
                 action != "issue" || matches!(fields.get(&self.issue_label), Some(Kind::Text)),
                 "credential label requires a canonical text input path"
@@ -743,6 +762,10 @@ impl CredentialAccess {
         ensure!(
             self.issues.len() == 1 || self.issue_label.is_empty(),
             "credential label requires issue access"
+        );
+        ensure!(
+            self.issues.len() == 1 || self.issue_grant.is_empty(),
+            "credential selection requires issue access"
         );
         ensure!(
             self.rotations.len() + self.revocations.len() == 1
@@ -2541,6 +2564,75 @@ mod selector_tests {
                 ),
                 "{registry}"
             );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod credential_binding_tests {
+    use super::*;
+
+    #[test]
+    fn issuance_bindings_require_exact_mode_and_distinct_text_selection() -> Result<()> {
+        for (variable, selected) in [
+            ("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT", false),
+            ("DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT", true),
+        ] {
+            let path = std::path::PathBuf::from(
+                std::env::var_os(variable).context("compiled credential fixture required")?,
+            );
+            let loaded = crate::artifact::LoadedArtifact::load(&path)?;
+            for operation in [
+                "credential_metadata.create_client",
+                "credential_metadata.create_personal",
+            ] {
+                let artifact = loaded.contract();
+                let access = &artifact
+                    .app_contract
+                    .as_ref()
+                    .context("app contract")?
+                    .operations[operation]
+                    .credential_access;
+                access.validate(artifact, operation)?;
+                if selected {
+                    for mutation in ["missing", "aliased", "absent", "nontext"] {
+                        let mut access = access.clone();
+                        let mut changed = artifact.clone();
+                        match mutation {
+                            "missing" => access.issue_grant.clear(),
+                            "aliased" => access.issue_grant = access.issue_label.clone(),
+                            "absent" => access.issue_grant = "missing_field".into(),
+                            "nontext" => {
+                                let input = &loaded.operation(operation)?.input_type;
+                                changed
+                                    .schema
+                                    .inputs
+                                    .get_mut(input)
+                                    .unwrap()
+                                    .fields
+                                    .insert(access.issue_grant.clone(), Kind::Boolean);
+                            }
+                            _ => unreachable!(),
+                        }
+                        let error = access
+                            .validate(&changed, operation)
+                            .expect_err("invalid selection binding admitted");
+                        assert!(error.to_string().contains("selectable issuance requires a distinct canonical grant text input path"), "{operation} {mutation}: {error}");
+                    }
+                } else {
+                    let mut access = access.clone();
+                    access.issue_grant = access.issue_label.clone();
+                    let error = access
+                        .validate(artifact, operation)
+                        .expect_err("fixed issuance gained selection input");
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("fixed issuance has no grant selection input")
+                    );
+                }
+            }
         }
         Ok(())
     }

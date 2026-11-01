@@ -1400,6 +1400,12 @@ impl SecurityShell {
                 "revoke" => "Revoke credential",
                 _ => anyhow::bail!("unsupported credential action"),
             };
+            let permissions = match &pending.intent {
+                crate::managed_credentials::lifecycle::Intent::Issue { grant, .. } => {
+                    family.issuance_roots(grant.request())?
+                }
+                _ => family.roots.clone(),
+            };
             let has_delivery = open(runtime.db())?.query_row(
                 "SELECT EXISTS(SELECT 1 FROM day2_credential_receipts WHERE invocation=?1 AND action IN ('issue','rotate'))",
                 [&pending.invocation], |row| row.get::<_, bool>(0))?;
@@ -1415,8 +1421,8 @@ impl SecurityShell {
                         dt { "Principal" } dd { (principal) }
                         dt { "Recipient" } dd { (identity.email) }
                         dt { "Lifetime" } dd { (family.lifetime_seconds) " seconds" } }
-                    h2 { "Fixed permissions" }
-                    ul { @for operation in family.roots.keys() {
+                    h2 { @if family.grant == day2_capabilities::credentials::GrantMode::Fixed { "Fixed permissions" } @else if pending.intent.action() == "issue" { "Selected permissions" } @else { "Family maximum permissions" } }
+                    ul { @for operation in permissions.keys() {
                         li { @if let Some(operation) = app.operations.get(operation) { (operation.intent.title) " — " }
                             code { (operation) } }
                     } }
@@ -2150,9 +2156,12 @@ mod tests {
     }
 
     fn browser_world(quota: u32) -> Result<BrowserWorld> {
+        browser_world_for(quota, "DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+    }
+
+    fn browser_world_for(quota: u32, fixture: &str) -> Result<BrowserWorld> {
         let artifact = PathBuf::from(
-            std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
-                .context("credential fixture artifact required")?,
+            std::env::var_os(fixture).context("credential fixture artifact required")?,
         );
         let directory = tempfile::tempdir()?;
         let runtime = crate::development::create_verification_for(
@@ -2652,6 +2661,211 @@ mod tests {
                 &credential_body(&revoke_session, "acknowledge"),
                 world.now,
             )?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selectable_navigation_refuses_invalid_or_foreign_selection_before_key_load()
+    -> Result<()> {
+        use day2_capabilities::credentials::GrantSelection;
+        let world = browser_world_for(10, "DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT")?;
+        for registration in ["clients", "personal"] {
+            let manifest = &world.runtime.artifact().contract().credential_manifest;
+            let family = manifest
+                .iter()
+                .find(|family| family.registration.as_str() == registration)
+                .context("selectable fixture family")?;
+            let other = manifest
+                .iter()
+                .find(|candidate| candidate.id != family.id)
+                .context("other family")?;
+            let original = serde_json::to_value(GrantSelection::new(
+                family,
+                vec!["credential_metadata.ping".into()],
+            )?)?;
+            let operation = if registration == "clients" {
+                "credential_metadata.create_client"
+            } else {
+                "credential_metadata.create_personal"
+            };
+            for mutation in [
+                "missing",
+                "empty",
+                "duplicate",
+                "unknown",
+                "foreign",
+                "stale",
+                "extra",
+                "oversize",
+                "duplicate_member",
+            ] {
+                let mut selection = original.clone();
+                match mutation {
+                    "empty" => selection["roots"] = serde_json::json!([]),
+                    "duplicate" => {
+                        selection["roots"] = serde_json::json!([
+                            "credential_metadata.ping",
+                            "credential_metadata.ping"
+                        ])
+                    }
+                    "unknown" => selection["roots"] = serde_json::json!(["foreign.ping"]),
+                    "foreign" => selection["family_contract"] = serde_json::json!(other.contract),
+                    "stale" => {
+                        selection["family_contract"] =
+                            serde_json::json!(day2_capabilities::Digest::new(b"stale"))
+                    }
+                    "extra" => selection["subject"] = "someone-else".into(),
+                    _ => {}
+                }
+                let mut input =
+                    serde_json::json!({"label":"Only readiness", "grant":selection.to_string()});
+                match mutation {
+                    "missing" => { input.as_object_mut().unwrap().remove("grant"); }
+                    "oversize" => input["grant"] = "x".repeat(8193).into(),
+                    "duplicate_member" => input["grant"] = format!("{{\"family_contract\":\"{}\",\"roots\":[\"credential_metadata.ping\"],\"roots\":[\"credential_metadata.record_use\"]}}", family.contract.as_str()).into(),
+                    _ => {},
+                }
+                let id = format!("{registration}-{mutation}");
+                assert!(
+                    credentials::start(
+                        &world.runtime,
+                        operation,
+                        "alice@example.com",
+                        &id,
+                        &input,
+                        None,
+                        world.now
+                    )
+                    .is_err(),
+                    "{id}"
+                );
+            }
+        }
+        assert_eq!(world.keys.0.load(Ordering::SeqCst), 0);
+        let db = open(world.runtime.db())?;
+        for table in [
+            "day2_credential_browser",
+            "day2_credential_confirmations",
+            "day2_credential_lineages",
+        ] {
+            let count: i64 = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+            assert_eq!(count, 0, "unexpected {table}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selectable_credential_confirmation_and_ingress_preserve_the_exact_subset() -> Result<()>
+    {
+        use crate::managed_credentials::ingress;
+        use day2_capabilities::credentials::{GrantMode, GrantSelection};
+        let world = browser_world_for(10, "DAY2_TEST_CREDENTIAL_SELECTABLE_ARTIFACT")?;
+        let shell = credential_shell(&world, true)?;
+        for (registration, operation, id) in [
+            (
+                "clients",
+                "credential_metadata.create_client",
+                "selected-client",
+            ),
+            (
+                "personal",
+                "credential_metadata.create_personal",
+                "selected-personal",
+            ),
+        ] {
+            let family = world
+                .runtime
+                .artifact()
+                .contract()
+                .credential_manifest
+                .iter()
+                .find(|family| family.registration.as_str() == registration)
+                .context("selectable fixture family")?;
+            assert_eq!(family.grant, GrantMode::Selectable);
+            let selection = GrantSelection::new(family, vec!["credential_metadata.ping".into()])?;
+            let input = serde_json::json!({"label":"Only readiness", "grant":serde_json::to_string(&selection)?});
+            let (path, headers, session) = navigate_input(&world, &shell, operation, id, &input)?;
+            let page = shell.dispatch(&Method::GET, &path, None, &headers, &[], world.now)?;
+            let html = String::from_utf8(to_bytes(page.into_body(), 8192).await?.to_vec())?;
+            assert!(html.contains("credential_metadata.ping"));
+            assert!(!html.contains("credential_metadata.record_use"));
+            let response = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                world.now,
+            )?;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let revealed = shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?;
+            let token = credential_token(revealed).await?;
+            let db = open(world.runtime.db())?;
+            let (grant, principal, revision): (String, String, i64) = db.query_row(
+                "SELECT grant_json,principal,revision FROM day2_credential_lineages WHERE label='Only readiness' AND family=?1",
+                [family.id.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let ceiling: day2_capabilities::oauth::GrantCeiling =
+                crate::json::decode(grant.as_bytes())?;
+            assert_eq!(
+                ceiling.roots.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["credential_metadata.ping"]
+            );
+            assert_eq!(
+                ceiling.roots["credential_metadata.ping"],
+                family.roots["credential_metadata.ping"]
+            );
+            assert_eq!(revision, 1);
+            if registration == "clients" {
+                assert_eq!(
+                    crate::authority::client_family(&principal),
+                    Some("client_keys")
+                );
+            } else {
+                assert_eq!(principal, "accounts.google.com:google-alice");
+            }
+            let allowed = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.ping",
+                &token,
+                world.now,
+            )?;
+            let invocation = format!("{id}-ping");
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &allowed,
+                &invocation,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            let reply = world
+                .runtime
+                .execute(&invocation, crate::store::Fault::None)?;
+            assert_eq!(reply.status, "success");
+            assert_eq!(reply.result, serde_json::json!({"ready":true}));
+            assert!(
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.record_use",
+                    &token,
+                    world.now
+                )
+                .is_err()
+            );
+            let uses: i64 =
+                db.query_row("SELECT count(*) FROM use_receipts", [], |row| row.get(0))?;
+            assert_eq!(uses, 0);
+            let trace = serde_json::to_string(&world.runtime.trace(&invocation)?)?;
+            assert!(!trace.contains(&token));
         }
         Ok(())
     }

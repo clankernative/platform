@@ -61,6 +61,7 @@ Api :: [].{
 		rotations : List(Str),
 		revocations : List(Str),
 		issue_label : Str,
+		issue_grant : Str,
 		management_lineage : Str,
 		rotation_head : Str,
 		rotation_revision : Str,
@@ -383,6 +384,15 @@ Api :: [].{
 			credential_access: { ..definition.credential_access, issue_label: path.name() },
 		}
 
+		# Canonical serialized family selection, frozen before confirmation.
+		credential_grant :
+			CommandDef(input, output, input_fields, output_fields),
+			Path(input, Str) -> CommandDef(input, output, input_fields, output_fields)
+		credential_grant = |definition, path| {
+			..definition,
+			credential_access: { ..definition.credential_access, issue_grant: path.name() },
+		}
+
 		# Shape-only input bindings; current management authority is checked by the host.
 		credential_rotation :
 			CommandDef(input, output, input_fields, output_fields),
@@ -620,6 +630,7 @@ Api :: [].{
 				rotations: [],
 				revocations: [],
 				issue_label: "",
+				issue_grant: "",
 				management_lineage: "",
 				rotation_head: "",
 				rotation_revision: "",
@@ -658,6 +669,7 @@ Api :: [].{
 				rotations: [],
 				revocations: [],
 				issue_label: "",
+				issue_grant: "",
 				management_lineage: "",
 				rotation_head: "",
 				rotation_revision: "",

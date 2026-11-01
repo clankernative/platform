@@ -8,8 +8,8 @@ use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     Digest,
     credentials::{
-        LineageRef, ManagedProfile, ManagementPredicate, ManagementSnapshot, ManagementState,
-        ManifestFamily, RotationProfile, VersionRef,
+        GrantSelection, IssuanceGrant, LineageRef, ManagedProfile, ManagementPredicate,
+        ManagementSnapshot, ManagementState, ManifestFamily, RotationProfile, VersionRef,
     },
     oauth::GrantCeiling,
 };
@@ -18,10 +18,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum IssueGrant {
+    Fixed {},
+    Selected { selection: GrantSelection },
+}
+
+impl IssueGrant {
+    pub(crate) fn request(&self) -> IssuanceGrant<'_> {
+        match self {
+            Self::Fixed {} => IssuanceGrant::Fixed,
+            Self::Selected { selection } => IssuanceGrant::Selected(selection),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Intent {
     Issue {
         label: String,
+        grant: IssueGrant,
     },
     Rotate {
         lineage: String,
@@ -34,6 +51,13 @@ pub(crate) enum Intent {
 }
 
 impl Intent {
+    pub(super) fn check_family(&self, family: &ManifestFamily) -> Result<()> {
+        if let Self::Issue { grant, .. } = self {
+            family.issuance_roots(grant.request())?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn action(&self) -> &str {
         match self {
             Self::Issue { .. } => "issue",
@@ -74,7 +98,16 @@ pub(super) fn intent(access: &CredentialAccess, input: &Value) -> Result<Intent>
                         && !label.chars().any(char::is_control),
                     "invalid credential label"
                 );
-                Intent::Issue { label }
+                let grant = if access.issue_grant.is_empty() {
+                    IssueGrant::Fixed {}
+                } else {
+                    let raw = text(&access.issue_grant)?;
+                    ensure!(raw.len() <= 8192, "credential selection byte budget");
+                    IssueGrant::Selected {
+                        selection: crate::json::decode(raw.as_bytes())?,
+                    }
+                };
+                Intent::Issue { label, grant }
             }
             "rotate" => {
                 let head = text(&access.rotation_head)?;

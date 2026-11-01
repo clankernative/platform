@@ -1487,6 +1487,44 @@ step = |raw| raw
             directory.join("app/Credentials.roc"),
             day2::credential_codegen::module(&selectable, admission)?,
         )?;
+        let positive = format!(
+            "{issuance_base}\nprobe : InteractiveContext, Credential.Label, Credentials.GrantSelection_clients -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, {{ label, grant }})\n"
+        );
+        fs::write(directory.join("app/main.roc"), &positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "selectable typed issuance: {diagnostics}");
+        for (probe, expected) in [
+            (
+                "probe : InteractiveContext, Credential.Label, Credentials.GrantSelection_personal -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant })",
+                "GrantSelection_personal",
+            ),
+            (
+                "probe : InteractiveContext, Credential.Label, Credentials.GrantSelection_clients -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant, subject: \"someone-else\" })",
+                "subject",
+            ),
+            (
+                "probe : InteractiveContext, Credential.Label -> Tx(Credentials.Issued_clients)\nprobe = |context, label| (Credentials.clients.issue)(context, { label })",
+                "grant",
+            ),
+            (
+                "probe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant, subject: \"foreign\" })",
+                "subject",
+            ),
+            (
+                "probe = |context, expected| (Credentials.clients.rotate)(context, { expected })",
+                "rotate",
+            ),
+        ] {
+            fs::write(
+                directory.join("app/main.roc"),
+                format!("{issuance_base}\n{probe}\n"),
+            )?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "selectable native exclusion: {diagnostics}"
+            );
+        }
         for (probe, expected) in [
             (
                 "probe = (Credentials.clients.selection_from_options)(Credentials.personal.grant_options)",
