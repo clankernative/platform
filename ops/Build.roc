@@ -22,6 +22,7 @@ Build :: [].{
 		_ = Capability.call!("build-glue", "{}", host!)?
 		_ = Capability.call!("build-host", "{}", host!)?
 		_ = Capability.call!("build-connection-contract", "{}", host!)?
+		_ = Capability.call!("build-credential-contract", "{}", host!)?
 		_ = Capability.call!("build-bind", "{}", host!)?
 		_ = Capability.call!("build-app-check", "{}", host!)?
 		_ = Capability.call!("build-admission", "{}", host!)?

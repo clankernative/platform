@@ -125,6 +125,38 @@ fn stale_or_modified_workflow_executables_are_rejected() -> Result<()> {
 }
 
 #[test]
+fn credential_discovery_is_required_before_binding_and_refusal_stops_the_build() -> Result<()> {
+    for refused in [false, true] {
+        let mut effects = Vec::new();
+        let result = automation::run(&automation::runner()?, &["build-recipe"], |request| {
+            effects.push(request.action.clone());
+            if refused && request.action == "build-credential-contract" {
+                bail!("injected credential declaration rejection");
+            }
+            Ok(json!({}))
+        });
+        let position = |name: &str| effects.iter().position(|effect| effect == name).unwrap();
+        assert!(position("build-app-types") < position("build-credential-contract"));
+        assert!(position("build-host") < position("build-credential-contract"));
+        if refused {
+            assert!(result.is_err());
+            assert_eq!(
+                effects.last().map(String::as_str),
+                Some("build-credential-contract")
+            );
+            assert!(!effects.iter().any(|effect| matches!(
+                effect.as_str(),
+                "build-bind" | "build-link" | "build-publish"
+            )));
+        } else {
+            result?;
+            assert!(position("build-credential-contract") < position("build-bind"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn rejected_compiler_admission_prevents_linking_and_publication() -> Result<()> {
     let mut effects = Vec::new();
     let result = automation::run(&automation::runner()?, &["build-recipe"], |request| {

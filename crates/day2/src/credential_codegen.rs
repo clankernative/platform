@@ -35,6 +35,14 @@ pub fn provisional_module<'a>(names: impl IntoIterator<Item = &'a str>) -> Resul
     render(names, false, true)
 }
 
+/// Evaluate only pure App.definition metadata, never an application handler.
+pub fn probe(catalog: &crate::registry::Catalog) -> String {
+    let projection = crate::credential_declaration::projection(catalog, "App.definition");
+    format!(
+        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport App\nstep : Str -> Str\nstep = |_| {projection}\n"
+    )
+}
+
 fn render<'a>(
     names: impl IntoIterator<Item = &'a str>,
     admission: bool,
