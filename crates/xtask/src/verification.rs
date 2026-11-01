@@ -1876,47 +1876,32 @@ mod tests {
     }
 
     #[test]
-    fn linux_consumers_bootstrap_only_the_same_run_verifier_before_output_mounts() {
-        let producer = ci_job("verify-prepare-parts");
-        let prepared = producer
-            .find("      - run: build-out/bin/xtask verify-prepare-part ${{ matrix.part }}\n")
-            .expect("fresh native preparation precedes verifier transport");
-        let archived = producer
-            .find("      - name: Archive the current run verifier only\n")
-            .unwrap();
-        let retained = producer
-            .find("      - name: Retain the current run verifier only\n")
-            .unwrap();
-        assert!(prepared < archived && archived < retained);
-        let archive = ci_step(&producer, "Archive the current run verifier only");
-        assert!(archive.contains("if: ${{ matrix.part == 'inputs' }}"));
-        assert!(archive.contains(
-            "run: tar -czf /tmp/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" build-out/bin/xtask"
-        ));
-        let upload = ci_step(&producer, "Retain the current run verifier only");
-        assert!(upload.contains("if: ${{ matrix.part == 'inputs' }}"));
-        assert!(
-            upload.contains(
-                "name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}"
-            )
-        );
-        assert!(upload.contains("path: /tmp/day2-linux-verifier.tgz"));
-        assert!(upload.contains("if-no-files-found: error"));
-        for (name, archive) in [
-            ("verify-prepare", "preparation-inputs/day2-preparation"),
-            ("verify-shards", "verification/day2-common"),
-            ("verify", "verification/day2-common"),
+    fn linux_consumers_bootstrap_current_source_before_mounts_and_authenticated_downloads() {
+        assert!(!include_str!("../../../.github/workflows/ci.yml").contains("day2-linux-verifier"));
+        for (name, archive, phase) in [
+            (
+                "verify-prepare",
+                "preparation-inputs/day2-preparation",
+                "preparation",
+            ),
+            (
+                "verify-shards",
+                "verification/day2-common",
+                "${{ matrix.shard }}",
+            ),
+            ("verify", "verification/day2-common", "compose"),
         ] {
             let job = ci_job(name);
-            let download = job
-                .find("name: day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}")
-                .expect("authenticated current run/attempt archive");
-            let bootstrap = ci_step(&job, "Restore the current run verifier only");
-            assert!(bootstrap.contains(
-                "run: tar -xzf /tmp/day2-linux-verifier/day2-linux-verifier.tgz -C \"$GITHUB_WORKSPACE\" build-out/bin/xtask"
-            ));
+            let bootstrap = ci_step(
+                &job,
+                "Bootstrap the current source artifact admission guard",
+            );
+            assert!(bootstrap.contains("run: bazel --batch --nosystem_rc --nohome_rc"));
+            assert!(bootstrap.contains("--config=ci-linux"));
+            assert!(bootstrap.contains("//crates/xtask:xtask -- install-verifier"));
+            assert!(!bootstrap.contains("tar -x"));
             let bootstrap_at = job
-                .find("      - name: Restore the current run verifier only\n")
+                .find("      - name: Bootstrap the current source artifact admission guard\n")
                 .unwrap();
             let context = ci_step(
                 &job,
@@ -1929,19 +1914,47 @@ mod tests {
                     "      - name: Establish the mandatory bounded native Linux compiler context\n",
                 )
                 .unwrap();
+            let selector = ci_step(
+                &job,
+                "Select authenticated artifacts from successful producer attempts",
+            );
+            assert!(selector.contains("run: build-out/bin/xtask verify-artifact-plan"));
+            assert!(selector.contains(phase));
+            assert!(selector.contains("GH_TOKEN: ${{ github.token }}"));
+            let select_at = job.find("      - name: Select authenticated artifacts from successful producer attempts\n").unwrap();
+            let download_at = job.find("uses: actions/download-artifact@").unwrap();
             let restore = job
                 .find(&format!(
                     "run: tar -xzf /tmp/day2-{archive}.tgz -C \"$GITHUB_WORKSPACE\"\n"
                 ))
-                .expect("full restoration still required after context setup");
+                .unwrap();
             assert!(
-                download < bootstrap_at && bootstrap_at < context_at && context_at < restore,
+                bootstrap_at < context_at
+                    && context_at < select_at
+                    && select_at < download_at
+                    && download_at < restore,
                 "{name}"
             );
+            assert!(job.contains("      actions: read") && job.contains("      checks: read"));
+            for step in job
+                .split("      - ")
+                .filter(|step| step.contains("uses: actions/download-artifact@"))
+            {
+                let inputs = step.split_once("        with:\n").unwrap().1;
+                assert!(inputs.contains("repository: clankernative/platform"));
+                assert!(inputs.contains("run-id: ${{ github.run_id }}"));
+                assert!(inputs.contains("github-token: ${{ github.token }}"));
+                assert!(inputs.contains("artifact-ids: ${{ steps.artifact_plan.outputs."));
+                assert!(
+                    !inputs.contains("          name:") && !inputs.contains("          pattern:")
+                );
+            }
             if name == "verify" {
                 let skip_reused = "if: ${{ !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') }}";
-                assert!(bootstrap.contains(skip_reused));
+                assert!(!bootstrap.contains(skip_reused));
                 assert!(context.contains(skip_reused));
+                assert!(selector.contains("'reuse' || 'compose'"));
+                assert!(job.contains("            artifacts/ci-artifact-selection.json"));
             }
         }
     }
@@ -1965,9 +1978,7 @@ mod tests {
         }
         let shards = ci_job("verify-shards");
         assert!(shards.contains("shard: [workspace-day2, workspace-control, workspace-other, simulation, parallel-runtime]"));
-        assert!(shards.contains(
-            "name: day2-verify-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"
-        ));
+        assert!(shards.contains("artifact-ids: ${{ steps.artifact_plan.outputs.binaries }}"));
         assert!(
             ci_step(&shards, "Download this workspace shard's test executables")
                 .contains("startsWith(matrix.shard, 'workspace-')")
