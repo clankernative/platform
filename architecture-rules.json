@@ -204,6 +204,7 @@
     "crates/day2/src/instance_catalog.rs",
     "crates/day2/src/integration_host.rs",
     "crates/day2/src/integration_host_tests.rs",
+    "crates/day2/src/integrations/alerts_coverage_tests.rs",
     "crates/day2/src/integrations/coverage_tests.rs",
     "crates/day2/src/integrations/delegation_coverage_tests.rs",
     "crates/day2/src/integrations/freetool_executor.rs",
