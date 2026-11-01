@@ -242,12 +242,19 @@ fn pure_authority_projection_matches_final_manifest_and_rejects_each_contract_dr
     assert!(!expected.is_empty());
     assert_eq!(derive(&definitions)?, *expected);
     let root = expected[0].roots.keys().next().context("credential root")?;
+    let canonical_version = definitions[root].export_version.max(1);
+    let next_version = canonical_version
+        .checked_add(1)
+        .context("version fixture overflow")?;
+    let mut normalized = definitions.clone();
+    normalized.get_mut(root).unwrap().export_version = canonical_version;
+    assert_eq!(derive(&normalized)?, *expected);
     for mutation in [
         "version", "access", "internal", "all_rows", "missing", "foreign",
     ] {
         let mut changed = definitions.clone();
         match mutation {
-            "version" => changed.get_mut(root).unwrap().export_version += 1,
+            "version" => changed.get_mut(root).unwrap().export_version = next_version,
             "access" => changed.get_mut(root).unwrap().credential_access.enabled = false,
             "internal" => changed.get_mut(root).unwrap().execution.internal = true,
             "all_rows" => changed
@@ -270,7 +277,7 @@ fn pure_authority_projection_matches_final_manifest_and_rejects_each_contract_dr
     // A valid version change must derive a different full contract, rather
     // than only making an invalid projection fail to parse.
     let mut changed = definitions.clone();
-    changed.get_mut(root).unwrap().export_version += 1;
+    changed.get_mut(root).unwrap().export_version = next_version;
     assert_ne!(derive(&changed)?, *expected);
     Ok(())
 }
