@@ -93,6 +93,10 @@ impl Fixture {
             "budgets":{"mail":{"revision":1,"scope":"app","period_seconds":3600,
                 "limits":{"calls":10000,"bytes":100000000,"concurrency":1}}}});
         let instance = json!({"installation":"notificationcoverage","environment":"test","resources":catalog,
+            "control":{"version":1,"state_directory":directory.path().join("control"),
+                "operators":["notification-test-operator"],
+                "sources":{"repo":{"kind":"local_git","repository":directory.path().join("repo")}},
+                "apps":{"app":{"source":"repo"}}},
             "apps":{"app":{"artifact":artifact_directory,"readers":["alice","bob"],"writers":["alice","bob"],
                 "authority":policy,"resource_policies":[{"policy":{"id":"notify","revision":1},
                     "operation":"run","bindings":{"mail":{"id":"mail","revision":1}}}]}}});
@@ -100,7 +104,7 @@ impl Fixture {
         let contract = serde_json::from_value(json!({
             "format":crate::artifact::CURRENT_FORMAT,"verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
             "roc_version":"notification-seam-test","worker_digest":"notification-seam-test","schema_digest":"notification-seam-test",
-            "schema":{"models":{},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
+            "schema":{"models":{"items":{"fields":{"value":"text"}}},"inputs":{"input":{"fields":{}}},"foreign_keys":[]},
             "operations":[{"name":"run","kind":"command","input_type":"input","output_type":""}],
             "sources":{},"admission":"local-spike-only"}))?;
         let inputs = crate::host_inputs::Inputs {
@@ -321,6 +325,15 @@ fn all_notification_actions_use_the_same_admitted_gate() -> Result<()> {
 
 #[test]
 fn actual_gate_refuses_constant_missing_mutating_and_wrong_world_substitutes() -> Result<()> {
+    // A dead fixture is not a successful mutant rejection. Admit the exact real
+    // baseline before any substitute is allowed to count as a negative control.
+    for action in [
+        Action::NotificationsResolve,
+        Action::NotificationsLatest,
+        Action::NotificationsSend,
+    ] {
+        super::check(action, |variant| observe(action, variant)).map_err(anyhow::Error::msg)?;
+    }
     for action in [Action::NotificationsResolve, Action::NotificationsLatest] {
         assert!(
             super::check(action, |variant| {
