@@ -4,6 +4,10 @@
 
 use super::{crypto::KeyLease, effects, store};
 use crate::simulation::coverage::{self as dst, Campaign, Transition};
+
+#[cfg(unix)]
+#[path = "crash_reopen_tests.rs"]
+pub(crate) mod crash_reopen;
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::{
     BindingRef, Digest, Name,

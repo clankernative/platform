@@ -184,6 +184,7 @@ impl<'ast> Visit<'ast> for Guard {
 const REVIEWED_SOURCES: &[&str] = &[
     "authority.rs",
     "browser.rs",
+    "crash_reopen_tests.rs",
     "crypto.rs",
     "effects.rs",
     "effects_guard.rs",
