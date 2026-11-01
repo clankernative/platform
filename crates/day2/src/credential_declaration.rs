@@ -215,7 +215,11 @@ mod tests {
     use serde_json::{Value, json};
 
     fn catalog(mode: &str) -> crate::registry::Catalog {
-        let grant = match mode { "fixed" => GrantMode::Fixed, "selectable" => GrantMode::Selectable, _ => unreachable!() };
+        let grant = match mode {
+            "fixed" => GrantMode::Fixed,
+            "selectable" => GrantMode::Selectable,
+            _ => unreachable!(),
+        };
         let operation = day2_contracts::registry::Operation {
             input: "Request".into(),
             output: "Reply".into(),
@@ -224,8 +228,20 @@ mod tests {
             commands: BTreeMap::from([("save".into(), operation.clone())]),
             queries: BTreeMap::from([("read".into(), operation)]),
             credentials: BTreeMap::from([
-                ("clients".into(), crate::registry::CredentialRegistration { profile: "client".into(), grant: grant.clone() }),
-                ("personal".into(), crate::registry::CredentialRegistration { profile: "personal".into(), grant }),
+                (
+                    "clients".into(),
+                    crate::registry::CredentialRegistration {
+                        profile: "client".into(),
+                        grant: grant.clone(),
+                    },
+                ),
+                (
+                    "personal".into(),
+                    crate::registry::CredentialRegistration {
+                        profile: "personal".into(),
+                        grant,
+                    },
+                ),
             ]),
             ..Default::default()
         }
@@ -281,7 +297,10 @@ mod tests {
         ] {
             let mut altered = original.clone();
             altered[0]["roots"][0] = json!(root);
-            assert!(decode_value(&altered, &catalog("selectable")).is_err(), "{root}");
+            assert!(
+                decode_value(&altered, &catalog("selectable")).is_err(),
+                "{root}"
+            );
         }
         let mut ambiguous = catalog("selectable");
         ambiguous
@@ -311,7 +330,10 @@ mod tests {
         ] {
             let mut altered = original.clone();
             altered[0][field] = value;
-            assert!(decode_value(&altered, &catalog("fixed")).is_err(), "{field}");
+            assert!(
+                decode_value(&altered, &catalog("fixed")).is_err(),
+                "{field}"
+            );
         }
         assert!(decode_value(&json!([]), &catalog("fixed")).is_err());
         assert!(decode_value(&json!([original[0], original[0]]), &catalog("fixed")).is_err());
@@ -336,7 +358,10 @@ mod tests {
                 ]
             }))?;
             let raw = serde_json::to_vec(&declarations(mode))?;
-            assert_eq!(decode_catalog(&raw, &catalog, "fixture")?, decode(&raw, &artifact)?);
+            assert_eq!(
+                decode_catalog(&raw, &catalog, "fixture")?,
+                decode(&raw, &artifact)?
+            );
             let mut changed = artifact.clone();
             changed.operations[0].output_type = "ChangedReply".into();
             assert!(decode(&raw, &changed).is_err());
