@@ -28,8 +28,8 @@
 //! against two different worlds has not demonstrated a world at all.
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
-//! live Carta native capture/read pipelines. Three native/synthetic providers
-//! and local delegation still need adapter/callee harnesses and remain pending.
+//! live Carta native capture/read pipelines and the admitted local mailbox.
+//! Google/Linear/alert native adapters and local delegation still need harnesses.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -53,6 +53,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SCOPE: &str = "coverage/app";
+
+#[path = "notifications_coverage_tests.rs"]
+mod notifications;
 
 /// How an action demonstrates that its declared world is real.
 ///
@@ -94,6 +97,9 @@ enum Demonstration {
     LocalAuthorization,
     /// Exercises the executor service's own deterministic manifest/receipt world.
     FreetoolExecutorWorld,
+    /// The real resource/operation-authorized SQLite mailbox. Recipient lookup
+    /// is a local actor projection; latest/send demonstrate provider state.
+    NotificationsAdapter,
 }
 
 fn demonstration(action: Action) -> Demonstration {
@@ -125,10 +131,8 @@ fn demonstration(action: Action) -> Demonstration {
         // Billable but stateless: its dependence on the world is visible in the
         // usage the simulated account reports, not in a record it leaves behind.
         Action::OpenAiGenerate => Demonstration::ResultReflectsWorld,
-        Action::NotificationsResolve
-        | Action::NotificationsLatest
-        | Action::NotificationsSend
-        | Action::GoogleDirectorySnapshot
+        Action::NotificationsResolve | Action::NotificationsLatest | Action::NotificationsSend => Demonstration::NotificationsAdapter,
+        Action::GoogleDirectorySnapshot
         | Action::GoogleDirectoryRecord
         | Action::GoogleDirectoryCreateUser
         | Action::GoogleDirectoryPatchAttributes
@@ -173,24 +177,6 @@ const DELEGATION_REMOVAL: &str = "The delegation owner must cover all three acti
 // Keep individual action keys: adding an action to an existing pending provider
 // must also fail until its exact debt and removal condition receive review.
 const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
-    PendingDebt {
-        action: Action::NotificationsResolve,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::NotificationsLatest,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::NotificationsSend,
-        owner: "platform notification runtime",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
     PendingDebt {
         action: Action::GoogleDirectorySnapshot,
         owner: "platform Google directory/people adapter",
@@ -695,6 +681,17 @@ fn worlds(database: &std::path::Path) -> Result<BTreeMap<&'static str, Option<St
                 &path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
+            if *provider == Provider::LocalNotifications {
+                state.insert(
+                    world,
+                    Some(connection.query_row(
+                        "SELECT state FROM notification_world WHERE id=1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?),
+                );
+                continue;
+            }
             let stored: Option<String> = connection
                 .query_row(
                     "SELECT state FROM simulated_provider WHERE scope=?1",
@@ -739,6 +736,9 @@ impl Observed {
 /// Invoke one action against one seeded world, through the real adapter, and
 /// capture both what it returned and what it changed.
 fn observe(action: Action, variant: Variant) -> Result<Observed> {
+    if action.provider() == Provider::LocalNotifications {
+        return notifications::observe(action, variant);
+    }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -1214,6 +1214,7 @@ fn check(
         .expect("every provider declares a world");
     let run = |variant| observe(variant).map_err(|error| format!("{action:?}: {error:#}"));
     match demonstration(action) {
+        Demonstration::NotificationsAdapter => notifications::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
         Demonstration::NativeAdapterRead => {
@@ -1468,7 +1469,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 14);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 11);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 
@@ -1505,14 +1506,9 @@ fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
     // Closing all actions of a provider must also retire its old debt records.
     let mut closed = coverage;
     closed.insert(
-        Action::NotificationsResolve,
-        Demonstration::ResultReflectsWorld,
+        Action::OperatorAlertsSend,
+        Demonstration::EffectLandsInWorld,
     );
-    closed.insert(
-        Action::NotificationsLatest,
-        Demonstration::ResultReflectsWorld,
-    );
-    closed.insert(Action::NotificationsSend, Demonstration::EffectLandsInWorld);
     validate_provider_coverage(&closed)?;
     let error = validate_pending_debt(&closed, REVIEWED_PENDING_DEBT).unwrap_err();
     assert!(error.to_string().contains("stale reviewed coverage debt"));
