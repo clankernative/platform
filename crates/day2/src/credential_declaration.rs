@@ -171,6 +171,7 @@ mod tests {
             for mode in ["fixed", "selectable"] {
                 let mut artifact: Artifact = serde_json::from_value(json!({
                     "format":crate::artifact::CURRENT_FORMAT,
+                    "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
                     "roc_version":"test", "worker_digest":"test", "schema_digest":"test",
                     "schema":{"models":{},"inputs":{"Request":{"fields":{}}},"foreign_keys":[]},
                     "operations":[{"name":"fixture.save","kind":"command","input_type":"Request","output_type":"Reply"}],
