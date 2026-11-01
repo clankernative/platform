@@ -54,6 +54,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const SCOPE: &str = "coverage/app";
 
+#[path = "linear_coverage_tests.rs"]
+mod linear;
+
 /// How an action demonstrates that its declared world is real.
 ///
 /// This is declared per action rather than derived from `Action::is_write()`,
@@ -94,6 +97,8 @@ enum Demonstration {
     LocalAuthorization,
     /// Exercises the executor service's own deterministic manifest/receipt world.
     FreetoolExecutorWorld,
+    /// Real scoped synthetic Linear capability admission and committed world.
+    LinearAdapter,
 }
 
 fn demonstration(action: Action) -> Demonstration {
@@ -125,6 +130,7 @@ fn demonstration(action: Action) -> Demonstration {
         // Billable but stateless: its dependence on the world is visible in the
         // usage the simulated account reports, not in a record it leaves behind.
         Action::OpenAiGenerate => Demonstration::ResultReflectsWorld,
+        Action::LinearEnsureAccess | Action::LinearSuspend => Demonstration::LinearAdapter,
         Action::NotificationsResolve
         | Action::NotificationsLatest
         | Action::NotificationsSend
@@ -133,8 +139,6 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::GoogleDirectoryCreateUser
         | Action::GoogleDirectoryPatchAttributes
         | Action::GoogleDirectoryEnsureGroupMember
-        | Action::LinearEnsureAccess
-        | Action::LinearSuspend
         | Action::OperatorAlertsSend
         // A delegated read is answered by the callee application, not by a
         // transport this gate can drive: there is no socket to seed two worlds
@@ -218,18 +222,6 @@ const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
     PendingDebt {
         action: Action::GoogleDirectoryEnsureGroupMember,
         owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::LinearEnsureAccess,
-        owner: "platform Linear/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::LinearSuspend,
-        owner: "platform Linear/people adapter",
         reason: ADAPTER_REASON,
         remove_when: ADAPTER_REMOVAL,
     },
@@ -686,6 +678,13 @@ fn invocation(action: Action, variant: Variant) -> (LiveConnection, ResourceTarg
 /// including reads. A read that appends to the call log has not changed the
 /// provider; conflating the two would make every read look like a write.
 fn worlds(database: &std::path::Path) -> Result<BTreeMap<&'static str, Option<String>>> {
+    worlds_in_scope(database, SCOPE)
+}
+
+fn worlds_in_scope(
+    database: &std::path::Path,
+    scope: &str,
+) -> Result<BTreeMap<&'static str, Option<String>>> {
     let mut state = BTreeMap::new();
     for provider in Provider::ALL {
         let world = provider.world().expect("every provider declares a world");
@@ -695,10 +694,41 @@ fn worlds(database: &std::path::Path) -> Result<BTreeMap<&'static str, Option<St
                 &path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
+            if matches!(
+                provider,
+                Provider::SyntheticGoogleDirectory
+                    | Provider::SyntheticLinear
+                    | Provider::SyntheticOperatorAlerts
+            ) {
+                // Preserve every target partition; exclude only provider bookkeeping.
+                let mut query = connection.prepare(
+                    "SELECT target,state FROM people_provider WHERE scope=?1 ORDER BY target",
+                )?;
+                let rows = query
+                    .query_map([scope], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let worlds = rows
+                    .into_iter()
+                    .map(|(target, state)| -> Result<_> {
+                        let state: Value = serde_json::from_str(&state)?;
+                        Ok((
+                            target,
+                            state
+                                .get("world")
+                                .context("synthetic world missing")?
+                                .clone(),
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                state.insert(world, Some(serde_json::to_string(&worlds)?));
+                continue;
+            }
             let stored: Option<String> = connection
                 .query_row(
                     "SELECT state FROM simulated_provider WHERE scope=?1",
-                    [SCOPE],
+                    [scope],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
@@ -739,6 +769,9 @@ impl Observed {
 /// Invoke one action against one seeded world, through the real adapter, and
 /// capture both what it returned and what it changed.
 fn observe(action: Action, variant: Variant) -> Result<Observed> {
+    if action.provider() == Provider::SyntheticLinear {
+        return linear::observe(action, variant);
+    }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -1214,6 +1247,7 @@ fn check(
         .expect("every provider declares a world");
     let run = |variant| observe(variant).map_err(|error| format!("{action:?}: {error:#}"));
     match demonstration(action) {
+        Demonstration::LinearAdapter => linear::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
         Demonstration::NativeAdapterRead => {
@@ -1468,7 +1502,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 14);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 12);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 
@@ -1490,11 +1524,27 @@ fn a_wholly_pending_github_provider_cannot_escape_world_coverage() -> Result<()>
     Ok(())
 }
 
+// Counterfactual test data stays independent of real outstanding debt, including
+// the eventual empty catalog. These rows never enter REVIEWED_PENDING_DEBT.
+fn negative_debt_fixture() -> (BTreeMap<Action, Demonstration>, Vec<PendingDebt>) {
+    let mut coverage = current_coverage();
+    let mut debt = REVIEWED_PENDING_DEBT.to_vec();
+    for action in [Action::SlackRead, Action::SlackPost] {
+        coverage.insert(action, Demonstration::PendingAdapterSeam);
+        debt.push(PendingDebt{action,owner:"provider coverage validator test",
+            reason:"Independent completeness and metadata regression fixture, never live coverage debt.",
+            remove_when:"Remove only with the validator regression tests."});
+    }
+    (coverage, debt)
+}
+
 #[test]
 fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
-    let coverage = current_coverage();
-    let mut debt = REVIEWED_PENDING_DEBT.to_vec();
-    debt.push(debt[0]);
+    let (coverage, mut debt) = negative_debt_fixture();
+    validate_provider_coverage(&coverage)?;
+    validate_pending_debt(&coverage, &debt)?;
+    let record = *debt.last().context("counterfactual reviewed record")?;
+    debt.push(record);
     let error = validate_pending_debt(&coverage, &debt).unwrap_err();
     assert!(
         error
@@ -1502,45 +1552,43 @@ fn reviewed_pending_debt_rejects_duplicate_and_stale_records() -> Result<()> {
             .contains("duplicate reviewed coverage debt")
     );
 
-    // Closing all actions of a provider must also retire its old debt records.
-    let mut closed = coverage;
-    closed.insert(
-        Action::NotificationsResolve,
-        Demonstration::ResultReflectsWorld,
-    );
-    closed.insert(
-        Action::NotificationsLatest,
-        Demonstration::ResultReflectsWorld,
-    );
-    closed.insert(Action::NotificationsSend, Demonstration::EffectLandsInWorld);
-    validate_provider_coverage(&closed)?;
-    let error = validate_pending_debt(&closed, REVIEWED_PENDING_DEBT).unwrap_err();
+    // Slack is already covered. A stale record is refused even after every
+    // currently pending provider has acquired a real harness.
+    let current = current_coverage();
+    let mut stale = REVIEWED_PENDING_DEBT.to_vec();
+    stale.push(record);
+    let error = validate_pending_debt(&current, &stale).unwrap_err();
     assert!(error.to_string().contains("stale reviewed coverage debt"));
     Ok(())
 }
 
 #[test]
-fn reviewed_pending_debt_requires_owner_reason_and_removal_condition() {
-    let coverage = current_coverage();
+fn reviewed_pending_debt_requires_owner_reason_and_removal_condition() -> Result<()> {
+    let (coverage, debt) = negative_debt_fixture();
+    validate_pending_debt(&coverage, &debt)?;
+    let record = *debt.last().context("counterfactual reviewed record")?;
     for incomplete in [
         PendingDebt {
             owner: " ",
-            ..REVIEWED_PENDING_DEBT[0]
+            ..record
         },
         PendingDebt {
             reason: " ",
-            ..REVIEWED_PENDING_DEBT[0]
+            ..record
         },
         PendingDebt {
             remove_when: " ",
-            ..REVIEWED_PENDING_DEBT[0]
+            ..record
         },
     ] {
-        let mut debt = REVIEWED_PENDING_DEBT.to_vec();
-        debt[0] = incomplete;
-        let error = validate_pending_debt(&coverage, &debt).unwrap_err();
+        let mut changed = debt.clone();
+        *changed
+            .last_mut()
+            .context("counterfactual reviewed record")? = incomplete;
+        let error = validate_pending_debt(&coverage, &changed).unwrap_err();
         assert!(error.to_string().contains("coverage debt metadata missing"));
     }
+    Ok(())
 }
 
 #[test]
