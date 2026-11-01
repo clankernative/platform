@@ -1161,7 +1161,8 @@ pub fn modules(
         let families = catalog
             .credentials
             .iter()
-            .map(|(name, profile)| {
+            .map(|(name, registration)| {
+                let profile = &registration.profile;
                 format!(
                     "{{ registration: \"{name}\", profile: \"{profile}\", id: product.credentials.{name}.metadata().id, grant_mode: product.credentials.{name}.metadata().grant.mode, roots: product.credentials.{name}.metadata().grant.roots.map(|root| \"${{root.operation}}|${{root.input_type}}|${{root.output_type}}\"), lifetime_seconds: product.credentials.{name}.metadata().lifetime_seconds }}"
                 )
@@ -1395,13 +1396,17 @@ pub fn modules(
         catalog
             .credentials
             .iter()
-            .map(|(name, profile)| {
-                let nominal = match profile.as_str() {
+            .map(|(name, registration)| {
+                let nominal = match registration.profile.as_str() {
                     "client" => "ClientFamily",
                     "personal" => "PersonalFamily",
                     _ => unreachable!("checked credential profile"),
                 };
-                format!("{name} : Credential.{nominal}")
+                let marker = match registration.grant {
+                    day2_capabilities::credentials::GrantMode::Fixed => "FixedGrantMode",
+                    day2_capabilities::credentials::GrantMode::Selectable => "SelectableGrantMode",
+                };
+                format!("{name} : Credential.{nominal}(Credential.{marker})")
             })
             .collect::<Vec<_>>()
             .join(", ")

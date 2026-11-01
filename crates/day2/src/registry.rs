@@ -4,6 +4,13 @@ use day2_contracts::registry::Operation;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialRegistration {
+    pub profile: String,
+    pub grant: day2_capabilities::credentials::GrantMode,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
@@ -22,7 +29,7 @@ pub struct Catalog {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<String, String>,
+    pub credentials: BTreeMap<String, CredentialRegistration>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connections: BTreeMap<String, String>,
 }
@@ -572,7 +579,7 @@ pub struct AppShape {
     pub schedules: Vec<String>,
     pub ingress: Vec<String>,
     pub redirects: Vec<String>,
-    pub credentials: BTreeMap<String, String>,
+    pub credentials: BTreeMap<String, CredentialRegistration>,
     pub connections: BTreeMap<String, String>,
 }
 
@@ -719,7 +726,27 @@ impl AppShape {
                         field.name
                     ),
                 };
-                profiles.insert(field.name.clone(), profile.to_owned());
+                let marker = table.node(table.witness(family, "witness")?)?;
+                ensure!(
+                    marker.kind == "record",
+                    "credential grant mode witness must be nominal"
+                );
+                let grant = match marker.name.as_str() {
+                    "Credential.FixedGrantMode" => day2_capabilities::credentials::GrantMode::Fixed,
+                    "Credential.SelectableGrantMode" => {
+                        day2_capabilities::credentials::GrantMode::Selectable
+                    }
+                    _ => anyhow::bail!(
+                        "credential family requires a checked fixed/selectable grant mode"
+                    ),
+                };
+                profiles.insert(
+                    field.name.clone(),
+                    CredentialRegistration {
+                        profile: profile.into(),
+                        grant,
+                    },
+                );
             }
             ensure!(
                 profiles.len() <= 64,
@@ -1282,6 +1309,63 @@ mod tests {
         document[0]["types"][6]["kind"] = json!("record");
         document[0]["types"][6]["name"] = json!("Impostor.CommandDef");
         assert!(parse(&document).is_err());
+    }
+
+    #[test]
+    fn credential_modes_remain_distinct_for_two_families_of_the_same_profile() -> Result<()> {
+        use day2_capabilities::credentials::GrantMode;
+        let mut document = checked();
+        let types = document[0]["types"].as_array_mut().unwrap();
+        let mut append = |node: Value| {
+            let id = types.len();
+            types.push(node);
+            id
+        };
+        let boolean =
+            append(json!({"kind":"bool","name":"","fields":[],"args":[],"ret":0,"item":0}));
+        let fixed = append(
+            json!({"kind":"record","name":"Credential.FixedGrantMode","fields":[{"name":"value","type_id":boolean}],"args":[],"ret":0,"item":0}),
+        );
+        let selected = append(
+            json!({"kind":"record","name":"Credential.SelectableGrantMode","fields":[{"name":"value","type_id":boolean}],"args":[],"ret":0,"item":0}),
+        );
+        let fixed_list =
+            append(json!({"kind":"list","name":"","fields":[],"args":[],"ret":0,"item":fixed}));
+        let selected_list =
+            append(json!({"kind":"list","name":"","fields":[],"args":[],"ret":0,"item":selected}));
+        let fixed_family = append(
+            json!({"kind":"record","name":"Credential.ClientFamily","fields":[{"name":"witness","type_id":fixed_list}],"args":[],"ret":0,"item":0}),
+        );
+        let selected_family = append(
+            json!({"kind":"record","name":"Credential.ClientFamily","fields":[{"name":"witness","type_id":selected_list}],"args":[],"ret":0,"item":0}),
+        );
+        let credentials = append(
+            json!({"kind":"record","name":"","fields":[{"name":"fixed","type_id":fixed_family},{"name":"selected","type_id":selected_family}],"args":[],"ret":0,"item":0}),
+        );
+        let product = append(
+            json!({"kind":"record","name":"","fields":[{"name":"namespace","type_id":2},{"name":"operations","type_id":7},{"name":"pages","type_id":0},{"name":"properties","type_id":0},{"name":"errors","type_id":0},{"name":"credentials","type_id":credentials}],"args":[],"ret":0,"item":0}),
+        );
+        let function = append(
+            json!({"kind":"function","name":"","fields":[],"args":[0],"ret":product,"item":0}),
+        );
+        document[0]["entries"] = json!([{"symbol":"day2_app","type_id":function}]);
+        let parse = |value: &Value| AppShape::from_checked_types(&serde_json::to_vec(value)?);
+        let shape = parse(&document)?;
+        assert_eq!(shape.credentials["fixed"].profile, "client");
+        assert_eq!(shape.credentials["selected"].profile, "client");
+        assert_eq!(shape.credentials["fixed"].grant, GrantMode::Fixed);
+        assert_eq!(shape.credentials["selected"].grant, GrantMode::Selectable);
+        for (node, field, value) in [
+            (selected, "name", json!("Impostor.SelectableGrantMode")),
+            (selected, "kind", json!("text")),
+            (selected_list, "kind", json!("text")),
+            (selected_family, "fields", json!([])),
+        ] {
+            let mut changed = document.clone();
+            changed[0]["types"][node][field] = value;
+            assert!(parse(&changed).is_err(), "{node} {field}");
+        }
+        Ok(())
     }
 
     #[test]

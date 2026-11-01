@@ -117,10 +117,14 @@ pub fn validate(families: &[FamilyDeclaration], artifact: &Artifact) -> Result<(
             .with_context(|| format!("unregistered credential family {name}"))?;
         ensure!(
             matches!(
-                (&family.profile, expected.as_str()),
+                (&family.profile, expected.profile.as_str()),
                 (ManagedProfile::Client, "client") | (ManagedProfile::Personal, "personal")
             ),
             "credential family {name} profile differs from checked type"
+        );
+        ensure!(
+            family.grant == expected.grant,
+            "credential family {name} grant mode differs from checked type"
         );
         ensure!(
             (1..=31_536_000).contains(&family.lifetime_seconds),
@@ -154,4 +158,60 @@ pub fn validate(families: &[FamilyDeclaration], artifact: &Artifact) -> Result<(
         "credential declarations differ from checked App.definition registrations"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn worker_metadata_must_preserve_checked_profile_and_grant_mode() -> Result<()> {
+        for profile in ["client", "personal"] {
+            for mode in ["fixed", "selectable"] {
+                let mut artifact: Artifact = serde_json::from_value(json!({
+                    "format":crate::artifact::CURRENT_FORMAT,
+                    "roc_version":"test", "worker_digest":"test", "schema_digest":"test",
+                    "schema":{"models":{},"inputs":{"Request":{"fields":{}}},"foreign_keys":[]},
+                    "operations":[{"name":"fixture.save","kind":"command","input_type":"Request","output_type":"Reply"}],
+                    "declarations":{"commands":{"save":{"input":"Request","output":"Reply"}},"queries":{},
+                        "credentials":{"keys":{"profile":profile,"grant":mode}}},
+                    "sources":{},"admission":"local-spike-only"
+                }))?;
+                let wire = json!([{"registration":"keys","profile":profile,"id":"keys",
+                    "grant_mode":mode,"roots":["fixture.save|Request|Reply"],"lifetime_seconds":3600}]);
+                let raw = serde_json::to_vec(&wire)?;
+                assert_eq!(decode(&raw, &artifact)?.len(), 1);
+                let checked = artifact.declarations.credentials["keys"].clone();
+                artifact
+                    .declarations
+                    .credentials
+                    .get_mut("keys")
+                    .unwrap()
+                    .grant = if mode == "fixed" {
+                    GrantMode::Selectable
+                } else {
+                    GrantMode::Fixed
+                };
+                assert!(decode(&raw, &artifact).is_err(), "mode {profile} {mode}");
+                artifact
+                    .declarations
+                    .credentials
+                    .insert("keys".into(), checked);
+                artifact
+                    .declarations
+                    .credentials
+                    .get_mut("keys")
+                    .unwrap()
+                    .profile = if profile == "client" {
+                    "personal"
+                } else {
+                    "client"
+                }
+                .into();
+                assert!(decode(&raw, &artifact).is_err(), "profile {profile} {mode}");
+            }
+        }
+        Ok(())
+    }
 }

@@ -6,16 +6,21 @@ import CredentialMetadataAccess
 Credential :: [].{
 	GrantMetadata : { mode : Str, roots : List(Api.Target) }
 
-	Grant :: { value : GrantMetadata }.{
-		metadata : Grant -> GrantMetadata
+	# Type witnesses select an authoring shape; they carry no runtime authority.
+	FixedGrantMode :: { value : Bool }.{}
+
+	SelectableGrantMode :: { value : Bool }.{}
+
+	Grant(mode) :: { value : GrantMetadata, witness : List(mode) }.{
+		metadata : Grant(mode) -> GrantMetadata
 		metadata = |grant| grant.value
 	}
 
-	fixed : List(Api.Target) -> Grant
-	fixed = |roots| { value: { mode: "fixed", roots } }
+	fixed : List(Api.Target) -> Grant(FixedGrantMode)
+	fixed = |roots| { value: { mode: "fixed", roots }, witness: [] }
 
-	selectable : List(Api.Target) -> Grant
-	selectable = |roots| { value: { mode: "selectable", roots } }
+	selectable : List(Api.Target) -> Grant(SelectableGrantMode)
+	selectable = |roots| { value: { mode: "selectable", roots }, witness: [] }
 
 	FamilyMetadata : {
 		id : Str,
@@ -23,34 +28,36 @@ Credential :: [].{
 		lifetime_seconds : U64,
 	}
 
-	FamilyOptions : { id : Str, grant : Grant, lifetime_seconds : U64 }
+	FamilyOptions(mode) : { id : Str, grant : Grant(mode), lifetime_seconds : U64 }
 
-	ClientFamily :: { value : FamilyMetadata }.{
-		metadata : ClientFamily -> FamilyMetadata
+	ClientFamily(mode) :: { value : FamilyMetadata, witness : List(mode) }.{
+		metadata : ClientFamily(mode) -> FamilyMetadata
 		metadata = |family| family.value
 	}
 
-	PersonalFamily :: { value : FamilyMetadata }.{
-		metadata : PersonalFamily -> FamilyMetadata
+	PersonalFamily(mode) :: { value : FamilyMetadata, witness : List(mode) }.{
+		metadata : PersonalFamily(mode) -> FamilyMetadata
 		metadata = |family| family.value
 	}
 
-	client_family : FamilyOptions -> ClientFamily
+	client_family : FamilyOptions(mode) -> ClientFamily(mode)
 	client_family = |options| {
 		value: {
 			id: options.id,
 			grant: options.grant.metadata(),
 			lifetime_seconds: options.lifetime_seconds,
 		},
+		witness: [],
 	}
 
-	personal_family : FamilyOptions -> PersonalFamily
+	personal_family : FamilyOptions(mode) -> PersonalFamily(mode)
 	personal_family = |options| {
 		value: {
 			id: options.id,
 			grant: options.grant.metadata(),
 			lifetime_seconds: options.lifetime_seconds,
 		},
+		witness: [],
 	}
 
 	# Declaration only: the host still applies current policy to the inherited principal.

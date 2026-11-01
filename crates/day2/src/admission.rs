@@ -86,7 +86,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Credential.roc",
         "",
-        "ebfe0deb809a2cbc56ce4fdd6d23db36a7354a35309517c31d2f83cd30169682",
+        "5fc3e39507360a0423e5c070f2f78b7c31925e3589af3ba3f5305cf938671251",
     ),
     (
         "FreetoolExecutor.roc",
