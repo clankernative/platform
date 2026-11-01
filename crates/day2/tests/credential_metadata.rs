@@ -998,6 +998,10 @@ fn native_compiler_preserves_family_types_and_seals_host_read_constructors() -> 
         output_schema,
         schema::{Kind, Record, Schema},
     };
+    let fixture = LoadedArtifact::load(&PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("compiled credential fixture required")?,
+    ))?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
