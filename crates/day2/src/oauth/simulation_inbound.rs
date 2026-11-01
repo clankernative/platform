@@ -385,7 +385,7 @@ fn category(error: &anyhow::Error) -> String {
 fn verify(program: &Program) -> Result<Vec<Observation>> {
     let result = checked(program);
     if let Err(error) = &result {
-        let failure = category(&error);
+        let failure = category(error);
         let (steps, observed) =
             super::reduce_steps(&program.steps, 128, &failure, category, |steps| {
                 checked(&Program {
@@ -398,7 +398,7 @@ fn verify(program: &Program) -> Result<Vec<Observation>> {
             steps,
             ..program.clone()
         };
-        let minimized = observed.as_ref().unwrap_or(&error);
+        let minimized = observed.as_ref().unwrap_or(error);
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/oauth-simulation");
         std::fs::create_dir_all(&directory)?;
