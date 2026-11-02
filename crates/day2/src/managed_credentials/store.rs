@@ -4658,6 +4658,21 @@ mod tests {
             .unwrap()
             .into_response_body(&lease())?;
         let namespace = namespace();
+        let policy=creator_policy();
+        let metadata=MetadataRead {namespace:&namespace,family:&family,policy:&policy,requester:"issuer/human-1"};
+        let request=ListRequest {after:FamilyCursor {family:family.id.clone(),opaque:String::new()},limit:10};
+        let projected=inspect_metadata(&db,&metadata,&expected.lineage)?.context("narrowed inspection")?;
+        assert_eq!(projected.summary.grant,narrowed.digest);
+        assert_ne!(projected.summary.grant,original.digest);
+        assert_eq!(projected.rotation.context("selectable rotation snapshot")?.head.id,second.version.clone().unwrap());
+        assert_eq!(list_metadata(&db,&metadata,&request)?.unwrap().items[0].grant,narrowed.digest);
+        {
+            let tx=db.transaction()?;
+            tx.execute("DELETE FROM day2_credential_material WHERE version=?1",[second.version.as_deref().unwrap()])?;
+            assert!(inspect_metadata(&tx,&metadata,&expected.lineage).is_err());
+            assert!(list_metadata(&tx,&metadata,&request).is_err());
+            tx.rollback()?;
+        }
         let read = &original.roots["ReadTranscription"];
         let write = &original.roots["SubmitTranscription"];
         assert_eq!(
