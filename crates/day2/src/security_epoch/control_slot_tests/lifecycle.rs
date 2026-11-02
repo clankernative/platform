@@ -37,6 +37,7 @@ enum Fault {
     ForwardSlotClock,
     LostCounterBefore,
     LostCounterAfter,
+    RolledBackCounterWrite,
     MalformedCounterReply,
     ExpiredCounterReply,
     RewoundCounterClock,
@@ -139,6 +140,7 @@ struct State {
     current: usize,
     slot_posts: usize,
     counter_posts: usize,
+    counter_rollback_failures: usize,
     // Fixed primary budget category in the controlled port, not a native
     // clock witness. These schedules keep the domain unchanged.
     clock_order_failures: usize,
@@ -170,6 +172,7 @@ struct World {
     first_holder: bool,
     current: usize,
     activation: Option<Digest>,
+    counter_rollback_failures: usize,
     clock_order_failures: usize,
     counter_decode_failures: usize,
     replaced: BTreeMap<CounterRecord, Option<Value>>,
@@ -274,6 +277,7 @@ impl World {
             first_holder: false,
             current: 0,
             activation: None,
+            counter_rollback_failures: 0,
             clock_order_failures: 0,
             counter_decode_failures: 0,
             replaced: BTreeMap::new(),
@@ -409,6 +413,9 @@ impl World {
                 if fault == Fault::MalformedCounterReply {
                     counter_fixture::malformed_ack_after_commit(&mut self.port.counter);
                 }
+                if fault == Fault::RolledBackCounterWrite {
+                    counter_fixture::fail_during_commit(&mut self.port.counter);
+                }
                 let result = claim.send(&self.selection, &mut self.port);
                 if result.as_ref().err().is_some_and(|error| {
                     error
@@ -417,6 +424,13 @@ impl World {
                         .is_some_and(serde_json::Error::is_data)
                 }) {
                     self.counter_decode_failures += 1;
+                }
+                // Closed synthetic fixture cause only. Do not export or keep
+                // formatted errors; a different refusal cannot satisfy this cut.
+                if result.as_ref().err().is_some_and(|error| {
+                    error.root_cause().to_string() == "scripted mid-commit failure"
+                }) {
+                    self.counter_rollback_failures += 1;
                 }
                 result?;
                 ensure!(
@@ -747,6 +761,7 @@ impl World {
                 current: self.current,
                 slot_posts: self.port.slot_posts,
                 counter_posts: self.port.counter_posts,
+                counter_rollback_failures: self.counter_rollback_failures,
                 clock_order_failures: self.clock_order_failures,
                 counter_decode_failures: self.counter_decode_failures,
                 counter: json!({"documents":counter["documents"],"sends":counter["sends"]}),
@@ -1727,6 +1742,67 @@ fn generated_malformed_counter_acknowledgements_keep_commits_and_refuse_reuse() 
         coverage == BTreeSet::from([0, 1]),
         "counter acknowledgement stage coverage incomplete"
     );
+    Ok(())
+}
+
+#[test]
+fn generated_counter_transaction_rollbacks_keep_may_and_refuse_reuse() -> Result<()> {
+    let mut coverage = BTreeSet::new();
+    for seed in 0..4 {
+        let baseline = successful(seed);
+        let reference = check(&baseline)?;
+        let end = &reference.last().unwrap().state;
+        ensure!(
+            end.continuation && end.current == 3 && end.counter_rollback_failures == 0,
+            "ordinary counter commit control did not complete"
+        );
+        for (index, event) in baseline.events.iter().enumerate() {
+            let Event::Bootstrap { stage, operation: Operation::Dispatch, .. } = *event else {
+                continue;
+            };
+            let mut program = baseline.clone();
+            program.events.truncate(index);
+            program.events.push(Event::Bootstrap {
+                stage,
+                operation: Operation::Dispatch,
+                fault: Fault::RolledBackCounterWrite,
+            });
+            program.events.extend([
+                Event::RestoreClock,
+                Event::Observe { stage },
+                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
+                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
+                Event::Reopen,
+                Event::Observe { stage },
+                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
+                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
+                Event::Current { death_cut: None, rewrite_provider: false },
+            ]);
+            let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
+            let records = check(&program)?;
+            let before = &reference[index - 1].state;
+            let attempted = &reference[index].state;
+            ensure!(!records[index].accepted, "partial counter transaction accepted");
+            for record in &records[index..] {
+                ensure!(
+                    !record.state.continuation
+                        && record.state.counter_rollback_failures == 1
+                        && record.state.counter["documents"] == before.counter["documents"]
+                        && record.state.counter["sends"] == attempted.counter["sends"]
+                        && record.state.slots == attempted.slots
+                        && record.state.slot_posts == attempted.slot_posts
+                        && record.state.counter_posts == attempted.counter_posts,
+                    "rollback, durable May, attempted send or permanent refusal changed"
+                );
+            }
+            for (event, record) in program.events.iter().zip(&records).skip(index + 1) {
+                let historical_data = matches!(event, Event::RestoreClock | Event::Observe { .. } | Event::Reopen);
+                ensure!(record.accepted == historical_data, "readback or attempted reuse changed");
+            }
+            coverage.insert(stage);
+        }
+    }
+    ensure!(coverage == BTreeSet::from([0, 1]), "counter rollback stage coverage incomplete");
     Ok(())
 }
 

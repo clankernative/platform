@@ -45,6 +45,17 @@ independent oracle, twice replay and bounded reduction. These schedules know
 where their fixture applied the write; a malformed real provider response alone
 does not establish application or permit rollback, retry or a new grant.
 
+Further generated histories fail the existing SQLite counter adapter after two
+of its three real writes, before commit. The transaction rolls back every counter
+row and version, while the earlier known May slot and attempted-send count remain.
+The actual fixture's mid-commit failure must be observed; an unrelated refusal
+does not satisfy the cut. An independent oracle predicts the complete unchanged
+counter state and durable May. Backend reset, independent readback and reopen
+cannot revive the same refused continuation, settle it, resend or grant Current.
+Paired normal commits still complete both stages and three Current exchanges.
+These controlled histories know exactly where their fixture failed; a real lost
+or rejected provider response alone does not prove rollback or authorize retry.
+
 The lifecycle oracle separately specifies the allowed state changes and every
 expected provider row, including immutable requests, candidate/holder data,
 receipts, attempt lineage and exact versions. It does not call production slot
