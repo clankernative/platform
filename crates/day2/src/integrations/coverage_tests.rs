@@ -29,7 +29,7 @@
 //!
 //! Scope: this covers transport simulations and the Workspace Directory and
 //! live Carta native capture/read pipelines, and delegation's admitted-resource
-//! offline handler and the scoped synthetic Linear handler. Remaining pending
+//! offline handler and the scoped synthetic Linear and operator-alert handlers. Remaining pending
 //! native/synthetic providers have explicit debt below.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
@@ -55,6 +55,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const SCOPE: &str = "coverage/app";
 
+#[path = "alerts_coverage_tests.rs"]
+mod alerts;
 #[path = "delegation_coverage_tests.rs"]
 mod delegation;
 #[path = "linear_coverage_tests.rs"]
@@ -102,6 +104,8 @@ enum Demonstration {
     FreetoolExecutorWorld,
     /// Real scoped synthetic Linear capability admission and committed world.
     LinearAdapter,
+    /// Real scoped operator-alert capability admission and committed world.
+    OperatorAlertsAdapter,
 }
 
 fn demonstration(action: Action) -> Demonstration {
@@ -143,6 +147,7 @@ fn demonstration(action: Action) -> Demonstration {
         // usage the simulated account reports, not in a record it leaves behind.
         Action::OpenAiGenerate => Demonstration::ResultReflectsWorld,
         Action::LinearEnsureAccess | Action::LinearSuspend => Demonstration::LinearAdapter,
+        Action::OperatorAlertsSend => Demonstration::OperatorAlertsAdapter,
         Action::NotificationsResolve
         | Action::NotificationsLatest
         | Action::NotificationsSend
@@ -150,8 +155,7 @@ fn demonstration(action: Action) -> Demonstration {
         | Action::GoogleDirectoryRecord
         | Action::GoogleDirectoryCreateUser
         | Action::GoogleDirectoryPatchAttributes
-        | Action::GoogleDirectoryEnsureGroupMember
-        | Action::OperatorAlertsSend => Demonstration::PendingAdapterSeam,
+        | Action::GoogleDirectoryEnsureGroupMember => Demonstration::PendingAdapterSeam,
         Action::WorkspaceDirectoryCapture
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
@@ -227,12 +231,6 @@ const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
     PendingDebt {
         action: Action::GoogleDirectoryEnsureGroupMember,
         owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::OperatorAlertsSend,
-        owner: "platform operator-alert adapter",
         reason: ADAPTER_REASON,
         remove_when: ADAPTER_REMOVAL,
     },
@@ -762,6 +760,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     if action.provider() == Provider::SyntheticLinear {
         return linear::observe(action, variant);
     }
+    if action.provider() == Provider::SyntheticOperatorAlerts {
+        return alerts::observe(action, variant);
+    }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
     seed(&database, SCOPE, &fixture(variant))?;
@@ -1238,6 +1239,7 @@ fn check(
     let run = |variant| observe(variant).map_err(|error| format!("{action:?}: {error:#}"));
     match demonstration(action) {
         Demonstration::LinearAdapter => linear::check(action, observe),
+        Demonstration::OperatorAlertsAdapter => alerts::check(action, observe),
         Demonstration::PendingAdapterSeam => Ok(()),
         Demonstration::FreetoolExecutorWorld => check_freetool_executor(action),
         Demonstration::NativeAdapterRead => {
@@ -1492,7 +1494,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 9);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 8);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 
