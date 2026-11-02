@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod model;
+pub(in crate::security_epoch) mod preparation;
+use preparation::{PreparationFiles, PreparationInput, PreparationObservation};
 
 const MAX_EVENTS: usize = 96;
 // The original ordinary history budget remains separate from one explicitly
@@ -132,6 +134,10 @@ pub(in crate::security_epoch) struct FileState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum Event {
+    PrepareOriginal {
+        input: PreparationInput,
+    },
+    RestorePreparation {},
     FirstHolder {
         death_cut: Option<usize>,
     },
@@ -240,6 +246,8 @@ struct State {
     counter: Value,
     slots: Value,
     file: Option<FileState>,
+    preparation: Option<PreparationObservation>,
+    preparation_files: Option<PreparationFiles>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -371,12 +379,12 @@ impl World {
         #[cfg(not(target_os = "linux"))]
         ensure!(physical.is_none(), "physical lifecycle requires Linux");
         #[cfg(target_os = "linux")]
-        let mut file = physical
+        let file = physical
             .map(crate::security_epoch::storage_authority::FileFixture::new)
             .transpose()?;
         #[cfg(target_os = "linux")]
-        let (selection, create, image_binding) = if let Some(file) = &mut file {
-            let (policy, store, original, image) = file.blueprint()?;
+        let (selection, create, image_binding) = if let Some(file) = &file {
+            let (policy, store, original, image) = file.proposed_blueprint()?;
             let request = Request::CreateInitialAuthority {
                 bootstrap: original.bootstrap()?,
             };
@@ -1134,6 +1142,20 @@ impl World {
 
     fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<Record> {
         let accepted = match event {
+            Event::RestorePreparation {} => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.file
+                        .as_mut()
+                        .context("physical preparation required")?
+                        .restore_preparation()?;
+                    true
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    anyhow::bail!("physical preparation requires Linux");
+                }
+            }
             Event::WorkTime {
                 wire_nanos,
                 provider_nanos,
@@ -1205,6 +1227,24 @@ impl World {
                 let mut continuation = self.continuation;
                 let result = lifecycle_fixture::phase(&mut continuation, || {
                     match event {
+                        Event::PrepareOriginal { input } => {
+                            #[cfg(target_os = "linux")]
+                            {
+                                ensure!(
+                                    self.file
+                                        .as_mut()
+                                        .context("physical preparation required")?
+                                        .prepare(input)?,
+                                    "original preparation refused"
+                                );
+                                Ok(())
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                let _ = input;
+                                anyhow::bail!("physical preparation requires Linux");
+                            }
+                        }
                         Event::FirstHolder { death_cut } => self.complete_first_holder(death_cut),
                         Event::StartFirstHolder { .. }
                         | Event::AdvanceFirstHolder
@@ -1299,6 +1339,22 @@ impl World {
                 file: self.file.as_ref().map(|file| file.snapshot()).transpose()?,
                 #[cfg(not(target_os = "linux"))]
                 file: None,
+                #[cfg(target_os = "linux")]
+                preparation: self
+                    .file
+                    .as_ref()
+                    .and_then(|file| file.preparation_observation()),
+                #[cfg(not(target_os = "linux"))]
+                preparation: None,
+                #[cfg(target_os = "linux")]
+                preparation_files: self
+                    .file
+                    .as_ref()
+                    .map(|file| file.preparation_files())
+                    .transpose()?
+                    .flatten(),
+                #[cfg(not(target_os = "linux"))]
+                preparation_files: None,
             },
             provider: json!({"counter":counter,"slots":provider}),
             handshake: self.handshake.snapshot(),
@@ -1370,7 +1426,7 @@ impl ConsumerLifecycle {
         scope: &day2_capabilities::security_epoch::AuthorityScope,
     ) -> Result<Self> {
         let world = World::selected(seed, None, Some(scope))?;
-        let model = model::Model::new(seed, &world.cores, false, &world.image_binding)?;
+        let model = model::Model::new(seed, &world.cores, None, &world.image_binding)?;
         let mut enrollment = [
             LifecycleHandshake::enrollment(seed ^ 1)?,
             LifecycleHandshake::enrollment(seed ^ 2)?,
@@ -1716,11 +1772,19 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             .is_none_or(|image| (100..=16 * 1024 * 1024).contains(&image.len())),
         "lifecycle initial image byte bound"
     );
+    ensure!(
+        program.physical.is_some()
+            || program.events.iter().all(|event| !matches!(
+                event,
+                Event::PrepareOriginal { .. } | Event::RestorePreparation {}
+            )),
+        "preparation event requires original image"
+    );
     let mut world = World::new(program.seed, program.physical.as_deref())?;
     let mut model = model::Model::new(
         program.seed,
         &world.cores,
-        program.physical.is_some(),
+        program.physical.as_ref().map(Vec::len),
         &world.image_binding,
     )?;
     let mut records = Vec::new();
@@ -1787,6 +1851,7 @@ fn source() -> Digest {
         [
             include_str!("lifecycle.rs"),
             include_str!("lifecycle/model.rs"),
+            include_str!("lifecycle/preparation.rs"),
             include_str!("../control_slot.rs"),
             include_str!("../control_slot_io.rs"),
             include_str!("../control_slot_firestore.rs"),
@@ -2487,6 +2552,12 @@ fn real_original_file_mutation_at_offer_and_after_accepted_never_becomes_retenti
                 let mut program = stepped_first_holder(seed, None)?;
                 program.physical =
                     Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+                program.events.insert(
+                    0,
+                    Event::PrepareOriginal {
+                        input: PreparationInput::SUCCESS,
+                    },
+                );
                 let cut = program
                     .events
                     .iter()
@@ -2548,7 +2619,7 @@ fn stepped_completion(seed: u64, target: Event) -> Result<(Program, usize)> {
     let input = World::new(seed, None)?;
     // Immutable fixture inputs only; no actual execution or observation selects
     // the expected schedule. All decisions below belong to the separate oracle.
-    let mut reference = model::Model::new(seed, &input.cores, false, &input.image_binding)?;
+    let mut reference = model::Model::new(seed, &input.cores, None, &input.image_binding)?;
     let mut events = baseline.events[..index].to_vec();
     for &event in &events {
         ensure!(reference.step(event)?.0, "reference prefix refused");
@@ -2846,7 +2917,7 @@ fn lost_known_consumed_and_released_packets_never_become_remote_receipts() -> Re
         for (sender, packet) in [(1, "known"), (0, "consumed"), (1, "released")] {
             let (mut program, start) = stepped_completion(17, target)?;
             let input = World::new(17, None)?;
-            let mut reference = model::Model::new(17, &input.cores, false, &input.image_binding)?;
+            let mut reference = model::Model::new(17, &input.cores, None, &input.image_binding)?;
             let mut found = None;
             for (index, &event) in program.events.iter().enumerate() {
                 ensure!(reference.step(event)?.0, "loss prefix refused");
@@ -2961,7 +3032,7 @@ fn explicit_work_time_keeps_wire_and_provider_origins_separate_without_renewal()
         .position(|event| matches!(event, Event::PrepareCompletionRelease))
         .unwrap();
     let input = World::new(17, None)?;
-    let mut reference = model::Model::new(17, &input.cores, false, &input.image_binding)?;
+    let mut reference = model::Model::new(17, &input.cores, None, &input.image_binding)?;
     for &event in &current.events[..cut] {
         assert!(reference.step(event)?.0);
     }
@@ -3005,6 +3076,12 @@ fn activation_checks_initial_bytes_before_release_then_physical_identity_after_p
         let (mut program, _) = stepped_completion(17, target)?;
         program.physical =
             Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        program.events.insert(
+            0,
+            Event::PrepareOriginal {
+                input: PreparationInput::SUCCESS,
+            },
+        );
         let cut = program
             .events
             .iter()
@@ -3889,6 +3966,12 @@ fn generated_post_write_file_refusals_preserve_commits_without_resend() -> Resul
         let mut baseline = successful(seed);
         baseline.physical =
             Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        baseline.events.insert(
+            0,
+            Event::PrepareOriginal {
+                input: PreparationInput::SUCCESS,
+            },
+        );
         let baseline: Program = serde_json::from_slice(&serde_json::to_vec(&baseline)?)?;
         let successful_records = check(&baseline)?;
         for (index, event) in baseline.events.iter().enumerate() {
@@ -4005,6 +4088,12 @@ fn generated_real_file_histories_join_the_same_first_holder_and_writer_decisions
         let mut baseline = successful(seed);
         baseline.physical =
             Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        baseline.events.insert(
+            0,
+            Event::PrepareOriginal {
+                input: PreparationInput::SUCCESS,
+            },
+        );
         // Persist/reload the actual image input before running. The complete
         // retained bytes, not a fresh initializer or a weaker logical digest,
         // must survive both executions and process-boundary replay.

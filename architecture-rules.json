@@ -347,6 +347,7 @@
     "crates/day2/src/security_epoch/control_slot_tests.rs",
     "crates/day2/src/security_epoch/control_slot_tests/lifecycle.rs",
     "crates/day2/src/security_epoch/control_slot_tests/lifecycle/model.rs",
+    "crates/day2/src/security_epoch/control_slot_tests/lifecycle/preparation.rs",
     "crates/day2/src/security_epoch/control_slot_tests/paired_reads.rs",
     "crates/day2/src/security_epoch/controller.rs",
     "crates/day2/src/security_epoch/controller/bootstrap_timing.rs",
