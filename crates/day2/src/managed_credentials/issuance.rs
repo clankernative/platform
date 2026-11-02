@@ -2585,6 +2585,24 @@ mod tests {
             let redacted = serde_json::to_string(&trace)?;
             assert!(!redacted.contains("d2c1."));
             assert!(!redacted.contains("ciphertext"));
+            let rotate_id=format!("selected-{registration}-rotate");
+            let rotate_operation=if registration=="clients" {"credential_metadata.rotate_client"} else {"credential_metadata.rotate_personal"};
+            let rotate_input=serde_json::json!({"lineage":outcome.result["lineage"],"head":outcome.result["version"],"revision":1,
+                "grant":serde_json::to_string(&lifecycle::RotateGrant::KeepExisting)?});
+            confirm_input(&runtime,rotate_operation,&rotate_id,&rotate_input)?;
+            assert!(runtime.execute(&rotate_id,Fault::BeforeCommit).is_err());
+            let before:i64=db.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get(0))?;
+            assert_eq!(before,index*2+1);
+            assert!(runtime.execute(&rotate_id,Fault::AfterCommit).is_err());
+            let rotated=runtime.execute(&rotate_id,Fault::None)?;
+            assert_eq!(rotated.status,"success");
+            assert_eq!(rotated.result["status"],"rotated");
+            assert_eq!(rotated,runtime.execute(&rotate_id,Fault::None)?);
+            let (versions,receipts):(i64,i64)=db.query_row("SELECT (SELECT count(*) FROM day2_credential_versions),(SELECT count(*) FROM key_receipts WHERE family=?1)",[registration],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(versions,index*2+2);
+            assert_eq!(receipts,2);
+            assert_eq!(counts(&runtime)?,(index+1,index+1));
+            replay(runtime.artifact(),&runtime.trace(&rotate_id)?)?;
         }
         Ok(())
     }
@@ -2692,6 +2710,55 @@ mod tests {
             stage(&tx, &runtime, &request, &instruction, &prepared)?;
             tx.rollback()?;
             assert_eq!(counts(&runtime)?, (0, 0));
+            let issued=runtime.execute("selected-hostile",Fault::None)?;
+            assert_eq!(issued.status,"success");
+            let rotate_operation=if registration=="clients" {"credential_metadata.rotate_client"} else {"credential_metadata.rotate_personal"};
+            let rotate_input=serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1,
+                "grant":serde_json::to_string(&lifecycle::RotateGrant::KeepExisting)?});
+            confirm_input(&runtime,rotate_operation,"rotation-hostile",&rotate_input)?;
+            let prepared=runtime.prepare_credential_keys("rotation-hostile")?.context("rotation keys")?;
+            let tx=db.transaction()?;
+            let request=protocol::Request {operation:rotate_operation.into(),input:rotate_input.to_string(),
+                context:crate::store::invocation_context(&tx,"rotation-hostile")?,observations:vec![]};
+            let expected=load(&tx,"rotation-hostile")?.context("rotation proof")?.confirmation.intent.instruction(registration,"rotation-hostile");
+            for mutation in ["missing","fixed","unknown","expand","foreign","head"] {
+                let mut wire=expected.clone();
+                match mutation {
+                    "missing"=>{wire.as_object_mut().unwrap().remove("grant");},
+                    "fixed"=>wire["grant"]=serde_json::json!({"mode":"fixed","selections":[]}),
+                    "unknown"=>wire["grant"]["mode"]="future_mode".into(),
+                    "expand"=>wire["grant"]=serde_json::json!({"mode":"narrow","selections":[{"family_contract":family.contract,"roots":["credential_metadata.ping","credential_metadata.record_use"]}]}),
+                    "foreign"=>wire["registration"]="foreign".into(),
+                    "head"=>wire["head"]="other-version".into(),
+                    _=>unreachable!(),
+                }
+                let instruction=protocol::Instruction {kind:"credential_rotate".into(),model:crate::credential_codegen::ROTATE.into(),data:wire.to_string(),..Default::default()};
+                assert!(stage(&tx,&runtime,&request,&instruction,&prepared).is_err(),"{registration} rotation {mutation}");
+                assert_eq!(tx.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get::<_,i64>(0))?,1);
+            }
+            tx.rollback()?;
+            let original:String=db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation='rotation-hostile'",[],|r|r.get(0))?;
+            let mut changed:Value=crate::json::decode(original.as_bytes())?;
+            changed["confirmation"]["rotation_grant"]=serde_json::json!(Digest::new(b"forged frozen successor"));
+            rehash_fixture_value(&mut changed)?;
+            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation='rotation-hostile'",[changed.to_string()])?;
+            // Prepare through the real owning runtime AFTER the synthetic DATA
+            // change, so refusal must reach the production grant rederivation,
+            // rather than only the prepared-record commitment comparison.
+            let changed_prepared=runtime.prepare_credential_keys("rotation-hostile")?.context("changed record keys")?;
+            let tx=db.transaction()?;
+            let instruction=protocol::Instruction {kind:"credential_rotate".into(),model:crate::credential_codegen::ROTATE.into(),data:expected.to_string(),..Default::default()};
+            let error=stage(&tx,&runtime,&request,&instruction,&changed_prepared).expect_err("changed frozen grant accepted");
+            assert!(error.to_string().contains("credential rotation grant changed after confirmation"));
+            assert_eq!(tx.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get::<_,i64>(0))?,1);
+            tx.rollback()?;
+            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation='rotation-hostile'",[original])?;
+            let prepared=runtime.prepare_credential_keys("rotation-hostile")?.context("restored original keys")?;
+            let tx=db.transaction()?;
+            stage(&tx,&runtime,&request,&instruction,&prepared)?;
+            assert_eq!(tx.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get::<_,i64>(0))?,2);
+            tx.rollback()?;
+            assert_eq!(counts(&runtime)?,(1,1));
         }
         Ok(())
     }
