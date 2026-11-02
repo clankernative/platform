@@ -3752,6 +3752,14 @@ mod tests {
         independent.binding.namespace.environment = name("independent");
         authority.replace(vec![initial.clone(), independent.clone()])?;
         assert_eq!(authority.verification_epoch(&independent.binding, &independent.management, "verify-v1", 1100)?, Some(1));
+        let mut independent_next = independent.clone();
+        independent_next.security_epoch = 2;
+        authority.replace(vec![initial.clone(), independent_next.clone()])?;
+        assert!(authority.replace(vec![epoch_selection(9), independent.clone()]).is_err());
+        assert_eq!(authority.verification_epoch(&independent_next.binding, &independent_next.management, "verify-v1", 1100)?, Some(2));
+        // Nor may a valid higher entry in a different domain leak from a batch
+        // whose otherwise valid sibling rewound an already observed epoch.
+        authority.replace(vec![initial.clone(), independent_next])?;
         assert!(authority.replace(vec![epoch_selection(7)]).is_err());
         assert_eq!(authority.verification_epoch(&initial.binding, &initial.management, "verify-v1", 1100)?, Some(8));
         let mut different_store = epoch_selection(1);
