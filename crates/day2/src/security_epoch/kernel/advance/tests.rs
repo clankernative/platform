@@ -104,7 +104,7 @@ impl Provider {
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<Versioned<T>>> {
-        let row: Option<(String, u64)> = self
+        let row: Option<(String, i64)> = self
             .db
             .query_row(
                 "SELECT body,version FROM records WHERE name=?1",
@@ -115,7 +115,7 @@ impl Provider {
         row.map(|(body, revision)| {
             Ok(Versioned {
                 value: serde_json::from_str(&body)?,
-                version: version(revision),
+                    version: version(revision.try_into()?),
             })
         })
         .transpose()
@@ -130,7 +130,7 @@ impl Provider {
         })
     }
 
-    fn sends(&self) -> u64 {
+    fn sends(&self) -> i64 {
         self.db
             .query_row("SELECT COUNT(*) FROM sends", [], |r| r.get(0))
             .unwrap()
@@ -145,7 +145,7 @@ impl Provider {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, u64>(2)?,
+                    r.get::<_, i64>(2)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -163,12 +163,12 @@ impl Provider {
             ("root", &plan.before.root),
             ("sentinel", &plan.before.sentinel),
         ] {
-            let revision: u64 = transaction.query_row(
+            let revision: i64 = transaction.query_row(
                 "SELECT version FROM records WHERE name=?1",
                 [name],
                 |r| r.get(0),
             )?;
-            ensure!(&version(revision) == expected, "fixture CAS refused");
+            ensure!(&version(revision.try_into()?) == expected, "fixture CAS refused");
         }
         let key = plan.receipt.request.operation.as_str();
         for (name, body, revision) in [
@@ -301,7 +301,7 @@ fn exact_request_receipt_and_both_versions_are_required() -> Result<()> {
         assert!(request.prepare(&selection, &changed).is_err());
     }
     let mut foreign = selection.clone();
-    foreign.scope.app = "other".try_into()?;
+    foreign.scope.app = "other".to_owned().try_into()?;
     assert!(request.prepare(&foreign, &before).is_err());
     let mut provider = Provider::new(&before)?;
     provider.apply(&request.prepare(&selection, &before)?, Cut::Known)?;
