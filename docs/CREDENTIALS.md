@@ -21,6 +21,15 @@ and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectab
 families expose `issue` and `revoke`; selectable rotation remains unsupported
 until its closed keep-existing/narrow choice is implemented.
 
+The portable rotation resolver accepts only `KeepExisting` or an exact
+`Narrow(GrantSelection)` subset of the actual predecessor. It preserves the
+predecessor's subject, audience and authority binding and rejects retired or
+changed canonical contracts, foreign selections and newly added roots. Fixed
+families use the same resolver for keep-existing validation and cannot consume
+a narrowing selection. This is a grant calculation, not maintenance or live
+management authority. Selectable rotation's generated input, protected intent
+and atomic storage publication remain pending; no new rotation route is enabled.
+
 The shared local-family contract now resolves fixed and selected requests
 through one closed `IssuanceGrant` mode. A `GrantSelection` is portable DATA:
 it binds a nonempty canonical root set to the exact family contract and the
