@@ -4,6 +4,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+mod history;
+
 fn version(value: u64) -> super::super::UpdateTime {
     format!("2026-11-02T00:00:00.{value:06}Z")
         .try_into()
@@ -54,11 +56,13 @@ fn initial() -> (EpochStore, Snapshot) {
     (selection, snapshot)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Cut {
     Known,
     BeforeWrite,
     AfterRoot,
+    AfterSentinel,
     AfterCommit,
 }
 
@@ -191,6 +195,10 @@ impl Provider {
                 !matches!(cut, Cut::AfterRoot) || name != "root",
                 "fixture transaction interrupted"
             );
+            ensure!(
+                !matches!(cut, Cut::AfterSentinel) || name != "sentinel",
+                "fixture transaction interrupted"
+            );
         }
         transaction.commit()?;
         ensure!(
@@ -242,6 +250,7 @@ fn conditional_advance_preserves_unknown_completion_and_fences_both_initial_requ
             Cut::Known,
             Cut::BeforeWrite,
             Cut::AfterRoot,
+            Cut::AfterSentinel,
             Cut::AfterCommit,
         ] {
             let (selection, before) = initial();

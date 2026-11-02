@@ -1,4 +1,6 @@
 //! Private, initial-only external security-epoch protocol.
+//! The pure kernel also describes a first fenced epoch advance; no native
+//! maintenance permission, advance transport or restore workflow is installed.
 //!
 //! Records, receipts and observations below are historical DATA. None is a
 //! current authority, clock, holder or credential-readiness proof. The native execution context

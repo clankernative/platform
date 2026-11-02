@@ -188,6 +188,13 @@ permit: both records use exact provider `updateTime` conditions and the
 activation receipt is create-only. No delete, advance, restore, takeover or
 existing-database adoption operation is exposed.
 
+The separate [first epoch-advance DATA kernel](CREDENTIAL-EPOCH-ADVANCE.md)
+describes the conditional transition from active initial epoch 1 to fenced epoch
+2. Its request, plan and receipt supply no execution authority. Initial
+reconciliation refuses the fenced phase; a new writer is never activated by the
+advance. Native maintenance authorization, incumbent-lease fencing, provider
+dispatch and operational restore remain separate, unsupported work.
+
 Canonical requests exclude derived after-record hashes. A domain-separated
 request digest determines both records; the immutable receipt then commits the
 request and those derived records. This avoids a recursive hash definition.
