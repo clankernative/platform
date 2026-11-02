@@ -445,13 +445,17 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     let nested = format!("{{\"phase\":\"fenced\",\"fence\":{nested}}}");
     assert!(serde_json::from_str::<Phase>(&nested).is_err());
     let mut sequence = encoded.clone();
-    sequence["fence"] = Value::Array(
-        encoded["fence"]
-            .as_object()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect(),
+    sequence["fence"] = json!([
+        encoded["fence"]["operation"],
+        encoded["fence"]["request"],
+        encoded["fence"]["activation_receipt"],
+        encoded["fence"]["previous_root"],
+        encoded["fence"]["previous_sentinel"],
+        encoded["fence"]["previous_epoch"],
+    ]);
+    assert_eq!(
+        serde_json::from_value::<Fence>(sequence["fence"].clone())?,
+        serde_json::from_value::<Fence>(encoded["fence"].clone())?
     );
     assert!(serde_json::from_value::<Phase>(sequence).is_err());
     let completion = serde_json::to_value(&before.root.as_ref().unwrap().value.phase)?;
@@ -462,6 +466,19 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     let raw =
         format!("{{\"phase\":\"active_first_holder\",\"completion\":{duplicate_completion}}}");
     assert!(serde_json::from_str::<Phase>(&raw).is_err());
+    let mut sequence = completion.clone();
+    sequence["completion"] = json!([
+        completion["completion"]["operation"],
+        completion["completion"]["request"],
+        completion["completion"]["parent_receipt"],
+        completion["completion"]["before"],
+        completion["completion"]["holder"],
+    ]);
+    assert_eq!(
+        serde_json::from_value::<super::super::Completion>(sequence["completion"].clone())?,
+        serde_json::from_value::<super::super::Completion>(completion["completion"].clone())?
+    );
+    assert!(serde_json::from_value::<Phase>(sequence).is_err());
     let mut unsupported = serde_json::to_value(&request.activation.request)?;
     unsupported["action"] = json!("advance_epoch");
     assert!(serde_json::from_value::<InitialRequest>(unsupported).is_err());
