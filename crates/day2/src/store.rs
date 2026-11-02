@@ -2402,6 +2402,13 @@ pub fn validate_storage_snapshot(
     Ok(())
 }
 
+/// An ordinary restore cannot carry private managed-credential history without
+/// an external epoch fence. Inspect the actual snapshot, not selected metadata.
+/// The caller owns the read/write transaction and its existing execution hook.
+pub fn require_no_managed_credential_restore_state(connection: &Connection) -> Result<()> {
+    crate::managed_credentials::store::require_no_restore_state(connection)
+}
+
 fn validate_storage_in(
     snapshot: &Connection,
     artifact: &LoadedArtifact,
