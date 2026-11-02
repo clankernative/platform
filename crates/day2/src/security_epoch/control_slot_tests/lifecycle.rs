@@ -419,6 +419,11 @@ impl World {
             _ => None,
         };
         if let Some(change) = change {
+            ensure!(
+                self.port.slots.db.is_autocommit()
+                    && counter_fixture::transaction_closed(&self.port.counter),
+                "post-write file cut encountered an open provider transaction"
+            );
             #[cfg(target_os = "linux")]
             self.file
                 .as_mut()

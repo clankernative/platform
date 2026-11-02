@@ -5,6 +5,10 @@ pub(in crate::security_epoch) fn open(path: &Path) -> Provider {
     Provider::open(path)
 }
 
+pub(in crate::security_epoch) fn transaction_closed(provider: &Provider) -> bool {
+    provider.db.is_autocommit()
+}
+
 /// Independent historical DATA, not a replacement writer/continuation owner.
 /// The refused writer port is untouched; this connection cannot create or
 /// mutate even the fixture schema, and a missing file refuses.
