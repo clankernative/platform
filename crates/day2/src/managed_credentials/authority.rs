@@ -113,8 +113,12 @@ impl SelectedAuthority {
                     "invalid credential subject"
                 );
             }
-            if let Some(epoch) = epochs.insert(epoch_domain(&entry.binding)?, entry.security_epoch) {
-                ensure!(epoch == entry.security_epoch, "credential epoch cohort mismatch");
+            if let Some(epoch) = epochs.insert(epoch_domain(&entry.binding)?, entry.security_epoch)
+            {
+                ensure!(
+                    epoch == entry.security_epoch,
+                    "credential epoch cohort mismatch"
+                );
             }
         }
         let mut selected = self
@@ -126,13 +130,19 @@ impl SelectedAuthority {
         // publishes a partially changed selection. No floor is ever evicted.
         ensure!(
             selected.epoch_floor.len()
-                + epochs.keys().filter(|domain| !selected.epoch_floor.contains_key(*domain)).count()
+                + epochs
+                    .keys()
+                    .filter(|domain| !selected.epoch_floor.contains_key(*domain))
+                    .count()
                 <= 128,
             "credential epoch history budget"
         );
         for (domain, epoch) in &epochs {
             ensure!(
-                selected.epoch_floor.get(domain).is_none_or(|previous| epoch >= previous),
+                selected
+                    .epoch_floor
+                    .get(domain)
+                    .is_none_or(|previous| epoch >= previous),
                 "credential security epoch rewound"
             );
         }
@@ -274,7 +284,8 @@ impl Authority for SelectedAuthority {
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
         ensure!(
-            entries.current
+            entries
+                .current
                 .iter()
                 .any(|entry| &entry.binding == binding && entry.security_origin == origin),
             "credential shell not selected for family"
@@ -342,7 +353,10 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        Ok(Self::selected(&entries.current, binding, management, actor, subject, now)?.security_epoch)
+        Ok(
+            Self::selected(&entries.current, binding, management, actor, subject, now)?
+                .security_epoch,
+        )
     }
 
     fn human_keys(
