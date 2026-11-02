@@ -115,6 +115,16 @@ endpoint knowledge are compared, not just aggregate completion. These remain
 DATA and unqualified filesystem fixtures; initial preparation still precedes
 the generated history, and no native owner or P3 is constructed.
 
+The retained wrapper additionally selects bootstrap-purpose conversations through
+a separate closed entry. Initial/enrollment/serving cannot acquire that class,
+and ordinary Current retains its own limit. Endpoint-local checked Ready and
+Consumed expose the existing durable-work and release cuts without claiming a
+remote receipt from local send. Controlled packet loss mutates only an actually
+queued packet; it cannot manufacture a message or repeat a refused continuation.
+The storage lifecycle's independent reference follows these conversations too,
+including complete clocks/queues, while each world keeps its original observations.
+
+
 ## Failure evidence and replay
 
 Model or replay divergence writes typed, redacted evidence under

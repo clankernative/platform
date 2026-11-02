@@ -395,6 +395,18 @@ fn validate_after(
     Ok(())
 }
 
+#[cfg(test)]
+pub(in crate::security_epoch) fn validate_after_fixture(
+    action: Action,
+    selection: &EpochStore,
+    request: &Request,
+    core: &LogicalCore,
+    observed: &Snapshot,
+    slot: &control_slot_io::SlotObservation,
+) -> Result<()> {
+    validate_after(action, selection, request, core, observed, slot)
+}
+
 /// The original App file/peer stay owned through ALL six fixed native stages.
 /// A failure keeps this owner refused; progress DATA cannot reconstruct it.
 pub(crate) struct AppStorageBootstrap {

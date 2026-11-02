@@ -178,3 +178,43 @@ SQLite reopen cannot repair a refused continuation. Linux histories use the
 existing unqualified held-file fixture at the actual observation cuts. They do
 not qualify fsync, physical durability, enrolled peers, P3 or writer authority;
 exclusive creation and preparation still precede these generated histories.
+
+
+## Stepped bootstrap and Current completion
+
+Each complete bootstrap or ordinary Current event now drains the same explicit
+completion path used by paused histories. Bootstrap selects the closed
+StorageBootstrap purpose; ordinary Current keeps CurrentRole. A checked local
+Controller Ready send precedes its conditional mutation; App receipt remains a
+separate later observation. Only a successful mutation reaches the strong
+counter/slot post-read and the production `validate_after` decision before
+Known. A mutation error still receives its retained-original postcheck, keeps
+its actual primary error, and starts no additional provider read.
+
+Histories separately pause after checked Consumed before Released and after
+peer completion before final file validation. Final activation keeps its last
+initial-byte check before App release, then checks physical identity at final
+finish. A late file or provider refusal retains committed rows, consumed and
+peer-complete history while denying usable completion. Current's completion
+count advances only after its post-read and final file check. A pending
+completion also fences the actual shared consumer-readiness fixture before any
+provider call; later readiness after a successful finish does not reuse or
+unpoison a refused outer request original.
+
+The outer reference now independently drives every bootstrap and Current wire
+conversation. Complete worlds, queues, original observations and cumulative
+schedule state are compared after every event. Fixed/generated cuts cover all
+six bootstrap actions and ordinary Current, lost Known/Consumed/Released,
+applied-but-unacknowledged and rolled-back counter writes, pending operation
+exclusion, restoration/reopen, deadline equality and a positive small-work
+control. Only one target conversation is expanded per history, retaining the
+existing independent ordinary-event and wire-advance input caps.
+
+The provider fixture's controller-process-clock execution interval stays fixed
+at 100..105. Wire observations retain their distinct seed/endpoint/sequence
+domains and original purpose-bound intervals. Controlled work explicitly advances
+each domain; numeric samples are never translated into each other or used to
+renew a context. These are synthetic observations, not a physical clock-rate or
+native timing qualification. Linux uses the existing unqualified held-file
+fixture; its observations and DATA contexts do not construct native authority,
+P3, current-writer ownership or a real request original.
