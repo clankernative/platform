@@ -101,6 +101,15 @@ an earlier success cannot hide a newer failed producer. Common metadata and
 binary partitions must share their preparation origin, and every Linux receipt
 must match the exact prepared-output digest.
 
+Inventory reads require complete bounded pages with unique positive IDs. If a
+count and its entries disagree or the count changes between pages, the selector
+discards that entire snapshot and restarts from page one, at most three times.
+It never truncates extra entries or combines pages from different snapshots.
+Malformed identities, duplicates and budget overruns refuse immediately;
+persistent inconsistency also refuses. Diagnostics identify only the closed
+inventory endpoint and numeric run/attempt, without process arguments or
+environment values.
+
 `ci-artifact-selection.json` in the final verification receipt records the current
 consumer and each original producer attempt, job, check, artifact ID and digest.
 Earlier receipts retain their execution identity; a retry does not claim that
@@ -127,27 +136,6 @@ It cannot reserve GitHub capacity or guarantee that the second request succeeds.
 The existing exact-success queue-reuse guard remains conservative: a rescued
 run with a cancelled original Mac job does not qualify for main's receipt reuse,
 so main executes ordinary verification instead.
-
-### Rerunning sharded verification
-
-Use **Re-run all jobs** for a failed Platform CI verification run. From the CLI:
-
-```console
-gh run rerun RUN_ID --repo clankernative/platform
-```
-
-Failed-jobs-only (`--failed`) and individual-job retries are not supported for
-rerunning the sharded verification pipeline. Artifact names include the producing
-`github.run_attempt`, and consumers request their own attempt's artifacts. A
-retry can retain green producer jobs from an earlier attempt without producing
-the new Linux verifier, prepared outputs or shard receipts that consumers need.
-The final `verify` job then fails despite those earlier green results.
-
-For ordinary sharded verification, a full rerun executes the campaigns and
-produces a complete set of artifacts for one attempt. Keep earlier artifacts
-under their original identities.
-Admitted compilation caches can still speed the rerun; runtime outcomes remain
-fresh, and the complete verification receipt is required before handoff.
 
 ## Completed build outputs
 
