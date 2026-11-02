@@ -127,7 +127,7 @@ const CREDENTIAL_PEER_TABLES: &[&str] = &[
 /// This is a read-only absence check, never schema admission or permission.
 pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
     let mut statement = db.prepare(
-        "SELECT type,name FROM sqlite_master
+        "SELECT type,name FROM main.sqlite_master
          WHERE type IN ('table','view') AND lower(name) GLOB 'day2_credential_*'
          ORDER BY name",
     )?;
@@ -150,7 +150,7 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
             // A marker is the sole exempt metadata table, never a place to
             // hide retained private columns. Full schema/version admission
             // remains the owning installer's responsibility.
-            let mut columns = db.prepare("PRAGMA table_xinfo(day2_credential_schema_version)")?;
+            let mut columns = db.prepare("PRAGMA main.table_xinfo(day2_credential_schema_version)")?;
             let mut fields = columns.query([])?;
             let field = fields.next()?.context("credential restore marker missing")?;
             ensure!(
@@ -163,9 +163,9 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
             );
             ensure!(fields.next()?.is_none(), "security_restore_preflight_required");
             let strict: i64 = db.query_row(
-                "SELECT strict FROM pragma_table_list WHERE schema='main' AND name='day2_credential_schema_version'",
+                "PRAGMA main.table_list('day2_credential_schema_version')",
                 [],
-                |row| row.get(0),
+                |row| row.get(5),
             )?;
             ensure!(strict == 1, "security_restore_preflight_required");
             continue;
@@ -173,7 +173,7 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
         // The name is one of the owning schema's constant identifiers. Never
         // interpolate an imported identifier or read a private row's contents.
         let occupied: bool = db.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM {name})"),
+            &format!("SELECT EXISTS(SELECT 1 FROM main.{name})"),
             [],
             |row| row.get(0),
         )?;
@@ -2287,6 +2287,7 @@ mod tests {
             db.execute_batch(&format!("CREATE TABLE {table}(private BLOB) STRICT"))?;
             require_no_restore_state(&db)?;
             db.execute(&format!("INSERT INTO {table} VALUES(?1)"), [vec![23_u8; 32]])?;
+            db.execute_batch(&format!("CREATE TEMP TABLE {table}(private BLOB) STRICT"))?;
             assert!(require_no_restore_state(&db).is_err(), "{table}");
         }
         Ok(())
@@ -2299,6 +2300,9 @@ mod tests {
             "CREATE TABLE DAY2_CREDENTIAL_LINEAGES(value TEXT)",
             "CREATE VIEW day2_credential_lineages AS SELECT * FROM must_not_execute",
             "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY,private BLOB) STRICT",
+            "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY);
+             CREATE TABLE pragma_table_list(schema TEXT,name TEXT,strict INTEGER);
+             INSERT INTO pragma_table_list VALUES('main','day2_credential_schema_version',1)",
         ] {
             let db = Connection::open_in_memory()?;
             db.execute_batch(ddl)?;
