@@ -112,6 +112,208 @@ fn validate_linux_context(cgroup: &str, memory: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum StoragePhase {
+    Before,
+    After,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct StorageCapacity {
+    total_bytes: u64,
+    used_bytes: u64,
+    free_bytes: u64,
+    available_bytes: u64,
+    total_inodes: u64,
+    free_inodes: u64,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl StorageCapacity {
+    fn from_blocks(
+        size: u64,
+        blocks: u64,
+        free: u64,
+        available: u64,
+        inodes: u64,
+        free_inodes: u64,
+    ) -> Result<Self> {
+        ensure!(
+            size > 0 && free <= blocks && available <= free && free_inodes <= inodes,
+            "invalid filesystem capacity counters"
+        );
+        Ok(Self {
+            total_bytes: size
+                .checked_mul(blocks)
+                .context("filesystem capacity overflow")?,
+            used_bytes: size
+                .checked_mul(blocks - free)
+                .context("filesystem usage overflow")?,
+            free_bytes: size
+                .checked_mul(free)
+                .context("filesystem free space overflow")?,
+            available_bytes: size
+                .checked_mul(available)
+                .context("filesystem availability overflow")?,
+            total_inodes: inodes,
+            free_inodes,
+        })
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Default, serde::Serialize)]
+struct RecorderStorage {
+    scanned_entries: u64,
+    capture_directories: u64,
+    capture_files: u64,
+    logical_bytes: u64,
+    other_entries: u64,
+    complete: bool,
+}
+
+/// Count only the two fixed recorder levels. Never open captures, follow links,
+/// retain names, or recurse into an unexpected directory. A cap is explicit.
+#[cfg(any(test, target_os = "linux"))]
+fn recorder_storage(artifacts: &Path, limit: u64) -> Result<RecorderStorage> {
+    let mut result = RecorderStorage {
+        complete: true,
+        ..Default::default()
+    };
+    let recorder = artifacts.join("control-slot-replays");
+    match fs::symlink_metadata(&recorder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        metadata => ensure!(metadata?.is_dir(), "regular recorder directory required"),
+    }
+    'scan: for directory in fs::read_dir(recorder)? {
+        if result.scanned_entries == limit {
+            result.complete = false;
+            break;
+        }
+        result.scanned_entries += 1;
+        let directory = directory?;
+        if !directory.file_type()?.is_dir() {
+            result.other_entries += 1;
+            continue;
+        }
+        result.capture_directories += 1;
+        for file in fs::read_dir(directory.path())? {
+            if result.scanned_entries == limit {
+                result.complete = false;
+                break 'scan;
+            }
+            result.scanned_entries += 1;
+            let file = file?;
+            let metadata = fs::symlink_metadata(file.path())?;
+            if file.file_name() == "replay.json.gz" && metadata.is_file() {
+                result.capture_files += 1;
+                result.logical_bytes = result
+                    .logical_bytes
+                    .checked_add(metadata.len())
+                    .context("recorder byte count overflow")?;
+            } else {
+                result.other_entries += 1;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn artifact_storage(root: &Path) -> Result<serde_json::Value> {
+    let artifacts = root.join("artifacts");
+    ensure!(
+        fs::symlink_metadata(&artifacts)?.is_dir() && artifacts.canonicalize()? == artifacts,
+        "canonical owned artifacts directory required"
+    );
+    let directory = fs::File::open(&artifacts)?;
+    let stats = rustix::fs::fstatfs(&directory)?;
+    let capacity = StorageCapacity::from_blocks(
+        u64::try_from(stats.f_bsize)?,
+        stats.f_blocks,
+        stats.f_bfree,
+        stats.f_bavail,
+        stats.f_files,
+        stats.f_ffree,
+    )?;
+    Ok(
+        json!({"capacity":capacity,"recorder":recorder_storage(&artifacts, 100_000)?,
+        "cause_attribution":false,"peak_measurement":false}),
+    )
+}
+
+/// This existing per-job context lives outside artifacts' bounded tmpfs, so an
+/// ENOSPC test failure does not itself prevent retaining capacity observations.
+fn shard_storage(root: &Path, shard: &str, phase: StoragePhase) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        use std::io::Read;
+        let path = Path::new("/tmp/day2-ci-linux-context.json");
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 64 * 1024, "bounded hosted context required");
+        let mut context: serde_json::Value = serde_json::from_slice(&bytes)?;
+        ensure!(
+            context["workspace"].as_str() == root.canonicalize()?.to_str()
+                && context["run"].as_str() == Some(std::env::var("GITHUB_RUN_ID")?.as_str())
+                && context["attempt"].as_str()
+                    == Some(std::env::var("GITHUB_RUN_ATTEMPT")?.as_str()),
+            "current hosted storage context required"
+        );
+        let field = match phase {
+            StoragePhase::Before => {
+                ensure!(
+                    context.get("artifact_storage").is_none(),
+                    "duplicate storage campaign"
+                );
+                context["artifact_storage"] = json!({"shard":shard,"before":null,"after":null});
+                "before"
+            }
+            StoragePhase::After => {
+                ensure!(
+                    context["artifact_storage"]["shard"].as_str() == Some(shard)
+                        && context["artifact_storage"]["before"].is_object()
+                        && context["artifact_storage"]["after"].is_null(),
+                    "storage before/after campaign mismatch"
+                );
+                "after"
+            }
+        };
+        let sample = artifact_storage(root);
+        context["artifact_storage"][field] = match &sample {
+            Ok(value) => json!({"available":true,"observation":value}),
+            Err(_) => json!({"available":false,"cause_attribution":false}),
+        };
+        let temporary = Path::new("/tmp/day2-ci-linux-context.json.pending");
+        fs::write(temporary, serde_json::to_vec_pretty(&context)?)?;
+        fs::rename(temporary, path)?;
+        sample?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (root, shard, phase);
+    Ok(())
+}
+
+fn preserve_campaign_error<T>(campaign: Result<T>, diagnostics: Result<()>) -> Result<T> {
+    match campaign {
+        Err(error) => {
+            if diagnostics.is_err() {
+                eprintln!(
+                    "Storage observations also failed; preserving the primary campaign failure"
+                );
+            }
+            Err(error)
+        }
+        Ok(value) => {
+            diagnostics?;
+            Ok(value)
+        }
+    }
+}
+
 // Every full-gate campaign selects the same Bazel package/target graph. Only
 // libtest filters change, so campaigns share compiled dependencies.
 const WORKSPACE_TEST_PACKAGES: &[&str] = &[
@@ -331,15 +533,20 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             let budget = campaign.budget()?;
             let started = Instant::now();
             if request.action == "verify-prebuilt-tests" {
-                executed_binaries = shards::tests(
-                    root,
-                    prepared
-                        .as_ref()
-                        .context("prepared test binaries required")?,
-                    &campaign.suite,
-                    &fixtures,
-                    budget,
-                )?;
+                shard_storage(root, &campaign.suite, StoragePhase::Before)?;
+                let tests = (|| {
+                    shards::tests(
+                        root,
+                        prepared
+                            .as_ref()
+                            .context("prepared test binaries required")?,
+                        &campaign.suite,
+                        &fixtures,
+                        budget,
+                    )
+                })();
+                let observations = shard_storage(root, &campaign.suite, StoragePhase::After);
+                executed_binaries = preserve_campaign_error(tests, observations)?;
             } else {
                 tests(root, &campaign.suite, &fixtures, budget)?;
             }
@@ -1790,6 +1997,123 @@ fn required_steps(scope: &str) -> Result<&'static [&'static str]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_capacity_uses_checked_numeric_blocks_and_inodes() -> Result<()> {
+        assert_eq!(
+            StorageCapacity::from_blocks(4096, 10, 3, 2, 100, 50)?,
+            StorageCapacity {
+                total_bytes: 40960,
+                used_bytes: 28672,
+                free_bytes: 12288,
+                available_bytes: 8192,
+                total_inodes: 100,
+                free_inodes: 50,
+            }
+        );
+        for (size, blocks, free, available, inodes, free_inodes) in [
+            (0, 10, 3, 2, 100, 50),
+            (4096, 10, 11, 2, 100, 50),
+            (4096, 10, 3, 4, 100, 50),
+            (4096, 10, 3, 2, 100, 101),
+            (u64::MAX, 2, 1, 1, 1, 1),
+        ] {
+            assert!(
+                StorageCapacity::from_blocks(size, blocks, free, available, inodes, free_inodes)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorder_storage_is_two_levels_bounded_and_contains_no_capture_contents() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert!(recorder_storage(directory.path(), 100)?.complete);
+        let recorder = directory.path().join("control-slot-replays");
+        for name in ["first", "second"] {
+            fs::create_dir_all(recorder.join(name).join("unexpected"))?;
+            fs::write(
+                recorder.join(name).join("replay.json.gz"),
+                b"not opened or decoded",
+            )?;
+            fs::write(
+                recorder.join(name).join("unexpected/private"),
+                b"never visited",
+            )?;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(directory.path(), recorder.join("not-followed"))?;
+        let usage = recorder_storage(directory.path(), 100)?;
+        assert!(usage.complete);
+        assert_eq!(
+            (
+                usage.capture_directories,
+                usage.capture_files,
+                usage.logical_bytes
+            ),
+            (2, 2, 42)
+        );
+        assert_eq!(usage.other_entries, if cfg!(unix) { 3 } else { 2 });
+        let encoded = serde_json::to_string(&usage)?;
+        assert!(
+            !encoded.contains("first")
+                && !encoded.contains("private")
+                && !encoded.contains("not opened")
+        );
+        for limit in [0, 1, 2, 3] {
+            let partial = recorder_storage(directory.path(), limit)?;
+            assert!(!partial.complete);
+            assert_eq!(partial.scanned_entries, limit);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn storage_observation_failure_never_replaces_a_campaign_failure_or_passes_silently() {
+        let primary = || Err::<(), _>(anyhow::anyhow!("original test failure"));
+        assert_eq!(
+            preserve_campaign_error(primary(), Err(anyhow::anyhow!("storage failure")))
+                .unwrap_err()
+                .to_string(),
+            "original test failure"
+        );
+        assert_eq!(
+            preserve_campaign_error(primary(), Ok(()))
+                .unwrap_err()
+                .to_string(),
+            "original test failure"
+        );
+        assert!(preserve_campaign_error(Ok(()), Err(anyhow::anyhow!("storage failure"))).is_err());
+        assert!(preserve_campaign_error(Ok(()), Ok(())).is_ok());
+    }
+
+    #[test]
+    fn hosted_shard_context_is_retained_after_tests_with_exact_compressed_capture_allowlist() {
+        let shards = ci_job("verify-shards");
+        assert!(
+            shards.find("id: verify_shard").unwrap()
+                < shards
+                    .find("name: Retain current native Linux shard context")
+                    .unwrap()
+        );
+        let context = ci_step(&shards, "Retain current native Linux shard context");
+        assert!(context.contains("always() && steps.linux_context.outcome == 'success'"));
+        assert!(
+            context.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+        );
+        assert!(context.contains("name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}"));
+        assert!(context.contains("path: /tmp/day2-ci-linux-context.json"));
+        assert!(
+            context.contains("if-no-files-found: error") && context.contains("retention-days: 14")
+        );
+        let replays = ci_step(&shards, "Retain redacted DST counterexamples for replay");
+        assert!(replays.contains(
+            "failure() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation')"
+        ));
+        assert!(replays.contains("            artifacts/control-slot-replays/*/replay.json.gz\n"));
+        assert!(!replays.contains("artifacts/control-slot-replays/**"));
+    }
 
     #[test]
     fn ui_dependency_pin_changes_native_host_snapshots_and_missing_pin_is_refused() -> Result<()> {

@@ -888,14 +888,6 @@ jobs:
       - name: Establish the mandatory bounded native Linux compiler context
         id: linux_context
         run: build-out/bin/xtask verify-linux-context
-      - name: Retain current native Linux shard context
-        if: ${{ always() && steps.linux_context.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/day2-ci-linux-context.json
-          if-no-files-found: error
-          retention-days: 14
       - name: Download common admitted fixtures and metadata
         id: artifact_download_2
         timeout-minutes: 2
@@ -979,6 +971,14 @@ jobs:
       - run: build-out/bin/xtask configure-tofu
       - run: build-out/bin/xtask verify-shard ${{ matrix.shard }}
         id: verify_shard
+      - name: Retain current native Linux shard context
+        if: ${{ always() && steps.linux_context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: day2-linux-context-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/day2-ci-linux-context.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Publish fresh DST campaigns, seeds and observed transitions
         if: ${{ always() && (matrix.shard == 'workspace-day2' || matrix.shard == 'simulation') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -999,6 +999,7 @@ jobs:
           path: |
             artifacts/oauth-simulation/*.json
             artifacts/credential-simulation/failure-*.json
+            artifacts/control-slot-replays/*/replay.json.gz
             artifacts/native-handshake-simulation/*.json
             artifacts/control-simulation/run-*/campaign/counterexamples/**/*.json
             artifacts/control-simulation/run-*/campaign/*.program.json
