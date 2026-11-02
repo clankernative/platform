@@ -75,9 +75,11 @@ Directories are private temporary directories and files are created with mode
 it fails.
 
 Each complete record uses the existing four-MiB evidence decoder limit; the
-whole archive and its reference-expanded observations are bounded to 64 MiB.
-Histories retain the existing 64-step limit. Whole identical records may share
-one file, but no observation is truncated. The manifest binds every record's
+whole archive is bounded to 64 MiB. Histories retain the existing 64-step limit.
+Whole identical records share one parsed value through bounded, borrowed record
+references; replay does not expand those references into copied value trees.
+Every complete original and reduced observation is still compared, without
+truncation. The manifest binds every record's
 length and digest and is written only after its referenced files are synced and
 closed. This is not a directory-fsync or power-loss durability claim. Reduction
 retains the actual last winning observation, including an intermittent failure

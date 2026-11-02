@@ -1229,43 +1229,66 @@ fn store_pair(pair: &ReplayPair, chunks: &mut Vec<Vec<u8>>) -> Result<SavedPair>
     })
 }
 
-fn load_outcome(
+// Borrow each already bounded parsed chunk. Repeated wire references must not
+// create repeated Value trees or require a larger archive budget.
+#[derive(PartialEq)]
+struct LoadedOutcome<'a> {
+    failure: Option<(FailureKind, Option<usize>)>,
+    records: Vec<&'a Value>,
+}
+
+impl LoadedOutcome<'_> {
+    fn matches(&self, actual: &Outcome) -> bool {
+        let failure = match actual {
+            Outcome::Passed(_) => None,
+            Outcome::Failed { kind, index, .. } => Some((*kind, *index)),
+        };
+        self.failure == failure && self.records.len() == actual.records().len()
+            && self.records.iter().zip(actual.records()).all(|(saved, actual)| *saved == actual)
+    }
+}
+
+struct LoadedPair<'a> { first: LoadedOutcome<'a>, second: LoadedOutcome<'a> }
+
+impl LoadedPair<'_> {
+    fn fully_observed(&self) -> bool {
+        [&self.first, &self.second].iter().all(|outcome|
+            !matches!(outcome.failure, Some((FailureKind::Unobserved, _))))
+    }
+
+    fn failure(&self) -> Option<FailureKind> {
+        if self.first != self.second { return Some(FailureKind::Replay); }
+        self.first.failure.map(|(kind, _)| kind)
+    }
+
+    fn matches(&self, actual: &ReplayPair) -> bool {
+        self.first.matches(&actual.first) && self.second.matches(&actual.second)
+    }
+}
+
+fn load_outcome<'a>(
     outcome: &SavedOutcome,
-    chunks: &[Value],
+    chunks: &'a [Value],
     used: &mut BTreeSet<usize>,
-) -> Result<Outcome> {
+) -> Result<LoadedOutcome<'a>> {
     let references = match outcome {
         SavedOutcome::Passed { records } | SavedOutcome::Failed { records, .. } => records,
     };
-    ensure!(
-        references.len() <= MAX_STEPS + 1,
-        "consumer record count bound"
-    );
+    ensure!(references.len() <= MAX_STEPS + 1, "consumer record count bound");
     let mut records = Vec::new();
     for &index in references {
-        records.push(
-            chunks
-                .get(index)
-                .context("consumer record missing")?
-                .clone(),
-        );
+        records.push(chunks.get(index).context("consumer record missing")?);
         used.insert(index);
     }
-    Ok(match outcome {
-        SavedOutcome::Passed { .. } => Outcome::Passed(records),
-        SavedOutcome::Failed { kind, index, .. } => Outcome::Failed {
-            kind: *kind,
-            index: *index,
-            records,
-        },
-    })
+    let failure = match outcome {
+        SavedOutcome::Passed { .. } => None,
+        SavedOutcome::Failed { kind, index, .. } => Some((*kind, *index)),
+    };
+    Ok(LoadedOutcome { failure, records })
 }
 
-fn load_pair(pair: &SavedPair, chunks: &[Value], used: &mut BTreeSet<usize>) -> Result<ReplayPair> {
-    Ok(ReplayPair {
-        first: load_outcome(&pair.first, chunks, used)?,
-        second: load_outcome(&pair.second, chunks, used)?,
-    })
+fn load_pair<'a>(pair: &SavedPair, chunks: &'a [Value], used: &mut BTreeSet<usize>) -> Result<LoadedPair<'a>> {
+    Ok(LoadedPair { first: load_outcome(&pair.first, chunks, used)?, second: load_outcome(&pair.second, chunks, used)? })
 }
 
 fn retain_at(
@@ -1481,9 +1504,8 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Bundle> {
                 .context("consumer archive size overflow")
         })?;
     ensure!(total as u64 <= MAX_BYTES, "consumer archive byte bound");
-    // Hash-pool sharing is lossless, but repeated references must not amplify a
-    // small physical archive into an unchecked giant in-memory observation.
-    let mut expanded = bytes.len();
+    // Counts and indices are bounded before allocating borrowed references.
+    // Each unique Value is decoded only once from the bounded archive.
     for outcome in [
         &bundle.original_observation.first,
         &bundle.original_observation.second,
@@ -1498,17 +1520,7 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Bundle> {
             "consumer record count bound"
         );
         for &index in records {
-            let record = bundle
-                .records
-                .get(index)
-                .context("consumer record missing")?;
-            expanded = expanded
-                .checked_add(record.bytes)
-                .context("consumer expanded size overflow")?;
-            ensure!(
-                expanded as u64 <= MAX_BYTES,
-                "consumer expanded observation byte bound"
-            );
+            bundle.records.get(index).context("consumer record missing")?;
         }
     }
     Ok(bundle)
@@ -1585,11 +1597,11 @@ fn replay_file_inner(path: &std::path::Path) -> Result<()> {
     );
     // Validate the complete original as well as the deletion-only reduction.
     ensure!(
-        replay_pair(&bundle.original, bundle.oracle_control) == original,
+        original.matches(&replay_pair(&bundle.original, bundle.oracle_control)),
         "consumer original observation changed"
     );
     ensure!(
-        replay_pair(&bundle.reduced, bundle.oracle_control) == reduced,
+        reduced.matches(&replay_pair(&bundle.reduced, bundle.oracle_control)),
         "consumer reduced observation changed"
     );
     Ok(())
@@ -2143,11 +2155,11 @@ fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning
         }
         let mut used = BTreeSet::new();
         ensure!(
-            load_pair(&bundle.original_observation, &chunks, &mut used)? == original,
+            load_pair(&bundle.original_observation, &chunks, &mut used)?.matches(&original),
             "original captured pair was lost"
         );
         ensure!(
-            load_pair(&bundle.reduced_observation, &chunks, &mut used)? == original,
+            load_pair(&bundle.reduced_observation, &chunks, &mut used)?.matches(&original),
             "last winning pair was lost"
         );
         ensure!(
@@ -2159,7 +2171,7 @@ fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning
 }
 
 #[test]
-fn replay_with_any_unobserved_outcome_cannot_qualify_or_expand_without_bound() -> Result<()> {
+fn replay_unknown_causes_refuse_and_repeated_records_borrow_one_bounded_value() -> Result<()> {
     let program = Program {
         version: 1,
         seed: 97,
@@ -2196,20 +2208,33 @@ fn replay_with_any_unobserved_outcome_cannot_qualify_or_expand_without_bound() -
         "unknown guard did not inspect actual outcomes"
     );
     let mut bundle = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
-    bundle.records = vec![RecordRef {
-        digest: Digest::new(b"bounded alias"),
-        bytes: MAX_RECORD_BYTES,
-    }];
-    bundle.original_observation.first = SavedOutcome::Passed {
-        records: vec![0; MAX_STEPS],
-    };
-    let error = decode_descriptor(&serde_json::to_vec(&bundle)?)
-        .err()
-        .context("reference amplification accepted")?;
-    ensure!(
-        error.to_string() == "consumer expanded observation byte bound",
-        "alias control missed actual expansion guard"
-    );
+    let chunks = vec![json!({"complete": "x".repeat(1_048_576)})];
+    let bytes = serde_json::to_vec(&chunks[0])?;
+    bundle.records = vec![RecordRef { digest: Digest::new(&bytes), bytes: bytes.len() }];
+    let repeated = SavedOutcome::Failed { kind: FailureKind::State, index: Some(MAX_STEPS - 1), records: vec![0; MAX_STEPS] };
+    bundle.original_observation = SavedPair { first: repeated.clone(), second: repeated.clone() };
+    bundle.reduced_observation = SavedPair { first: repeated.clone(), second: repeated };
+    bundle.category = FailureKind::State;
+    let decoded = decode_descriptor(&serde_json::to_vec(&bundle)?)?;
+    let mut used = BTreeSet::new();
+    let original = load_pair(&decoded.original_observation, &chunks, &mut used)?;
+    let reduced = load_pair(&decoded.reduced_observation, &chunks, &mut used)?;
+    for outcome in [&original.first, &original.second, &reduced.first, &reduced.second] {
+        ensure!(outcome.records.len() == MAX_STEPS && outcome.records.iter().all(|record| std::ptr::eq(*record, &chunks[0])), "repeated record allocated a replacement Value");
+    }
+    ensure!(used == BTreeSet::from([0]) && original.failure() == Some(FailureKind::State), "shared record changed content or metadata");
+    for (outcome, expected) in [
+        (SavedOutcome::Passed { records: vec![0; MAX_STEPS + 2] }, "consumer record count bound"),
+        (SavedOutcome::Passed { records: vec![1] }, "consumer record missing"),
+    ] {
+        bundle.original_observation.first = outcome;
+        let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("invalid references accepted")?;
+        ensure!(error.to_string() == expected, "reference refusal missed actual bound");
+    }
+    bundle.records = vec![RecordRef { digest: Digest::new(b"bounded physical part"), bytes: MAX_RECORD_BYTES }; 16];
+    let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("physical archive overflow accepted")?;
+    ensure!(error.to_string() == "consumer archive byte bound", "physical archive bound changed");
+
     Ok(())
 }
 
@@ -2251,7 +2276,7 @@ fn unobserved_consumer_failure_never_reduces_to_invalid_empty_input() -> Result<
             );
             let mut used = BTreeSet::new();
             ensure!(
-                load_pair(&descriptor.reduced_observation, &[], &mut used)? == pair,
+                load_pair(&descriptor.reduced_observation, &[], &mut used)?.matches(&pair),
                 "unknown outcomes changed"
             );
             ensure!(replay_file(&path).is_err(), "unobserved cause qualified");
