@@ -29,5 +29,6 @@ platform_rust_test(
 exports_files([
     "Cargo.toml",
     "src/lib.rs",
-    "src/oauth.rs"
+    "src/oauth.rs",
+    "src/security_epoch.rs"
 ])

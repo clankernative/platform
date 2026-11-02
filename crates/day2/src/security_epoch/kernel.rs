@@ -7,6 +7,8 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize};
 
+pub(super) mod advance;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
@@ -251,6 +253,30 @@ pub(super) struct Completion {
 pub(super) enum Phase {
     PendingFirstHolder,
     ActiveFirstHolder { completion: Box<Completion> },
+    Fenced { fence: Box<advance::Fence> },
+}
+
+/// Preserve the original typed map: Value would erase duplicate nested keys.
+struct PhaseObject<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PhaseObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a typed external epoch phase object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+        deserializer
+            .deserialize_map(ObjectVisitor(std::marker::PhantomData))
+            .map(Self)
+    }
 }
 
 impl<'de> Deserialize<'de> for Phase {
@@ -272,6 +298,7 @@ impl<'de> Deserialize<'de> for Phase {
                 use serde::de::Error;
                 let mut phase = None;
                 let mut completion = None;
+                let mut fence = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "phase" => {
@@ -284,18 +311,28 @@ impl<'de> Deserialize<'de> for Phase {
                             if completion.is_some() {
                                 return Err(A::Error::duplicate_field("completion"));
                             }
-                            completion = Some(map.next_value::<serde_json::Value>()?);
+                            completion = Some(map.next_value::<PhaseObject<Box<Completion>>>()?.0);
                         }
-                        _ => return Err(A::Error::unknown_field(&key, &["phase", "completion"])),
+                        "fence" => {
+                            if fence.is_some() {
+                                return Err(A::Error::duplicate_field("fence"));
+                            }
+                            fence = Some(map.next_value::<PhaseObject<Box<advance::Fence>>>()?.0);
+                        }
+                        _ => {
+                            return Err(A::Error::unknown_field(
+                                &key,
+                                &["phase", "completion", "fence"],
+                            ));
+                        }
                     }
                 }
-                match (phase.as_deref(), completion) {
-                    (Some("pending_first_holder"), None) => Ok(Phase::PendingFirstHolder),
-                    (Some("active_first_holder"), Some(value)) if value.is_object() => {
-                        Ok(Phase::ActiveFirstHolder {
-                            completion: serde_json::from_value(value).map_err(A::Error::custom)?,
-                        })
+                match (phase.as_deref(), completion, fence) {
+                    (Some("pending_first_holder"), None, None) => Ok(Phase::PendingFirstHolder),
+                    (Some("active_first_holder"), Some(completion), None) => {
+                        Ok(Phase::ActiveFirstHolder { completion })
                     }
+                    (Some("fenced"), None, Some(fence)) => Ok(Phase::Fenced { fence }),
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }
             }
@@ -471,6 +508,7 @@ pub(super) fn reconcile(
             );
             receipt.request.clone()
         }
+        Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
     };
     let (expected_root, expected_sentinel) = state_request.records()?;
     ensure!(
@@ -496,6 +534,7 @@ pub(super) fn reconcile(
                 );
                 Ok(Outcome::Applied(Box::new(request.receipt()?)))
             }
+            Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
         },
     }
 }
