@@ -1010,7 +1010,9 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             || program.events.iter().all(|event| !matches!(
                 event,
                 Event::Bootstrap {
-                    fault: Fault::FileTamperAfter | Fault::FileReplaceAfter | Fault::FileShortenAfter,
+                    fault: Fault::FileTamperAfter
+                        | Fault::FileReplaceAfter
+                        | Fault::FileShortenAfter,
                     ..
                 }
             )),
@@ -1755,28 +1757,54 @@ fn generated_post_write_file_refusals_preserve_commits_without_resend() -> Resul
         let baseline: Program = serde_json::from_slice(&serde_json::to_vec(&baseline)?)?;
         let successful_records = check(&baseline)?;
         for (index, event) in baseline.events.iter().enumerate() {
-            let Event::Bootstrap { stage, operation, .. } = *event else {
+            let Event::Bootstrap {
+                stage, operation, ..
+            } = *event
+            else {
                 continue;
             };
-            for fault in [Fault::FileTamperAfter, Fault::FileReplaceAfter, Fault::FileShortenAfter] {
+            for fault in [
+                Fault::FileTamperAfter,
+                Fault::FileReplaceAfter,
+                Fault::FileShortenAfter,
+            ] {
                 let mut program = baseline.clone();
                 program.events.truncate(index);
-                program.events.push(Event::Bootstrap { stage, operation, fault });
+                program.events.push(Event::Bootstrap {
+                    stage,
+                    operation,
+                    fault,
+                });
                 program.events.extend([
                     Event::Observe { stage },
-                    Event::File { change: FileChange::Restore },
+                    Event::File {
+                        change: FileChange::Restore,
+                    },
                     Event::Reopen,
                     Event::RestoreClock,
-                    Event::Bootstrap { stage, operation, fault: Fault::None },
-                    Event::Current { death_cut: None, rewrite_provider: false },
+                    Event::Bootstrap {
+                        stage,
+                        operation,
+                        fault: Fault::None,
+                    },
+                    Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    },
                 ]);
                 // The new cut itself must survive the same serialized input
                 // and twice-replay path as a retained divergence bundle.
                 let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
                 let records = check(&program)?;
                 let expected = &successful_records[index].state;
-                ensure!(successful_records[index].accepted, "reference write did not complete");
-                ensure!(!records[index].accepted, "post-write file failure was accepted");
+                ensure!(
+                    successful_records[index].accepted,
+                    "reference write did not complete"
+                );
+                ensure!(
+                    !records[index].accepted,
+                    "post-write file failure was accepted"
+                );
                 for record in &records[index..] {
                     ensure!(
                         !record.state.continuation
@@ -1795,7 +1823,10 @@ fn generated_post_write_file_refusals_preserve_commits_without_resend() -> Resul
             }
         }
     }
-    ensure!(coverage.len() == 18, "post-write file cut coverage incomplete");
+    ensure!(
+        coverage.len() == 18,
+        "post-write file cut coverage incomplete"
+    );
     Ok(())
 }
 
@@ -1803,13 +1834,26 @@ fn generated_post_write_file_refusals_preserve_commits_without_resend() -> Resul
 fn post_write_file_faults_require_an_actual_original_image_before_execution() -> Result<()> {
     let baseline = successful(0);
     for (index, event) in baseline.events.iter().enumerate() {
-        let Event::Bootstrap { stage, operation, .. } = *event else {
+        let Event::Bootstrap {
+            stage, operation, ..
+        } = *event
+        else {
             continue;
         };
-        for fault in [Fault::FileTamperAfter, Fault::FileReplaceAfter, Fault::FileShortenAfter] {
+        for fault in [
+            Fault::FileTamperAfter,
+            Fault::FileReplaceAfter,
+            Fault::FileShortenAfter,
+        ] {
             let mut program = baseline.clone();
-            program.events[index] = Event::Bootstrap { stage, operation, fault };
-            let error = run(&program).err().context("physical fault admitted without an image")?;
+            program.events[index] = Event::Bootstrap {
+                stage,
+                operation,
+                fault,
+            };
+            let error = run(&program)
+                .err()
+                .context("physical fault admitted without an image")?;
             ensure!(
                 error.to_string() == "lifecycle physical fault requires original image",
                 "physical fault was not refused at input admission"

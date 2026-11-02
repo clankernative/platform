@@ -425,16 +425,24 @@ impl Model {
                                 _ => fault,
                             };
                             let completed = self.bootstrap(stage, operation, counter_fault);
-                            if completed && matches!(
-                                fault,
-                                Fault::FileTamperAfter
-                                    | Fault::FileReplaceAfter
-                                    | Fault::FileShortenAfter
-                            ) {
-                                let file = self.state.file.as_mut().context("physical fixture required")?;
+                            if completed
+                                && matches!(
+                                    fault,
+                                    Fault::FileTamperAfter
+                                        | Fault::FileReplaceAfter
+                                        | Fault::FileShortenAfter
+                                )
+                            {
+                                let file = self
+                                    .state
+                                    .file
+                                    .as_mut()
+                                    .context("physical fixture required")?;
                                 match fault {
                                     Fault::FileReplaceAfter => file.named_original = false,
-                                    Fault::FileTamperAfter | Fault::FileShortenAfter => file.image_exact = false,
+                                    Fault::FileTamperAfter | Fault::FileShortenAfter => {
+                                        file.image_exact = false
+                                    }
                                     _ => unreachable!(),
                                 }
                                 self.file_refused = true;
@@ -442,7 +450,7 @@ impl Model {
                             } else {
                                 completed
                             }
-                        },
+                        }
                         Event::Current {
                             death_cut,
                             rewrite_provider,
