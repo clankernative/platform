@@ -494,17 +494,24 @@ pub(super) fn validate_restored_intent(
         anyhow::bail!("invalid restored credential lineage reference")
     };
     match intent {
-        Intent::Issue { label, .. } => ensure!(
-            !label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
-            "invalid restored credential label"
-        ),
+        Intent::Issue { label, grant } => {
+            ensure!(!label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
+                "invalid restored credential label");
+            if let super::lifecycle::IssueGrant::Selected {selection}=grant {
+                super::lifecycle::validate_selection(selection)?;
+            }
+        },
         Intent::Rotate {
             lineage,
             head,
             revision,
-            ..
+            grant,
         } => {
             reference(lineage)?;
+            if let super::lifecycle::RotateGrant::Narrow(selection)=grant {
+                super::lifecycle::validate_selection(selection)?;
+            }
+
             validate_id(head)?;
             ensure!(
                 *revision > 0 && *revision <= i64::MAX as u64,

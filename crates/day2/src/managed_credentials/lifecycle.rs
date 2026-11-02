@@ -78,6 +78,7 @@ impl RotateGrant {
         match (self,&family.grant) {
             (Self::Fixed,GrantMode::Fixed) | (Self::KeepExisting,GrantMode::Selectable) => Ok(RotationGrant::KeepExisting),
             (Self::Narrow(selection),GrantMode::Selectable) => {
+                validate_selection(selection)?;
                 family.issuance_roots(IssuanceGrant::Selected(selection))?;
                 Ok(RotationGrant::Narrow(selection))
             }
@@ -93,6 +94,14 @@ impl RotateGrant {
 pub(crate) struct RotationPreview {
     pub digest: Digest,
     pub roots: Vec<String>,
+}
+
+pub(super) fn validate_selection(selection:&GrantSelection) -> Result<()> {
+    ensure!((1..=64).contains(&selection.roots().len())
+        && selection.roots().windows(2).all(|pair|pair[0]<pair[1]),
+        "credential selection root budget or order");
+    for root in selection.roots() {store::validate_id(root)?;}
+    Ok(())
 }
 
 pub(super) fn validate_preview(intent:&Intent, preview:&Option<RotationPreview>) -> Result<()> {

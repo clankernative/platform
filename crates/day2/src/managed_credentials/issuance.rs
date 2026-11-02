@@ -252,18 +252,13 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
             grant: lifecycle::IssueGrant::Selected { selection },
             ..
         } => {
-            ensure!(
-                (1..=64).contains(&selection.roots().len())
-                    && selection.roots().iter().all(|root| root.len() <= 160),
-                "credential selection structure budget"
-            );
+            lifecycle::validate_selection(selection)?;
             8 + selection.roots().len()
         }
         Intent::Rotate {grant,..} => match grant {
             lifecycle::RotateGrant::Fixed | lifecycle::RotateGrant::KeepExisting => 8,
             lifecycle::RotateGrant::Narrow(selection) => {
-                ensure!((1..=64).contains(&selection.roots().len())
-                    && selection.roots().iter().all(|root|root.len()<=160),"credential rotation selection structure budget");
+                lifecycle::validate_selection(selection)?;
                 11 + selection.roots().len()
             }
         },
