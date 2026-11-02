@@ -5,7 +5,7 @@
 
 use crate::{
     BindingRef, Digest, Name,
-    oauth::{OperationAuthorityContract, ResourceAudienceRef, SecurityOriginRef},
+    oauth::{GrantCeiling, OperationAuthorityContract, ResourceAudienceRef, SecurityOriginRef},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -191,6 +191,13 @@ pub enum IssuanceGrant<'a> {
     Selected(&'a GrantSelection),
 }
 
+/// A successor preserves or narrows the actual predecessor, never today's
+/// complete family. This is portable intent DATA, not current permission.
+pub enum RotationGrant<'a> {
+    KeepExisting,
+    Narrow(&'a GrantSelection),
+}
+
 impl ManifestFamily {
     /// Resolve only admitted canonical contracts, preserving every selected
     /// root's complete child/path authority. No member is dropped or widened.
@@ -237,6 +244,49 @@ impl ManifestFamily {
             }
             _ => anyhow::bail!("credential grant mode mismatch"),
         }
+    }
+
+    /// Preserve the predecessor's subject, audience and authority binding while
+    /// resolving an exact subset of its admitted canonical roots. The caller
+    /// still owns current policy, epochs, deadlines and the predecessor CAS.
+    pub fn rotation_ceiling(
+        &self,
+        predecessor: &GrantCeiling,
+        request: RotationGrant<'_>,
+    ) -> Result<GrantCeiling> {
+        self.verify()?;
+        ensure!(
+            matches!(self.profile, ManagedProfile::Client | ManagedProfile::Personal),
+            "unsupported credential rotation profile"
+        );
+        ensure!(
+            !predecessor.roots.is_empty() && predecessor.roots.len() <= 64,
+            "credential predecessor root budget"
+        );
+        predecessor.verify()?;
+        for (name, root) in &predecessor.roots {
+            ensure!(
+                self.roots.get(name) == Some(root),
+                "credential predecessor grant no longer admitted"
+            );
+        }
+        let roots = match request {
+            RotationGrant::KeepExisting => predecessor.roots.clone(),
+            RotationGrant::Narrow(selection) => {
+                let roots = self.issuance_roots(IssuanceGrant::Selected(selection))?;
+                ensure!(
+                    roots.iter().all(|(name, root)| predecessor.roots.get(name) == Some(root)),
+                    "credential rotation cannot widen predecessor grant"
+                );
+                roots
+            }
+        };
+        GrantCeiling::derive(
+            predecessor.client.clone(),
+            predecessor.subject.clone(),
+            predecessor.audience.clone(),
+            roots,
+        )
     }
 
     pub fn derive(
@@ -884,6 +934,132 @@ mod tests {
                 }))
                 .is_err()
         );
+        Ok(())
+    }
+
+    fn rotation_predecessor(roots: BTreeMap<String, OperationAuthorityContract>) -> Result<GrantCeiling> {
+        GrantCeiling::derive(
+            pin("approved-client-authority"),
+            "accounts.google.com:fixed-subject".into(),
+            ResourceAudienceRef(pin("transcriber-api")),
+            roots,
+        )
+    }
+
+    #[test]
+    fn rotation_keeps_or_narrows_each_predecessor_without_recovering_removed_roots() -> Result<()> {
+        for profile in [ManagedProfile::Client, ManagedProfile::Personal] {
+            let mut definition = declaration("local-keys", "keys", 1);
+            definition.profile = profile;
+            definition.grant = GrantMode::Selectable;
+            let mut catalog = catalog();
+            let child = root("NestedOperation", true).authority.closure;
+            let parent = &mut catalog.get_mut("SubmitTranscription").unwrap().authority;
+            let mut closure = parent.closure.clone();
+            closure.children.insert("nested-path".into(), child);
+            *parent = OperationAuthorityContract::derive(
+                parent.operation.clone(), parent.version, parent.operation_contract.clone(),
+                parent.kind.clone(), closure,
+            )?;
+            let family = ManifestFamily::derive(definition, &catalog)?;
+            let names = ["GetTranscription", "SubmitTranscription"];
+            for prior_bits in 1..4 {
+                let prior_roots = names.iter().enumerate()
+                    .filter(|(index, _)| prior_bits & (1 << index) != 0)
+                    .map(|(_, name)| ((*name).to_owned(), catalog[*name].authority.clone()))
+                    .collect();
+                let predecessor = rotation_predecessor(prior_roots)?;
+                let original = predecessor.clone();
+                assert_eq!(family.rotation_ceiling(&predecessor, RotationGrant::KeepExisting)?, predecessor);
+                for next_bits in 1..4 {
+                    let selected_names = names.iter().enumerate()
+                        .filter(|(index, _)| next_bits & (1 << index) != 0)
+                        .map(|(_, name)| (*name).to_owned()).collect();
+                    let selection = GrantSelection::new(&family, selected_names)?;
+                    let result = family.rotation_ceiling(&predecessor, RotationGrant::Narrow(&selection));
+                    if next_bits & !prior_bits != 0 {
+                        assert!(result.is_err());
+                        continue;
+                    }
+                    let next = result?;
+                    let expected = names.iter().enumerate()
+                        .filter(|(index, _)| next_bits & (1 << index) != 0)
+                        .map(|(_, name)| ((*name).to_owned(), catalog[*name].authority.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    assert_eq!(next.roots, expected);
+                    assert_eq!((&next.client, &next.subject, &next.audience),
+                        (&original.client, &original.subject, &original.audience));
+                    next.verify()?;
+                    assert_eq!(family.rotation_ceiling(&next, RotationGrant::KeepExisting)?, next);
+                    let original_selection = GrantSelection::new(&family, original.roots.keys().cloned().collect())?;
+                    if next_bits != prior_bits {
+                        assert!(family.rotation_ceiling(&next, RotationGrant::Narrow(&original_selection)).is_err());
+                    }
+                }
+                assert_eq!(predecessor, original);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_refuses_changed_predecessors_and_foreign_or_noncanonical_selections() -> Result<()> {
+        let family = selectable(ManagedProfile::Client);
+        let predecessor = rotation_predecessor(family.roots.clone())?;
+        let selected = GrantSelection::new(&family, vec!["GetTranscription".into()])?;
+        let mut corrupt = predecessor.clone();
+        corrupt.digest = Digest::of(&"different grant")?;
+        assert!(family.rotation_ceiling(&corrupt, RotationGrant::KeepExisting).is_err());
+        corrupt = predecessor.clone();
+        corrupt.roots.clear();
+        assert!(family.rotation_ceiling(&corrupt, RotationGrant::KeepExisting).is_err());
+        let changed = rotation_predecessor(BTreeMap::from([
+            ("GetTranscription".into(), root("GetTranscription", true).authority),
+        ]))?;
+        changed.verify()?;
+        assert!(family.rotation_ceiling(&changed, RotationGrant::KeepExisting).is_err());
+        assert!(family.rotation_ceiling(&changed, RotationGrant::Narrow(&selected)).is_err());
+        for roots in [vec![], vec!["GetTranscription", "GetTranscription"],
+            vec!["UnknownOperation"], vec!["SubmitTranscription", "GetTranscription"]] {
+            let decoded: GrantSelection = serde_json::from_value(serde_json::json!({
+                "family_contract":family.contract, "roots":roots,
+            }))?;
+            assert!(family.rotation_ceiling(&predecessor, RotationGrant::Narrow(&decoded)).is_err());
+        }
+        let personal = selectable(ManagedProfile::Personal);
+        let foreign = GrantSelection::new(&personal, vec!["GetTranscription".into()])?;
+        assert!(family.rotation_ceiling(&predecessor, RotationGrant::Narrow(&foreign)).is_err());
+        let mut definition = declaration("local-keys", "keys", 1);
+        definition.grant = GrantMode::Selectable;
+        definition.roots = vec!["GetTranscription".into()];
+        let reduced = ManifestFamily::derive(definition, &catalog())?;
+        let narrower = GrantSelection::new(&reduced, vec!["GetTranscription".into()])?;
+        assert!(reduced.rotation_ceiling(&predecessor, RotationGrant::KeepExisting).is_err());
+        assert!(reduced.rotation_ceiling(&predecessor, RotationGrant::Narrow(&narrower)).is_err());
+        assert!(reduced.rotation_ceiling(&rotation_predecessor(reduced.roots.clone())?, RotationGrant::Narrow(&selected)).is_err());
+        let oversized = rotation_predecessor((0..65).map(|index| {
+            let name = format!("Root{index}");
+            (name.clone(), root(&name, false).authority)
+        }).collect())?;
+        assert!(family.rotation_ceiling(&oversized, RotationGrant::KeepExisting).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_rotation_has_no_selection_and_resource_rotation_remains_unavailable() -> Result<()> {
+        let fixed = ManifestFamily::derive(declaration("local-keys", "keys", 1), &catalog())?;
+        let predecessor = rotation_predecessor(fixed.roots.clone())?;
+        assert_eq!(fixed.rotation_ceiling(&predecessor, RotationGrant::KeepExisting)?, predecessor);
+        let selected = GrantSelection::new(&selectable(ManagedProfile::Client), vec!["GetTranscription".into()])?;
+        assert!(fixed.rotation_ceiling(&predecessor, RotationGrant::Narrow(&selected)).is_err());
+        let mut definition = declaration("resource-keys", "keys", 1);
+        definition.profile = ManagedProfile::ResourceClient { model: name("Repository") };
+        let mut catalog = catalog();
+        for root in catalog.values_mut() {
+            root.single_resource_model = Some(name("Repository"));
+        }
+        let resource = ManifestFamily::derive(definition, &catalog)?;
+        assert!(resource.rotation_ceiling(&predecessor, RotationGrant::KeepExisting).is_err());
         Ok(())
     }
 

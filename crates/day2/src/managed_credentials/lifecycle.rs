@@ -9,7 +9,7 @@ use day2_capabilities::{
     Digest,
     credentials::{
         GrantSelection, IssuanceGrant, LineageRef, ManagedProfile, ManagementPredicate,
-        ManagementSnapshot, ManagementState, ManifestFamily, RotationProfile, VersionRef,
+        ManagementSnapshot, ManagementState, ManifestFamily, RotationGrant, RotationProfile, VersionRef,
     },
     oauth::GrantCeiling,
 };
@@ -204,12 +204,7 @@ pub(super) fn stage(
                     && ceiling.audience == selected.binding.audience,
                 "credential stored authority changed"
             );
-            for root in ceiling.roots.values() {
-                ensure!(
-                    family.roots.get(&root.operation) == Some(root),
-                    "credential predecessor grant no longer admitted"
-                );
-            }
+            family.rotation_ceiling(&ceiling, RotationGrant::KeepExisting)?;
             let expires_at = proof
                 .approved_at
                 .checked_add(i64::try_from(family.lifetime_seconds)?)
