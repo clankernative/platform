@@ -213,7 +213,9 @@ fn render<'a>(
         let rotate = if provisional {
             "|_context, _request| Tx.host_reject(\"credential_rotation_unavailable\")".into()
         } else if selectable {
-            format!("|context, request| {prefix}day2_rotate_selected_{name}(\"{name}\", context, request.expected, request.grant)")
+            format!(
+                "|context, request| {prefix}day2_rotate_selected_{name}(\"{name}\", context, request.expected, request.grant)"
+            )
         } else {
             format!(
                 "|context, request| {prefix}day2_rotate_fixed_{name}(\"{name}\", context, request.expected)"

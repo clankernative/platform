@@ -36,7 +36,18 @@ RotatePersonal :: [].{
 				version: "Successor identity.",
 				revision: "Successor revision.",
 			},
-			example: |_| Ok({ input: { lineage: "", head: "", revision: 1, grant: (Credentials.personal.rotation_to_str)(KeepExisting) }, output: empty("conflict") }),
+			example: |
+				_,
+			|
+				Ok({
+					input: {
+						lineage: "",
+						head: "",
+						revision: 1,
+						grant: (Credentials.personal.rotation_to_str)(KeepExisting),
+					},
+					output: empty("conflict"),
+				}),
 			errors: [],
 			input_sources: |_| [],
 			follow_ups: [],
@@ -50,7 +61,12 @@ RotatePersonal :: [].{
 						.key_receipts
 						.find_first(|candidate| candidate.value.family == "personal")
 						.map_err(|_| "create a personal first")?
-				Ok({ lineage: row.value.lineage, head: row.value.head, revision: row.value.revision, grant: (Credentials.personal.rotation_to_str)(KeepExisting) })
+				Ok({
+					lineage: row.value.lineage,
+					head: row.value.head,
+					revision: row.value.revision,
+					grant: (Credentials.personal.rotation_to_str)(KeepExisting),
+				})
 			},
 			check: |before, output, after| {
 				old = Data.verification_snapshot(before)?.live

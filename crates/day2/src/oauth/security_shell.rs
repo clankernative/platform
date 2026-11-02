@@ -1404,10 +1404,23 @@ impl SecurityShell {
                 crate::managed_credentials::lifecycle::Intent::Issue { grant, .. } => {
                     family.issuance_roots(grant.request())?
                 }
-                crate::managed_credentials::lifecycle::Intent::Rotate {..} => pending.rotation.as_ref()
-                    .context("credential rotation preview missing")?.roots.iter()
-                    .map(|name|Ok((name.clone(),family.roots.get(name).context("credential rotation root changed")?.clone())))
-                    .collect::<Result<std::collections::BTreeMap<_,_>>>()?,
+                crate::managed_credentials::lifecycle::Intent::Rotate { .. } => pending
+                    .rotation
+                    .as_ref()
+                    .context("credential rotation preview missing")?
+                    .roots
+                    .iter()
+                    .map(|name| {
+                        Ok((
+                            name.clone(),
+                            family
+                                .roots
+                                .get(name)
+                                .context("credential rotation root changed")?
+                                .clone(),
+                        ))
+                    })
+                    .collect::<Result<std::collections::BTreeMap<_, _>>>()?,
                 _ => family.roots.clone(),
             };
             let has_delivery = open(runtime.db())?.query_row(
@@ -2873,54 +2886,155 @@ mod tests {
 
             // Exercise the actual typed app -> protected confirmation -> atomic
             // writer path for both profiles, first keeping, then narrowing.
-            let all=GrantSelection::new(family,family.roots.keys().cloned().collect())?;
-            let full_id=format!("{id}-full");
-            let full_input=serde_json::json!({"label":"All then narrow","grant":serde_json::to_string(&all)?});
-            let (full_path,full_headers,full_session)=navigate_input(&world,&shell,operation,&full_id,&full_input)?;
-            shell.dispatch(&Method::POST,&full_path,None,&full_headers,&credential_body(&full_session,"confirm"),world.now)?;
-            let issued=world.runtime.execute(&full_id,crate::store::Fault::None)?;
-            let mut head=issued.result["version"].as_str().context("issued head")?.to_owned();
-            let lineage=issued.result["lineage"].as_str().context("issued lineage")?.to_owned();
-            let mut revision=1_u64;
-            let mut previous_token=credential_token(shell.dispatch(&Method::POST,&full_path,None,&full_headers,&credential_body(&full_session,"reveal"),world.now)?).await?;
-            let rotate_operation=format!("credential_metadata.rotate_{}",if registration=="clients" {"client"} else {"personal"});
-            for (choice,narrowed) in [
-                (crate::managed_credentials::lifecycle::RotateGrant::KeepExisting,false),
-                (crate::managed_credentials::lifecycle::RotateGrant::Narrow(selection.clone()),true),
+            let all = GrantSelection::new(family, family.roots.keys().cloned().collect())?;
+            let full_id = format!("{id}-full");
+            let full_input =
+                serde_json::json!({"label":"All then narrow","grant":serde_json::to_string(&all)?});
+            let (full_path, full_headers, full_session) =
+                navigate_input(&world, &shell, operation, &full_id, &full_input)?;
+            shell.dispatch(
+                &Method::POST,
+                &full_path,
+                None,
+                &full_headers,
+                &credential_body(&full_session, "confirm"),
+                world.now,
+            )?;
+            let issued = world.runtime.execute(&full_id, crate::store::Fault::None)?;
+            let mut head = issued.result["version"]
+                .as_str()
+                .context("issued head")?
+                .to_owned();
+            let lineage = issued.result["lineage"]
+                .as_str()
+                .context("issued lineage")?
+                .to_owned();
+            let mut revision = 1_u64;
+            let mut previous_token = credential_token(shell.dispatch(
+                &Method::POST,
+                &full_path,
+                None,
+                &full_headers,
+                &credential_body(&full_session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            let rotate_operation = format!(
+                "credential_metadata.rotate_{}",
+                if registration == "clients" {
+                    "client"
+                } else {
+                    "personal"
+                }
+            );
+            for (choice, narrowed) in [
+                (
+                    crate::managed_credentials::lifecycle::RotateGrant::KeepExisting,
+                    false,
+                ),
+                (
+                    crate::managed_credentials::lifecycle::RotateGrant::Narrow(selection.clone()),
+                    true,
+                ),
             ] {
-                let rotate_id=format!("{id}-rotate-{revision}");
-                let input=serde_json::json!({"lineage":lineage,"head":head,"revision":revision,"grant":serde_json::to_string(&choice)?});
-                let (rotate_path,rotate_headers,rotate_session)=navigate_input(&world,&shell,&rotate_operation,&rotate_id,&input)?;
-                let page=shell.dispatch(&Method::GET,&rotate_path,None,&rotate_headers,&[],world.now)?;
-                let html=String::from_utf8(to_bytes(page.into_body(),16384).await?.to_vec())?;
+                let rotate_id = format!("{id}-rotate-{revision}");
+                let input = serde_json::json!({"lineage":lineage,"head":head,"revision":revision,"grant":serde_json::to_string(&choice)?});
+                let (rotate_path, rotate_headers, rotate_session) =
+                    navigate_input(&world, &shell, &rotate_operation, &rotate_id, &input)?;
+                let page = shell.dispatch(
+                    &Method::GET,
+                    &rotate_path,
+                    None,
+                    &rotate_headers,
+                    &[],
+                    world.now,
+                )?;
+                let html = String::from_utf8(to_bytes(page.into_body(), 16384).await?.to_vec())?;
                 assert!(html.contains("Successor permissions"));
                 assert!(html.contains("credential_metadata.ping"));
-                assert_eq!(html.contains("credential_metadata.record_use"),!narrowed);
-                let response=shell.dispatch(&Method::POST,&rotate_path,None,&rotate_headers,&credential_body(&rotate_session,"confirm"),world.now)?;
-                assert_eq!(response.status(),StatusCode::SEE_OTHER);
-                let result=world.runtime.execute(&rotate_id,crate::store::Fault::None)?;
-                assert_eq!(result.result["status"],"rotated");
-                head=result.result["version"].as_str().context("rotated head")?.to_owned();
-                revision+=1;
-                assert!(ingress::prepare(&world.runtime,"credential_metadata.ping",&previous_token,world.now).is_err());
-                previous_token=credential_token(shell.dispatch(&Method::POST,&rotate_path,None,&rotate_headers,&credential_body(&rotate_session,"reveal"),world.now)?).await?;
-                ingress::prepare(&world.runtime,"credential_metadata.ping",&previous_token,world.now)?;
-                assert_eq!(ingress::prepare(&world.runtime,"credential_metadata.record_use",&previous_token,world.now).is_ok(),!narrowed);
+                assert_eq!(html.contains("credential_metadata.record_use"), !narrowed);
+                let response = shell.dispatch(
+                    &Method::POST,
+                    &rotate_path,
+                    None,
+                    &rotate_headers,
+                    &credential_body(&rotate_session, "confirm"),
+                    world.now,
+                )?;
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                let result = world
+                    .runtime
+                    .execute(&rotate_id, crate::store::Fault::None)?;
+                assert_eq!(result.result["status"], "rotated");
+                head = result.result["version"]
+                    .as_str()
+                    .context("rotated head")?
+                    .to_owned();
+                revision += 1;
+                assert!(
+                    ingress::prepare(
+                        &world.runtime,
+                        "credential_metadata.ping",
+                        &previous_token,
+                        world.now
+                    )
+                    .is_err()
+                );
+                previous_token = credential_token(shell.dispatch(
+                    &Method::POST,
+                    &rotate_path,
+                    None,
+                    &rotate_headers,
+                    &credential_body(&rotate_session, "reveal"),
+                    world.now,
+                )?)
+                .await?;
+                ingress::prepare(
+                    &world.runtime,
+                    "credential_metadata.ping",
+                    &previous_token,
+                    world.now,
+                )?;
+                assert_eq!(
+                    ingress::prepare(
+                        &world.runtime,
+                        "credential_metadata.record_use",
+                        &previous_token,
+                        world.now
+                    )
+                    .is_ok(),
+                    !narrowed
+                );
                 let (frozen,version_digest):(String,String)=db.query_row(
                     "SELECT confirmation,json_extract(confirmation,'$.confirmation.rotation_grant') FROM day2_credential_confirmations WHERE invocation=?1",[&rotate_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                let effective:String=db.query_row("SELECT grant_digest FROM day2_credential_versions WHERE id=?1",[&head],|r|r.get(0))?;
-                assert_eq!(version_digest,effective);
+                let effective: String = db.query_row(
+                    "SELECT grant_digest FROM day2_credential_versions WHERE id=?1",
+                    [&head],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(version_digest, effective);
                 assert!(!frozen.contains(&previous_token));
             }
             // Once narrowed, even a currently valid family selection cannot
             // recover the removed root. Navigation refuses before loading keys.
-            let loads=world.keys.0.load(Ordering::SeqCst);
-            let expanding=crate::managed_credentials::lifecycle::RotateGrant::Narrow(all);
-            let input=serde_json::json!({"lineage":lineage,"head":head,"revision":revision,"grant":serde_json::to_string(&expanding)?});
-            assert!(credentials::start(&world.runtime,&rotate_operation,"alice@example.com",&format!("{id}-expand"),&input,None,world.now).is_err());
-            assert_eq!(world.keys.0.load(Ordering::SeqCst),loads);
+            let loads = world.keys.0.load(Ordering::SeqCst);
+            let expanding = crate::managed_credentials::lifecycle::RotateGrant::Narrow(all);
+            let input = serde_json::json!({"lineage":lineage,"head":head,"revision":revision,"grant":serde_json::to_string(&expanding)?});
+            assert!(
+                credentials::start(
+                    &world.runtime,
+                    &rotate_operation,
+                    "alice@example.com",
+                    &format!("{id}-expand"),
+                    &input,
+                    None,
+                    world.now
+                )
+                .is_err()
+            );
+            assert_eq!(world.keys.0.load(Ordering::SeqCst), loads);
             let count:i64=db.query_row("SELECT count(*) FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage WHERE l.family=?1 AND l.label='All then narrow'",[family.id.as_str()],|r|r.get(0))?;
-            assert_eq!(count,3);
+            assert_eq!(count, 3);
         }
         Ok(())
     }

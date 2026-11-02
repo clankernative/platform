@@ -85,11 +85,19 @@ fn require_current_pending(
         .credentials
         .get(&pending.family)
         .context("credential family inactive")?;
-    let family=runtime.artifact().contract().credential_manifest.iter()
-        .find(|family|family.id.as_str()==pending.family).context("credential family missing")?;
-    lifecycle::validate_preview(&pending.intent,&pending.rotation)?;
-    ensure!(lifecycle::rotation_preview(db,family,selected,&identity.email,&pending.intent)?==pending.rotation,
-        "credential rotation preview changed");
+    let family = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|family| family.id.as_str() == pending.family)
+        .context("credential family missing")?;
+    lifecycle::validate_preview(&pending.intent, &pending.rotation)?;
+    ensure!(
+        lifecycle::rotation_preview(db, family, selected, &identity.email, &pending.intent)?
+            == pending.rotation,
+        "credential rotation preview changed"
+    );
     runtime
         .credential_authority()?
         .check_shell(&selected.binding, shell_origin)?;
@@ -127,12 +135,12 @@ pub(crate) fn start(
     let intent = lifecycle::intent(access, input)?;
     let (_, family) = access.mutation().context("credential action missing")?;
     let declared = runtime
-            .artifact()
-            .contract()
-            .credential_manifest
-            .iter()
-            .find(|declared| declared.id.as_str() == family)
-            .context("credential family missing")?;
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|declared| declared.id.as_str() == family)
+        .context("credential family missing")?;
     intent.check_family(declared)?;
     let instance = Instance::load(runtime.instance_path())?;
     let (_, edge) = instance.security_edge()?;
@@ -158,7 +166,7 @@ pub(crate) fn start(
         .get(family)
         .context("credential family inactive")?;
     let binding = Digest::of(&selected.binding)?;
-    let rotation=lifecycle::rotation_preview(&tx,declared,selected,actor,&intent)?;
+    let rotation = lifecycle::rotation_preview(&tx, declared, selected, actor, &intent)?;
     let previous: Option<String> = tx
         .query_row(
             "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
@@ -410,7 +418,11 @@ fn checked_browser_confirmation(
             && proof.input == pending.input
             && proof.family == pending.family
             && proof.intent == pending.intent
-            && proof.rotation_grant == pending.rotation.as_ref().map(|preview|preview.digest.clone())
+            && proof.rotation_grant
+                == pending
+                    .rotation
+                    .as_ref()
+                    .map(|preview| preview.digest.clone())
             && proof.artifact == pending.artifact
             && proof.authority == pending.authority
             && proof.binding == pending.binding,
@@ -511,10 +523,18 @@ fn confirm_inner(
         now,
     )?;
     human_proof.require_current(now)?;
-    let family=runtime.artifact().contract().credential_manifest.iter()
-        .find(|family|family.id.as_str()==pending.family).context("credential family missing")?;
-    ensure!(lifecycle::rotation_preview(&tx,family,selected,&identity.email,&pending.intent)?==pending.rotation,
-        "credential rotation preview changed before confirmation");
+    let family = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|family| family.id.as_str() == pending.family)
+        .context("credential family missing")?;
+    ensure!(
+        lifecycle::rotation_preview(&tx, family, selected, &identity.email, &pending.intent)?
+            == pending.rotation,
+        "credential rotation preview changed before confirmation"
+    );
     if let Some(record) =
         checked_browser_confirmation(&tx, runtime, pending, identity, session, &original, now)?
     {
@@ -541,7 +561,10 @@ fn confirm_inner(
             input: pending.input.clone(),
             family: pending.family.clone(),
             intent: pending.intent.clone(),
-            rotation_grant: pending.rotation.as_ref().map(|preview|preview.digest.clone()),
+            rotation_grant: pending
+                .rotation
+                .as_ref()
+                .map(|preview| preview.digest.clone()),
             artifact: pending.artifact.clone(),
             authority: active.stamp,
             binding: ready.binding,

@@ -255,7 +255,7 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
             lifecycle::validate_selection(selection)?;
             8 + selection.roots().len()
         }
-        Intent::Rotate {grant,..} => match grant {
+        Intent::Rotate { grant, .. } => match grant {
             lifecycle::RotateGrant::Fixed | lifecycle::RotateGrant::KeepExisting => 8,
             lifecycle::RotateGrant::Narrow(selection) => {
                 lifecycle::validate_selection(selection)?;
@@ -383,7 +383,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
                     revision,
                     grant,
                 } => {
-                    map.serialize_entry("grant",grant)?;
+                    map.serialize_entry("grant", grant)?;
                     map.serialize_entry("head", head)?;
                     map.serialize_entry("lineage", lineage)?;
                     map.serialize_entry("revision", revision)?;
@@ -466,7 +466,10 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
 
 fn validate_record_data(proof: &Confirmation, original: &ConfirmationOrigin) -> Result<()> {
     check_record_structure(proof, original)?;
-    ensure!(matches!(proof.intent,Intent::Rotate {..})==proof.rotation_grant.is_some(),"credential rotation confirmation footprint missing or unexpected");
+    ensure!(
+        matches!(proof.intent, Intent::Rotate { .. }) == proof.rotation_grant.is_some(),
+        "credential rotation confirmation footprint missing or unexpected"
+    );
     for value in [
         &proof.invocation,
         &proof.operation,
@@ -1199,7 +1202,8 @@ mod tests {
             assert_ne!(changed["commitment"], old, "unbound {path}");
         }
         let mut unexpected_grant = body.clone();
-        unexpected_grant["confirmation"]["rotation_grant"] = Digest::new(b"unexpected rotation").as_str().into();
+        unexpected_grant["confirmation"]["rotation_grant"] =
+            Digest::new(b"unexpected rotation").as_str().into();
         assert!(decode_record("invocation-1", unexpected_grant.to_string().as_bytes()).is_err());
         // Fixed closed tags cannot be relabelled as another producer or purpose.
         for path in [

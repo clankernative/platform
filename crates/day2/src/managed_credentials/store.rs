@@ -399,7 +399,7 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
                 validate_id(page)?;
             }
             validate_restored_intent(&navigation.intent, &navigation.family)?;
-            super::lifecycle::validate_preview(&navigation.intent,&navigation.rotation)?;
+            super::lifecycle::validate_preview(&navigation.intent, &navigation.rotation)?;
             pending.insert(navigation.invocation.clone(), navigation);
         }
     }
@@ -425,7 +425,11 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
                         && confirmation.input == navigation.input
                         && confirmation.family == navigation.family
                         && confirmation.intent == navigation.intent
-                        && confirmation.rotation_grant == navigation.rotation.as_ref().map(|preview|preview.digest.clone())
+                        && confirmation.rotation_grant
+                            == navigation
+                                .rotation
+                                .as_ref()
+                                .map(|preview| preview.digest.clone())
                         && confirmation.artifact == navigation.artifact
                         && confirmation.authority == navigation.authority
                         && confirmation.binding == navigation.binding
@@ -495,12 +499,16 @@ pub(super) fn validate_restored_intent(
     };
     match intent {
         Intent::Issue { label, grant } => {
-            ensure!(!label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
-                "invalid restored credential label");
-            if let super::lifecycle::IssueGrant::Selected {selection}=grant {
+            ensure!(
+                !label.trim().is_empty()
+                    && label.len() <= 128
+                    && !label.chars().any(char::is_control),
+                "invalid restored credential label"
+            );
+            if let super::lifecycle::IssueGrant::Selected { selection } = grant {
                 super::lifecycle::validate_selection(selection)?;
             }
-        },
+        }
         Intent::Rotate {
             lineage,
             head,
@@ -508,7 +516,7 @@ pub(super) fn validate_restored_intent(
             grant,
         } => {
             reference(lineage)?;
-            if let super::lifecycle::RotateGrant::Narrow(selection)=grant {
+            if let super::lifecycle::RotateGrant::Narrow(selection) = grant {
                 super::lifecycle::validate_selection(selection)?;
             }
 
@@ -681,16 +689,40 @@ pub(super) fn version_grant(
     version: &str,
 ) -> Result<GrantCeiling> {
     validate_id(version)?;
-    let (ceiling, digest, principal, raw, version_digest, epoch, material_revision, recipient):
-        (String, String, String, String, String, i64, i64, String) = db.query_row(
+    let (ceiling, digest, principal, raw, version_digest, epoch, material_revision, recipient): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+    ) = db.query_row(
         "SELECT l.grant_json,l.grant_digest,l.principal,m.identity_json,v.grant_digest,
                 v.security_epoch,m.material_revision,d.recipient
          FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage
          JOIN day2_credential_material m ON m.version=v.id
          JOIN day2_credential_deliveries d ON d.version=v.id
          WHERE v.id=?1 AND l.id=?2 AND l.namespace=?3 AND l.family=?4",
-        params![version,lineage.id,namespace_key(&lineage.namespace)?,lineage.family.as_str()],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
+        params![
+            version,
+            lineage.id,
+            namespace_key(&lineage.namespace)?,
+            lineage.family.as_str()
+        ],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        },
     )?;
     let ceiling: GrantCeiling = crate::json::decode(ceiling.as_bytes())?;
     let identity: MaterialIdentity = crate::json::decode(raw.as_bytes())?;
@@ -3426,8 +3458,12 @@ mod tests {
         family: &str,
         intent: &super::super::lifecycle::Intent,
     ) -> Result<()> {
-        let preview = matches!(intent,super::super::lifecycle::Intent::Rotate {..}).then(||
-            super::super::lifecycle::RotationPreview {digest:Digest::new(b"synthetic-restored-rotation"),roots:vec!["app.operation".into()]});
+        let preview = matches!(intent, super::super::lifecycle::Intent::Rotate { .. }).then(|| {
+            super::super::lifecycle::RotationPreview {
+                digest: Digest::new(b"synthetic-restored-rotation"),
+                roots: vec!["app.operation".into()],
+            }
+        });
         for (table, column) in [
             ("day2_credential_browser", "intent"),
             ("day2_credential_confirmations", "confirmation"),
@@ -3444,7 +3480,8 @@ mod tests {
             } else {
                 changed["confirmation"]["family"] = family.into();
                 changed["confirmation"]["intent"] = serde_json::to_value(intent)?;
-                changed["confirmation"]["rotation_grant"] = serde_json::to_value(preview.as_ref().map(|preview|preview.digest.clone()))?;
+                changed["confirmation"]["rotation_grant"] =
+                    serde_json::to_value(preview.as_ref().map(|preview| preview.digest.clone()))?;
                 let pending: super::super::browser::Pending = crate::json::decode(
                     db.query_row("SELECT intent FROM day2_credential_browser", [], |row| {
                         row.get::<_, String>(0)

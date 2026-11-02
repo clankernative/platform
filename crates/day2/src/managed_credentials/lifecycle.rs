@@ -44,20 +44,27 @@ pub(crate) enum RotateGrant {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RotationMode { Fixed, KeepExisting, Narrow }
+enum RotationMode {
+    Fixed,
+    KeepExisting,
+    Narrow,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RotationWire { mode: RotationMode, selections: Vec<GrantSelection> }
+struct RotationWire {
+    mode: RotationMode,
+    selections: Vec<GrantSelection>,
+}
 
 impl TryFrom<RotationWire> for RotateGrant {
     type Error = anyhow::Error;
 
     fn try_from(wire: RotationWire) -> Result<Self> {
-        match (wire.mode,wire.selections.as_slice()) {
-            (RotationMode::Fixed,[]) => Ok(Self::Fixed),
-            (RotationMode::KeepExisting,[]) => Ok(Self::KeepExisting),
-            (RotationMode::Narrow,[selection]) => Ok(Self::Narrow(selection.clone())),
+        match (wire.mode, wire.selections.as_slice()) {
+            (RotationMode::Fixed, []) => Ok(Self::Fixed),
+            (RotationMode::KeepExisting, []) => Ok(Self::KeepExisting),
+            (RotationMode::Narrow, [selection]) => Ok(Self::Narrow(selection.clone())),
             _ => anyhow::bail!("invalid closed credential rotation choice"),
         }
     }
@@ -66,23 +73,34 @@ impl TryFrom<RotationWire> for RotateGrant {
 impl From<RotateGrant> for RotationWire {
     fn from(choice: RotateGrant) -> Self {
         match choice {
-            RotateGrant::Fixed => Self {mode:RotationMode::Fixed,selections:vec![]},
-            RotateGrant::KeepExisting => Self {mode:RotationMode::KeepExisting,selections:vec![]},
-            RotateGrant::Narrow(selection) => Self {mode:RotationMode::Narrow,selections:vec![selection]},
+            RotateGrant::Fixed => Self {
+                mode: RotationMode::Fixed,
+                selections: vec![],
+            },
+            RotateGrant::KeepExisting => Self {
+                mode: RotationMode::KeepExisting,
+                selections: vec![],
+            },
+            RotateGrant::Narrow(selection) => Self {
+                mode: RotationMode::Narrow,
+                selections: vec![selection],
+            },
         }
     }
 }
 
 impl RotateGrant {
     pub(super) fn request(&self, family: &ManifestFamily) -> Result<RotationGrant<'_>> {
-        match (self,&family.grant) {
-            (Self::Fixed,GrantMode::Fixed) | (Self::KeepExisting,GrantMode::Selectable) => Ok(RotationGrant::KeepExisting),
-            (Self::Narrow(selection),GrantMode::Selectable) => {
+        match (self, &family.grant) {
+            (Self::Fixed, GrantMode::Fixed) | (Self::KeepExisting, GrantMode::Selectable) => {
+                Ok(RotationGrant::KeepExisting)
+            }
+            (Self::Narrow(selection), GrantMode::Selectable) => {
                 validate_selection(selection)?;
                 family.issuance_roots(IssuanceGrant::Selected(selection))?;
                 Ok(RotationGrant::Narrow(selection))
             }
-            _=>anyhow::bail!("credential rotation grant mode mismatch"),
+            _ => anyhow::bail!("credential rotation grant mode mismatch"),
         }
     }
 }
@@ -96,49 +114,91 @@ pub(crate) struct RotationPreview {
     pub roots: Vec<String>,
 }
 
-pub(super) fn validate_selection(selection:&GrantSelection) -> Result<()> {
-    ensure!((1..=64).contains(&selection.roots().len())
-        && selection.roots().windows(2).all(|pair|pair[0]<pair[1]),
-        "credential selection root budget or order");
-    for root in selection.roots() {store::validate_id(root)?;}
-    Ok(())
-}
-
-pub(super) fn validate_preview(intent:&Intent, preview:&Option<RotationPreview>) -> Result<()> {
-    ensure!(matches!(intent,Intent::Rotate {..})==preview.is_some(),"credential rotation preview missing or unexpected");
-    if let Some(preview)=preview {
-        ensure!((1..=64).contains(&preview.roots.len())
-            && preview.roots.windows(2).all(|pair|pair[0]<pair[1]),"credential rotation preview root budget or order");
-        for root in &preview.roots {store::validate_id(root)?;}
+pub(super) fn validate_selection(selection: &GrantSelection) -> Result<()> {
+    ensure!(
+        (1..=64).contains(&selection.roots().len())
+            && selection.roots().windows(2).all(|pair| pair[0] < pair[1]),
+        "credential selection root budget or order"
+    );
+    for root in selection.roots() {
+        store::validate_id(root)?;
     }
     Ok(())
 }
 
-fn lineage_ref(raw: &str, family: &ManifestFamily, selected: &ActiveCredentialFamily) -> Result<LineageRef> {
-    use base64::{Engine,engine::general_purpose::URL_SAFE_NO_PAD};
-    ensure!(raw.len()<=2048,"invalid credential lineage");
-    let prefix=format!("cr1_{}_",family.registration.as_str());
-    let lineage:LineageRef=crate::json::decode(&URL_SAFE_NO_PAD.decode(raw.strip_prefix(&prefix).context("credential family reference mismatch")?)?)?;
-    ensure!(lineage.namespace==selected.binding.namespace && lineage.family==family.id
-        && super::encode_ref(family.registration.as_str(),&lineage)?==raw,"credential lineage outside selected family");
+pub(super) fn validate_preview(intent: &Intent, preview: &Option<RotationPreview>) -> Result<()> {
+    ensure!(
+        matches!(intent, Intent::Rotate { .. }) == preview.is_some(),
+        "credential rotation preview missing or unexpected"
+    );
+    if let Some(preview) = preview {
+        ensure!(
+            (1..=64).contains(&preview.roots.len())
+                && preview.roots.windows(2).all(|pair| pair[0] < pair[1]),
+            "credential rotation preview root budget or order"
+        );
+        for root in &preview.roots {
+            store::validate_id(root)?;
+        }
+    }
+    Ok(())
+}
+
+fn lineage_ref(
+    raw: &str,
+    family: &ManifestFamily,
+    selected: &ActiveCredentialFamily,
+) -> Result<LineageRef> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    ensure!(raw.len() <= 2048, "invalid credential lineage");
+    let prefix = format!("cr1_{}_", family.registration.as_str());
+    let lineage: LineageRef = crate::json::decode(
+        &URL_SAFE_NO_PAD.decode(
+            raw.strip_prefix(&prefix)
+                .context("credential family reference mismatch")?,
+        )?,
+    )?;
+    ensure!(
+        lineage.namespace == selected.binding.namespace
+            && lineage.family == family.id
+            && super::encode_ref(family.registration.as_str(), &lineage)? == raw,
+        "credential lineage outside selected family"
+    );
     Ok(lineage)
 }
 
 pub(super) fn rotation_preview(
-    db:&Connection, family:&ManifestFamily, selected:&ActiveCredentialFamily,
-    actor:&str, intent:&Intent,
+    db: &Connection,
+    family: &ManifestFamily,
+    selected: &ActiveCredentialFamily,
+    actor: &str,
+    intent: &Intent,
 ) -> Result<Option<RotationPreview>> {
-    let Intent::Rotate {lineage,head,grant,..}=intent else {return Ok(None);};
-    ensure!(matches!(selected.management.rotate,ManagementPredicate::Creator),"credential management policy unavailable");
-    let lineage=lineage_ref(lineage,family,selected)?;
+    let Intent::Rotate {
+        lineage,
+        head,
+        grant,
+        ..
+    } = intent
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        matches!(selected.management.rotate, ManagementPredicate::Creator),
+        "credential management policy unavailable"
+    );
+    let lineage = lineage_ref(lineage, family, selected)?;
     let creator:String=db.query_row(
         "SELECT creator FROM day2_credential_lineages WHERE id=?1 AND namespace=?2 AND family=?3 AND family_contract=?4",
         params![lineage.id,Digest::of(&("credential-namespace-v1",&lineage.namespace))?.as_str(),family.id.as_str(),family.contract.as_str()],|r|r.get(0),
     )?;
-    ensure!(creator==actor,"credential management denied");
-    let predecessor=store::version_grant(db,&lineage,head)?;
-    let successor=family.rotation_ceiling(&predecessor,grant.request(family)?)?;
-    Ok(Some(RotationPreview {digest:successor.digest,roots:successor.roots.into_keys().collect()}))
+    ensure!(creator == actor, "credential management denied");
+    let predecessor = store::version_grant(db, &lineage, head)?;
+    let successor = family.rotation_ceiling(&predecessor, grant.request(family)?)?;
+    Ok(Some(RotationPreview {
+        digest: successor.digest,
+        roots: successor.roots.into_keys().collect(),
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +223,7 @@ impl Intent {
     pub(super) fn check_family(&self, family: &ManifestFamily) -> Result<()> {
         if let Self::Issue { grant, .. } = self {
             family.issuance_roots(grant.request())?;
-        } else if let Self::Rotate {grant,..} = self {
+        } else if let Self::Rotate { grant, .. } = self {
             grant.request(family)?;
         }
         Ok(())
@@ -243,10 +303,13 @@ pub(super) fn intent(access: &CredentialAccess, input: &Value) -> Result<Intent>
                     grant: if access.rotation_grant.is_empty() {
                         RotateGrant::Fixed
                     } else {
-                        let raw=text(&access.rotation_grant)?;
-                        ensure!(raw.len()<=16384,"credential rotation choice byte budget");
-                        let grant:RotateGrant=crate::json::decode(raw.as_bytes())?;
-                        ensure!(serde_json::to_string(&grant)?==raw,"noncanonical credential rotation choice");
+                        let raw = text(&access.rotation_grant)?;
+                        ensure!(raw.len() <= 16384, "credential rotation choice byte budget");
+                        let grant: RotateGrant = crate::json::decode(raw.as_bytes())?;
+                        ensure!(
+                            serde_json::to_string(&grant)? == raw,
+                            "noncanonical credential rotation choice"
+                        );
                         grant
                     },
                 }
@@ -277,7 +340,7 @@ pub(super) fn stage(
         matches!(predicate, ManagementPredicate::Creator),
         "credential management policy unavailable"
     );
-    let lineage = lineage_ref(raw,family,selected)?;
+    let lineage = lineage_ref(raw, family, selected)?;
     let namespace = Digest::of(&("credential-namespace-v1", &lineage.namespace))?;
     let (principal, label, grant_json, grant_digest, grant_until, epoch, creator): (String, String, String, String, i64, i64, String) = tx.query_row(
         "SELECT principal,label,grant_json,grant_digest,grant_valid_until,security_epoch,creator
@@ -288,7 +351,12 @@ pub(super) fn stage(
     ensure!(creator == proof.actor, "credential management denied");
     let slot = u32::try_from(request.observations.len())?;
     match &proof.intent {
-        Intent::Rotate { head, revision, grant: choice, .. } => {
+        Intent::Rotate {
+            head,
+            revision,
+            grant: choice,
+            ..
+        } => {
             ensure!(
                 matches!(selected.binding.rotation, RotationProfile::AtomicReplace),
                 "credential rotation profile unavailable"
@@ -311,7 +379,10 @@ pub(super) fn stage(
             );
             let predecessor = store::version_grant(tx, &lineage, head)?;
             let grant = family.rotation_ceiling(&predecessor, choice.request(family)?)?;
-            ensure!(proof.rotation_grant.as_ref()==Some(&grant.digest),"credential rotation grant changed after confirmation");
+            ensure!(
+                proof.rotation_grant.as_ref() == Some(&grant.digest),
+                "credential rotation grant changed after confirmation"
+            );
             let expires_at = proof
                 .approved_at
                 .checked_add(i64::try_from(family.lifetime_seconds)?)
@@ -416,16 +487,24 @@ mod tests {
 
     #[test]
     fn rotation_choice_is_closed_canonical_and_never_defaults_to_a_grant() -> Result<()> {
-        let keep=RotateGrant::KeepExisting;
-        assert_eq!(serde_json::to_string(&keep)?,r#"{"mode":"keep_existing","selections":[]}"#);
-        let selection:GrantSelection=serde_json::from_value(json!({
+        let keep = RotateGrant::KeepExisting;
+        assert_eq!(
+            serde_json::to_string(&keep)?,
+            r#"{"mode":"keep_existing","selections":[]}"#
+        );
+        let selection: GrantSelection = serde_json::from_value(json!({
             "family_contract":Digest::new(b"rotation choice family"),"roots":["app.read"]
         }))?;
-        let narrow=RotateGrant::Narrow(selection);
-        let encoded=serde_json::to_string(&narrow)?;
-        assert_eq!(crate::json::decode::<RotateGrant>(encoded.as_bytes())?,narrow);
+        let narrow = RotateGrant::Narrow(selection);
+        let encoded = serde_json::to_string(&narrow)?;
+        assert_eq!(
+            crate::json::decode::<RotateGrant>(encoded.as_bytes())?,
+            narrow
+        );
         for value in [
-            json!(null),json!("keep_existing"),json!({}),
+            json!(null),
+            json!("keep_existing"),
+            json!({}),
             json!({"mode":"keep_existing"}),
             json!({"mode":"keep_existing","selections":[],"extra":true}),
             json!({"mode":"unknown","selections":[]}),
@@ -433,13 +512,23 @@ mod tests {
             json!({"mode":"keep_existing","selections":[json!({"family_contract":Digest::new(b"family"),"roots":["app.read"]})]}),
             json!({"mode":"narrow","selections":[json!({"family_contract":Digest::new(b"family"),"roots":["app.read"]}),json!({"family_contract":Digest::new(b"family"),"roots":["app.write"]})]}),
         ] {
-            assert!(crate::json::decode::<RotateGrant>(value.to_string().as_bytes()).is_err(),"accepted {value}");
+            assert!(
+                crate::json::decode::<RotateGrant>(value.to_string().as_bytes()).is_err(),
+                "accepted {value}"
+            );
         }
-        for roots in [vec![],vec!["app.read","app.read"],vec!["app.write","app.read"],vec!["invalid root"]] {
-            let selection:GrantSelection=serde_json::from_value(json!({"family_contract":Digest::new(b"family"),"roots":roots}))?;
+        for roots in [
+            vec![],
+            vec!["app.read", "app.read"],
+            vec!["app.write", "app.read"],
+            vec!["invalid root"],
+        ] {
+            let selection: GrantSelection = serde_json::from_value(
+                json!({"family_contract":Digest::new(b"family"),"roots":roots}),
+            )?;
             assert!(validate_selection(&selection).is_err());
         }
-        let duplicate=r#"{"mode":"keep_existing","mode":"narrow","selections":[]}"#;
+        let duplicate = r#"{"mode":"keep_existing","mode":"narrow","selections":[]}"#;
         assert!(crate::json::decode::<RotateGrant>(duplicate.as_bytes()).is_err());
         Ok(())
     }

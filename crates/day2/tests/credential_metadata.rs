@@ -1563,7 +1563,10 @@ step = |raw| raw
                 "GrantSelection_clients",
             ),
         ] {
-            fs::write(directory.join("app/main.roc"), format!("{issuance_base}\n{probe}\n"))?;
+            fs::write(
+                directory.join("app/main.roc"),
+                format!("{issuance_base}\n{probe}\n"),
+            )?;
             let (success, diagnostics) = run(directory, "check")?;
             ensure!(
                 !success && diagnostics.contains(expected),
@@ -1618,15 +1621,15 @@ step = |raw| raw
         expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => match (Credentials.clients.selection_from_options)(selection.options()) {{ Ok(copy) => copy.to_str() == selection.to_str()\n Err(_) => Bool.False }}\n Err(_) => Bool.False }}\n", serde_json::to_string(&selected)?));
         expectations.push_str("expect match Credentials.clients.grant_options { [first, second] => match (Credentials.clients.selection_from_options)([second, first]) { Ok(selection) => selection.options().map(|option| option.operation()) == [first.operation(), second.operation()]\n Err(_) => Bool.False }\n _ => Bool.False }\n");
         expectations.push_str("expect match Credentials.clients.grant_options { [first, ..] => match (Credentials.clients.selection_from_options)([first, first]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n _ => Bool.False }\n");
-        let keep=json!({"mode":"keep_existing","selections":[]}).to_string();
-        let selected_wire:serde_json::Value=serde_json::from_str(&selected)?;
-        let narrow=json!({"mode":"narrow","selections":[selected_wire.clone()]}).to_string();
-        for raw in [&keep,&narrow] {
+        let keep = json!({"mode":"keep_existing","selections":[]}).to_string();
+        let selected_wire: serde_json::Value = serde_json::from_str(&selected)?;
+        let narrow = json!({"mode":"narrow","selections":[selected_wire.clone()]}).to_string();
+        for raw in [&keep, &narrow] {
             expectations.push_str(&format!("expect match (Credentials.clients.rotation_from_str)({}) {{ Ok(choice) => (Credentials.clients.rotation_to_str)(choice) == {}\n Err(_) => Bool.False }}\n",serde_json::to_string(raw)?,serde_json::to_string(raw)?));
         }
-        let mut foreign=selected_wire.clone();
-        foreign["family_contract"]=Digest::new(b"foreign rotation family").as_str().into();
-        let mut invalid_rotation=vec![
+        let mut foreign = selected_wire.clone();
+        foreign["family_contract"] = Digest::new(b"foreign rotation family").as_str().into();
+        let mut invalid_rotation = vec![
             json!({"mode":"fixed","selections":[]}).to_string(),
             json!({"mode":"keep_existing","selections":[selected_wire.clone()]}).to_string(),
             json!({"mode":"narrow","selections":[]}).to_string(),

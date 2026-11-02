@@ -707,14 +707,17 @@ impl CredentialAccess {
                 "only client and personal lifecycle management is supported"
             );
             let fields = &artifact.schema.inputs[&registered.input_type].fields;
-            match (&family.grant,action) {
-                (day2_capabilities::credentials::GrantMode::Selectable,"rotate") => ensure!(
-                    matches!(fields.get(&self.rotation_grant),Some(Kind::Text))
+            match (&family.grant, action) {
+                (day2_capabilities::credentials::GrantMode::Selectable, "rotate") => ensure!(
+                    matches!(fields.get(&self.rotation_grant), Some(Kind::Text))
                         && self.rotation_grant != self.management_lineage
                         && self.rotation_grant != self.rotation_head,
                     "selectable rotation requires a distinct canonical grant-choice text input path"
                 ),
-                _ => ensure!(self.rotation_grant.is_empty(),"only selectable rotation has a grant-choice input"),
+                _ => ensure!(
+                    self.rotation_grant.is_empty(),
+                    "only selectable rotation has a grant-choice input"
+                ),
             }
             match (&family.grant, action) {
                 (day2_capabilities::credentials::GrantMode::Selectable, "issue") => ensure!(
@@ -780,7 +783,9 @@ impl CredentialAccess {
         );
         ensure!(
             self.rotations.len() == 1
-                || (self.rotation_head.is_empty() && self.rotation_revision.is_empty() && self.rotation_grant.is_empty()),
+                || (self.rotation_head.is_empty()
+                    && self.rotation_revision.is_empty()
+                    && self.rotation_grant.is_empty()),
             "credential rotation precondition requires rotate access"
         );
         ensure!(
@@ -2639,30 +2644,46 @@ mod credential_binding_tests {
                     );
                 }
             }
-            for operation in ["credential_metadata.rotate_client", "credential_metadata.rotate_personal"] {
+            for operation in [
+                "credential_metadata.rotate_client",
+                "credential_metadata.rotate_personal",
+            ] {
                 let artifact = loaded.contract();
-                let access = &artifact.app_contract.as_ref().context("app contract")?
-                    .operations[operation].credential_access;
-                access.validate(artifact,operation)?;
-                for mutation in ["missing","lineage","head","absent","nontext"] {
-                    let mut access=access.clone();
-                    let mut changed=artifact.clone();
+                let access = &artifact
+                    .app_contract
+                    .as_ref()
+                    .context("app contract")?
+                    .operations[operation]
+                    .credential_access;
+                access.validate(artifact, operation)?;
+                for mutation in ["missing", "lineage", "head", "absent", "nontext"] {
+                    let mut access = access.clone();
+                    let mut changed = artifact.clone();
                     if selected {
                         match mutation {
-                            "missing"=>access.rotation_grant.clear(),
-                            "lineage"=>access.rotation_grant=access.management_lineage.clone(),
-                            "head"=>access.rotation_grant=access.rotation_head.clone(),
-                            "absent"=>access.rotation_grant="missing_field".into(),
-                            "nontext"=>{
-                                let input=&loaded.operation(operation)?.input_type;
-                                changed.schema.inputs.get_mut(input).unwrap().fields.insert(access.rotation_grant.clone(),Kind::Boolean);
+                            "missing" => access.rotation_grant.clear(),
+                            "lineage" => access.rotation_grant = access.management_lineage.clone(),
+                            "head" => access.rotation_grant = access.rotation_head.clone(),
+                            "absent" => access.rotation_grant = "missing_field".into(),
+                            "nontext" => {
+                                let input = &loaded.operation(operation)?.input_type;
+                                changed
+                                    .schema
+                                    .inputs
+                                    .get_mut(input)
+                                    .unwrap()
+                                    .fields
+                                    .insert(access.rotation_grant.clone(), Kind::Boolean);
                             }
-                            _=>unreachable!(),
+                            _ => unreachable!(),
                         }
                     } else {
-                        access.rotation_grant=access.rotation_head.clone();
+                        access.rotation_grant = access.rotation_head.clone();
                     }
-                    assert!(access.validate(&changed,operation).is_err(),"{operation} selected={selected} {mutation}");
+                    assert!(
+                        access.validate(&changed, operation).is_err(),
+                        "{operation} selected={selected} {mutation}"
+                    );
                 }
             }
         }

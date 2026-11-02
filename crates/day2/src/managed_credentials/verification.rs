@@ -119,13 +119,13 @@ pub(crate) fn confirm(
         .mutation()
         .context("credential verification family missing")?;
     let intent = super::lifecycle::intent(access, input)?;
-    let declared=runtime
-            .artifact()
-            .contract()
-            .credential_manifest
-            .iter()
-            .find(|declared| declared.id.as_str() == family)
-            .context("credential family missing")?;
+    let declared = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|declared| declared.id.as_str() == family)
+        .context("credential family missing")?;
     intent.check_family(declared)?;
     let mut db = open(runtime.db())?;
     let tx = crate::write_queue::immediate(&mut db)?;
@@ -148,8 +148,9 @@ pub(crate) fn confirm(
         &subject,
         now,
     )?;
-    let rotation_grant=super::lifecycle::rotation_preview(&tx,declared,selected,actor,&intent)?
-        .map(|preview|preview.digest);
+    let rotation_grant =
+        super::lifecycle::rotation_preview(&tx, declared, selected, actor, &intent)?
+            .map(|preview| preview.digest);
     let confirmation = Confirmation {
         invocation: invocation.into(),
         operation: operation.into(),
