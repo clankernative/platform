@@ -610,6 +610,8 @@ mod tests {
                 "ceiling_digest",
                 "version_json",
                 "version_digest",
+                "ceiling_pair",
+                "version_pair",
             ] {
                 world.set_wall(1100);
                 let (_directory, mut db) = fixture::database()?;
@@ -698,7 +700,23 @@ mod tests {
                             params![ceiling.digest.as_str(), version],
                         )?;
                     }
+                    "ceiling_pair"=>{
+                        db.execute("UPDATE day2_credential_lineages SET grant_json=?1,grant_digest=?2",params![serde_json::to_string(&grant)?,grant.digest.as_str()])?;
+                    }
+                    "version_pair"=>{
+                        let mut identity:MaterialIdentity=crate::json::decode(before.identity_json.as_bytes())?;
+                        identity.grant=ceiling.clone();
+                        db.execute("UPDATE day2_credential_material SET identity_json=?1 WHERE version=?2",params![serde_json::to_string(&identity)?,version])?;
+                        db.execute("UPDATE day2_credential_versions SET grant_digest=?1 WHERE id=?2",params![ceiling.digest.as_str(),version])?;
+                    }
                     _ => {}
+                }
+                if matches!(change,"ceiling_pair"|"version_pair") {
+                    // Each replacement is internally consistent, so this must
+                    // reach the stale-target comparison rather than fail only
+                    // at the grant JSON/digest consistency checks.
+                    let (changed,_)=current(&db,&request,1100)?;
+                    assert_ne!(changed.fingerprint(),ready.target.fingerprint());
                 }
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 if change != "none" {
