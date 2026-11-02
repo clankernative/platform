@@ -2989,12 +2989,18 @@ mod tests {
                     world.now,
                 )?)
                 .await?;
-                ingress::prepare(
+                let allowed=ingress::prepare(
                     &world.runtime,
                     "credential_metadata.ping",
                     &previous_token,
                     world.now,
                 )?;
+                let invocation=format!("{rotate_id}-ping");
+                world.runtime.accept_credential("credential_metadata.ping",&allowed,&invocation,&serde_json::json!({}),world.now)?;
+                let reply=world.runtime.execute(&invocation,crate::store::Fault::None)?;
+                assert_eq!(reply.status,"success");
+                assert_eq!(reply.result,serde_json::json!({"ready":true}));
+                crate::store::replay(world.runtime.artifact(),&world.runtime.trace(&invocation)?)?;
                 assert_eq!(
                     ingress::prepare(
                         &world.runtime,
