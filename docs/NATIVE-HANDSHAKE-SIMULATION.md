@@ -89,6 +89,17 @@ queued packet. Histories replay twice and must match exactly. Limits are 512
 events, 64 queued packets per direction and eight MiB per failure bundle;
 overflow refuses instead of truncating the compared state.
 
+The storage lifecycle's retained wrapper can also queue one bounded conversation
+and advance a single scheduler event at a time. Its ordinary complete-exchange
+helper uses that same stepper. Complete snapshots include the pending event
+queue, seed, sequence and event count as well as both endpoint worlds. A pause,
+including the interval before the next Current begins, cannot report a completed
+conversation. Overlapping starts, exhausted steps and model divergence refuse.
+Seeded controls compare every stepped pause with replay, complete exchanges and
+peer-death cuts. This is a scheduling seam for future durable interleavings;
+it does not itself move initial file preparation into the generated history or
+construct any native owner.
+
 ## Failure evidence and replay
 
 Model or replay divergence writes typed, redacted evidence under
