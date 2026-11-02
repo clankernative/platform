@@ -192,9 +192,9 @@ fn is_fixture_mid_commit_failure(error: &anyhow::Error) -> bool {
     // Refuse wrappers/lookalikes rather than formatting an unknown error or
     // mistaking an outer context label for the actual primary fixture cause.
     error.chain().count() == 1
-        && error.downcast_ref::<&'static str>().is_some_and(|message| {
-            *message == "scripted mid-commit failure"
-        })
+        && error
+            .downcast_ref::<&'static str>()
+            .is_some_and(|message| *message == "scripted mid-commit failure")
 }
 
 #[test]
@@ -468,7 +468,11 @@ impl World {
                 }
                 // Closed synthetic fixture cause only. Do not export or keep
                 // formatted errors; a different refusal cannot satisfy this cut.
-                if result.as_ref().err().is_some_and(is_fixture_mid_commit_failure) {
+                if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(is_fixture_mid_commit_failure)
+                {
                     self.counter_rollback_failures += 1;
                 }
                 result?;
@@ -1796,7 +1800,12 @@ fn generated_counter_transaction_rollbacks_keep_may_and_refuse_reuse() -> Result
             "ordinary counter commit control did not complete"
         );
         for (index, event) in baseline.events.iter().enumerate() {
-            let Event::Bootstrap { stage, operation: Operation::Dispatch, .. } = *event else {
+            let Event::Bootstrap {
+                stage,
+                operation: Operation::Dispatch,
+                ..
+            } = *event
+            else {
                 continue;
             };
             let mut program = baseline.clone();
@@ -1809,19 +1818,41 @@ fn generated_counter_transaction_rollbacks_keep_may_and_refuse_reuse() -> Result
             program.events.extend([
                 Event::RestoreClock,
                 Event::Observe { stage },
-                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
-                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault: Fault::None,
+                },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Settle,
+                    fault: Fault::None,
+                },
                 Event::Reopen,
                 Event::Observe { stage },
-                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
-                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
-                Event::Current { death_cut: None, rewrite_provider: false },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Settle,
+                    fault: Fault::None,
+                },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault: Fault::None,
+                },
+                Event::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                },
             ]);
             let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
             let records = check(&program)?;
             let before = &reference[index - 1].state;
             let attempted = &reference[index].state;
-            ensure!(!records[index].accepted, "partial counter transaction accepted");
+            ensure!(
+                !records[index].accepted,
+                "partial counter transaction accepted"
+            );
             for record in &records[index..] {
                 ensure!(
                     !record.state.continuation
@@ -1835,13 +1866,22 @@ fn generated_counter_transaction_rollbacks_keep_may_and_refuse_reuse() -> Result
                 );
             }
             for (event, record) in program.events.iter().zip(&records).skip(index + 1) {
-                let historical_data = matches!(event, Event::RestoreClock | Event::Observe { .. } | Event::Reopen);
-                ensure!(record.accepted == historical_data, "readback or attempted reuse changed");
+                let historical_data = matches!(
+                    event,
+                    Event::RestoreClock | Event::Observe { .. } | Event::Reopen
+                );
+                ensure!(
+                    record.accepted == historical_data,
+                    "readback or attempted reuse changed"
+                );
             }
             coverage.insert(stage);
         }
     }
-    ensure!(coverage == BTreeSet::from([0, 1]), "counter rollback stage coverage incomplete");
+    ensure!(
+        coverage == BTreeSet::from([0, 1]),
+        "counter rollback stage coverage incomplete"
+    );
     Ok(())
 }
 

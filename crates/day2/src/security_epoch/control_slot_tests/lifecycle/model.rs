@@ -231,7 +231,10 @@ impl Model {
                     return false;
                 }
                 self.state.counter_posts += 1;
-                if !matches!(fault, Fault::LostCounterBefore | Fault::RolledBackCounterWrite) {
+                if !matches!(
+                    fault,
+                    Fault::LostCounterBefore | Fault::RolledBackCounterWrite
+                ) {
                     let next = self.applied as u64 + 1;
                     self.documents.insert(
                         self.names[0].clone(),
@@ -254,7 +257,8 @@ impl Model {
                 self.state.clock_order_failures += usize::from(fault == Fault::RewoundCounterClock);
                 self.state.counter_decode_failures +=
                     usize::from(fault == Fault::MalformedCounterReply);
-                self.state.counter_rollback_failures += usize::from(fault == Fault::RolledBackCounterWrite);
+                self.state.counter_rollback_failures +=
+                    usize::from(fault == Fault::RolledBackCounterWrite);
                 return matches!(
                     fault,
                     Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock
