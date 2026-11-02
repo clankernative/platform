@@ -107,6 +107,7 @@ struct Row {
     creator: String,
     label: String,
     predecessor: Option<String>,
+    version_grant: String,
 }
 
 fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, Row)> {
@@ -126,13 +127,13 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
             l.grant_json,l.grant_digest,l.grant_valid_until,l.security_epoch,
             v.id,v.selector,v.verifier,v.verifier_key_version,v.issued_at,v.expires_at,
             m.identity_json,m.material_revision,m.envelope_revision,m.encryption_key_version,m.nonce,m.ciphertext,
-            l.principal,l.creator,l.label,v.predecessor
+            l.principal,l.creator,l.label,v.predecessor,v.grant_digest
          FROM day2_credential_material m
          JOIN day2_credential_versions v ON v.id=m.version
          JOIN day2_credential_lineages l ON l.id=v.lineage
          WHERE v.id=?1 AND l.namespace=?2 AND l.family=?3 AND l.family_contract=?4
            AND l.state='active' AND l.head=v.id AND v.state='active'
-           AND v.security_epoch=l.security_epoch AND v.grant_digest=l.grant_digest",
+           AND v.security_epoch=l.security_epoch",
         params![request.version, namespace_key(&request.binding.namespace)?, request.family.id.as_str(), request.family.contract.as_str()],
         |r| Ok(Row {
             namespace_json:r.get(0)?,family_contract:r.get(1)?,lineage:r.get(2)?,lineage_revision:r.get(3)?,
@@ -140,6 +141,7 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
             version:r.get(10)?,selector:r.get(11)?,verifier:r.get(12)?,verifier_version:r.get(13)?,issued_at:r.get(14)?,expires_at:r.get(15)?,
             identity_json:r.get(16)?,material_revision:r.get(17)?,envelope_revision:r.get(18)?,encryption_version:r.get(19)?,nonce:r.get(20)?,ciphertext:r.get(21)?,
             principal:r.get(22)?,creator:r.get(23)?,label:r.get(24)?,predecessor:r.get(25)?,
+            version_grant:r.get(26)?,
         }),
     ).optional()?.context("credential rewrap target unavailable")?;
     ensure!(
@@ -151,6 +153,11 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
         request.binding.namespace == namespace,
         "credential rewrap namespace changed"
     );
+    let stored: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
+    let ceiling: day2_capabilities::oauth::GrantCeiling = crate::json::decode(row.grant.as_bytes())?;
+    super::require_grant_subset(&ceiling,&stored.grant)?;
+    ensure!(ceiling.digest.as_str()==row.grant_digest
+        && stored.grant.digest.as_str()==row.version_grant,"credential rewrap grant changed");
     let identity = MaterialIdentity {
         namespace,
         family: request.family.id.as_str().to_owned(),
@@ -159,8 +166,8 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
         recipient: row.recipient.clone(),
         security_epoch: row.epoch.try_into()?,
         material_revision: row.material_revision.try_into()?,
+        grant: stored.grant.clone(),
     };
-    let stored: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
     ensure!(
         stored == identity && identity.security_epoch > 0 && identity.material_revision > 0,
         "credential rewrap stored identity changed"
@@ -329,7 +336,7 @@ pub(crate) fn stage(
            AND EXISTS(SELECT 1 FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage
              WHERE v.id=day2_credential_material.version AND l.namespace=?12 AND l.family_contract=?13
                AND l.state='active' AND l.head=v.id AND l.revision=?14 AND v.state='active'
-               AND v.security_epoch=?15 AND l.security_epoch=?15 AND v.grant_digest=l.grant_digest
+               AND v.security_epoch=?15 AND l.security_epoch=?15 AND v.grant_digest=?34
                AND l.namespace_json=?17 AND l.family=?18 AND l.id=?19
                AND l.recipient=?20 AND l.session=?21 AND l.grant_json=?22
                AND l.grant_digest=?23 AND l.grant_valid_until=?24
@@ -343,7 +350,7 @@ pub(crate) fn stage(
             namespace_key(&target.identity.namespace)?,row.family_contract,row.lineage_revision,row.epoch,update_at,
             row.namespace_json,target.identity.family,row.lineage,row.recipient,row.session,row.grant,
             row.grant_digest,row.grant_until,row.selector,row.verifier,row.verifier_version,row.issued_at,row.expires_at,
-            row.principal,row.creator,row.label,row.predecessor],
+            row.principal,row.creator,row.label,row.predecessor,row.version_grant],
     )?;
     ensure!(changed == 1, "credential rewrap conditional write lost");
     Ok(Pending { _private: () })
@@ -659,6 +666,7 @@ mod tests {
                                 &fixture::lease(),
                                 &fixture::snapshot(&receipt),
                                 super::super::RotationIntent {
+                                    grant: &ready.target.identity.grant,
                                     invocation: "rotation-for-rewrap",
                                     instruction_slot: 0,
                                     recipient: "issuer/human-1",

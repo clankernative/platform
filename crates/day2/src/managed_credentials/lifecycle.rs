@@ -204,7 +204,8 @@ pub(super) fn stage(
                     && ceiling.audience == selected.binding.audience,
                 "credential stored authority changed"
             );
-            family.rotation_ceiling(&ceiling, RotationGrant::KeepExisting)?;
+            let predecessor = store::version_grant(tx,&lineage,head)?;
+            let grant = family.rotation_ceiling(&predecessor, RotationGrant::KeepExisting)?;
             let expires_at = proof
                 .approved_at
                 .checked_add(i64::try_from(family.lifetime_seconds)?)
@@ -231,6 +232,7 @@ pub(super) fn stage(
                 &ready.keys,
                 &expected,
                 store::RotationIntent {
+                    grant: &grant,
                     invocation: &proof.invocation,
                     instruction_slot: slot,
                     recipient: &proof.actor,

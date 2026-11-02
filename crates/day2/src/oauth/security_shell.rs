@@ -5133,11 +5133,11 @@ mod tests {
                         })?;
                     ensure!(count == 1, "replay extra foreign credential writer rows");
                 }
-                let (lineage,version,namespace_json,identity_json):(String,String,String,String) = db.query_row(
-                    "SELECT l.id,v.id,l.namespace_json,m.identity_json FROM day2_credential_receipts r
+                let (lineage,version,namespace_json,identity_json,grant_json):(String,String,String,String,String) = db.query_row(
+                    "SELECT l.id,v.id,l.namespace_json,m.identity_json,l.grant_json FROM day2_credential_receipts r
                      JOIN day2_credential_lineages l ON l.id=r.lineage JOIN day2_credential_versions v ON v.id=r.version
                      JOIN day2_credential_material m ON m.version=v.id WHERE r.invocation=?1",
-                    [&world.pending.invocation],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+                    [&world.pending.invocation],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))?;
                 ensure!(
                     crate::json::decode::<day2_capabilities::credentials::Namespace>(
                         namespace_json.as_bytes()
@@ -5152,6 +5152,7 @@ mod tests {
                     recipient: "alice@example.com".into(),
                     security_epoch: 1,
                     material_revision: 1,
+                    grant: crate::json::decode(grant_json.as_bytes())?,
                 };
                 ensure!(
                     crate::json::decode::<crate::managed_credentials::crypto::MaterialIdentity>(

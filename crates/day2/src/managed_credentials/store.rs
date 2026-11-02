@@ -638,6 +638,45 @@ struct RestoredLineage {
     head: String,
     revision: i64,
     revoked: bool,
+    ceiling: GrantCeiling,
+}
+
+/// A version may remove complete canonical roots, never change the lineage's
+/// principal/binding/audience or recover authority absent from its predecessor.
+pub(super) fn require_grant_subset(ceiling: &GrantCeiling, grant: &GrantCeiling) -> Result<()> {
+    ensure!(ceiling.roots.len() <= 64 && grant.roots.len() <= 64, "credential grant root budget");
+    ceiling.verify()?;
+    grant.verify()?;
+    ensure!(
+        grant.client == ceiling.client && grant.subject == ceiling.subject
+            && grant.audience == ceiling.audience
+            && grant.roots.iter().all(|(name, root)| ceiling.roots.get(name) == Some(root)),
+        "credential version exceeds its immutable ceiling"
+    );
+    Ok(())
+}
+
+/// Historical version DATA under the caller's actual SQL owner. This does not
+/// require that the version is still head; the publication CAS decides conflict.
+pub(super) fn version_grant(db: &Connection, lineage: &LineageRef, version: &str) -> Result<GrantCeiling> {
+    validate_id(version)?;
+    let (ceiling, digest, principal, raw, version_digest): (String, String, String, String, String) = db.query_row(
+        "SELECT l.grant_json,l.grant_digest,l.principal,m.identity_json,v.grant_digest
+         FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage
+         JOIN day2_credential_material m ON m.version=v.id
+         WHERE v.id=?1 AND l.id=?2 AND l.namespace=?3 AND l.family=?4",
+        params![version,lineage.id,namespace_key(&lineage.namespace)?,lineage.family.as_str()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    )?;
+    let ceiling: GrantCeiling = crate::json::decode(ceiling.as_bytes())?;
+    let identity: MaterialIdentity = crate::json::decode(raw.as_bytes())?;
+    ensure!(ceiling.digest.as_str()==digest && ceiling.subject==principal
+        && identity.namespace==lineage.namespace && identity.family==lineage.family.as_str()
+        && identity.lineage==lineage.id && identity.version==version
+        && identity.grant.digest.as_str()==version_digest,
+        "credential version grant identity changed");
+    require_grant_subset(&ceiling,&identity.grant)?;
+    Ok(identity.grant)
 }
 
 /// These checks apply to a completed/restored database, not to intermediate
@@ -672,7 +711,7 @@ fn validate_credential_rows(db: &Connection) -> Result<()> {
             LEFT JOIN day2_credential_deliveries d ON d.version=v.id
             LEFT JOIN day2_credential_versions p ON p.id=v.predecessor
             WHERE m.version IS NULL OR d.version IS NULL OR
-                v.security_epoch!=l.security_epoch OR v.grant_digest!=l.grant_digest OR
+                v.security_epoch!=l.security_epoch OR v.grant_digest!=json_extract(m.identity_json,'$.grant.digest') OR
                 v.expires_at>l.grant_valid_until OR
                 d.expires_at<=v.issued_at OR d.expires_at>v.expires_at OR
                 (l.state='revoked' AND v.state!='revoked') OR
@@ -753,6 +792,7 @@ fn validate_credential_rows(db: &Connection) -> Result<()> {
                 head: row.get(12)?,
                 revision: row.get(13)?,
                 revoked: row.get_ref(14)?.as_str()? == "revoked",
+                ceiling: grant,
             },
         );
     }
@@ -761,13 +801,17 @@ fn validate_credential_rows(db: &Connection) -> Result<()> {
 
     let mut predecessors = BTreeMap::new();
     let mut statement =
-        db.prepare("SELECT id,lineage,predecessor FROM day2_credential_versions")?;
+        db.prepare("SELECT v.id,v.lineage,v.predecessor,m.identity_json,v.grant_digest FROM day2_credential_versions v JOIN day2_credential_material m ON m.version=v.id")?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         materialize(row)?;
+        let identity: MaterialIdentity = crate::json::decode(row.get_ref(3)?.as_str()?.as_bytes())?;
+        let lineage = lineages.get(&row.get::<_,String>(1)?).context("missing credential ceiling")?;
+        require_grant_subset(&lineage.ceiling,&identity.grant)?;
+        ensure!(identity.grant.digest.as_str()==row.get_ref(4)?.as_str()?,"credential version grant digest changed");
         predecessors.insert(
             row.get::<_, String>(0)?,
-            (row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?),
+            (row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, identity.grant),
         );
     }
     drop(rows);
@@ -781,10 +825,16 @@ fn validate_credential_rows(db: &Connection) -> Result<()> {
                 visited.insert(version),
                 "cyclic or shared restored credential chain"
             );
-            let (owner, predecessor) = predecessors
+            let (owner, predecessor, grant) = predecessors
                 .get(version)
                 .context("missing restored credential chain member")?;
             ensure!(owner == id, "cross-lineage restored credential chain");
+            if let Some(previous) = predecessor {
+                let (_,_,previous_grant) = predecessors.get(previous).context("missing predecessor grant")?;
+                require_grant_subset(previous_grant,grant)?;
+            } else {
+                ensure!(*grant==lineage.ceiling,"initial version must preserve its issued ceiling");
+            }
             count += 1;
             cursor = predecessor.as_deref();
         }
@@ -998,6 +1048,7 @@ pub(crate) fn prepare_issue(
         recipient: intent.recipient.clone(),
         security_epoch: intent.security_epoch,
         material_revision: 1,
+        grant: intent.ceiling.clone(),
     };
     let material = prepare_managed(lease, identity)?;
     let request_digest = Digest::of(&(
@@ -1143,7 +1194,8 @@ fn insert_version(tx: &Transaction<'_>, write: VersionWrite<'_>) -> Result<()> {
         material.identity.lineage == lineage
             && material.identity.version == version
             && material.identity.security_epoch == security_epoch
-            && material.identity.recipient == recipient,
+            && material.identity.recipient == recipient
+            && material.identity.grant.digest.as_str() == grant_digest,
         "credential material binding mismatch"
     );
     tx.execute(
@@ -1187,6 +1239,7 @@ pub(crate) enum RotationResult {
 }
 
 pub(crate) struct RotationIntent<'a> {
+    pub grant: &'a GrantCeiling,
     pub invocation: &'a str,
     pub instruction_slot: u32,
     pub recipient: &'a str,
@@ -1206,6 +1259,7 @@ pub(crate) fn stage_rotation(
     intent: RotationIntent<'_>,
 ) -> Result<RotationResult> {
     let RotationIntent {
+        grant,
         invocation,
         instruction_slot,
         recipient,
@@ -1218,6 +1272,8 @@ pub(crate) fn stage_rotation(
     crate::authority::valid_actor(recipient)?;
     validate_id(session)?;
     let namespace = namespace_key(&expected.lineage.namespace)?;
+    ensure!(grant.roots.len() <= 64, "credential rotation grant budget");
+    grant.verify()?;
     let (
         family_contract,
         grant_json,
@@ -1262,6 +1318,7 @@ pub(crate) fn stage_rotation(
         issued_at,
         expires_at,
         reveal_until,
+        &grant.digest,
     ))?;
     if let Some(ReceiptRow {
         contract,
@@ -1301,6 +1358,9 @@ pub(crate) fn stage_rotation(
         ceiling.digest.as_str() == grant_digest,
         "stored credential grant mismatch"
     );
+    let predecessor = version_grant(tx,&expected.lineage,&expected.head.id)?;
+    require_grant_subset(&ceiling,grant)?;
+    require_grant_subset(&predecessor,grant)?;
     let next = random_id()?;
     let identity = MaterialIdentity {
         namespace: expected.lineage.namespace.clone(),
@@ -1310,6 +1370,7 @@ pub(crate) fn stage_rotation(
         recipient: recipient.to_owned(),
         security_epoch: u64::try_from(epoch)?,
         material_revision: 1,
+        grant: grant.clone(),
     };
     let material = prepare_managed(lease, identity)?;
     let changed = tx.execute(
@@ -1345,7 +1406,7 @@ pub(crate) fn stage_rotation(
             issued_at,
             expires_at,
             security_epoch: u64::try_from(epoch)?,
-            grant_digest: &grant_digest,
+            grant_digest: grant.digest.as_str(),
             recipient,
             session,
             reveal_until,
@@ -1494,6 +1555,8 @@ struct MetadataRow {
     head: String,
     revision: i64,
     expires_at: i64,
+    identity_json: String,
+    version_grant: String,
 }
 
 fn metadata_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetadataRow> {
@@ -1508,6 +1571,8 @@ fn metadata_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetadataRow> {
         head: row.get(7)?,
         revision: row.get(8)?,
         expires_at: row.get(9)?,
+        identity_json: row.get(10)?,
+        version_grant: row.get(11)?,
     })
 }
 
@@ -1522,6 +1587,11 @@ fn project_metadata(row: MetadataRow, read: &MetadataRead<'_>) -> Result<Inspect
         ceiling.digest.as_str() == row.grant_digest && ceiling.subject == row.principal,
         "stored credential grant mismatch"
     );
+    let identity: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
+    require_grant_subset(&ceiling,&identity.grant)?;
+    ensure!(identity.version==row.head && identity.lineage==row.lineage
+        && identity.family==read.family.id.as_str() && identity.namespace==*read.namespace
+        && identity.grant.digest.as_str()==row.version_grant,"credential metadata version grant changed");
     let state = match row.state.as_str() {
         "active" => ManagementState::Active,
         "revoked" => ManagementState::Revoked,
@@ -1543,10 +1613,10 @@ fn project_metadata(row: MetadataRow, read: &MetadataRead<'_>) -> Result<Inspect
         principal: row.principal,
         resource: None,
         state: state.clone(),
-        grant: Digest::try_from(row.grant_digest)?,
+        grant: identity.grant.digest,
         expires_at: row.expires_at,
     };
-    let rotation = (read.family.grant == GrantMode::Fixed && read.family.profile.can_rotate())
+    let rotation = read.family.profile.can_rotate()
         .then_some(ManagementSnapshot {
             lineage,
             head: current_version,
@@ -1576,9 +1646,10 @@ pub(crate) fn list_metadata(
     };
     let mut query = db.prepare(
         "SELECT l.id, l.namespace_json, l.principal, l.label, l.grant_json,
-                l.grant_digest, l.state, l.head, l.revision, v.expires_at
+                l.grant_digest, l.state, l.head, l.revision, v.expires_at, m.identity_json, v.grant_digest
          FROM day2_credential_lineages l
          JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
+         JOIN day2_credential_material m ON m.version=v.id
          WHERE l.namespace = ?1 AND l.family = ?2 AND l.family_contract = ?3
            AND l.creator = ?4 AND l.id > ?5
          ORDER BY l.id LIMIT ?6",
@@ -1638,9 +1709,10 @@ pub(crate) fn inspect_metadata(
     let row = db
         .query_row(
             "SELECT l.id, l.namespace_json, l.principal, l.label, l.grant_json,
-                    l.grant_digest, l.state, l.head, l.revision, v.expires_at
+                    l.grant_digest, l.state, l.head, l.revision, v.expires_at, m.identity_json, v.grant_digest
              FROM day2_credential_lineages l
              JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
+             JOIN day2_credential_material m ON m.version=v.id
              WHERE l.id = ?1 AND l.namespace = ?2 AND l.family = ?3
                AND l.family_contract = ?4 AND l.creator = ?5",
             params![
@@ -1715,19 +1787,20 @@ pub(crate) fn verify_ingress(
         verifier_version: String,
         material_revision: i64,
         material_identity: String,
+        version_grant: String,
     }
     let row: Option<IngressRow> = db
         .query_row(
             "SELECT l.id, v.id, l.namespace_json, l.family, l.family_contract,
                     l.principal, l.recipient, l.grant_json, l.grant_digest,
                     l.grant_valid_until, l.security_epoch, v.issued_at, v.expires_at,
-                    v.verifier, v.verifier_key_version, m.material_revision, m.identity_json
+                    v.verifier, v.verifier_key_version, m.material_revision, m.identity_json, v.grant_digest
              FROM day2_credential_versions v
              JOIN day2_credential_lineages l ON l.id = v.lineage
              JOIN day2_credential_material m ON m.version = v.id
              WHERE v.selector = ?1 AND l.namespace = ?2 AND l.family = ?3
                AND l.head = v.id AND l.state = 'active' AND v.state = 'active'
-               AND v.security_epoch = l.security_epoch AND v.grant_digest = l.grant_digest",
+               AND v.security_epoch = l.security_epoch",
             params![selector, namespace, current.family],
             |row| {
                 Ok(IngressRow {
@@ -1748,6 +1821,7 @@ pub(crate) fn verify_ingress(
                     verifier_version: row.get(14)?,
                     material_revision: row.get(15)?,
                     material_identity: row.get(16)?,
+                    version_grant: row.get(17)?,
                 })
             },
         )
@@ -1768,6 +1842,11 @@ pub(crate) fn verify_ingress(
         stored_namespace == *current.namespace,
         "stored credential namespace mismatch"
     );
+    let stored_identity: MaterialIdentity = serde_json::from_str(&row.material_identity)?;
+    let original: GrantCeiling = crate::json::decode(row.grant_json.as_bytes())?;
+    require_grant_subset(&original,&stored_identity.grant)?;
+    ensure!(original.digest.as_str()==row.grant_digest
+        && stored_identity.grant.digest.as_str()==row.version_grant,"credential ingress grant changed");
     let expected_identity = MaterialIdentity {
         namespace: stored_namespace,
         family: row.family,
@@ -1776,16 +1855,15 @@ pub(crate) fn verify_ingress(
         recipient: row.recipient,
         security_epoch: u64::try_from(row.epoch)?,
         material_revision: u64::try_from(row.material_revision)?,
+        grant: stored_identity.grant.clone(),
     };
-    let stored_identity: MaterialIdentity = serde_json::from_str(&row.material_identity)?;
     ensure!(
         stored_identity == expected_identity,
         "stored credential material identity mismatch"
     );
-    let ceiling: GrantCeiling = serde_json::from_str(&row.grant_json)?;
-    ceiling.verify()?;
+    let ceiling = stored_identity.grant;
     ensure!(
-        ceiling.digest.as_str() == row.grant_digest && ceiling.subject == row.principal,
+        ceiling.digest.as_str() == row.version_grant && ceiling.subject == row.principal,
         "stored credential grant mismatch"
     );
     if !ceiling.allows(current.operation)?
@@ -1902,20 +1980,24 @@ pub(crate) fn authorize_reveal_in(
         expires_at: i64,
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
+        ceiling_json: String,
+        ceiling_digest: String,
+        version_grant: String,
     }
     let row: Option<RevealRow> = tx
         .query_row(
             "SELECT m.identity_json, l.namespace_json, l.family, l.id, m.material_revision,
                 m.envelope_revision, m.encryption_key_version, l.security_epoch,
                 d.recipient, d.session, v.issued_at, v.expires_at,
-                l.grant_valid_until, d.expires_at, m.nonce, m.ciphertext
+                l.grant_valid_until, d.expires_at, m.nonce, m.ciphertext,
+                l.grant_json,l.grant_digest,v.grant_digest
          FROM day2_credential_deliveries d
          JOIN day2_credential_versions v ON v.id = d.version
          JOIN day2_credential_lineages l ON l.id = v.lineage
          JOIN day2_credential_material m ON m.version = v.id
          WHERE d.version = ?1 AND l.namespace = ?2 AND l.head = v.id
            AND l.state = 'active' AND v.state = 'active' AND d.state = 'available'
-           AND v.security_epoch = l.security_epoch AND v.grant_digest = l.grant_digest
+           AND v.security_epoch = l.security_epoch
            AND d.recipient = l.recipient AND d.session = l.session",
             params![post.version, expected_namespace_key],
             |row| {
@@ -1936,6 +2018,9 @@ pub(crate) fn authorize_reveal_in(
                     expires_at: row.get(13)?,
                     nonce: row.get(14)?,
                     ciphertext: row.get(15)?,
+                    ceiling_json: row.get(16)?,
+                    ceiling_digest: row.get(17)?,
+                    version_grant: row.get(18)?,
                 })
             },
         )
@@ -1958,6 +2043,11 @@ pub(crate) fn authorize_reveal_in(
         stored_namespace == post.namespace,
         "stored credential namespace mismatch"
     );
+    let stored_identity: MaterialIdentity = serde_json::from_str(&row.identity_json)?;
+    let original: GrantCeiling = crate::json::decode(row.ceiling_json.as_bytes())?;
+    require_grant_subset(&original,&stored_identity.grant)?;
+    ensure!(original.digest.as_str()==row.ceiling_digest
+        && stored_identity.grant.digest.as_str()==row.version_grant,"credential reveal grant changed");
     let expected_identity = MaterialIdentity {
         namespace: stored_namespace,
         family: row.family,
@@ -1966,8 +2056,8 @@ pub(crate) fn authorize_reveal_in(
         recipient: row.recipient.clone(),
         security_epoch: u64::try_from(row.epoch)?,
         material_revision: u64::try_from(row.material_revision)?,
+        grant: stored_identity.grant.clone(),
     };
-    let stored_identity: MaterialIdentity = serde_json::from_str(&row.identity_json)?;
     ensure!(
         stored_identity == expected_identity,
         "stored delivery identity mismatch"
@@ -2620,6 +2710,7 @@ mod tests {
             &snapshot(&first),
             RotationIntent {
                 invocation: "rotation-history",
+                grant: &ceiling(),
                 instruction_slot: 0,
                 recipient: "issuer/human-2",
                 session: "session-2",
@@ -4331,6 +4422,93 @@ mod tests {
         Ok(())
     }
 
+    fn selectable_fixture() -> Result<(ManifestFamily, GrantCeiling)> {
+        let fixed = family();
+        let read = OperationAuthorityContract::derive(
+            "ReadTranscription".into(),1,Digest::new(b"read-transcription-v1"),OperationKind::Query,
+            AuthorityNode { actions: BTreeSet::new(), children: BTreeMap::new() },
+        )?;
+        let mut roots = fixed.roots.clone();
+        roots.insert(read.operation.clone(),read);
+        let catalog = roots.iter().map(|(name,authority)| (name.clone(),CredentialRoot {
+            authority:authority.clone(),direct_ingress:true,interactive_security:false,single_resource_model:None,
+        })).collect();
+        let selected = ManifestFamily::derive(FamilyDeclaration {
+            registration:fixed.registration,id:fixed.id,profile:ManagedProfile::Client,grant:GrantMode::Selectable,
+            roots:roots.keys().cloned().collect(),lifetime_seconds:fixed.lifetime_seconds,source:fixed.source,
+        },&catalog)?;
+        let base = ceiling();
+        let grant = GrantCeiling::derive(base.client,base.subject,base.audience,roots)?;
+        Ok((selected,grant))
+    }
+
+    #[test]
+    fn narrowed_rotation_authenticates_its_version_grant_and_never_expands_after_reopen() -> Result<()> {
+        use day2_capabilities::credentials::{GrantSelection,RotationGrant};
+        let (family,original) = selectable_fixture()?;
+        let (directory,mut db) = database()?;
+        let mut intent = issue("selected-issue");
+        intent.family_contract=family.contract.clone();intent.ceiling=original.clone();
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let first=stage_issue(&tx,prepare_issue(&lease(),&family,intent)?)?.public_identity().clone();
+        tx.commit()?;
+        let old_token=authorize_reveal(&mut db,post(first.version.as_deref().unwrap(),"old-selected-token"))?.unwrap().into_response_body(&lease())?;
+        let selection=GrantSelection::new(&family,vec!["ReadTranscription".into()])?;
+        let narrowed=family.rotation_ceiling(&original,RotationGrant::Narrow(&selection))?;
+        let expected=snapshot(&first);
+        let rotate=|| RotationIntent { grant:&narrowed, invocation:"selected-rotate",instruction_slot:0,
+            recipient:"issuer/human-1",session:"session-1",issued_at:1200,expires_at:2100,reveal_until:1400 };
+        // Dropping the shared product transaction publishes neither the new
+        // verifier/delivery nor the product write or predecessor closure.
+        db.execute_batch("CREATE TABLE rotation_product(version TEXT PRIMARY KEY)")?;
+        {
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let pending=match stage_rotation(&tx,&lease(),&expected,rotate())? {
+                RotationResult::Rotated(pending)=>pending,
+                RotationResult::Conflict=>anyhow::bail!("fresh selected rotation conflicted"),
+            };
+            tx.execute("INSERT INTO rotation_product VALUES(?1)",[pending.public_identity().version.as_deref().unwrap()])?;
+        }
+        assert_eq!(db.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get::<_,i64>(0))?,1);
+        assert_eq!(db.query_row("SELECT count(*) FROM rotation_product",[],|r|r.get::<_,i64>(0))?,0);
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let second=match stage_rotation(&tx,&lease(),&expected,rotate())? {
+            RotationResult::Rotated(pending)=>pending.public_identity().clone(),
+            RotationResult::Conflict=>anyhow::bail!("rolled-back selected rotation conflicted"),
+        };
+        tx.execute("INSERT INTO rotation_product VALUES(?1)",[second.version.as_deref().unwrap()])?;
+        tx.commit()?;
+        install_schema(&db)?;
+        let retained:GrantCeiling=crate::json::decode(db.query_row("SELECT grant_json FROM day2_credential_lineages",[],|r|r.get::<_,String>(0))?.as_bytes())?;
+        assert_eq!(retained,original);
+        assert_eq!(version_grant(&db,&expected.lineage,second.version.as_deref().unwrap())?,narrowed);
+        let mut reveal=post(second.version.as_deref().unwrap(),"new-selected-token");reveal.now=1250;
+        let token=authorize_reveal(&mut db,reveal)?.unwrap().into_response_body(&lease())?;
+        let namespace=namespace();
+        let read=&original.roots["ReadTranscription"];
+        let write=&original.roots["SubmitTranscription"];
+        assert_eq!(verify_ingress(&db,&lease(),ingress(&namespace,&family.contract,read,7,1250),&token)?.unwrap().ceiling,narrowed);
+        assert!(verify_ingress(&db,&lease(),ingress(&namespace,&family.contract,write,7,1250),&token)?.is_none());
+        assert!(verify_ingress(&db,&lease(),ingress(&namespace,&family.contract,read,7,1250),&old_token)?.is_none());
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert!(matches!(stage_rotation(&tx,&lease(),&expected,rotate())?,RotationResult::Rotated(_)));
+        let changed=RotationIntent {grant:&original,..rotate()};
+        assert!(stage_rotation(&tx,&lease(),&expected,changed).is_err());
+        tx.commit()?;
+        drop(db);
+        let mut db=Connection::open(directory.path().join("app.sqlite"))?;
+        // Reopen the same database, without reconstructing a grant from the
+        // larger original ceiling or granting a retired version permission.
+        install_schema(&db)?;
+        let next=ManagementSnapshot {lineage:expected.lineage.clone(),head:VersionRef {lineage:expected.lineage.clone(),id:second.version.clone().unwrap()},revision:2,state:ManagementState::Active};
+        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expansion=RotationIntent {grant:&original,invocation:"forbidden-expansion",..rotate()};
+        assert!(stage_rotation(&tx,&lease(),&next,expansion).is_err());
+        drop(tx);
+        assert_eq!(db.query_row("SELECT count(*) FROM day2_credential_versions",[],|r|r.get::<_,i64>(0))?,2);
+        Ok(())
+    }
+
     #[test]
     fn stale_rotation_cannot_create_a_second_successor_and_revoke_is_terminal() -> Result<()> {
         let (_dir, mut db) = database()?;
@@ -4343,6 +4521,7 @@ mod tests {
             &expected,
             RotationIntent {
                 invocation: "rotation-1",
+                grant: &ceiling(),
                 instruction_slot: 0,
                 recipient: "issuer/human-1",
                 session: "session-1",
@@ -4365,6 +4544,7 @@ mod tests {
                 &expected,
                 RotationIntent {
                     invocation: "rotation-2",
+                    grant: &ceiling(),
                     instruction_slot: 0,
                     recipient: "issuer/human-1",
                     session: "session-1",
@@ -4428,6 +4608,7 @@ mod tests {
                     &expected,
                     RotationIntent {
                         invocation: id,
+                        grant: &ceiling(),
                         instruction_slot: 0,
                         recipient: "issuer/human-1",
                         session: "session-1",
@@ -4688,6 +4869,7 @@ mod tests {
             &snapshot(&first),
             RotationIntent {
                 invocation: "rotation-ingress",
+                grant: &ceiling(),
                 instruction_slot: 0,
                 recipient: "issuer/human-1",
                 session: "session-1",
@@ -4779,6 +4961,7 @@ mod tests {
                         &expected,
                         RotationIntent {
                             invocation: &format!("rotation-{index}"),
+                            grant: &ceiling(),
                             instruction_slot: 0,
                             recipient: "issuer/human-1",
                             session: "session-1",
