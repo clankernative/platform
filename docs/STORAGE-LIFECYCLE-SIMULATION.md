@@ -156,3 +156,25 @@ authenticated provider adapters or actual current-writer effects. It does not
 prove physical durability, kernel admission, AppArmor, provider fidelity or timing
 margin. The real kernel conformance tests remain unchanged. Executing the complete
 native producer/consumer lifecycle remains separate qualification work.
+
+The first-holder conversation can also advance one controlled wire event at a
+time. Its App file observation is a separate obligation after the checked Offer
+and before Confirm; Controller retention follows its checked Accepted, rather
+than treating an empty queue or successful send as a receipt. Both use the same
+original controlled observations before and after file work, including when file
+work fails. A file error remains primary after the mandatory postcheck. Histories
+retain checked-Accepted DATA separately from usable first-holder retention, so a
+late file/clock refusal cannot erase history or grant bootstrap work. File work
+can consume controlled time inside the original interval; equality and rewind
+refuse. Each record also retains the separate reference world and its pending
+queue, including failure paths.
+
+The existing complete-exchange event drains this same path. The outer program
+retains its 96 ordinary-event bound and allows up to 512 individual handshake
+advances in addition, with the existing bundle byte bound unchanged. The oracle
+owns its own independent wire model and never reads the actual transcript to
+predict an outcome. Pending file obligations, restoration, late packets and
+SQLite reopen cannot repair a refused continuation. Linux histories use the
+existing unqualified held-file fixture at the actual observation cuts. They do
+not qualify fsync, physical durability, enrolled peers, P3 or writer authority;
+exclusive creation and preparation still precede these generated histories.

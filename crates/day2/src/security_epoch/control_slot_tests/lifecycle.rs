@@ -5,7 +5,9 @@ use super::*;
 use crate::security_epoch::{
     bootstrap::check_active_snapshot,
     journal::snapshot_digest,
-    native_enrollment::{LifecycleHandshake, LifecycleModelError},
+    native_enrollment::{
+        LifecycleHandshake, LifecycleModelError, LifecycleProgress, LifecycleReference,
+    },
     storage_authority::lifecycle_fixture,
     tests::lifecycle_provider as counter_fixture,
 };
@@ -16,6 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 mod model;
 
 const MAX_EVENTS: usize = 96;
+// The original ordinary history budget remains separate from one explicitly
+// stepped bounded wire schedule; no native acquisition budget is changed.
+const MAX_HANDSHAKE_ADVANCES: usize = 512;
 const MAX_BUNDLE: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +99,22 @@ enum Event {
     FirstHolder {
         death_cut: Option<usize>,
     },
+    StartFirstHolder {
+        death_cut: Option<usize>,
+    },
+    AdvanceFirstHolder,
+    ObserveFirstHolder {
+        work_nanos: u64,
+    },
+    RetainFirstHolder {
+        work_nanos: u64,
+    },
+    FileTime {
+        nanos: u64,
+    },
+    FileRewind {
+        nanos: u64,
+    },
     Bootstrap {
         stage: usize,
         operation: Operation,
@@ -119,6 +140,18 @@ enum Event {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HolderPhase {
+    NotStarted,
+    BeforeOffer,
+    AppObservation,
+    AfterAppObservation,
+    ControllerRetention,
+    Retained,
+    Refused,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Program {
@@ -137,6 +170,8 @@ struct State {
     binding: Digest,
     continuation: bool,
     first_holder: bool,
+    checked_accepted: bool,
+    holder_phase: HolderPhase,
     current: usize,
     slot_posts: usize,
     counter_posts: usize,
@@ -160,6 +195,7 @@ struct Record {
     // replay as well as checking the independently predicted complete rows.
     provider: Value,
     handshake: Value,
+    reference: Option<Value>,
 }
 
 struct World {
@@ -170,6 +206,8 @@ struct World {
     image_binding: Option<Digest>,
     continuation: bool,
     first_holder: bool,
+    checked_accepted: bool,
+    holder_phase: HolderPhase,
     current: usize,
     activation: Option<Digest>,
     counter_rollback_failures: usize,
@@ -195,6 +233,31 @@ fn is_fixture_mid_commit_failure(error: &anyhow::Error) -> bool {
         && error
             .downcast_ref::<&'static str>()
             .is_some_and(|message| *message == "scripted mid-commit failure")
+}
+
+fn checked_file_observation(
+    handshake: &mut LifecycleHandshake,
+    endpoint: usize,
+    work_nanos: u64,
+    observe: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    ensure!(
+        handshake.check_file_boundary(endpoint)?,
+        "first holder original precheck refused"
+    );
+    let requested = observe();
+    let elapsed = if work_nanos == 0 {
+        Ok(())
+    } else {
+        handshake.advance_file_time(work_nanos)
+    };
+    // Evaluate the postcheck even when file work failed. Preserve its original
+    // primary error; the caller separately quarantines a model-execution error.
+    let checked = handshake.check_file_boundary(endpoint);
+    requested?;
+    elapsed?;
+    ensure!(checked?, "first holder original postcheck refused");
+    Ok(())
 }
 
 #[test]
@@ -316,6 +379,8 @@ impl World {
             image_binding,
             continuation: true,
             first_holder: false,
+            checked_accepted: false,
+            holder_phase: HolderPhase::NotStarted,
             current: 0,
             activation: None,
             counter_rollback_failures: 0,
@@ -326,6 +391,102 @@ impl World {
             #[cfg(target_os = "linux")]
             file,
         })
+    }
+
+    fn first_holder_step(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::StartFirstHolder { death_cut } => {
+                ensure!(
+                    self.holder_phase == HolderPhase::NotStarted && !self.first_holder,
+                    "first holder already started"
+                );
+                #[cfg(target_os = "linux")]
+                if let Some(file) = &mut self.file {
+                    file.check(false)?;
+                }
+                self.handshake.begin_exchange(death_cut, 0)?;
+                self.holder_phase = HolderPhase::BeforeOffer;
+            }
+            Event::AdvanceFirstHolder => {
+                ensure!(
+                    matches!(
+                        self.holder_phase,
+                        HolderPhase::BeforeOffer | HolderPhase::AfterAppObservation
+                    ),
+                    "first holder file obligation pending"
+                );
+                ensure!(
+                    self.handshake.progress()? != LifecycleProgress::Refused,
+                    "first holder peer refused"
+                );
+                self.handshake.advance_exchange()?;
+                ensure!(
+                    self.handshake.progress()? != LifecycleProgress::Refused,
+                    "first holder peer refused"
+                );
+                if self.handshake.controller_accepted_checked()? {
+                    self.checked_accepted = true;
+                    ensure!(
+                        self.holder_phase == HolderPhase::AfterAppObservation,
+                        "first holder App observation missing"
+                    );
+                    self.holder_phase = HolderPhase::ControllerRetention;
+                } else if self.holder_phase == HolderPhase::BeforeOffer
+                    && self.handshake.app_observation_ready()?
+                {
+                    self.holder_phase = HolderPhase::AppObservation;
+                }
+            }
+            Event::ObserveFirstHolder { work_nanos } => {
+                ensure!(
+                    self.holder_phase == HolderPhase::AppObservation
+                        && self.handshake.app_observation_ready()?,
+                    "first holder App observation order"
+                );
+                checked_file_observation(&mut self.handshake, 0, work_nanos, || {
+                    #[cfg(target_os = "linux")]
+                    if let Some(file) = &mut self.file {
+                        file.check(false)?;
+                    }
+                    Ok(())
+                })?;
+                self.holder_phase = HolderPhase::AfterAppObservation;
+            }
+            Event::RetainFirstHolder { work_nanos } => {
+                ensure!(
+                    self.holder_phase == HolderPhase::ControllerRetention
+                        && self.handshake.controller_accepted_checked()?,
+                    "first holder Controller retention order"
+                );
+                checked_file_observation(&mut self.handshake, 1, work_nanos, || {
+                    #[cfg(target_os = "linux")]
+                    if let Some(file) = &mut self.file {
+                        file.check(false)?;
+                    }
+                    Ok(())
+                })?;
+                self.first_holder = true;
+                self.holder_phase = HolderPhase::Retained;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn complete_first_holder(&mut self, death_cut: Option<usize>) -> Result<()> {
+        self.first_holder_step(Event::StartFirstHolder { death_cut })?;
+        loop {
+            let event = match self.holder_phase {
+                HolderPhase::BeforeOffer | HolderPhase::AfterAppObservation => {
+                    Event::AdvanceFirstHolder
+                }
+                HolderPhase::AppObservation => Event::ObserveFirstHolder { work_nanos: 0 },
+                HolderPhase::ControllerRetention => Event::RetainFirstHolder { work_nanos: 0 },
+                HolderPhase::Retained => return Ok(()),
+                _ => anyhow::bail!("first holder incomplete"),
+            };
+            self.first_holder_step(event)?;
+        }
     }
 
     fn evidence(
@@ -688,6 +849,14 @@ impl World {
 
     fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<Record> {
         let accepted = match event {
+            Event::FileTime { nanos } => {
+                self.handshake.advance_file_time(nanos)?;
+                true
+            }
+            Event::FileRewind { nanos } => {
+                self.handshake.rewind_file_time(nanos)?;
+                true
+            }
             Event::CounterReplace { record } => self.replace_counter(record)?,
             Event::CounterRestore { record } => self.restore_counter(record)?,
             Event::Reopen => {
@@ -742,19 +911,17 @@ impl World {
                 let mut continuation = self.continuation;
                 let result = lifecycle_fixture::phase(&mut continuation, || {
                     #[cfg(target_os = "linux")]
-                    if let Some(file) = &mut self.file {
+                    if matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
+                        && let Some(file) = &mut self.file
+                    {
                         file.check(matches!(event, Event::Current { .. }))?;
                     }
                     match event {
-                        Event::FirstHolder { death_cut } => {
-                            ensure!(!self.first_holder, "first holder already fixed");
-                            ensure!(
-                                self.handshake.exchange(death_cut)?,
-                                "first-holder exchange incomplete"
-                            );
-                            self.first_holder = true;
-                            Ok(())
-                        }
+                        Event::FirstHolder { death_cut } => self.complete_first_holder(death_cut),
+                        Event::StartFirstHolder { .. }
+                        | Event::AdvanceFirstHolder
+                        | Event::ObserveFirstHolder { .. }
+                        | Event::RetainFirstHolder { .. } => self.first_holder_step(event),
                         Event::Bootstrap {
                             stage,
                             operation,
@@ -767,7 +934,9 @@ impl World {
                         _ => unreachable!(),
                     }?;
                     #[cfg(target_os = "linux")]
-                    if let Some(file) = &mut self.file {
+                    if matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
+                        && let Some(file) = &mut self.file
+                    {
                         file.check(matches!(event, Event::Current { .. }))?;
                     }
                     Ok(())
@@ -775,8 +944,16 @@ impl World {
                 self.continuation = continuation;
                 match result {
                     Ok(()) => true,
-                    Err(error) if error.is::<LifecycleModelError>() => return Err(error),
+                    Err(error)
+                        if error.is::<LifecycleModelError>()
+                            || self.handshake.progress().is_err() =>
+                    {
+                        return Err(error.context(LifecycleModelError));
+                    }
                     Err(error) => {
+                        if !self.first_holder {
+                            self.holder_phase = HolderPhase::Refused;
+                        }
                         // Fixed synthetic budget failure only. Do not retain
                         // or export any formatted error/provider value. The
                         // independent model must predict this primary cause,
@@ -801,6 +978,8 @@ impl World {
                 binding: self.binding()?,
                 continuation: self.continuation,
                 first_holder: self.first_holder,
+                checked_accepted: self.checked_accepted,
+                holder_phase: self.holder_phase,
                 current: self.current,
                 slot_posts: self.port.slot_posts,
                 counter_posts: self.port.counter_posts,
@@ -816,6 +995,7 @@ impl World {
             },
             provider: json!({"counter":counter,"slots":provider}),
             handshake: self.handshake.snapshot(),
+            reference: None,
         })
     }
 
@@ -883,7 +1063,7 @@ impl ConsumerLifecycle {
         scope: &day2_capabilities::security_epoch::AuthorityScope,
     ) -> Result<Self> {
         let world = World::selected(seed, None, Some(scope))?;
-        let model = model::Model::new(&world.cores, false, &world.image_binding)?;
+        let model = model::Model::new(seed, &world.cores, false, &world.image_binding)?;
         let mut enrollment = [
             LifecycleHandshake::enrollment(seed ^ 1)?,
             LifecycleHandshake::enrollment(seed ^ 2)?,
@@ -908,7 +1088,7 @@ impl ConsumerLifecycle {
     pub(crate) fn observation(&self) -> Result<Value> {
         Ok(
             json!({"storage":self.world.record(false, counter_fixture::snapshot(&self.world.port.counter))?,
-            "expected":self.model.observation(),"serving":self.shell.snapshot(),
+            "expected":self.model.observation(),"reference":self.model.handshake_snapshot(),"serving":self.shell.snapshot(),
             "enrollment":self.enrollment.iter().map(LifecycleHandshake::snapshot).collect::<Vec<_>>()}),
         )
     }
@@ -1092,9 +1272,29 @@ struct Divergence {
     expected: Value,
 }
 
+fn initial_reference_matches(actual: &Record, reference: &Value) -> bool {
+    actual.handshake["oracle"] == reference["world"]
+        && actual.handshake["schedule"] == reference["schedule"]
+        && actual.handshake["failed"] == reference["failed"]
+}
+
 fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>> {
     ensure!(
-        program.version == 1 && !program.events.is_empty() && program.events.len() <= MAX_EVENTS,
+        program.version == 1
+            && !program.events.is_empty()
+            && program.events.len() <= MAX_EVENTS + MAX_HANDSHAKE_ADVANCES
+            && program
+                .events
+                .iter()
+                .filter(|event| matches!(event, Event::AdvanceFirstHolder))
+                .count()
+                <= MAX_HANDSHAKE_ADVANCES
+            && program
+                .events
+                .iter()
+                .filter(|event| !matches!(event, Event::AdvanceFirstHolder))
+                .count()
+                <= MAX_EVENTS,
         "lifecycle version/history bound"
     );
     ensure!(
@@ -1165,19 +1365,23 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
     );
     let mut world = World::new(program.seed, program.physical.as_deref())?;
     let mut model = model::Model::new(
+        program.seed,
         &world.cores,
         program.physical.is_some(),
         &world.image_binding,
     )?;
     let mut records = Vec::new();
     for (index, &event) in program.events.iter().enumerate() {
-        let actual = match world.step(event) {
+        let mut actual = match world.step(event) {
             Ok(record) => record,
             Err(_) => {
                 // Preserve the schedule even when a nested handshake oracle or
                 // physical-fixture expectation fails before the outer model
                 // comparison. Raw adapter errors never enter the bundle.
-                records.push(world.record(false, counter_fixture::snapshot(&world.port.counter))?);
+                let mut refused =
+                    world.record(false, counter_fixture::snapshot(&world.port.counter))?;
+                refused.reference = Some(model.handshake_snapshot());
+                records.push(refused);
                 return Ok(Err(Divergence {
                     index,
                     category: "adapter",
@@ -1186,8 +1390,39 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
                 }));
             }
         };
-        let expected = model.step(event)?;
+        let expected = match model.step(event) {
+            Ok(expected) => expected,
+            Err(_) => {
+                actual.reference = Some(model.handshake_snapshot());
+                records.push(actual);
+                return Ok(Err(Divergence {
+                    index,
+                    category: "oracle",
+                    records,
+                    expected: json!({"observation":"closed independent lifecycle execution"}),
+                }));
+            }
+        };
+        actual.reference = Some(model.handshake_snapshot());
         records.push(actual.clone());
+        // Initial wire clocks, queues and endpoint knowledge must agree too;
+        // equal aggregate dispositions alone could hide a changed observation.
+        // Subsequent Current exchanges have their own retained paired oracle.
+        if (!actual.state.first_holder
+            || (actual.accepted
+                && matches!(
+                    event,
+                    Event::FirstHolder { .. } | Event::RetainFirstHolder { .. }
+                )))
+            && !initial_reference_matches(&actual, actual.reference.as_ref().unwrap())
+        {
+            return Ok(Err(Divergence {
+                index,
+                category: "handshake-reference",
+                records,
+                expected: model.handshake_snapshot(),
+            }));
+        }
         if (actual.accepted, &actual.state) != (expected.0, &expected.1) {
             return Ok(Err(Divergence {
                 index,
@@ -1437,6 +1672,525 @@ fn record_history(seed: u64, records: &[Record]) -> Result<()> {
             ),
         ],
     )
+}
+
+// Generate only from the independent wire specification. The actual reducer
+// and file fixture do not choose their own expected interleaving.
+fn stepped_first_holder(seed: u64, death_cut: Option<usize>) -> Result<Program> {
+    let mut reference = LifecycleReference::new(seed)?;
+    reference.begin_exchange(death_cut, 0)?;
+    let mut events = vec![Event::StartFirstHolder { death_cut }];
+    let mut observed = false;
+    loop {
+        match reference.progress()? {
+            LifecycleProgress::Refused => break,
+            LifecycleProgress::ProtocolComplete => {
+                events.push(Event::RetainFirstHolder { work_nanos: 0 });
+                ensure!(
+                    reference.check_file_boundary(1)? && reference.check_file_boundary(1)?,
+                    "reference retention original refused"
+                );
+                break;
+            }
+            LifecycleProgress::Pending => {
+                if !observed && reference.app_observation_ready()? {
+                    events.push(Event::ObserveFirstHolder { work_nanos: 0 });
+                    ensure!(
+                        reference.check_file_boundary(0)? && reference.check_file_boundary(0)?,
+                        "reference App original refused"
+                    );
+                    observed = true;
+                } else {
+                    events.push(Event::AdvanceFirstHolder);
+                    reference.advance_exchange()?;
+                }
+            }
+        }
+    }
+    Ok(Program {
+        version: 1,
+        seed,
+        physical: None,
+        events,
+    })
+}
+
+#[test]
+fn reference_comparison_observes_clocks_queues_and_endpoints_not_only_the_disposition() -> Result<()>
+{
+    let program = stepped_first_holder(17, None)?;
+    let records = check(&program)?;
+    let paused = records
+        .iter()
+        .find(|record| record.state.holder_phase == HolderPhase::AppObservation)
+        .unwrap();
+    let reference = paused.reference.as_ref().unwrap();
+    assert!(initial_reference_matches(paused, reference));
+    for field in ["now", "queues", "endpoints"] {
+        let mut changed = reference.clone();
+        changed["world"][field] = Value::Null;
+        assert!(!initial_reference_matches(paused, &changed));
+    }
+    for field in ["schedule", "failed"] {
+        let mut changed = reference.clone();
+        changed[field] = Value::Null;
+        assert!(!initial_reference_matches(paused, &changed));
+    }
+    let mut bad = paused.clone();
+    bad.handshake["oracle"]["now"] = Value::Null;
+    assert!(!initial_reference_matches(&bad, reference));
+    Ok(())
+}
+
+#[test]
+fn first_holder_advance_bound_is_independent_of_the_ordinary_event_allowance() -> Result<()> {
+    let mut events = vec![Event::StartFirstHolder { death_cut: None }];
+    events.extend(std::iter::repeat_n(
+        Event::AdvanceFirstHolder,
+        MAX_HANDSHAKE_ADVANCES + 1,
+    ));
+    assert!(events.len() < MAX_EVENTS + MAX_HANDSHAKE_ADVANCES);
+    let program = Program {
+        version: 1,
+        seed: 17,
+        physical: None,
+        events,
+    };
+    assert!(run(&program).is_err());
+    Ok(())
+}
+
+#[test]
+fn stepped_first_holder_keeps_wire_completion_separate_from_file_retention() -> Result<()> {
+    for seed in 0..8 {
+        let mut program = stepped_first_holder(seed, None)?;
+        let first = check(&program)?;
+        let observe = program
+            .events
+            .iter()
+            .position(|event| matches!(event, Event::ObserveFirstHolder { work_nanos: 0 }))
+            .unwrap();
+        let retain = program.events.len() - 1;
+        assert_eq!(
+            first[observe - 1].state.holder_phase,
+            HolderPhase::AppObservation
+        );
+        assert_eq!(
+            first[observe - 1].handshake["actual"]["endpoints"][0]["machine"]["position"],
+            3
+        );
+        assert_eq!(
+            first[retain - 1].state.holder_phase,
+            HolderPhase::ControllerRetention
+        );
+        assert!(!first[retain - 1].state.first_holder);
+        for endpoint in first[retain - 1].handshake["actual"]["endpoints"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(endpoint["machine"]["position"], 6);
+            assert_eq!(endpoint["machine"]["busy"], false);
+        }
+        assert!(first[retain].state.first_holder && first[retain].state.continuation);
+        assert_eq!(first[retain].state.holder_phase, HolderPhase::Retained);
+        let complete = check(&Program {
+            version: 1,
+            seed,
+            physical: None,
+            events: vec![Event::FirstHolder { death_cut: None }],
+        })?;
+        assert_eq!(first.last(), complete.last());
+        let baseline = successful(seed);
+        program.events.extend_from_slice(&baseline.events[1..]);
+        let records = check(&program)?;
+        assert_eq!(records.last().unwrap().state.current, 3);
+        assert_eq!(
+            records.last().unwrap().state,
+            check(&baseline)?.last().unwrap().state
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_file_obligations_block_provider_work_and_never_rearm_after_reopen() -> Result<()> {
+    for boundary in [
+        Event::ObserveFirstHolder { work_nanos: 0 },
+        Event::RetainFirstHolder { work_nanos: 0 },
+    ] {
+        let mut program = stepped_first_holder(17, None)?;
+        let cut = program
+            .events
+            .iter()
+            .position(|event| *event == boundary)
+            .unwrap();
+        program.events.truncate(cut);
+        program.events.extend([
+            Event::Bootstrap {
+                stage: 0,
+                operation: Operation::Reserve,
+                fault: Fault::None,
+            },
+            Event::Reopen,
+            Event::RestoreClock,
+            boundary,
+            Event::AdvanceFirstHolder,
+            Event::FirstHolder { death_cut: None },
+            Event::Current {
+                death_cut: None,
+                rewrite_provider: false,
+            },
+        ]);
+        let records = check(&program)?;
+        for record in &records[cut..] {
+            assert!(!record.state.first_holder && !record.state.continuation);
+            assert_eq!(record.state.holder_phase, HolderPhase::Refused);
+            assert_eq!(
+                (record.state.slot_posts, record.state.counter_posts),
+                (0, 0)
+            );
+        }
+        assert!(!records[cut].accepted && !records.last().unwrap().accepted);
+    }
+    Ok(())
+}
+
+#[test]
+fn file_work_spends_the_original_interval_and_equality_refuses_even_after_wire_completion()
+-> Result<()> {
+    for seed in 0..4 {
+        for boundary in [
+            Event::ObserveFirstHolder { work_nanos: 0 },
+            Event::RetainFirstHolder { work_nanos: 0 },
+        ] {
+            let mut program = stepped_first_holder(seed, None)?;
+            let cut = program
+                .events
+                .iter()
+                .position(|event| *event == boundary)
+                .unwrap();
+            let prefix = check(&Program {
+                events: program.events[..cut].to_vec(),
+                ..program.clone()
+            })?;
+            let snapshot = &prefix.last().unwrap().handshake["actual"];
+            let now: Duration = serde_json::from_value(snapshot["now"].clone())?;
+            for endpoint in snapshot["endpoints"].as_array().unwrap() {
+                assert_eq!(
+                    serde_json::from_value::<Duration>(endpoint["clock"]["origin"].clone())?,
+                    Duration::from_secs(100)
+                );
+                assert_eq!(
+                    serde_json::from_value::<Duration>(endpoint["clock"]["deadline"].clone())?,
+                    Duration::from_secs(110)
+                );
+            }
+            let equality = u64::try_from((Duration::from_secs(110) - now).as_nanos())?;
+            program.events.truncate(cut);
+            program.events.extend([
+                Event::FileTime { nanos: equality },
+                boundary,
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::FirstHolder { death_cut: None },
+                Event::Bootstrap {
+                    stage: 0,
+                    operation: Operation::Reserve,
+                    fault: Fault::None,
+                },
+            ]);
+            let records = check(&program)?;
+            assert!(records[cut].accepted);
+            assert!(!records[cut + 1].accepted);
+            for record in &records[cut + 1..] {
+                assert!(!record.state.continuation && !record.state.first_holder);
+                assert_eq!(
+                    (record.state.slot_posts, record.state.counter_posts),
+                    (0, 0)
+                );
+            }
+            assert!(!records.last().unwrap().accepted);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn file_observation_precheck_skips_work_and_postcheck_keeps_the_actual_file_primary() -> Result<()>
+{
+    struct Opaque;
+    impl std::fmt::Display for Opaque {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("foreign Display")
+        }
+    }
+    impl std::fmt::Debug for Opaque {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("foreign Debug")
+        }
+    }
+    impl std::error::Error for Opaque {}
+    for boundary in [
+        Event::ObserveFirstHolder { work_nanos: 0 },
+        Event::RetainFirstHolder { work_nanos: 0 },
+    ] {
+        let program = stepped_first_holder(17, None)?;
+        let cut = program
+            .events
+            .iter()
+            .position(|event| *event == boundary)
+            .unwrap();
+        let endpoint = usize::from(matches!(boundary, Event::RetainFirstHolder { .. }));
+        for precheck_failure in [false, true] {
+            let mut world = World::new(17, None)?;
+            for &event in &program.events[..cut] {
+                assert!(world.step(event)?.accepted);
+            }
+            let snapshot = world.handshake.snapshot();
+            let now: Duration = serde_json::from_value(snapshot["actual"]["now"].clone())?;
+            let equality = u64::try_from((Duration::from_secs(110) - now).as_nanos())?;
+            if precheck_failure {
+                world.handshake.advance_file_time(equality)?;
+            }
+            let before = world.handshake.snapshot()["schedule"]["events"]
+                .as_u64()
+                .unwrap();
+            let calls = std::cell::Cell::new(0);
+            let error = anyhow::Error::new(Opaque);
+            let primary = error.root_cause() as *const dyn std::error::Error;
+            let mut continuation = world.continuation;
+            let result = lifecycle_fixture::phase(&mut continuation, || {
+                checked_file_observation(&mut world.handshake, endpoint, equality, || {
+                    calls.set(calls.get() + 1);
+                    Err(error)
+                })
+            });
+            let refused = match result {
+                Ok(()) => panic!("file observation accepted"),
+                Err(error) => error,
+            };
+            assert!(!continuation);
+            let after = world.handshake.snapshot();
+            assert_eq!(after["actual"]["endpoints"][endpoint]["refused"], true);
+            assert_eq!(
+                world.checked_accepted,
+                matches!(boundary, Event::RetainFirstHolder { .. })
+            );
+            if precheck_failure {
+                assert_eq!(calls.get(), 0);
+                assert_eq!(after["schedule"]["events"].as_u64().unwrap(), before + 1);
+            } else {
+                assert_eq!(calls.get(), 1);
+                assert!(refused.is::<Opaque>());
+                assert!(std::ptr::eq(primary, refused.root_cause()));
+                assert_eq!(after["schedule"]["events"].as_u64().unwrap(), before + 3);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn time_spent_inside_the_file_action_refuses_retention_without_erasing_checked_accepted()
+-> Result<()> {
+    for boundary in [
+        Event::ObserveFirstHolder { work_nanos: 0 },
+        Event::RetainFirstHolder { work_nanos: 0 },
+    ] {
+        let mut program = stepped_first_holder(17, None)?;
+        let cut = program
+            .events
+            .iter()
+            .position(|event| *event == boundary)
+            .unwrap();
+        let prefix = check(&Program {
+            events: program.events[..cut].to_vec(),
+            ..program.clone()
+        })?;
+        let now: Duration =
+            serde_json::from_value(prefix.last().unwrap().handshake["actual"]["now"].clone())?;
+        let work_nanos = u64::try_from((Duration::from_secs(110) - now).as_nanos())?;
+        let action = match boundary {
+            Event::ObserveFirstHolder { .. } => Event::ObserveFirstHolder { work_nanos },
+            Event::RetainFirstHolder { .. } => Event::RetainFirstHolder { work_nanos },
+            _ => unreachable!(),
+        };
+        program.events.truncate(cut);
+        program.events.extend([
+            action,
+            Event::Reopen,
+            Event::RestoreClock,
+            Event::RetainFirstHolder { work_nanos: 0 },
+        ]);
+        let records = check(&program)?;
+        assert!(!records[cut].accepted);
+        for record in &records[cut..] {
+            assert!(!record.state.continuation && !record.state.first_holder);
+            assert_eq!(
+                record.state.checked_accepted,
+                matches!(boundary, Event::RetainFirstHolder { .. })
+            );
+            assert_eq!(record.state.holder_phase, HolderPhase::Refused);
+            assert_eq!(record.state.counter_posts, 0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn file_boundary_rewind_refuses_but_small_forward_work_keeps_the_same_original() -> Result<()> {
+    for boundary in [
+        Event::ObserveFirstHolder { work_nanos: 0 },
+        Event::RetainFirstHolder { work_nanos: 0 },
+    ] {
+        for seed in 0..4 {
+            let complete = stepped_first_holder(seed, None)?;
+            let cut = complete
+                .events
+                .iter()
+                .position(|event| *event == boundary)
+                .unwrap();
+            let mut rewind = complete.clone();
+            rewind.events.truncate(cut);
+            rewind.events.extend([
+                Event::FileRewind {
+                    nanos: 1_000_000_000,
+                },
+                boundary,
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::FirstHolder { death_cut: None },
+            ]);
+            let records = check(&rewind)?;
+            assert!(records[cut].accepted && !records[cut + 1].accepted);
+            assert!(
+                records[cut + 1..]
+                    .iter()
+                    .all(|record| !record.state.first_holder && !record.state.continuation)
+            );
+            assert!(!records.last().unwrap().accepted);
+            let mut forward = complete;
+            forward.events[cut] = match boundary {
+                Event::ObserveFirstHolder { .. } => Event::ObserveFirstHolder {
+                    work_nanos: 1_000_000,
+                },
+                Event::RetainFirstHolder { .. } => Event::RetainFirstHolder {
+                    work_nanos: 1_000_000,
+                },
+                _ => unreachable!(),
+            };
+            let records = check(&forward)?;
+            assert!(records.iter().all(|record| record.accepted));
+            assert!(records.last().unwrap().state.first_holder);
+            for endpoint in records.last().unwrap().handshake["actual"]["endpoints"]
+                .as_array()
+                .unwrap()
+            {
+                assert_eq!(
+                    serde_json::from_value::<Duration>(endpoint["clock"]["origin"].clone())?,
+                    Duration::from_secs(100)
+                );
+                assert_eq!(
+                    serde_json::from_value::<Duration>(endpoint["clock"]["deadline"].clone())?,
+                    Duration::from_secs(110)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stepwise_peer_death_is_observed_before_any_later_file_or_provider_action() -> Result<()> {
+    let mut refused = 0;
+    for seed in 0..8 {
+        for cut in [0, 3, 21, 47, 79, 100] {
+            let mut program = stepped_first_holder(seed, Some(cut))?;
+            program.events.extend([
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::ObserveFirstHolder { work_nanos: 0 },
+                Event::RetainFirstHolder { work_nanos: 0 },
+                Event::Bootstrap {
+                    stage: 0,
+                    operation: Operation::Reserve,
+                    fault: Fault::None,
+                },
+            ]);
+            let records = check(&program)?;
+            assert!(!records.last().unwrap().accepted);
+            assert!(!records.last().unwrap().state.continuation);
+            assert!(!records.last().unwrap().state.first_holder);
+            assert_eq!(records.last().unwrap().state.counter_posts, 0);
+            refused += usize::from(records.iter().any(|record| !record.accepted));
+        }
+    }
+    assert_eq!(refused, 48);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_original_file_mutation_at_offer_and_after_accepted_never_becomes_retention() -> Result<()> {
+    let mut cuts = BTreeSet::new();
+    for seed in 0..2 {
+        for boundary in [
+            Event::ObserveFirstHolder { work_nanos: 0 },
+            Event::RetainFirstHolder { work_nanos: 0 },
+        ] {
+            for change in [FileChange::Tamper, FileChange::Replace, FileChange::Shorten] {
+                let mut program = stepped_first_holder(seed, None)?;
+                program.physical =
+                    Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+                let cut = program
+                    .events
+                    .iter()
+                    .position(|event| *event == boundary)
+                    .unwrap();
+                program.events.truncate(cut);
+                program.events.extend([
+                    Event::File { change },
+                    boundary,
+                    Event::File {
+                        change: FileChange::Restore,
+                    },
+                    Event::Reopen,
+                    Event::RestoreClock,
+                    Event::RetainFirstHolder { work_nanos: 0 },
+                    Event::FirstHolder { death_cut: None },
+                    Event::Bootstrap {
+                        stage: 0,
+                        operation: Operation::Reserve,
+                        fault: Fault::None,
+                    },
+                ]);
+                let records = check(&program)?;
+                assert!(!records[cut + 1].accepted);
+                if matches!(boundary, Event::RetainFirstHolder { .. }) {
+                    assert_eq!(
+                        records[cut].state.holder_phase,
+                        HolderPhase::ControllerRetention
+                    );
+                    assert_eq!(
+                        records[cut].handshake["actual"]["endpoints"][1]["machine"]["position"],
+                        6
+                    );
+                }
+                for record in &records[cut + 1..] {
+                    assert!(!record.state.continuation && !record.state.first_holder);
+                    assert_eq!(record.state.holder_phase, HolderPhase::Refused);
+                    assert_eq!(
+                        (record.state.slot_posts, record.state.counter_posts),
+                        (0, 0)
+                    );
+                }
+                assert!(!records.last().unwrap().accepted);
+                cuts.insert(format!("{seed}/{boundary:?}/{change:?}"));
+            }
+        }
+    }
+    assert_eq!(cuts.len(), 12);
+    Ok(())
 }
 
 #[test]

@@ -22,6 +22,7 @@ pub(super) struct Model {
     clock_invalid: bool,
     active: bool,
     file_refused: bool,
+    handshake: LifecycleReference,
 }
 
 fn fields(value: &Value) -> Value {
@@ -51,6 +52,10 @@ impl Model {
         serde_json::to_value(&self.state).unwrap()
     }
 
+    pub(super) fn handshake_snapshot(&self) -> Value {
+        self.handshake.snapshot()
+    }
+
     pub(super) fn consumer_current(&self) -> bool {
         self.active
             && self.state.first_holder
@@ -60,6 +65,7 @@ impl Model {
     }
 
     pub(super) fn new(
+        seed: u64,
         cores: &[LogicalCore; 2],
         physical: bool,
         image_binding: &Option<Digest>,
@@ -133,6 +139,8 @@ impl Model {
                 binding: Digest::of(&("day2-storage-lifecycle-fixture-v1", cores, image_binding))?,
                 continuation: true,
                 first_holder: false,
+                checked_accepted: false,
+                holder_phase: HolderPhase::NotStarted,
                 current: 0,
                 slot_posts: 0,
                 counter_posts: 0,
@@ -165,7 +173,136 @@ impl Model {
             clock_invalid: false,
             active: false,
             file_refused: false,
+            handshake: LifecycleReference::new(seed)?,
         })
+    }
+
+    fn first_file_valid(&mut self) -> bool {
+        let valid =
+            !self.file_refused
+                && self.state.file.as_ref().is_none_or(|file| {
+                    file.named_original && file.held_original && file.image_exact
+                });
+        self.file_refused |= !valid;
+        valid
+    }
+
+    fn first_holder_step(&mut self, event: Event) -> Result<bool> {
+        if !self.state.continuation {
+            return Ok(false);
+        }
+        let accepted = match event {
+            Event::StartFirstHolder { death_cut } => {
+                if self.state.holder_phase != HolderPhase::NotStarted
+                    || self.state.first_holder
+                    || !self.first_file_valid()
+                {
+                    false
+                } else {
+                    self.handshake.begin_exchange(death_cut, 0)?;
+                    self.state.holder_phase = HolderPhase::BeforeOffer;
+                    true
+                }
+            }
+            Event::AdvanceFirstHolder => {
+                if !matches!(
+                    self.state.holder_phase,
+                    HolderPhase::BeforeOffer | HolderPhase::AfterAppObservation
+                ) || self.handshake.progress()? == LifecycleProgress::Refused
+                {
+                    false
+                } else {
+                    self.handshake.advance_exchange()?;
+                    if self.handshake.progress()? == LifecycleProgress::Refused {
+                        false
+                    } else if self.handshake.controller_accepted_checked()? {
+                        self.state.checked_accepted = true;
+                        if self.state.holder_phase != HolderPhase::AfterAppObservation {
+                            false
+                        } else {
+                            self.state.holder_phase = HolderPhase::ControllerRetention;
+                            true
+                        }
+                    } else {
+                        if self.state.holder_phase == HolderPhase::BeforeOffer
+                            && self.handshake.app_observation_ready()?
+                        {
+                            self.state.holder_phase = HolderPhase::AppObservation;
+                        }
+                        true
+                    }
+                }
+            }
+            Event::ObserveFirstHolder { work_nanos } => {
+                if self.state.holder_phase != HolderPhase::AppObservation
+                    || !self.handshake.app_observation_ready()?
+                    || !self.handshake.check_file_boundary(0)?
+                {
+                    false
+                } else {
+                    let requested = self.first_file_valid();
+                    if work_nanos != 0 {
+                        self.handshake.advance_file_time(work_nanos)?;
+                    }
+                    let checked = self.handshake.check_file_boundary(0)?;
+                    if requested && checked {
+                        self.state.holder_phase = HolderPhase::AfterAppObservation;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            Event::RetainFirstHolder { work_nanos } => {
+                if self.state.holder_phase != HolderPhase::ControllerRetention
+                    || !self.handshake.controller_accepted_checked()?
+                    || !self.handshake.check_file_boundary(1)?
+                {
+                    false
+                } else {
+                    let requested = self.first_file_valid();
+                    if work_nanos != 0 {
+                        self.handshake.advance_file_time(work_nanos)?;
+                    }
+                    let checked = self.handshake.check_file_boundary(1)?;
+                    if requested && checked {
+                        self.state.first_holder = true;
+                        self.state.holder_phase = HolderPhase::Retained;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            _ => unreachable!(),
+        };
+        if !accepted {
+            self.state.continuation = false;
+            if !self.state.first_holder {
+                self.state.holder_phase = HolderPhase::Refused;
+            }
+        }
+        Ok(accepted)
+    }
+
+    fn complete_first_holder(&mut self, death_cut: Option<usize>) -> Result<bool> {
+        if !self.first_holder_step(Event::StartFirstHolder { death_cut })? {
+            return Ok(false);
+        }
+        loop {
+            let event = match self.state.holder_phase {
+                HolderPhase::BeforeOffer | HolderPhase::AfterAppObservation => {
+                    Event::AdvanceFirstHolder
+                }
+                HolderPhase::AppObservation => Event::ObserveFirstHolder { work_nanos: 0 },
+                HolderPhase::ControllerRetention => Event::RetainFirstHolder { work_nanos: 0 },
+                HolderPhase::Retained => return Ok(true),
+                _ => return Ok(false),
+            };
+            if !self.first_holder_step(event)? {
+                return Ok(false);
+            }
+        }
     }
 
     fn write_slot(&mut self, stage: usize, state: Value) {
@@ -380,6 +517,18 @@ impl Model {
 
     pub(super) fn step(&mut self, event: Event) -> Result<(bool, State)> {
         let accepted = match event {
+            Event::FileTime { nanos } => {
+                self.handshake.advance_file_time(nanos)?;
+                true
+            }
+            Event::FileRewind { nanos } => {
+                self.handshake.rewind_file_time(nanos)?;
+                true
+            }
+            Event::StartFirstHolder { .. }
+            | Event::AdvanceFirstHolder
+            | Event::ObserveFirstHolder { .. }
+            | Event::RetainFirstHolder { .. } => self.first_holder_step(event)?,
             Event::CounterReplace { record } => self.replace_counter(record),
             Event::CounterRestore { record } => self.restore_counter(record),
             Event::Reopen => true,
@@ -420,16 +569,14 @@ impl Model {
                 } else if self.file_refused || !file_valid {
                     self.file_refused = true;
                     self.state.continuation = false;
+                    if !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
                     false
                 } else {
                     let accepted = match event {
                         Event::FirstHolder { death_cut } => {
-                            if self.state.first_holder || death_cut.is_some() {
-                                false
-                            } else {
-                                self.state.first_holder = true;
-                                true
-                            }
+                            self.complete_first_holder(death_cut)?
                         }
                         Event::Bootstrap {
                             stage,
@@ -495,6 +642,9 @@ impl Model {
                         _ => unreachable!(),
                     };
                     self.state.continuation = accepted;
+                    if !accepted && !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
                     accepted
                 }
             }

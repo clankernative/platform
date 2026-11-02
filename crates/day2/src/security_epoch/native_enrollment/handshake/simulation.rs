@@ -16,7 +16,9 @@ use std::{collections::VecDeque, time::Duration};
 mod connection_request;
 mod lifecycle;
 mod model;
-pub(in crate::security_epoch) use lifecycle::{LifecycleHandshake, LifecycleModelError};
+pub(in crate::security_epoch) use lifecycle::{
+    LifecycleHandshake, LifecycleModelError, LifecycleProgress, LifecycleReference,
+};
 
 const MAX_EVENTS: usize = 512;
 const MAX_QUEUED: usize = 64;
@@ -35,6 +37,7 @@ trait Machine: Sized {
     fn transport(&mut self, event: Transport, clock: Observation) -> Result<TransportDecision>;
     fn delivered(&mut self, frame: Frame, clock: Observation) -> Result<()>;
     fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()>;
+    fn check_original(&mut self, clock: Observation) -> Result<()>;
     fn poll(observation: PollObservation) -> Result<TransportDecision>;
     fn refuse(&mut self);
     fn snapshot(&self) -> serde_json::Value;
@@ -63,6 +66,11 @@ impl Machine for Transcript {
 
     fn current(&mut self, sequence: u64, purpose: StagePurpose) -> Result<()> {
         self.begin_current(sequence, purpose)
+    }
+
+    fn check_original(&mut self, clock: Observation) -> Result<()> {
+        let result = self.observe(clock);
+        self.finish_result(result)
     }
 
     fn poll(observation: PollObservation) -> Result<TransportDecision> {
@@ -227,6 +235,21 @@ impl<M: Machine> World<M> {
         self.endpoints[endpoint].refused = true;
         self.endpoints[endpoint].machine.refuse();
         Outcome::Refused
+    }
+
+    // The native adapter checks its same acquisition around file work. This
+    // controlled observation neither delivers a packet nor begins a new grant.
+    fn check_original(&mut self, endpoint: usize) -> bool {
+        if !self.guard(endpoint) {
+            return false;
+        }
+        let local = &mut self.endpoints[endpoint];
+        if local.machine.check_original(local.clock.clone()).is_err() {
+            self.refuse(endpoint);
+            false
+        } else {
+            true
+        }
     }
 
     // Controlled observations of the guards that remain native. In particular,

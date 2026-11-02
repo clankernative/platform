@@ -273,6 +273,11 @@ impl Machine for Model {
         self.result(result)
     }
 
+    fn check_original(&mut self, clock: Observation) -> Result<()> {
+        let result = self.clock(clock);
+        self.result(result)
+    }
+
     fn refuse(&mut self) {
         self.terminal = true;
     }

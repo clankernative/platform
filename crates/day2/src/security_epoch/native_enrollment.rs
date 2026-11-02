@@ -16,7 +16,7 @@ mod executable_bytes;
 mod handshake;
 #[cfg(test)]
 pub(in crate::security_epoch) use handshake::simulation::{
-    LifecycleHandshake, LifecycleModelError,
+    LifecycleHandshake, LifecycleModelError, LifecycleProgress, LifecycleReference,
 };
 pub(in crate::security_epoch) mod issuer_costs;
 #[cfg(target_os = "linux")]

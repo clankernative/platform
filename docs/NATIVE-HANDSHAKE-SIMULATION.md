@@ -100,6 +100,21 @@ peer-death cuts. This is a scheduling seam for future durable interleavings;
 it does not itself move initial file preparation into the generated history or
 construct any native owner.
 
+The durable-state oracle also has a reference-only wrapper containing solely
+the independent wire model. It shares controlled schedule input/order and bounds
+with the actual wrapper, but derives completion, liveness and refusal from its
+own world. It neither reads the actual snapshot nor calls the production
+transcript to predict a result. A compile-time model-type pin, per-event parity,
+deliberate reference-only divergence and a dropped-final-postcheck control keep
+the distinction explicit. The storage lifecycle now uses that separate model
+for individual first-holder steps and original-file observation cuts: App work
+follows checked Offer, and Controller retention follows checked Accepted.
+Historical checked Accepted stays distinct from usable retention after a late
+file or original-clock refusal. Complete initial reference clocks, queues and
+endpoint knowledge are compared, not just aggregate completion. These remain
+DATA and unqualified filesystem fixtures; initial preparation still precedes
+the generated history, and no native owner or P3 is constructed.
+
 ## Failure evidence and replay
 
 Model or replay divergence writes typed, redacted evidence under
