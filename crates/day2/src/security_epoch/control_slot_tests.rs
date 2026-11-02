@@ -927,7 +927,7 @@ enum ClaimReply {
     ProviderDeadline,
     LostAfterCommit,
     MalformedAfterCommit,
-    ExpiredAfterCommit,
+    ClockAfterCommit(Duration),
 }
 
 struct SharedPort {
@@ -937,7 +937,7 @@ struct SharedPort {
     slot_posts: usize,
     counter_posts: usize,
     retained_counter_owner: Option<std::rc::Weak<()>>,
-    expire_after_counter_commit: bool,
+    counter_commit_time: Option<Duration>,
     lose_counter_reply: bool,
     selected_timeouts: Vec<Duration>,
     transactions: std::collections::BTreeMap<String, (Value, Vec<Value>)>,
@@ -963,7 +963,7 @@ impl SharedPort {
             slot_posts: 0,
             counter_posts: 0,
             retained_counter_owner: None,
-            expire_after_counter_commit: false,
+            counter_commit_time: None,
             lose_counter_reply: false,
             selected_timeouts: Vec::new(),
             transactions: std::collections::BTreeMap::new(),
@@ -1157,8 +1157,8 @@ impl SharedPort {
                 .as_str()
                 .context("oracle slot name")?;
             let document: Value = serde_json::from_slice(&self.slots.read(name))?;
-            if reply == ClaimReply::ExpiredAfterCommit {
-                self.counter.set_slot_fixture_time(Duration::from_secs(105));
+            if let ClaimReply::ClockAfterCommit(now) = reply {
+                self.counter.set_slot_fixture_time(now);
             }
             let body = if reply == ClaimReply::MalformedAfterCommit {
                 b"{}".to_vec()
@@ -1184,8 +1184,10 @@ impl SharedPort {
         }
         let reply = self.counter.post_wire(url, body, timeout, max_bytes)?;
         if url.ends_with(":commit") {
-            if self.expire_after_counter_commit {
-                self.counter.set_slot_fixture_time(Duration::from_secs(105));
+            if reply.status == 200
+                && let Some(now) = self.counter_commit_time.take()
+            {
+                self.counter.set_slot_fixture_time(now);
             }
             ensure!(!self.lose_counter_reply, "counter reply lost after commit");
         }
@@ -1573,7 +1575,7 @@ fn counter_send_keeps_the_known_claim_owner_through_transport_and_releases_on_ev
             .send(&selection, &mut port)
             .unwrap();
             assert!(retained.upgrade().is_some());
-            port.expire_after_counter_commit = outcome == "expired";
+            port.counter_commit_time = (outcome == "expired").then_some(Duration::from_secs(105));
             port.lose_counter_reply = outcome == "lost";
             let result = claim.send(&selection, &mut port);
             assert_eq!(result.is_ok(), outcome == "known", "{outcome}");
@@ -1606,7 +1608,7 @@ fn only_known_current_claim_commit_yields_one_consuming_counter_send() {
             ClaimReply::ProviderDeadline,
             ClaimReply::LostAfterCommit,
             ClaimReply::MalformedAfterCommit,
-            ClaimReply::ExpiredAfterCommit,
+            ClaimReply::ClockAfterCommit(Duration::from_secs(105)),
         ] {
             let mut port = SharedPort::new();
             if core.stage == Stage::Complete {

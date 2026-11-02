@@ -19,7 +19,7 @@ pub(super) struct Model {
     documents: BTreeMap<String, (Value, u64)>,
     replaced: BTreeMap<CounterRecord, Option<(Value, u64)>>,
     applied: usize,
-    expired: bool,
+    clock_invalid: bool,
     active: bool,
     file_refused: bool,
 }
@@ -55,7 +55,7 @@ impl Model {
         self.active
             && self.state.first_holder
             && self.state.continuation
-            && !self.expired
+            && !self.clock_invalid
             && !self.file_refused
     }
 
@@ -136,6 +136,7 @@ impl Model {
                 current: 0,
                 slot_posts: 0,
                 counter_posts: 0,
+                clock_order_failures: 0,
                 counter: Value::Null,
                 slots: Value::Null,
                 file: physical.then_some(FileState {
@@ -159,7 +160,7 @@ impl Model {
             documents: BTreeMap::new(),
             replaced: BTreeMap::new(),
             applied: 0,
-            expired: false,
+            clock_invalid: false,
             active: false,
             file_refused: false,
         })
@@ -175,7 +176,7 @@ impl Model {
 
     fn bootstrap(&mut self, stage: usize, operation: Operation, fault: Fault) -> bool {
         if !self.state.first_holder
-            || self.expired
+            || self.clock_invalid
             || fault == Fault::ReplaceCandidate
             || !self.observed_documents_match()
         {
@@ -218,9 +219,13 @@ impl Model {
                     Fault::LostSlotReply
                         | Fault::MalformedSlotReply
                         | Fault::ExpiredSlotReply
+                        | Fault::RewoundSlotClock
                         | Fault::AbandonClaim
                 ) {
-                    self.expired = fault == Fault::ExpiredSlotReply;
+                    self.clock_invalid =
+                        matches!(fault, Fault::ExpiredSlotReply | Fault::RewoundSlotClock);
+                    self.state.clock_order_failures +=
+                        usize::from(fault == Fault::RewoundSlotClock);
                     return false;
                 }
                 self.state.counter_posts += 1;
@@ -240,8 +245,15 @@ impl Model {
                     );
                     self.applied += 1;
                 }
-                self.expired = fault == Fault::ExpiredCounterReply;
-                return fault == Fault::None;
+                self.clock_invalid = matches!(
+                    fault,
+                    Fault::ExpiredCounterReply | Fault::RewoundCounterClock
+                );
+                self.state.clock_order_failures += usize::from(fault == Fault::RewoundCounterClock);
+                return matches!(
+                    fault,
+                    Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock
+                );
             }
             Operation::Settle => {
                 if current != Some("may_have_been_sent") || self.applied <= stage {
@@ -258,13 +270,14 @@ impl Model {
                 };
                 self.write_slot(stage, json!({"state":"observed","control_lineage":lineage,"receipt":self.receipts[stage],
                     "settlement":{"id":digest("day2-control-settlement-v1", &core),"core":core}}));
-                if stage == 1 && fault == Fault::None {
+                if stage == 1 && matches!(fault, Fault::None | Fault::ForwardSlotClock) {
                     self.active = true;
                 }
             }
         }
-        self.expired = fault == Fault::ExpiredSlotReply;
-        fault == Fault::None
+        self.clock_invalid = matches!(fault, Fault::ExpiredSlotReply | Fault::RewoundSlotClock);
+        self.state.clock_order_failures += usize::from(fault == Fault::RewoundSlotClock);
+        matches!(fault, Fault::None | Fault::ForwardSlotClock)
     }
 
     fn counter_name(&self, record: CounterRecord) -> String {
@@ -362,7 +375,7 @@ impl Model {
             Event::CounterRestore { record } => self.restore_counter(record),
             Event::Reopen => true,
             Event::RestoreClock => {
-                self.expired = false;
+                self.clock_invalid = false;
                 true
             }
             // An independent read-only DATA observation may use a fresh read
@@ -455,7 +468,8 @@ impl Model {
                             death_cut,
                             rewrite_provider,
                         } => {
-                            if !self.active || self.expired || !self.active_documents_match() {
+                            if !self.active || self.clock_invalid || !self.active_documents_match()
+                            {
                                 false
                             } else {
                                 if rewrite_provider && death_cut.is_none() {
