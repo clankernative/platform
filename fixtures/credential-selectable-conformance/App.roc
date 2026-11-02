@@ -6,6 +6,8 @@ import MetadataInvariants
 import CreateClient
 import CreatePersonal
 import RecordUse
+import RotateClient
+import RotatePersonal
 import RevokeClient
 import RevokePersonal
 
@@ -19,6 +21,8 @@ App :: [].{
 			inspect: InspectKey.definition,
 			create_client: CreateClient.definition,
 			create_personal: CreatePersonal.definition,
+			rotate_client: RotateClient.definition,
+			rotate_personal: RotatePersonal.definition,
 			revoke_client: RevokeClient.definition,
 			revoke_personal: RevokePersonal.definition,
 			record_use: RecordUse.definition,

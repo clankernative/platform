@@ -399,6 +399,7 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
                 validate_id(page)?;
             }
             validate_restored_intent(&navigation.intent, &navigation.family)?;
+            super::lifecycle::validate_preview(&navigation.intent,&navigation.rotation)?;
             pending.insert(navigation.invocation.clone(), navigation);
         }
     }
@@ -424,6 +425,7 @@ fn validate_credential_peers(db: &Connection, peers: &[&str]) -> Result<()> {
                         && confirmation.input == navigation.input
                         && confirmation.family == navigation.family
                         && confirmation.intent == navigation.intent
+                        && confirmation.rotation_grant == navigation.rotation.as_ref().map(|preview|preview.digest.clone())
                         && confirmation.artifact == navigation.artifact
                         && confirmation.authority == navigation.authority
                         && confirmation.binding == navigation.binding
@@ -500,6 +502,7 @@ pub(super) fn validate_restored_intent(
             lineage,
             head,
             revision,
+            ..
         } => {
             reference(lineage)?;
             validate_id(head)?;
@@ -671,24 +674,16 @@ pub(super) fn version_grant(
     version: &str,
 ) -> Result<GrantCeiling> {
     validate_id(version)?;
-    let (ceiling, digest, principal, raw, version_digest): (
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = db.query_row(
-        "SELECT l.grant_json,l.grant_digest,l.principal,m.identity_json,v.grant_digest
+    let (ceiling, digest, principal, raw, version_digest, epoch, material_revision, recipient):
+        (String, String, String, String, String, i64, i64, String) = db.query_row(
+        "SELECT l.grant_json,l.grant_digest,l.principal,m.identity_json,v.grant_digest,
+                v.security_epoch,m.material_revision,d.recipient
          FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage
          JOIN day2_credential_material m ON m.version=v.id
+         JOIN day2_credential_deliveries d ON d.version=v.id
          WHERE v.id=?1 AND l.id=?2 AND l.namespace=?3 AND l.family=?4",
-        params![
-            version,
-            lineage.id,
-            namespace_key(&lineage.namespace)?,
-            lineage.family.as_str()
-        ],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        params![version,lineage.id,namespace_key(&lineage.namespace)?,lineage.family.as_str()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
     )?;
     let ceiling: GrantCeiling = crate::json::decode(ceiling.as_bytes())?;
     let identity: MaterialIdentity = crate::json::decode(raw.as_bytes())?;
@@ -699,6 +694,9 @@ pub(super) fn version_grant(
             && identity.family == lineage.family.as_str()
             && identity.lineage == lineage.id
             && identity.version == version
+            && identity.security_epoch == u64::try_from(epoch)?
+            && identity.material_revision == u64::try_from(material_revision)?
+            && identity.recipient == recipient
             && identity.grant.digest.as_str() == version_digest,
         "credential version grant identity changed"
     );
@@ -1698,7 +1696,7 @@ pub(crate) fn list_metadata(
                 l.grant_digest, l.state, l.head, l.revision, v.expires_at, m.identity_json, v.grant_digest
          FROM day2_credential_lineages l
          JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
-         JOIN day2_credential_material m ON m.version=v.id
+         LEFT JOIN day2_credential_material m ON m.version=v.id
          WHERE l.namespace = ?1 AND l.family = ?2 AND l.family_contract = ?3
            AND l.creator = ?4 AND l.id > ?5
          ORDER BY l.id LIMIT ?6",
@@ -1761,7 +1759,7 @@ pub(crate) fn inspect_metadata(
                     l.grant_digest, l.state, l.head, l.revision, v.expires_at, m.identity_json, v.grant_digest
              FROM day2_credential_lineages l
              JOIN day2_credential_versions v ON v.id = l.head AND v.lineage = l.id
-             JOIN day2_credential_material m ON m.version=v.id
+             LEFT JOIN day2_credential_material m ON m.version=v.id
              WHERE l.id = ?1 AND l.namespace = ?2 AND l.family = ?3
                AND l.family_contract = ?4 AND l.creator = ?5",
             params![
@@ -3210,6 +3208,7 @@ mod tests {
             created_at: 100,
             expires_at: 400,
             product_return: None,
+            rotation: None,
         };
         let confirmation = super::super::issuance::Confirmation {
             invocation: navigation.invocation.clone(),
@@ -3220,6 +3219,7 @@ mod tests {
             input: navigation.input.clone(),
             family: navigation.family.clone(),
             intent: navigation.intent.clone(),
+            rotation_grant: None,
             artifact: navigation.artifact.clone(),
             authority,
             binding: navigation.binding.clone(),
@@ -3419,6 +3419,8 @@ mod tests {
         family: &str,
         intent: &super::super::lifecycle::Intent,
     ) -> Result<()> {
+        let preview = matches!(intent,super::super::lifecycle::Intent::Rotate {..}).then(||
+            super::super::lifecycle::RotationPreview {digest:Digest::new(b"synthetic-restored-rotation"),roots:vec!["app.operation".into()]});
         for (table, column) in [
             ("day2_credential_browser", "intent"),
             ("day2_credential_confirmations", "confirmation"),
@@ -3431,9 +3433,11 @@ mod tests {
             if table == "day2_credential_browser" {
                 changed["family"] = family.into();
                 changed["intent"] = serde_json::to_value(intent)?;
+                changed["rotation"] = serde_json::to_value(&preview)?;
             } else {
                 changed["confirmation"]["family"] = family.into();
                 changed["confirmation"]["intent"] = serde_json::to_value(intent)?;
+                changed["confirmation"]["rotation_grant"] = serde_json::to_value(preview.as_ref().map(|preview|preview.digest.clone()))?;
                 let pending: super::super::browser::Pending = crate::json::decode(
                     db.query_row("SELECT intent FROM day2_credential_browser", [], |row| {
                         row.get::<_, String>(0)
@@ -3468,6 +3472,7 @@ mod tests {
                     lineage: reference.clone(),
                     head: "version-1".into(),
                     revision: 1,
+                    grant: super::super::lifecycle::RotateGrant::Fixed,
                 },
                 Intent::Revoke {
                     lineage: reference.clone(),
@@ -3768,7 +3773,7 @@ mod tests {
         .unwrap()
     }
 
-    fn issue(invocation: &str) -> IssueIntent {
+    pub(super) fn issue(invocation: &str) -> IssueIntent {
         IssueIntent {
             namespace: namespace(),
             family: "transcription-client".into(),
@@ -4477,7 +4482,7 @@ mod tests {
         Ok(())
     }
 
-    fn selectable_fixture() -> Result<(ManifestFamily, GrantCeiling)> {
+    pub(super) fn selectable_fixture() -> Result<(ManifestFamily, GrantCeiling)> {
         let fixed = family();
         let read = OperationAuthorityContract::derive(
             "ReadTranscription".into(),

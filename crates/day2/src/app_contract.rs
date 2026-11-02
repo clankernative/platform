@@ -53,6 +53,8 @@ pub struct CredentialAccess {
     pub rotation_head: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rotation_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rotation_grant: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interactive: bool,
 }
@@ -705,11 +707,15 @@ impl CredentialAccess {
                 "only client and personal lifecycle management is supported"
             );
             let fields = &artifact.schema.inputs[&registered.input_type].fields;
-            ensure!(
-                !(family.grant == day2_capabilities::credentials::GrantMode::Selectable
-                    && action == "rotate"),
-                "selectable rotation requires a closed grant choice and is not supported yet"
-            );
+            match (&family.grant,action) {
+                (day2_capabilities::credentials::GrantMode::Selectable,"rotate") => ensure!(
+                    matches!(fields.get(&self.rotation_grant),Some(Kind::Text))
+                        && self.rotation_grant != self.management_lineage
+                        && self.rotation_grant != self.rotation_head,
+                    "selectable rotation requires a distinct canonical grant-choice text input path"
+                ),
+                _ => ensure!(self.rotation_grant.is_empty(),"only selectable rotation has a grant-choice input"),
+            }
             match (&family.grant, action) {
                 (day2_capabilities::credentials::GrantMode::Selectable, "issue") => ensure!(
                     self.issue_grant != self.issue_label
@@ -774,7 +780,7 @@ impl CredentialAccess {
         );
         ensure!(
             self.rotations.len() == 1
-                || (self.rotation_head.is_empty() && self.rotation_revision.is_empty()),
+                || (self.rotation_head.is_empty() && self.rotation_revision.is_empty() && self.rotation_grant.is_empty()),
             "credential rotation precondition requires rotate access"
         );
         ensure!(
@@ -2631,6 +2637,32 @@ mod credential_binding_tests {
                             .to_string()
                             .contains("fixed issuance has no grant selection input")
                     );
+                }
+            }
+            for operation in ["credential_metadata.rotate_client", "credential_metadata.rotate_personal"] {
+                let artifact = loaded.contract();
+                let access = &artifact.app_contract.as_ref().context("app contract")?
+                    .operations[operation].credential_access;
+                access.validate(artifact,operation)?;
+                for mutation in ["missing","lineage","head","absent","nontext"] {
+                    let mut access=access.clone();
+                    let mut changed=artifact.clone();
+                    if selected {
+                        match mutation {
+                            "missing"=>access.rotation_grant.clear(),
+                            "lineage"=>access.rotation_grant=access.management_lineage.clone(),
+                            "head"=>access.rotation_grant=access.rotation_head.clone(),
+                            "absent"=>access.rotation_grant="missing_field".into(),
+                            "nontext"=>{
+                                let input=&loaded.operation(operation)?.input_type;
+                                changed.schema.inputs.get_mut(input).unwrap().fields.insert(access.rotation_grant.clone(),Kind::Boolean);
+                            }
+                            _=>unreachable!(),
+                        }
+                    } else {
+                        access.rotation_grant=access.rotation_head.clone();
+                    }
+                    assert!(access.validate(&changed,operation).is_err(),"{operation} selected={selected} {mutation}");
                 }
             }
         }

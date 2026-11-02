@@ -18,8 +18,8 @@ the checked compiler type. Nominal mode witnesses are declaration DATA, not
 runtime permission; final metadata must match both checked choices. The app supplies a stable ID and a bounded lifetime
 in seconds; registration names remain separate from IDs. Generated metadata reads
 and fixed client/personal `issue`, `rotate` and `revoke` are available. Selectable
-families expose `issue` and `revoke`; selectable rotation remains unsupported
-until its closed keep-existing/narrow choice is implemented.
+families expose `issue`, `rotate` and `revoke`; their rotation input requires an
+explicit keep-existing or narrow choice.
 
 The portable rotation resolver accepts only `KeepExisting` or an exact
 `Narrow(GrantSelection)` subset of the actual predecessor. It preserves the
@@ -27,8 +27,23 @@ predecessor's subject, audience and authority binding and rejects retired or
 changed canonical contracts, foreign selections and newly added roots. Fixed
 families use the same resolver for keep-existing validation and cannot consume
 a narrowing selection. This is a grant calculation, not maintenance or live
-management authority. Selectable rotation's generated input, protected intent
-and atomic storage publication remain pending; no new rotation route is enabled.
+management authority. Selectable rotation's generated input carries an explicit
+family-specific `RotationChoice`; a narrow choice contains that family's nominal
+`GrantSelection`. The app binds its canonical serialized choice with
+`.credential_rotation_grant(Selectors.<input_field>)`. Missing, foreign, aliased,
+unknown or noncanonical choices refuse; omission never restores the family maximum.
+
+Protected rotation navigation freezes the exact expected predecessor's successor
+grant digest and displays its root names. Confirmation binds that digest, the
+choice and full original input to the existing human original. The publishing
+transaction rederives the exact grant and refuses any changed digest. It commits
+the successor, predecessor closure, delivery, receipt and product writes together.
+A version's effective grant is authenticated in its verifier and encrypted
+material identity; the original lineage ceiling remains immutable. Metadata,
+reveal, ingress, replay, schema admission and rewrap all bind that version grant.
+After narrowing, later rotation cannot recover a removed root. Rewrap preserves
+both the original ceiling and the full effective version grant. This adds no
+maintenance authorizer, native producer or compatibility/migration path.
 
 The shared local-family contract now resolves fixed and selected requests
 through one closed `IssuanceGrant` mode. A `GrantSelection` is portable DATA:
@@ -65,8 +80,10 @@ fixed issuance has no grant field or option catalog. The application binds the
 serialized selection input with `.credential_grant(Selectors.<input_field>)`.
 The text codec accepts only its complete canonical encoding, so discarded JSON
 members cannot silently become a typed selection. The host independently
-rechecks the input against the current admitted manifest. Selectable rotation
-remains unsupported.
+rechecks the input against the current admitted manifest. Fixed rotation retains
+its `{ expected }` author input; selectable rotation requires `{ expected, grant }`.
+`KeepExisting` copies only the actual predecessor grant; `Narrow(selection)` can
+only remove complete canonical roots. Neither choice supplies permission.
 Artifact load recompares the declarations with the native worker. The build rejects duplicate IDs,
 registration/profile drift, empty or duplicate roots, unsupported lifetimes,
 internal command roots and target signatures that differ from the checked

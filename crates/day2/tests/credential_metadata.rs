@@ -98,6 +98,7 @@ fn lifecycle_admission_rejects_unbound_or_ambiguous_management_intent() -> Resul
         "mixed_action",
         "ordinary_context",
         "unknown_family",
+        "fixed_grant_choice",
     ] {
         let mut contract = artifact.contract().clone();
         let access = &mut contract
@@ -115,6 +116,7 @@ fn lifecycle_admission_rejects_unbound_or_ambiguous_management_intent() -> Resul
             "mixed_action" => access.revocations = access.rotations.clone(),
             "ordinary_context" => access.interactive = false,
             "unknown_family" => access.rotations = vec!["unknown".into()],
+            "fixed_grant_choice" => access.rotation_grant = access.rotation_head.clone(),
             _ => unreachable!(),
         }
         assert!(
@@ -1493,6 +1495,12 @@ step = |raw| raw
         fs::write(directory.join("app/main.roc"), &positive)?;
         let (success, diagnostics) = run(directory, "check")?;
         ensure!(success, "selectable typed issuance: {diagnostics}");
+        let rotation_positive = format!(
+            "{issuance_base}\nrotate : InteractiveContext, Credentials.ManagementSnapshot_clients, Credentials.RotationChoice_clients -> Tx(Credentials.RotationOutcome_clients)\nrotate = |context, expected, grant| (Credentials.clients.rotate)(context, {{ expected, grant }})\nkeep : InteractiveContext, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nkeep = |context, expected| (Credentials.clients.rotate)(context, {{ expected, grant: KeepExisting }})\nnarrow : InteractiveContext, Credentials.ManagementSnapshot_clients, Credentials.GrantSelection_clients -> Tx(Credentials.RotationOutcome_clients)\nnarrow = |context, expected, grant| (Credentials.clients.rotate)(context, {{ expected, grant: Narrow(grant) }})\n"
+        );
+        fs::write(directory.join("app/main.roc"), &rotation_positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "selectable typed rotation: {diagnostics}");
         for (probe, expected) in [
             (
                 "probe : InteractiveContext, Credential.Label, Credentials.GrantSelection_personal -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant })",
@@ -1512,7 +1520,7 @@ step = |raw| raw
             ),
             (
                 "probe = |context, expected| (Credentials.clients.rotate)(context, { expected })",
-                "rotate",
+                "grant",
             ),
         ] {
             fs::write(
@@ -1526,6 +1534,18 @@ step = |raw| raw
             );
         }
         for (probe, expected) in [
+            (
+                "probe : InteractiveContext, Credentials.ManagementSnapshot_clients, Credentials.RotationChoice_personal -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected, grant| (Credentials.clients.rotate)(context, { expected, grant })",
+                "RotationChoice_personal",
+            ),
+            (
+                "probe : InteractiveContext, Credentials.ManagementSnapshot_clients, Credentials.GrantSelection_personal -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected, grant| (Credentials.clients.rotate)(context, { expected, grant: Narrow(grant) })",
+                "GrantSelection_personal",
+            ),
+            (
+                "probe : InteractiveContext, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected| (Credentials.clients.rotate)(context, { expected, grant: \"keep_existing\" })",
+                "RotationChoice_clients",
+            ),
             (
                 "probe = (Credentials.clients.selection_from_options)(Credentials.personal.grant_options)",
                 "GrantOption_personal",
@@ -1543,7 +1563,7 @@ step = |raw| raw
                 "GrantSelection_clients",
             ),
         ] {
-            fs::write(directory.join("app/main.roc"), format!("{base}\n{probe}\n"))?;
+            fs::write(directory.join("app/main.roc"), format!("{issuance_base}\n{probe}\n"))?;
             let (success, diagnostics) = run(directory, "check")?;
             ensure!(
                 !success && diagnostics.contains(expected),
@@ -1598,13 +1618,33 @@ step = |raw| raw
         expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => match (Credentials.clients.selection_from_options)(selection.options()) {{ Ok(copy) => copy.to_str() == selection.to_str()\n Err(_) => Bool.False }}\n Err(_) => Bool.False }}\n", serde_json::to_string(&selected)?));
         expectations.push_str("expect match Credentials.clients.grant_options { [first, second] => match (Credentials.clients.selection_from_options)([second, first]) { Ok(selection) => selection.options().map(|option| option.operation()) == [first.operation(), second.operation()]\n Err(_) => Bool.False }\n _ => Bool.False }\n");
         expectations.push_str("expect match Credentials.clients.grant_options { [first, ..] => match (Credentials.clients.selection_from_options)([first, first]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n _ => Bool.False }\n");
+        let keep=json!({"mode":"keep_existing","selections":[]}).to_string();
+        let selected_wire:serde_json::Value=serde_json::from_str(&selected)?;
+        let narrow=json!({"mode":"narrow","selections":[selected_wire.clone()]}).to_string();
+        for raw in [&keep,&narrow] {
+            expectations.push_str(&format!("expect match (Credentials.clients.rotation_from_str)({}) {{ Ok(choice) => (Credentials.clients.rotation_to_str)(choice) == {}\n Err(_) => Bool.False }}\n",serde_json::to_string(raw)?,serde_json::to_string(raw)?));
+        }
+        let mut foreign=selected_wire.clone();
+        foreign["family_contract"]=Digest::new(b"foreign rotation family").as_str().into();
+        let mut invalid_rotation=vec![
+            json!({"mode":"fixed","selections":[]}).to_string(),
+            json!({"mode":"keep_existing","selections":[selected_wire.clone()]}).to_string(),
+            json!({"mode":"narrow","selections":[]}).to_string(),
+            json!({"mode":"narrow","selections":[selected_wire.clone(),selected_wire]}).to_string(),
+            json!({"mode":"narrow","selections":[foreign]}).to_string(),
+            json!({"mode":"keep_existing","selections":[],"ignored":true}).to_string(),
+        ];
+        invalid_rotation.push(r#"{"mode":"narrow","mode":"keep_existing","selections":[]}"#.into());
+        for raw in invalid_rotation {
+            expectations.push_str(&format!("expect match (Credentials.clients.rotation_from_str)({}) {{ Ok(_) => Bool.False\n Err(_) => Bool.True }}\n",serde_json::to_string(&raw)?));
+        }
         fs::write(
             directory.join("app/main.roc"),
             format!("{base}\n{expectations}"),
         )?;
         let (success, diagnostics) = run(directory, "test")?;
         ensure!(
-            success && diagnostics.contains("All (14) tests passed"),
+            success && diagnostics.contains("All (23) tests passed"),
             "compiled selection controls: {diagnostics}"
         );
     }

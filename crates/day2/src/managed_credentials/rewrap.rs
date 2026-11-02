@@ -599,6 +599,76 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_version_rewrap_preserves_both_grants_and_rejects_each_changed_snapshot() -> Result<()> {
+        use day2_capabilities::credentials::{GrantSelection,RotationGrant};
+        let world=World::new(707);
+        effects::scope(world.clone(),|| {
+            for change in ["none","ceiling_json","ceiling_digest","version_json","version_digest"] {
+                world.set_wall(1100);
+                let (_directory,mut db)=fixture::database()?;
+                let (family,ceiling)=fixture::selectable_fixture()?;
+                let mut issue=fixture::issue("rewrap-selected-issue");
+                issue.family_contract=family.contract.clone();
+                issue.ceiling=ceiling.clone();
+                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let first=super::super::stage_issue(&tx,super::super::prepare_issue(&fixture::lease(),&family,issue)?)?.public_identity().clone();
+                tx.commit()?;
+                let selection=GrantSelection::new(&family,vec!["ReadTranscription".into()])?;
+                let grant=family.rotation_ceiling(&ceiling,RotationGrant::Narrow(&selection))?;
+                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let successor=match super::super::stage_rotation(&tx,&fixture::lease(),&fixture::snapshot(&first),super::super::RotationIntent {
+                    grant:&grant,invocation:"rewrap-selected-narrow",instruction_slot:0,recipient:"issuer/human-1",session:"session-1",
+                    issued_at:1100,expires_at:2000,reveal_until:1300,
+                })? {
+                    super::super::RotationResult::Rotated(pending)=>pending.public_identity().clone(),
+                    super::super::RotationResult::Conflict=>anyhow::bail!("fresh rotation conflicted"),
+                };
+                tx.commit()?;
+                let version=successor.version.as_deref().context("narrowed successor")?;
+                let (authority,keys)=ports(version);
+                let request=Request {binding:&authority.binding,family:&family,version};
+                let (_,before)=current(&db,&request,1100)?;
+                let ready=prepare(&db,&authority,&keys,Request {binding:&authority.binding,family:&family,version})?;
+                assert_eq!(ready.target.identity.grant,grant);
+                match change {
+                    "ceiling_json"=>{db.execute("UPDATE day2_credential_lineages SET grant_json=?1",[serde_json::to_string(&grant)?])?;},
+                    "ceiling_digest"=>{db.execute("UPDATE day2_credential_lineages SET grant_digest=?1",[grant.digest.as_str()])?;},
+                    "version_json"=>{
+                        let mut identity:MaterialIdentity=crate::json::decode(before.identity_json.as_bytes())?;
+                        identity.grant=ceiling.clone();
+                        db.execute("UPDATE day2_credential_material SET identity_json=?1 WHERE version=?2",params![serde_json::to_string(&identity)?,version])?;
+                    },
+                    "version_digest"=>{db.execute("UPDATE day2_credential_versions SET grant_digest=?1 WHERE id=?2",params![ceiling.digest.as_str(),version])?;},
+                    _=>{},
+                }
+                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if change!="none" {
+                    assert!(stage(&tx,&authority,ready).is_err(),"accepted changed {change}");
+                    tx.rollback()?;
+                    let (ciphertext,revision):(Vec<u8>,i64)=db.query_row("SELECT ciphertext,envelope_revision FROM day2_credential_material WHERE version=?1",[version],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                    assert_eq!(ciphertext,before.ciphertext);
+                    assert_eq!(revision,1);
+                    continue;
+                }
+                let _pending=stage(&tx,&authority,ready)?;
+                tx.commit()?;
+                let (_,after)=current(&db,&request,1100)?;
+                assert_eq!(after.identity_json,before.identity_json);
+                assert_eq!(after.grant,before.grant);
+                assert_eq!(after.grant_digest,before.grant_digest);
+                assert_eq!(after.version_grant,grant.digest.as_str());
+                let identity:MaterialIdentity=crate::json::decode(after.identity_json.as_bytes())?;
+                let old=crypto::decrypt_for_human(&fixture::lease(),&identity,&identity,1,"encrypt-v1",before.nonce.as_slice().try_into()?,&before.ciphertext)?;
+                let replacement=KeyLease::new(&[3;32],&[8;32],"verify-v1".into(),"encrypt-v2".into())?;
+                let new=crypto::decrypt_for_human(&replacement,&identity,&identity,2,"encrypt-v2",after.nonce.as_slice().try_into()?,&after.ciphertext)?;
+                assert_eq!(old,new);
+                super::super::install_schema(&db)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
     fn rollback_and_competing_rewrap_never_publish_a_stale_envelope() -> Result<()> {
         effects::scope(World::new(702), || {
             let (dir, mut db) = fixture::database()?;

@@ -117,6 +117,7 @@ pub(super) struct Confirmation {
     pub input: Value,
     pub family: String,
     pub intent: Intent,
+    pub rotation_grant: Option<Digest>,
     pub artifact: String,
     pub authority: authority_state::AuthorityStamp,
     pub binding: Digest,
@@ -258,7 +259,14 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
             );
             8 + selection.roots().len()
         }
-        Intent::Rotate { .. } => 5,
+        Intent::Rotate {grant,..} => match grant {
+            lifecycle::RotateGrant::Fixed | lifecycle::RotateGrant::KeepExisting => 8,
+            lifecycle::RotateGrant::Narrow(selection) => {
+                ensure!((1..=64).contains(&selection.roots().len())
+                    && selection.roots().iter().all(|root|root.len()<=160),"credential rotation selection structure budget");
+                11 + selection.roots().len()
+            }
+        },
     };
     let original_nodes = match original {
         ConfirmationOrigin::Credential(context) => {
@@ -294,7 +302,7 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
     bounded(
         &proof.input,
         2,
-        &mut (18 + intent_nodes + original_nodes),
+        &mut (19 + intent_nodes + original_nodes),
         &mut 0,
     )
 }
@@ -366,7 +374,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
             let mut map = serializer.serialize_map(Some(match self.0 {
                 Intent::Issue { .. } => 3,
                 Intent::Revoke { .. } => 2,
-                Intent::Rotate { .. } => 4,
+                Intent::Rotate { .. } => 5,
             }))?;
             map.serialize_entry("action", self.0.action())?;
             match self.0 {
@@ -378,7 +386,9 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
                     lineage,
                     head,
                     revision,
+                    grant,
                 } => {
+                    map.serialize_entry("grant",grant)?;
                     map.serialize_entry("head", head)?;
                     map.serialize_entry("lineage", lineage)?;
                     map.serialize_entry("revision", revision)?;
@@ -403,6 +413,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input: SortedValue<'a>,
         family: &'a str,
         intent: CanonicalIntent<'a>,
+        rotation_grant: &'a Option<Digest>,
         artifact: &'a str,
         authority: CanonicalAuthority<'a>,
         binding: &'a Digest,
@@ -422,6 +433,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input,
         family,
         intent,
+        rotation_grant,
         artifact,
         authority,
         binding,
@@ -440,6 +452,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input: SortedValue(input),
         family,
         intent: CanonicalIntent(intent),
+        rotation_grant,
         artifact,
         authority: CanonicalAuthority {
             epoch,
@@ -458,6 +471,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
 
 fn validate_record_data(proof: &Confirmation, original: &ConfirmationOrigin) -> Result<()> {
     check_record_structure(proof, original)?;
+    ensure!(matches!(proof.intent,Intent::Rotate {..})==proof.rotation_grant.is_some(),"credential rotation confirmation footprint missing or unexpected");
     for value in [
         &proof.invocation,
         &proof.operation,
@@ -577,6 +591,7 @@ pub(super) fn decode_record(invocation: &str, body: &[u8]) -> Result<StoredConfi
         let original = &value["original"];
         ensure!(
             proof.is_object()
+                && proof.get("rotation_grant").is_some()
                 && original.is_object()
                 && original["context"].is_object()
                 && proof["authority"].is_object()
@@ -714,6 +729,7 @@ pub(crate) fn access<'a>(
             management_lineage: String::new(),
             rotation_head: String::new(),
             rotation_revision: String::new(),
+            rotation_grant: String::new(),
             interactive: false,
         };
     Ok(runtime
@@ -1116,9 +1132,9 @@ mod tests {
 
     // Literal preimage/hash authored independently of the Rust codec. These
     // values are synthetic DATA, never a signed original pending/proof owner.
-    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","grant":{"mode":"fixed"},"label":"Golden key"},"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
+    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","grant":{"mode":"fixed"},"label":"Golden key"},"rotation_grant":null,"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
     const GOLDEN_DIGEST: &str =
-        "sha256:e3dd7767ffc3a5316476b73e19e24ede9117d5d5c1a7c66475d04bc75b2cd40a";
+        "sha256:0f983ebd0a5c92808ae43ef92f6cdfd5a6aa76df9ea2da2b49848faac0a95655";
 
     fn golden() -> Result<(Confirmation, ConfirmationOrigin)> {
         let value: Value = crate::json::decode(GOLDEN_PREIMAGE.as_bytes())?;
@@ -1148,6 +1164,7 @@ mod tests {
             "/confirmation/input/zeta/z",
             "/confirmation/family",
             "/confirmation/intent/label",
+            "/confirmation/rotation_grant",
             "/confirmation/artifact",
             "/confirmation/authority/epoch",
             "/confirmation/authority/revision",
@@ -1179,12 +1196,16 @@ mod tests {
                 Value::String(text) => format!("{text}x").into(),
                 Value::Number(number) => (number.as_i64().unwrap() + 1).into(),
                 Value::Bool(value) => (!*value).into(),
+                Value::Null => Digest::new(b"changed rotation grant").as_str().into(),
                 _ => panic!("unexpected golden mutation role"),
             };
             let old = changed["commitment"].clone();
             rehash_fixture_value(&mut changed)?;
             assert_ne!(changed["commitment"], old, "unbound {path}");
         }
+        let mut unexpected_grant = body.clone();
+        unexpected_grant["confirmation"]["rotation_grant"] = Digest::new(b"unexpected rotation").as_str().into();
+        assert!(decode_record("invocation-1", unexpected_grant.to_string().as_bytes()).is_err());
         // Fixed closed tags cannot be relabelled as another producer or purpose.
         for path in [
             "/original/kind",
@@ -1388,6 +1409,7 @@ mod tests {
             "/commitment",
             "/original",
             "/confirmation/authenticated_at",
+            "/confirmation/rotation_grant",
             "/original/context/proof_deadline",
         ] {
             let mut changed = body.clone();
