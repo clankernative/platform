@@ -117,6 +117,7 @@ pub(super) struct Confirmation {
     pub input: Value,
     pub family: String,
     pub intent: Intent,
+    pub rotation_grant: Option<Digest>,
     pub artifact: String,
     pub authority: authority_state::AuthorityStamp,
     pub binding: Digest,
@@ -251,14 +252,16 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
             grant: lifecycle::IssueGrant::Selected { selection },
             ..
         } => {
-            ensure!(
-                (1..=64).contains(&selection.roots().len())
-                    && selection.roots().iter().all(|root| root.len() <= 160),
-                "credential selection structure budget"
-            );
+            lifecycle::validate_selection(selection)?;
             8 + selection.roots().len()
         }
-        Intent::Rotate { .. } => 5,
+        Intent::Rotate { grant, .. } => match grant {
+            lifecycle::RotateGrant::Fixed | lifecycle::RotateGrant::KeepExisting => 8,
+            lifecycle::RotateGrant::Narrow(selection) => {
+                lifecycle::validate_selection(selection)?;
+                11 + selection.roots().len()
+            }
+        },
     };
     let original_nodes = match original {
         ConfirmationOrigin::Credential(context) => {
@@ -294,7 +297,7 @@ fn check_record_structure(proof: &Confirmation, original: &ConfirmationOrigin) -
     bounded(
         &proof.input,
         2,
-        &mut (18 + intent_nodes + original_nodes),
+        &mut (19 + intent_nodes + original_nodes),
         &mut 0,
     )
 }
@@ -366,7 +369,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
             let mut map = serializer.serialize_map(Some(match self.0 {
                 Intent::Issue { .. } => 3,
                 Intent::Revoke { .. } => 2,
-                Intent::Rotate { .. } => 4,
+                Intent::Rotate { .. } => 5,
             }))?;
             map.serialize_entry("action", self.0.action())?;
             match self.0 {
@@ -378,7 +381,9 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
                     lineage,
                     head,
                     revision,
+                    grant,
                 } => {
+                    map.serialize_entry("grant", grant)?;
                     map.serialize_entry("head", head)?;
                     map.serialize_entry("lineage", lineage)?;
                     map.serialize_entry("revision", revision)?;
@@ -403,6 +408,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input: SortedValue<'a>,
         family: &'a str,
         intent: CanonicalIntent<'a>,
+        rotation_grant: &'a Option<Digest>,
         artifact: &'a str,
         authority: CanonicalAuthority<'a>,
         binding: &'a Digest,
@@ -422,6 +428,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input,
         family,
         intent,
+        rotation_grant,
         artifact,
         authority,
         binding,
@@ -440,6 +447,7 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
         input: SortedValue(input),
         family,
         intent: CanonicalIntent(intent),
+        rotation_grant,
         artifact,
         authority: CanonicalAuthority {
             epoch,
@@ -458,6 +466,10 @@ fn commitment(confirmation: &Confirmation, original: &ConfirmationOrigin) -> Res
 
 fn validate_record_data(proof: &Confirmation, original: &ConfirmationOrigin) -> Result<()> {
     check_record_structure(proof, original)?;
+    ensure!(
+        matches!(proof.intent, Intent::Rotate { .. }) == proof.rotation_grant.is_some(),
+        "credential rotation confirmation footprint missing or unexpected"
+    );
     for value in [
         &proof.invocation,
         &proof.operation,
@@ -577,6 +589,7 @@ pub(super) fn decode_record(invocation: &str, body: &[u8]) -> Result<StoredConfi
         let original = &value["original"];
         ensure!(
             proof.is_object()
+                && proof.get("rotation_grant").is_some()
                 && original.is_object()
                 && original["context"].is_object()
                 && proof["authority"].is_object()
@@ -714,6 +727,7 @@ pub(crate) fn access<'a>(
             management_lineage: String::new(),
             rotation_head: String::new(),
             rotation_revision: String::new(),
+            rotation_grant: String::new(),
             interactive: false,
         };
     Ok(runtime
@@ -1116,9 +1130,9 @@ mod tests {
 
     // Literal preimage/hash authored independently of the Rust codec. These
     // values are synthetic DATA, never a signed original pending/proof owner.
-    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","grant":{"mode":"fixed"},"label":"Golden key"},"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
+    const GOLDEN_PREIMAGE: &str = r#"["credential-confirmation-record-v1",{"invocation":"invocation-1","operation":"IssueKey","actor":"alice@example.com","subject":"accounts.google.com:human-1","session":"session-1","input":{"alpha":7,"label":"Golden key","zeta":{"a":[true,null,"text"],"z":2}},"family":"api_keys","intent":{"action":"issue","grant":{"mode":"fixed"},"label":"Golden key"},"rotation_grant":null,"artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","authority":{"epoch":"sha256:2222222222222222222222222222222222222222222222222222222222222222","revision":7},"binding":"sha256:3333333333333333333333333333333333333333333333333333333333333333","security_epoch":4,"authenticated_at":1010,"approved_at":1011,"expires_at":1290},{"kind":"credential","context":{"purpose":"credential_intent","scope":"localdev/disposable/app","app":"app","artifact":"sha256:1111111111111111111111111111111111111111111111111111111111111111","app_origin":"https://app.example.com","shell_origin":"https://shell.example.com","attempt":"attempt-1","pending_challenge":"sha256:4444444444444444444444444444444444444444444444444444444444444444","human":"alice@example.com","subject":"accounts.google.com:human-1","pending_created_at":1000,"pending_expires_at":1300,"authenticated_at":1010,"proof_deadline":1290}}]"#;
     const GOLDEN_DIGEST: &str =
-        "sha256:e3dd7767ffc3a5316476b73e19e24ede9117d5d5c1a7c66475d04bc75b2cd40a";
+        "sha256:0f983ebd0a5c92808ae43ef92f6cdfd5a6aa76df9ea2da2b49848faac0a95655";
 
     fn golden() -> Result<(Confirmation, ConfirmationOrigin)> {
         let value: Value = crate::json::decode(GOLDEN_PREIMAGE.as_bytes())?;
@@ -1148,6 +1162,7 @@ mod tests {
             "/confirmation/input/zeta/z",
             "/confirmation/family",
             "/confirmation/intent/label",
+            "/confirmation/rotation_grant",
             "/confirmation/artifact",
             "/confirmation/authority/epoch",
             "/confirmation/authority/revision",
@@ -1179,12 +1194,17 @@ mod tests {
                 Value::String(text) => format!("{text}x").into(),
                 Value::Number(number) => (number.as_i64().unwrap() + 1).into(),
                 Value::Bool(value) => (!*value).into(),
+                Value::Null => Digest::new(b"changed rotation grant").as_str().into(),
                 _ => panic!("unexpected golden mutation role"),
             };
             let old = changed["commitment"].clone();
             rehash_fixture_value(&mut changed)?;
             assert_ne!(changed["commitment"], old, "unbound {path}");
         }
+        let mut unexpected_grant = body.clone();
+        unexpected_grant["confirmation"]["rotation_grant"] =
+            Digest::new(b"unexpected rotation").as_str().into();
+        assert!(decode_record("invocation-1", unexpected_grant.to_string().as_bytes()).is_err());
         // Fixed closed tags cannot be relabelled as another producer or purpose.
         for path in [
             "/original/kind",
@@ -1229,8 +1249,10 @@ mod tests {
             let value = changed.pointer_mut(pointer).unwrap();
             *value = if pointer.ends_with("family_contract") {
                 Digest::new(b"different contract").as_str().into()
+            } else if pointer.ends_with("/0") {
+                "fixture.read_alternative".into()
             } else {
-                "fixture.other".into()
+                "fixture.save_alternative".into()
             };
             let before = changed["commitment"].clone();
             rehash_fixture_value(&mut changed)?;
@@ -1252,6 +1274,93 @@ mod tests {
                 "invalid selected record {case}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_confirmation_binds_choice_predecessor_and_frozen_successor_grant() -> Result<()> {
+        let (mut proof, original) = golden()?;
+        let selection = serde_json::from_value(
+            serde_json::json!({"family_contract":Digest::new(b"rotation family"),"roots":["fixture.read","fixture.save"]}),
+        )?;
+        let lineage = day2_capabilities::credentials::LineageRef {
+            namespace: day2_capabilities::credentials::Namespace {
+                installation: day2_capabilities::Name::try_from("localdev".to_owned())?,
+                environment: day2_capabilities::Name::try_from("disposable".to_owned())?,
+                app: day2_capabilities::Name::try_from("app".to_owned())?,
+                binding_generation: 1,
+            },
+            family: day2_capabilities::Name::try_from(proof.family.clone())?,
+            id: "lineage-1".into(),
+        };
+        let other = day2_capabilities::credentials::LineageRef {
+            id: "lineage-2".into(),
+            ..lineage.clone()
+        };
+        let registration = proof.family.clone();
+        proof.intent = Intent::Rotate {
+            lineage: crate::managed_credentials::encode_ref(&registration, &lineage)?,
+            head: "version-1".into(),
+            revision: 1,
+            grant: lifecycle::RotateGrant::Narrow(selection),
+        };
+        proof.rotation_grant = Some(Digest::new(b"frozen successor grant"));
+        let encoded = encode_record(proof, original)?;
+        decode_record("invocation-1", encoded.as_bytes())?;
+        let original: Value = crate::json::decode(encoded.as_bytes())?;
+        for (pointer, replacement) in [
+            (
+                "/confirmation/intent/lineage",
+                serde_json::json!(crate::managed_credentials::encode_ref(
+                    &registration,
+                    &other
+                )?),
+            ),
+            ("/confirmation/intent/head", serde_json::json!("version-2")),
+            ("/confirmation/intent/revision", serde_json::json!(2)),
+            (
+                "/confirmation/intent/grant",
+                serde_json::json!({"mode":"keep_existing","selections":[]}),
+            ),
+            (
+                "/confirmation/intent/grant/selections/0/family_contract",
+                serde_json::json!(Digest::new(b"other family")),
+            ),
+            (
+                "/confirmation/intent/grant/selections/0/roots/0",
+                serde_json::json!("fixture.read_alternative"),
+            ),
+            (
+                "/confirmation/intent/grant/selections/0/roots/1",
+                serde_json::json!("fixture.save_alternative"),
+            ),
+            (
+                "/confirmation/rotation_grant",
+                serde_json::json!(Digest::new(b"different successor")),
+            ),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            let previous = changed["commitment"].clone();
+            assert!(
+                decode_record("invocation-1", changed.to_string().as_bytes()).is_err(),
+                "unbound {pointer}"
+            );
+            rehash_fixture_value(&mut changed)?;
+            assert_ne!(changed["commitment"], previous, "unhashed {pointer}");
+        }
+        for missing in ["grant", "head", "revision"] {
+            let mut changed = original.clone();
+            changed["confirmation"]["intent"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(decode_record("invocation-1", changed.to_string().as_bytes()).is_err());
+        }
+        let mut missing_grant = original;
+        missing_grant["confirmation"]["rotation_grant"] = Value::Null;
+        assert!(rehash_fixture_value(&mut missing_grant).is_ok());
+        assert!(decode_record("invocation-1", missing_grant.to_string().as_bytes()).is_err());
         Ok(())
     }
 
@@ -1319,6 +1428,7 @@ mod tests {
                     "input",
                     "family",
                     "intent",
+                    "rotation_grant",
                     "artifact",
                     "authority",
                     "binding",
@@ -1388,6 +1498,7 @@ mod tests {
             "/commitment",
             "/original",
             "/confirmation/authenticated_at",
+            "/confirmation/rotation_grant",
             "/original/context/proof_deadline",
         ] {
             let mut changed = body.clone();
@@ -2493,6 +2604,31 @@ mod tests {
             let redacted = serde_json::to_string(&trace)?;
             assert!(!redacted.contains("d2c1."));
             assert!(!redacted.contains("ciphertext"));
+            let rotate_id = format!("selected-{registration}-rotate");
+            let rotate_operation = if registration == "clients" {
+                "credential_metadata.rotate_client"
+            } else {
+                "credential_metadata.rotate_personal"
+            };
+            let rotate_input = serde_json::json!({"lineage":outcome.result["lineage"],"head":outcome.result["version"],"revision":1,
+                "grant":serde_json::to_string(&lifecycle::RotateGrant::KeepExisting)?});
+            confirm_input(&runtime, rotate_operation, &rotate_id, &rotate_input)?;
+            assert!(runtime.execute(&rotate_id, Fault::BeforeCommit).is_err());
+            let before: i64 =
+                db.query_row("SELECT count(*) FROM day2_credential_versions", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(before, index * 2 + 1);
+            assert!(runtime.execute(&rotate_id, Fault::AfterCommit).is_err());
+            let rotated = runtime.execute(&rotate_id, Fault::None)?;
+            assert_eq!(rotated.status, "success");
+            assert_eq!(rotated.result["status"], "rotated");
+            assert_eq!(rotated, runtime.execute(&rotate_id, Fault::None)?);
+            let (versions,receipts):(i64,i64)=db.query_row("SELECT (SELECT count(*) FROM day2_credential_versions),(SELECT count(*) FROM key_receipts WHERE family=?1)",[registration],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(versions, index * 2 + 2);
+            assert_eq!(receipts, 2);
+            assert_eq!(counts(&runtime)?, (index + 1, index + 1));
+            replay(runtime.artifact(), &runtime.trace(&rotate_id)?)?;
         }
         Ok(())
     }
@@ -2600,6 +2736,119 @@ mod tests {
             stage(&tx, &runtime, &request, &instruction, &prepared)?;
             tx.rollback()?;
             assert_eq!(counts(&runtime)?, (0, 0));
+            let issued = runtime.execute("selected-hostile", Fault::None)?;
+            assert_eq!(issued.status, "success");
+            let rotate_operation = if registration == "clients" {
+                "credential_metadata.rotate_client"
+            } else {
+                "credential_metadata.rotate_personal"
+            };
+            let rotate_input = serde_json::json!({"lineage":issued.result["lineage"],"head":issued.result["version"],"revision":1,
+                "grant":serde_json::to_string(&lifecycle::RotateGrant::KeepExisting)?});
+            confirm_input(
+                &runtime,
+                rotate_operation,
+                "rotation-hostile",
+                &rotate_input,
+            )?;
+            let prepared = runtime
+                .prepare_credential_keys("rotation-hostile")?
+                .context("rotation keys")?;
+            let tx = db.transaction()?;
+            let request = protocol::Request {
+                operation: rotate_operation.into(),
+                input: rotate_input.to_string(),
+                context: crate::store::invocation_context(&tx, "rotation-hostile")?,
+                observations: vec![],
+            };
+            let expected = load(&tx, "rotation-hostile")?
+                .context("rotation proof")?
+                .confirmation
+                .intent
+                .instruction(registration, "rotation-hostile");
+            for mutation in ["missing", "fixed", "unknown", "expand", "foreign", "head"] {
+                let mut wire = expected.clone();
+                match mutation {
+                    "missing" => {
+                        wire.as_object_mut().unwrap().remove("grant");
+                    }
+                    "fixed" => wire["grant"] = serde_json::json!({"mode":"fixed","selections":[]}),
+                    "unknown" => wire["grant"]["mode"] = "future_mode".into(),
+                    "expand" => {
+                        wire["grant"] = serde_json::json!({"mode":"narrow","selections":[{"family_contract":family.contract,"roots":["credential_metadata.ping","credential_metadata.record_use"]}]})
+                    }
+                    "foreign" => wire["registration"] = "foreign".into(),
+                    "head" => wire["head"] = "other-version".into(),
+                    _ => unreachable!(),
+                }
+                let instruction = protocol::Instruction {
+                    kind: "credential_rotate".into(),
+                    model: crate::credential_codegen::ROTATE.into(),
+                    data: wire.to_string(),
+                    ..Default::default()
+                };
+                assert!(
+                    stage(&tx, &runtime, &request, &instruction, &prepared).is_err(),
+                    "{registration} rotation {mutation}"
+                );
+                assert_eq!(
+                    tx.query_row("SELECT count(*) FROM day2_credential_versions", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))?,
+                    1
+                );
+            }
+            tx.rollback()?;
+            let original:String=db.query_row("SELECT confirmation FROM day2_credential_confirmations WHERE invocation='rotation-hostile'",[],|r|r.get(0))?;
+            let mut changed: Value = crate::json::decode(original.as_bytes())?;
+            changed["confirmation"]["rotation_grant"] =
+                serde_json::json!(Digest::new(b"forged frozen successor"));
+            rehash_fixture_value(&mut changed)?;
+            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation='rotation-hostile'",[changed.to_string()])?;
+            // Prepare through the real owning runtime AFTER the synthetic DATA
+            // change, so refusal must reach the production grant rederivation,
+            // rather than only the prepared-record commitment comparison.
+            let changed_prepared = runtime
+                .prepare_credential_keys("rotation-hostile")?
+                .context("changed record keys")?;
+            let tx = db.transaction()?;
+            let instruction = protocol::Instruction {
+                kind: "credential_rotate".into(),
+                model: crate::credential_codegen::ROTATE.into(),
+                data: expected.to_string(),
+                ..Default::default()
+            };
+            let error = stage(&tx, &runtime, &request, &instruction, &changed_prepared)
+                .expect_err("changed frozen grant accepted");
+            assert!(
+                error
+                    .to_string()
+                    .contains("credential rotation grant changed after confirmation")
+            );
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM day2_credential_versions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                1
+            );
+            tx.rollback()?;
+            db.execute("UPDATE day2_credential_confirmations SET confirmation=?1 WHERE invocation='rotation-hostile'",[original])?;
+            let prepared = runtime
+                .prepare_credential_keys("rotation-hostile")?
+                .context("restored original keys")?;
+            let tx = db.transaction()?;
+            stage(&tx, &runtime, &request, &instruction, &prepared)?;
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM day2_credential_versions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                2
+            );
+            tx.rollback()?;
+            assert_eq!(counts(&runtime)?, (1, 1));
         }
         Ok(())
     }

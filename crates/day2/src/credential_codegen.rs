@@ -145,6 +145,7 @@ fn render<'a>(
             "RevocationOutcome",
             "GrantOption",
             "GrantSelection",
+            "RotationChoice",
         ] {
             body = body.replace(&format!("{ty}(family)"), &format!("{ty}_{name}"));
         }
@@ -159,6 +160,7 @@ fn render<'a>(
             "WirePage",
             "WireInspection",
             "SelectionWire",
+            "RotationWire",
         ] {
             body = body.replace(ty, &format!("{ty}_{name}"));
         }
@@ -170,6 +172,8 @@ fn render<'a>(
             "read_inspect",
             "issue_fixed",
             "rotate_fixed",
+            "rotate_selected",
+            "rotate_request",
             "revoke_lineage",
             "snapshot_from_parts",
             "selection_from_options",
@@ -178,6 +182,9 @@ fn render<'a>(
             "issue_request",
             "known_grant_root",
             "valid_grant_contract",
+            "rotation_from_str",
+            "rotation_to_str",
+            "rotation_to_wire",
         ] {
             body = body.replace(function, &format!("day2_{function}_{name}"));
         }
@@ -205,6 +212,10 @@ fn render<'a>(
         };
         let rotate = if provisional {
             "|_context, _request| Tx.host_reject(\"credential_rotation_unavailable\")".into()
+        } else if selectable {
+            format!(
+                "|context, request| {prefix}day2_rotate_selected_{name}(\"{name}\", context, request.expected, request.grant)"
+            )
         } else {
             format!(
                 "|context, request| {prefix}day2_rotate_fixed_{name}(\"{name}\", context, request.expected)"
@@ -224,13 +235,20 @@ fn render<'a>(
         } else {
             "{ label : Credential.Label }".to_owned()
         };
+        let rotation_input = if provisional && mode.is_none() {
+            "_".to_owned()
+        } else if selectable {
+            format!("{{ expected : ManagementSnapshot_{name}, grant : RotationChoice_{name} }}")
+        } else {
+            format!("{{ expected : ManagementSnapshot_{name} }}")
+        };
         let (selection_fields, selection_values) = if selectable {
             (
                 format!(
-                    ", grant_options : List(GrantOption_{name}), selection_from_options : List(GrantOption_{name}) -> Try(GrantSelection_{name}, [InvalidGrantSelection]), selection_from_str : Str -> Try(GrantSelection_{name}, [InvalidGrantSelection])"
+                    ", grant_options : List(GrantOption_{name}), selection_from_options : List(GrantOption_{name}) -> Try(GrantSelection_{name}, [InvalidGrantSelection]), selection_from_str : Str -> Try(GrantSelection_{name}, [InvalidGrantSelection]), rotation_from_str : Str -> Try(RotationChoice_{name}, [InvalidRotationGrant]), rotation_to_str : RotationChoice_{name} -> Str"
                 ),
                 format!(
-                    "        grant_options: {},\n        selection_from_options: day2_selection_from_options_{name},\n        selection_from_str: day2_selection_from_str_{name},\n",
+                    "        grant_options: {},\n        selection_from_options: day2_selection_from_options_{name},\n        selection_from_str: day2_selection_from_str_{name},\n        rotation_from_str: day2_rotation_from_str_{name},\n        rotation_to_str: day2_rotation_to_str_{name},\n",
                     family
                         .map(|family| format!(
                             "{}.map(|root| {{ family_contract: \"{}\", root }})",
@@ -245,14 +263,8 @@ fn render<'a>(
             (String::new(), String::new())
         };
         let family_api = format!(
-            "    {name} : {{ issue : InteractiveContext, {issue_input} -> Tx(Issued_{name}), rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]){selection_fields} }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n{selection_values}    }}\n\n"
+            "    {name} : {{ issue : InteractiveContext, {issue_input} -> Tx(Issued_{name}), rotate : InteractiveContext, {rotation_input} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]){selection_fields} }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n{selection_values}    }}\n\n"
         );
-        let family_api = if selectable && !provisional {
-            family_api.replace(&format!(" rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}),"), "")
-                .replace(&format!("        rotate: {rotate},\n"), "")
-        } else {
-            family_api
-        };
         source.push_str(&family_api);
     }
     source.push_str("}\n");
@@ -279,9 +291,17 @@ Credentials :: [].{
     }
 
     $PREFIX$rotate_fixed : Str, InteractiveContext, ManagementSnapshot(family) -> Tx(RotationOutcome(family))
-    $PREFIX$rotate_fixed = |registration, context, expected| Tx.$PREFIX$capability(
-        "credential_rotate", "credential.rotate.v1",
-        Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision() }),
+    $PREFIX$rotate_fixed = |registration, context, expected| {
+        grant : { mode : Str, selections : List({ family_contract : Str, roots : List(Str) }) }
+        grant = { mode: "fixed", selections: [] }
+        $PREFIX$rotate_request(registration,
+            Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision(), grant }),
+        )
+    }
+
+    $PREFIX$rotate_request : Str, Str -> Tx(RotationOutcome(family))
+    $PREFIX$rotate_request = |registration, input| Tx.$PREFIX$capability(
+        "credential_rotate", "credential.rotate.v1", input,
     ).and_then(|raw| {
         parsed : Try({ conflict : Bool, lineage : Str, version : Str, label : Str, expires_at : I64 }, _)
         parsed = Json.parse(raw)
@@ -529,6 +549,38 @@ const SELECTABLE: &str = r#"
         options : GrantSelection(family) -> List(GrantOption(family))
         options = |selection| selection.value.roots.map(|root| { family_contract: selection.value.family_contract, root })
     }
+
+    RotationChoice(family) : [KeepExisting, Narrow(GrantSelection(family))]
+    RotationWire : { mode : Str, selections : List(SelectionWire) }
+
+    rotation_to_wire : RotationChoice(family) -> RotationWire
+    rotation_to_wire = |choice| match choice {
+        KeepExisting => { mode: "keep_existing", selections: [] }
+        Narrow(selection) => { mode: "narrow", selections: [selection.value] }
+    }
+
+    rotation_to_str : RotationChoice(family) -> Str
+    rotation_to_str = |choice| Json.to_str(rotation_to_wire(choice))
+
+    rotation_from_str : Str -> Try(RotationChoice(family), [InvalidRotationGrant])
+    rotation_from_str = |raw| {
+        if raw.count_utf8_bytes() > 16384 { return Err(InvalidRotationGrant) }
+        parsed : Try(RotationWire, _)
+        parsed = Json.parse(raw)
+        wire = parsed.map_err(|_| InvalidRotationGrant)?
+        choice = match (wire.mode, wire.selections) {
+            ("keep_existing", []) => KeepExisting
+            ("narrow", [selection]) => Narrow(selection_from_str(Json.to_str(selection)).map_err(|_| InvalidRotationGrant)?)
+            _ => return Err(InvalidRotationGrant)
+        }
+        if rotation_to_str(choice) != raw { return Err(InvalidRotationGrant) }
+        Ok(choice)
+    }
+
+    $PREFIX$rotate_selected : Str, InteractiveContext, ManagementSnapshot(family), RotationChoice(family) -> Tx(RotationOutcome(family))
+    $PREFIX$rotate_selected = |registration, context, expected, choice| $PREFIX$rotate_request(registration,
+        Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision(), grant: rotation_to_wire(choice) }),
+    )
 
     known_grant_root : Str -> Bool
     known_grant_root = |root| $ROOTS$.any(|known| known == root)

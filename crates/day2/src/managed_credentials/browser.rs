@@ -28,6 +28,8 @@ pub(crate) struct Pending {
     pub input: Value,
     pub family: String,
     pub intent: Intent,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub rotation: Option<lifecycle::RotationPreview>,
     pub artifact: String,
     pub authority: authority_state::AuthorityStamp,
     pub binding: Digest,
@@ -83,6 +85,19 @@ fn require_current_pending(
         .credentials
         .get(&pending.family)
         .context("credential family inactive")?;
+    let family = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|family| family.id.as_str() == pending.family)
+        .context("credential family missing")?;
+    lifecycle::validate_preview(&pending.intent, &pending.rotation)?;
+    ensure!(
+        lifecycle::rotation_preview(db, family, selected, &identity.email, &pending.intent)?
+            == pending.rotation,
+        "credential rotation preview changed"
+    );
     runtime
         .credential_authority()?
         .check_shell(&selected.binding, shell_origin)?;
@@ -119,15 +134,14 @@ pub(crate) fn start(
     runtime.artifact().contract().schema.inputs[&op.input_type].validate_input(input)?;
     let intent = lifecycle::intent(access, input)?;
     let (_, family) = access.mutation().context("credential action missing")?;
-    intent.check_family(
-        runtime
-            .artifact()
-            .contract()
-            .credential_manifest
-            .iter()
-            .find(|declared| declared.id.as_str() == family)
-            .context("credential family missing")?,
-    )?;
+    let declared = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|declared| declared.id.as_str() == family)
+        .context("credential family missing")?;
+    intent.check_family(declared)?;
     let instance = Instance::load(runtime.instance_path())?;
     let (_, edge) = instance.security_edge()?;
     if let Some(page) = product_return {
@@ -152,6 +166,7 @@ pub(crate) fn start(
         .get(family)
         .context("credential family inactive")?;
     let binding = Digest::of(&selected.binding)?;
+    let rotation = lifecycle::rotation_preview(&tx, declared, selected, actor, &intent)?;
     let previous: Option<String> = tx
         .query_row(
             "SELECT intent FROM day2_credential_browser WHERE invocation=?1",
@@ -169,6 +184,7 @@ pub(crate) fn start(
                 && previous.artifact == runtime.artifact().id()
                 && previous.authority == active.stamp
                 && previous.binding == binding
+                && previous.rotation == rotation
                 && now < previous.expires_at,
             "credential intent changed or expired; use a new invocation"
         );
@@ -188,6 +204,7 @@ pub(crate) fn start(
             input: input.clone(),
             family: family.into(),
             intent,
+            rotation,
             artifact: runtime.artifact().id().into(),
             authority: active.stamp,
             binding,
@@ -301,6 +318,7 @@ pub(crate) fn fresh_intent(
             .find(|family| family.id.as_str() == pending.family)
             .context("credential family missing")?,
     )?;
+    lifecycle::validate_preview(&pending.intent, &pending.rotation)?;
     let instance = Instance::load(runtime.instance_path())?;
     ensure!(
         instance.scope(runtime.app())? == runtime.scope(),
@@ -400,6 +418,11 @@ fn checked_browser_confirmation(
             && proof.input == pending.input
             && proof.family == pending.family
             && proof.intent == pending.intent
+            && proof.rotation_grant
+                == pending
+                    .rotation
+                    .as_ref()
+                    .map(|preview| preview.digest.clone())
             && proof.artifact == pending.artifact
             && proof.authority == pending.authority
             && proof.binding == pending.binding,
@@ -500,6 +523,18 @@ fn confirm_inner(
         now,
     )?;
     human_proof.require_current(now)?;
+    let family = runtime
+        .artifact()
+        .contract()
+        .credential_manifest
+        .iter()
+        .find(|family| family.id.as_str() == pending.family)
+        .context("credential family missing")?;
+    ensure!(
+        lifecycle::rotation_preview(&tx, family, selected, &identity.email, &pending.intent)?
+            == pending.rotation,
+        "credential rotation preview changed before confirmation"
+    );
     if let Some(record) =
         checked_browser_confirmation(&tx, runtime, pending, identity, session, &original, now)?
     {
@@ -526,6 +561,10 @@ fn confirm_inner(
             input: pending.input.clone(),
             family: pending.family.clone(),
             intent: pending.intent.clone(),
+            rotation_grant: pending
+                .rotation
+                .as_ref()
+                .map(|preview| preview.digest.clone()),
             artifact: pending.artifact.clone(),
             authority: active.stamp,
             binding: ready.binding,

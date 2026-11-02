@@ -449,6 +449,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<Trace> {
                         &lease(),
                         &snapshot,
                         store::RotationIntent {
+                            grant: &ceiling(),
                             invocation: &format!("rotate-{slot}"),
                             instruction_slot: 0,
                             recipient: "issuer/human",

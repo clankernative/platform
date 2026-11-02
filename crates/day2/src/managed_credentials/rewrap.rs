@@ -107,6 +107,7 @@ struct Row {
     creator: String,
     label: String,
     predecessor: Option<String>,
+    version_grant: String,
 }
 
 fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, Row)> {
@@ -126,13 +127,13 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
             l.grant_json,l.grant_digest,l.grant_valid_until,l.security_epoch,
             v.id,v.selector,v.verifier,v.verifier_key_version,v.issued_at,v.expires_at,
             m.identity_json,m.material_revision,m.envelope_revision,m.encryption_key_version,m.nonce,m.ciphertext,
-            l.principal,l.creator,l.label,v.predecessor
+            l.principal,l.creator,l.label,v.predecessor,v.grant_digest
          FROM day2_credential_material m
          JOIN day2_credential_versions v ON v.id=m.version
          JOIN day2_credential_lineages l ON l.id=v.lineage
          WHERE v.id=?1 AND l.namespace=?2 AND l.family=?3 AND l.family_contract=?4
            AND l.state='active' AND l.head=v.id AND v.state='active'
-           AND v.security_epoch=l.security_epoch AND v.grant_digest=l.grant_digest",
+           AND v.security_epoch=l.security_epoch",
         params![request.version, namespace_key(&request.binding.namespace)?, request.family.id.as_str(), request.family.contract.as_str()],
         |r| Ok(Row {
             namespace_json:r.get(0)?,family_contract:r.get(1)?,lineage:r.get(2)?,lineage_revision:r.get(3)?,
@@ -140,6 +141,7 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
             version:r.get(10)?,selector:r.get(11)?,verifier:r.get(12)?,verifier_version:r.get(13)?,issued_at:r.get(14)?,expires_at:r.get(15)?,
             identity_json:r.get(16)?,material_revision:r.get(17)?,envelope_revision:r.get(18)?,encryption_version:r.get(19)?,nonce:r.get(20)?,ciphertext:r.get(21)?,
             principal:r.get(22)?,creator:r.get(23)?,label:r.get(24)?,predecessor:r.get(25)?,
+            version_grant:r.get(26)?,
         }),
     ).optional()?.context("credential rewrap target unavailable")?;
     ensure!(
@@ -151,6 +153,15 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
         request.binding.namespace == namespace,
         "credential rewrap namespace changed"
     );
+    let stored: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
+    let ceiling: day2_capabilities::oauth::GrantCeiling =
+        crate::json::decode(row.grant.as_bytes())?;
+    super::require_grant_subset(&ceiling, &stored.grant)?;
+    ensure!(
+        ceiling.digest.as_str() == row.grant_digest
+            && stored.grant.digest.as_str() == row.version_grant,
+        "credential rewrap grant changed"
+    );
     let identity = MaterialIdentity {
         namespace,
         family: request.family.id.as_str().to_owned(),
@@ -159,8 +170,8 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
         recipient: row.recipient.clone(),
         security_epoch: row.epoch.try_into()?,
         material_revision: row.material_revision.try_into()?,
+        grant: stored.grant.clone(),
     };
-    let stored: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
     ensure!(
         stored == identity && identity.security_epoch > 0 && identity.material_revision > 0,
         "credential rewrap stored identity changed"
@@ -329,7 +340,7 @@ pub(crate) fn stage(
            AND EXISTS(SELECT 1 FROM day2_credential_versions v JOIN day2_credential_lineages l ON l.id=v.lineage
              WHERE v.id=day2_credential_material.version AND l.namespace=?12 AND l.family_contract=?13
                AND l.state='active' AND l.head=v.id AND l.revision=?14 AND v.state='active'
-               AND v.security_epoch=?15 AND l.security_epoch=?15 AND v.grant_digest=l.grant_digest
+               AND v.security_epoch=?15 AND l.security_epoch=?15 AND v.grant_digest=?34
                AND l.namespace_json=?17 AND l.family=?18 AND l.id=?19
                AND l.recipient=?20 AND l.session=?21 AND l.grant_json=?22
                AND l.grant_digest=?23 AND l.grant_valid_until=?24
@@ -343,7 +354,7 @@ pub(crate) fn stage(
             namespace_key(&target.identity.namespace)?,row.family_contract,row.lineage_revision,row.epoch,update_at,
             row.namespace_json,target.identity.family,row.lineage,row.recipient,row.session,row.grant,
             row.grant_digest,row.grant_until,row.selector,row.verifier,row.verifier_version,row.issued_at,row.expires_at,
-            row.principal,row.creator,row.label,row.predecessor],
+            row.principal,row.creator,row.label,row.predecessor,row.version_grant],
     )?;
     ensure!(changed == 1, "credential rewrap conditional write lost");
     Ok(Pending { _private: () })
@@ -588,6 +599,184 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_version_rewrap_preserves_both_grants_and_rejects_each_changed_snapshot()
+    -> Result<()> {
+        use day2_capabilities::credentials::{GrantSelection, RotationGrant};
+        let world = World::new(707);
+        effects::scope(world.clone(), || {
+            for change in [
+                "none",
+                "ceiling_json",
+                "ceiling_digest",
+                "version_json",
+                "version_digest",
+                "ceiling_pair",
+                "version_pair",
+            ] {
+                world.set_wall(1100);
+                let (_directory, mut db) = fixture::database()?;
+                let (family, ceiling) = fixture::selectable_fixture()?;
+                let mut issue = fixture::issue("rewrap-selected-issue");
+                issue.family_contract = family.contract.clone();
+                issue.ceiling = ceiling.clone();
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let first = super::super::stage_issue(
+                    &tx,
+                    super::super::prepare_issue(&fixture::lease(), &family, issue)?,
+                )?
+                .public_identity()
+                .clone();
+                tx.commit()?;
+                let selection = GrantSelection::new(&family, vec!["ReadTranscription".into()])?;
+                let grant = family.rotation_ceiling(&ceiling, RotationGrant::Narrow(&selection))?;
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let successor = match super::super::stage_rotation(
+                    &tx,
+                    &fixture::lease(),
+                    &fixture::snapshot(&first),
+                    super::super::RotationIntent {
+                        grant: &grant,
+                        invocation: "rewrap-selected-narrow",
+                        instruction_slot: 0,
+                        recipient: "issuer/human-1",
+                        session: "session-1",
+                        issued_at: 1100,
+                        expires_at: 2000,
+                        reveal_until: 1300,
+                    },
+                )? {
+                    super::super::RotationResult::Rotated(pending) => {
+                        pending.public_identity().clone()
+                    }
+                    super::super::RotationResult::Conflict => {
+                        anyhow::bail!("fresh rotation conflicted")
+                    }
+                };
+                tx.commit()?;
+                let version = successor.version.as_deref().context("narrowed successor")?;
+                let (authority, keys) = ports(version);
+                let request = Request {
+                    binding: &authority.binding,
+                    family: &family,
+                    version,
+                };
+                let (_, before) = current(&db, &request, 1100)?;
+                let ready = prepare(
+                    &db,
+                    &authority,
+                    &keys,
+                    Request {
+                        binding: &authority.binding,
+                        family: &family,
+                        version,
+                    },
+                )?;
+                assert_eq!(ready.target.identity.grant, grant);
+                match change {
+                    "ceiling_json" => {
+                        db.execute(
+                            "UPDATE day2_credential_lineages SET grant_json=?1",
+                            [serde_json::to_string(&grant)?],
+                        )?;
+                    }
+                    "ceiling_digest" => {
+                        db.execute(
+                            "UPDATE day2_credential_lineages SET grant_digest=?1",
+                            [grant.digest.as_str()],
+                        )?;
+                    }
+                    "version_json" => {
+                        let mut identity: MaterialIdentity =
+                            crate::json::decode(before.identity_json.as_bytes())?;
+                        identity.grant = ceiling.clone();
+                        db.execute(
+                            "UPDATE day2_credential_material SET identity_json=?1 WHERE version=?2",
+                            params![serde_json::to_string(&identity)?, version],
+                        )?;
+                    }
+                    "version_digest" => {
+                        db.execute(
+                            "UPDATE day2_credential_versions SET grant_digest=?1 WHERE id=?2",
+                            params![ceiling.digest.as_str(), version],
+                        )?;
+                    }
+                    "ceiling_pair" => {
+                        db.execute(
+                            "UPDATE day2_credential_lineages SET grant_json=?1,grant_digest=?2",
+                            params![serde_json::to_string(&grant)?, grant.digest.as_str()],
+                        )?;
+                    }
+                    "version_pair" => {
+                        let mut identity: MaterialIdentity =
+                            crate::json::decode(before.identity_json.as_bytes())?;
+                        identity.grant = ceiling.clone();
+                        db.execute(
+                            "UPDATE day2_credential_material SET identity_json=?1 WHERE version=?2",
+                            params![serde_json::to_string(&identity)?, version],
+                        )?;
+                        db.execute(
+                            "UPDATE day2_credential_versions SET grant_digest=?1 WHERE id=?2",
+                            params![ceiling.digest.as_str(), version],
+                        )?;
+                    }
+                    _ => {}
+                }
+                if matches!(change, "ceiling_pair" | "version_pair") {
+                    // Each replacement is internally consistent, so this must
+                    // reach the stale-target comparison rather than fail only
+                    // at the grant JSON/digest consistency checks.
+                    let (changed, _) = current(&db, &request, 1100)?;
+                    assert_ne!(changed.fingerprint(), ready.target.fingerprint());
+                }
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if change != "none" {
+                    assert!(
+                        stage(&tx, &authority, ready).is_err(),
+                        "accepted changed {change}"
+                    );
+                    tx.rollback()?;
+                    let (ciphertext,revision):(Vec<u8>,i64)=db.query_row("SELECT ciphertext,envelope_revision FROM day2_credential_material WHERE version=?1",[version],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                    assert_eq!(ciphertext, before.ciphertext);
+                    assert_eq!(revision, 1);
+                    continue;
+                }
+                let _pending = stage(&tx, &authority, ready)?;
+                tx.commit()?;
+                let (_, after) = current(&db, &request, 1100)?;
+                assert_eq!(after.identity_json, before.identity_json);
+                assert_eq!(after.grant, before.grant);
+                assert_eq!(after.grant_digest, before.grant_digest);
+                assert_eq!(after.version_grant, grant.digest.as_str());
+                let identity: MaterialIdentity =
+                    crate::json::decode(after.identity_json.as_bytes())?;
+                let old = crypto::decrypt_for_human(
+                    &fixture::lease(),
+                    &identity,
+                    &identity,
+                    1,
+                    "encrypt-v1",
+                    before.nonce.as_slice().try_into()?,
+                    &before.ciphertext,
+                )?;
+                let replacement =
+                    KeyLease::new(&[3; 32], &[8; 32], "verify-v1".into(), "encrypt-v2".into())?;
+                let new = crypto::decrypt_for_human(
+                    &replacement,
+                    &identity,
+                    &identity,
+                    2,
+                    "encrypt-v2",
+                    after.nonce.as_slice().try_into()?,
+                    &after.ciphertext,
+                )?;
+                assert_eq!(old, new);
+                super::super::install_schema(&db)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
     fn rollback_and_competing_rewrap_never_publish_a_stale_envelope() -> Result<()> {
         effects::scope(World::new(702), || {
             let (dir, mut db) = fixture::database()?;
@@ -659,6 +848,7 @@ mod tests {
                                 &fixture::lease(),
                                 &fixture::snapshot(&receipt),
                                 super::super::RotationIntent {
+                                    grant: &ready.target.identity.grant,
                                     invocation: "rotation-for-rewrap",
                                     instruction_slot: 0,
                                     recipient: "issuer/human-1",

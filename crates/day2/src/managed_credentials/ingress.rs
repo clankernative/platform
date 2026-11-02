@@ -186,11 +186,12 @@ pub(super) fn validate_restored(db: &Connection) -> Result<()> {
     }
     let mut statement = db.prepare(
         "SELECT o.invocation,o.evidence,l.namespace,l.namespace_json,l.family,
-                l.family_contract,l.principal,l.security_epoch,l.grant_json,
+                l.family_contract,l.principal,l.security_epoch,json_extract(m.identity_json,'$.grant'),
                 v.id,v.lineage,v.verifier_key_version,v.security_epoch,i.operation,i.actor
          FROM day2_credential_origins o
          LEFT JOIN day2_invocations i ON i.id=o.invocation
          LEFT JOIN day2_credential_versions v ON v.id=json_extract(o.evidence,'$.version')
+         LEFT JOIN day2_credential_material m ON m.version=v.id
          LEFT JOIN day2_credential_lineages l ON l.id=v.lineage",
     )?;
     let mut rows = statement.query([])?;
@@ -622,7 +623,7 @@ pub(crate) fn require(
         JOIN day2_credential_versions v ON v.id=l.head AND v.lineage=l.id
         WHERE l.id=?1 AND v.id=?2 AND l.state='active' AND v.state='active'
         AND l.security_epoch=?3 AND v.security_epoch=l.security_epoch
-        AND l.principal=?4 AND l.grant_digest=?5 AND v.grant_digest=l.grant_digest
+        AND l.principal=?4 AND v.grant_digest=?5
         AND v.issued_at<=?6 AND ?6<v.expires_at AND ?6<l.grant_valid_until)",
         params![
             origin.lineage,

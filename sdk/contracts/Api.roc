@@ -65,6 +65,7 @@ Api :: [].{
 		management_lineage : Str,
 		rotation_head : Str,
 		rotation_revision : Str,
+		rotation_grant : Str,
 		interactive : Bool,
 	}
 
@@ -417,6 +418,15 @@ Api :: [].{
 			credential_access: { ..definition.credential_access, management_lineage: lineage.name() },
 		}
 
+		# Closed keep-existing/narrow choice for selectable rotation only.
+		credential_rotation_grant :
+			CommandDef(input, output, input_fields, output_fields),
+			Path(input, Str) -> CommandDef(input, output, input_fields, output_fields)
+		credential_rotation_grant = |definition, choice| {
+			..definition,
+			credential_access: { ..definition.credential_access, rotation_grant: choice.name() },
+		}
+
 		export_version : CommandDef(input, output, input_fields, output_fields) -> U64
 		export_version = |definition| definition.export_version
 
@@ -634,6 +644,7 @@ Api :: [].{
 				management_lineage: "",
 				rotation_head: "",
 				rotation_revision: "",
+				rotation_grant: "",
 				interactive: handler.requires_interaction(),
 			},
 			verification: definition.verification,
@@ -673,6 +684,7 @@ Api :: [].{
 				management_lineage: "",
 				rotation_head: "",
 				rotation_revision: "",
+				rotation_grant: "",
 				interactive: handler.requires_interaction(),
 			},
 			required_all_rows: [],

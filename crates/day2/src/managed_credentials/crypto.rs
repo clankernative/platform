@@ -4,7 +4,7 @@
 
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use day2_capabilities::credentials::Namespace;
+use day2_capabilities::{credentials::Namespace, oauth::GrantCeiling};
 use ring::{aead, hmac};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -223,6 +223,9 @@ pub(crate) struct MaterialIdentity {
     pub recipient: String,
     pub security_epoch: u64,
     pub material_revision: u64,
+    /// Immutable effective grant of THIS version, authenticated by both the
+    /// verifier and encrypted envelope; never reconstructed from today's head.
+    pub grant: GrantCeiling,
 }
 
 impl MaterialIdentity {
@@ -236,6 +239,11 @@ impl MaterialIdentity {
             self.security_epoch > 0 && self.material_revision > 0,
             "invalid material identity revision"
         );
+        ensure!(
+            self.grant.roots.len() <= 64,
+            "credential material grant budget"
+        );
+        self.grant.verify()?;
         Ok(())
     }
 
@@ -449,6 +457,35 @@ mod tests {
     use day2_capabilities::Name;
 
     fn identity() -> MaterialIdentity {
+        use day2_capabilities::{
+            BindingRef, Digest,
+            oauth::{
+                AuthorityNode, OperationAuthorityContract, OperationKind, ResourceAudienceRef,
+            },
+        };
+        let binding = BindingRef::pin(
+            Name::try_from("identity-client".to_owned()).unwrap(),
+            &"identity-client",
+        )
+        .unwrap();
+        let operation = OperationAuthorityContract::derive(
+            "ReadIdentity".into(),
+            1,
+            Digest::new(b"identity-contract"),
+            OperationKind::Query,
+            AuthorityNode {
+                actions: Default::default(),
+                children: Default::default(),
+            },
+        )
+        .unwrap();
+        let grant = GrantCeiling::derive(
+            binding.clone(),
+            "client-1".into(),
+            ResourceAudienceRef(binding),
+            std::collections::BTreeMap::from([("ReadIdentity".into(), operation)]),
+        )
+        .unwrap();
         MaterialIdentity {
             namespace: Namespace {
                 installation: Name::try_from("wonderly".to_owned()).unwrap(),
@@ -462,6 +499,7 @@ mod tests {
             recipient: "issuer/subject-1".into(),
             security_epoch: 7,
             material_revision: 1,
+            grant,
         }
     }
 
@@ -640,6 +678,51 @@ mod tests {
                     ciphertext: &ciphertext,
                     ..rewrap_source(&material)
                 },
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changing_a_version_grant_cannot_retarget_its_verifier_or_envelope() -> Result<()> {
+        let original = identity();
+        let material = prepare_managed(&lease(), original.clone())?;
+        let token = decrypt_for_human(
+            &lease(),
+            &original,
+            &original,
+            material.envelope_revision,
+            &material.encryption_version,
+            material.nonce,
+            &material.ciphertext,
+        )?;
+        let mut changed = original.clone();
+        changed.grant = GrantCeiling::derive(
+            original.grant.client,
+            "different-subject".into(),
+            original.grant.audience,
+            original.grant.roots,
+        )?;
+        assert!(!verify_managed(
+            &lease(),
+            &changed,
+            &material.selector,
+            &material.verifier,
+            &material.verifier_version,
+            &token
+        )?);
+        // Even a caller substituting both JSON identities cannot make the
+        // original ciphertext authenticate the altered grant.
+        assert!(
+            decrypt_for_human(
+                &lease(),
+                &changed,
+                &changed,
+                material.envelope_revision,
+                &material.encryption_version,
+                material.nonce,
+                &material.ciphertext
             )
             .is_err()
         );
