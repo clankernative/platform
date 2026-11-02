@@ -1923,12 +1923,27 @@ impl Runtime {
                 return Err(fault.interruption("simulated_process_loss"));
             }
             complete(tx, id, &trace)?;
+            #[cfg(all(test, unix))]
+            crate::managed_credentials::simulation::crash_reopen::checkpoint(
+                self, id,
+                crate::managed_credentials::simulation::crash_reopen::Cut::BeforeCommit,
+                Some(tx),
+            )?;
         }
         Ok(SqlDecision::Commit(Decision::Committed(outcome)))
         })?;
         match decision {
             Decision::Existing(outcome) => Ok(outcome),
             Decision::Committed(outcome) => {
+                #[cfg(all(test, unix))]
+                if outcome.status == "success" {
+                    crate::managed_credentials::simulation::crash_reopen::checkpoint(
+                        self,
+                        id,
+                        crate::managed_credentials::simulation::crash_reopen::Cut::AfterCommit,
+                        None,
+                    )?;
+                }
                 if outcome.status == "pending"
                     && (fault == Fault::AfterDecisionCommit || fault == Fault::AfterCommit)
                 {

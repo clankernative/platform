@@ -77,6 +77,12 @@ to the same record or nearby insertion point can still require a real merge.
 
 Private app migrations and company acceptance tests belong to downstream private
 repositories. Passing this public gate makes no claim about those applications.
+
+[Credential issuance crash/reopen coverage](CREDENTIAL-CRASH-REOPEN.md) runs the
+fixed client and personal conformance commands through actual child death at
+both sides of the product/private COMMIT and checks durable recovery against an
+independent lifecycle oracle. Its keys/readiness are disposable fixtures, not
+live supplier or browser qualification.
 Linux kernel/runtime qualification is a separate native campaign documented in
 [the runtime guide](../deploy/linux-sqlite/README.md).
 
