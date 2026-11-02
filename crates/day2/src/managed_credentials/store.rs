@@ -2243,8 +2243,9 @@ mod tests {
         install_schema(&db)?;
         super::super::issuance::install(&db)?;
         let before = database_snapshot(&db)?;
-        crate::store::require_no_managed_credential_restore_state(&db)?;
+        assert!(crate::store::require_no_managed_credential_restore_state(&db).is_err());
         let tx = db.transaction()?;
+        crate::store::require_no_managed_credential_restore_state(&tx)?;
         crate::authority_state::invalidate_restored(&tx, std::path::Path::new("/unused-artifact"))?;
         tx.rollback()?;
         assert!(database_snapshot(&db)? == before);
@@ -2271,9 +2272,12 @@ mod tests {
         assert!(database_snapshot(&tx)? == before);
         tx.rollback()?;
         drop(db);
-        let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        assert!(crate::store::require_no_managed_credential_restore_state(&db).is_err());
-        assert!(database_snapshot(&db)? == before);
+        let mut db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let tx = db.transaction()?;
+        let error = crate::store::require_no_managed_credential_restore_state(&tx).unwrap_err();
+        assert_eq!(error.downcast_ref::<&str>(), Some(&"security_restore_preflight_required"));
+        assert!(database_snapshot(&tx)? == before);
+        tx.rollback()?;
         Ok(())
     }
 
