@@ -668,6 +668,16 @@ fn main() -> Result<()> {
             build_recipe(&root, &app, None, None, context.as_ref())?;
         }
         "build-delegation" => verification::build_delegation(&root)?,
+        "build-credential-selectable" => {
+            ensure!(
+                args.next().is_none(),
+                "selectable fixture build accepts no arguments"
+            );
+            println!(
+                "{}",
+                verification::build_credential_selectable(&root)?.display()
+            );
+        }
         "build-delegation-business" => verification::build_delegation_business(&root)?,
         "catalog-candidate" => {
             let instance = PathBuf::from(

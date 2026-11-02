@@ -1,5 +1,6 @@
 //! Family-specific metadata clients, regenerated for both admission profiles.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use day2_capabilities::credentials::{GrantMode, ManifestFamily};
 use std::collections::BTreeSet;
 
 pub const MODULE: &str = "Credentials.roc";
@@ -25,41 +26,107 @@ pub fn cursor_shape(raw: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-pub fn module<'a>(names: impl IntoIterator<Item = &'a str>, admission: bool) -> Result<String> {
-    render(names, admission, false)
+pub fn module(families: &[ManifestFamily], admission: bool) -> Result<String> {
+    render(
+        families.iter().map(|family| {
+            (
+                family.registration.as_str(),
+                Some(family),
+                Some(&family.grant),
+            )
+        }),
+        admission,
+        false,
+    )
 }
 
 /// Inference needs exact nominal signatures without executable host programs.
 /// The checked catalog replaces these handles before both admission checks.
 pub fn provisional_module<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<String> {
-    render(names, false, true)
+    render(
+        names.into_iter().map(|name| (name, None, None)),
+        false,
+        true,
+    )
+}
+
+/// Close callback shapes from compiler-checked mode witnesses before compiling
+/// the pure probe. These stubs cannot execute an app lifecycle action.
+pub fn probe_module(catalog: &crate::registry::Catalog) -> Result<String> {
+    render(
+        catalog
+            .credentials
+            .iter()
+            .map(|(name, registration)| (name.as_str(), None, Some(&registration.grant))),
+        false,
+        true,
+    )
 }
 
 /// Evaluate only pure App.definition metadata, never an application handler.
 pub fn probe(catalog: &crate::registry::Catalog) -> String {
-    let projection = crate::credential_declaration::projection(catalog, "App.definition");
+    let projection = crate::credential_declaration::projection(catalog, "product");
+    let mut operations = Vec::new();
+    for (kind, definitions) in [("command", &catalog.commands), ("query", &catalog.queries)] {
+        for name in definitions.keys() {
+            let execution = crate::app_contract::execution_projection("operation", kind);
+            operations.push(format!("{{\n        operation = product.operations.{name}\n        {execution}\n        {{ operation: product.namespace.concat(\".{name}\"), definition: {{ execution: execution_metadata, credential_access: operation.credential_access(), required_all_rows: operation.required_all_rows(), export_version: operation.export_version() }} }}\n}}"));
+        }
+    }
+    let operations = operations.join(", ");
     format!(
-        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport App\nstep : Str -> Str\nstep = |_| {projection}\n"
+        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport App\nimport pf.Api\nstep : Str -> Str\nstep = |_| {{\n    product = App.definition\n    Json.to_str({{ families: {projection}, operations: [{operations}] }})\n}}\n"
     )
 }
 
 fn render<'a>(
-    names: impl IntoIterator<Item = &'a str>,
+    families: impl IntoIterator<Item = (&'a str, Option<&'a ManifestFamily>, Option<&'a GrantMode>)>,
     admission: bool,
     provisional: bool,
 ) -> Result<String> {
     let prefix = if admission { "admission_" } else { "" };
     let mut source = String::from(
-        "import pf.Observe\nimport pf.Tx\nimport pf.InteractiveContext\nimport pf.Credential\nimport pf.Cursor as PlatformCursor\nimport pf.PageSize\nimport pf.CollectionPage\n\nCredentials :: [].{\n",
+        "import pf.Observe\nimport pf.Tx\nimport pf.InteractiveContext\nimport pf.Credential\nimport pf.Cursor as PlatformCursor\nimport pf.PageSize\nimport pf.CollectionPage\nimport pf.TextSet\n\nCredentials :: [].{\n",
     );
     let mut seen = BTreeSet::new();
-    for name in names {
+    for (name, family, mode) in families {
         day2_contracts::names::identifier(name)?;
+        if let Some(family) = family {
+            family.verify()?;
+            for root in family.roots.keys() {
+                let (namespace, operation) = root
+                    .split_once('.')
+                    .context("unqualified credential option")?;
+                day2_contracts::names::identifier(namespace)?;
+                day2_contracts::names::identifier(operation)?;
+            }
+            ensure!(
+                matches!(
+                    family.profile,
+                    day2_capabilities::credentials::ManagedProfile::Client
+                        | day2_capabilities::credentials::ManagedProfile::Personal
+                ),
+                "unsupported generated credential profile"
+            );
+        }
         ensure!(seen.insert(name), "duplicate generated credential family");
         ensure!(seen.len() <= 64, "generated credential family budget");
         // Concrete nominals avoid return-only phantom specialization in the
         // pinned compiler. Exact labels prevent lowered-name collisions.
-        let mut body = COMMON
+        let selectable = mode.is_none_or(|mode| *mode == GrantMode::Selectable);
+        let mut common = COMMON.to_owned();
+        if selectable {
+            common.push_str(SELECTABLE);
+            let roots = family
+                .map(|family| family.roots.keys().collect::<Vec<_>>())
+                .unwrap_or_default();
+            common = common.replace("$ROOTS$", &serde_json::to_string(&roots)?);
+            common = common.replace(
+                "$CONTRACT$",
+                family.map(|family| family.contract.as_str()).unwrap_or(""),
+            );
+        }
+        let mut body = common
             .split_once("Credentials :: [].{\n")
             .unwrap()
             .1
@@ -76,6 +143,8 @@ fn render<'a>(
             "Issued",
             "RotationOutcome",
             "RevocationOutcome",
+            "GrantOption",
+            "GrantSelection",
         ] {
             body = body.replace(&format!("{ty}(family)"), &format!("{ty}_{name}"));
         }
@@ -89,6 +158,7 @@ fn render<'a>(
             "WireSummary",
             "WirePage",
             "WireInspection",
+            "SelectionWire",
         ] {
             body = body.replace(ty, &format!("{ty}_{name}"));
         }
@@ -102,6 +172,12 @@ fn render<'a>(
             "rotate_fixed",
             "revoke_lineage",
             "snapshot_from_parts",
+            "selection_from_options",
+            "selection_from_str",
+            "issue_selected",
+            "issue_request",
+            "known_grant_root",
+            "valid_grant_contract",
         ] {
             body = body.replace(function, &format!("day2_{function}_{name}"));
         }
@@ -118,6 +194,10 @@ fn render<'a>(
         };
         let issue = if provisional {
             "|_context, _request| Tx.host_reject(\"credential_issuance_unavailable\")".into()
+        } else if selectable {
+            format!(
+                "|context, request| {prefix}day2_issue_selected_{name}(\"{name}\", context, request.label, request.grant)"
+            )
         } else {
             format!(
                 "|context, request| {prefix}day2_issue_fixed_{name}(\"{name}\", context, request.label)"
@@ -137,9 +217,43 @@ fn render<'a>(
                 "|context, request| {prefix}day2_revoke_lineage_{name}(\"{name}\", context, request.lineage)"
             )
         };
-        source.push_str(&format!(
-            "    {name} : {{ issue : InteractiveContext, {{ label : Credential.Label }} -> Tx(Issued_{name}), rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]) }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n    }}\n\n"
-        ));
+        let issue_input = if provisional && mode.is_none() {
+            "_".to_owned()
+        } else if selectable {
+            format!("{{ label : Credential.Label, grant : GrantSelection_{name} }}")
+        } else {
+            "{ label : Credential.Label }".to_owned()
+        };
+        let (selection_fields, selection_values) = if selectable {
+            (
+                format!(
+                    ", grant_options : List(GrantOption_{name}), selection_from_options : List(GrantOption_{name}) -> Try(GrantSelection_{name}, [InvalidGrantSelection]), selection_from_str : Str -> Try(GrantSelection_{name}, [InvalidGrantSelection])"
+                ),
+                format!(
+                    "        grant_options: {},\n        selection_from_options: day2_selection_from_options_{name},\n        selection_from_str: day2_selection_from_str_{name},\n",
+                    family
+                        .map(|family| format!(
+                            "{}.map(|root| {{ family_contract: \"{}\", root }})",
+                            serde_json::to_string(&family.roots.keys().collect::<Vec<_>>())
+                                .expect("root DATA serializes"),
+                            family.contract.as_str()
+                        ))
+                        .unwrap_or("[]".into())
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+        let family_api = format!(
+            "    {name} : {{ issue : InteractiveContext, {issue_input} -> Tx(Issued_{name}), rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}), revoke : InteractiveContext, {{ lineage : Ref_{name} }} -> Tx(RevocationOutcome_{name}), snapshot_from_parts : {{ lineage : Ref_{name}, head : Str, revision : U64 }} -> Try(ManagementSnapshot_{name}, [InvalidSnapshot]), list : ListRequest_{name} -> Observe(Try(Page_{name}, ListFailure_{name})), inspect : {{ lineage : Ref_{name} }} -> Observe(Try(Inspection_{name}, InspectionFailure_{name})), start : Cursor_{name}, cursor_from_str : Str -> Try(Cursor_{name}, [InvalidCursor]), ref_from_str : Str -> Try(Ref_{name}, [InvalidRef]){selection_fields} }}\n    {name} = {{\n        issue: {issue},\n        rotate: {rotate},\n        revoke: {revoke},\n        snapshot_from_parts: day2_snapshot_from_parts_{name},\n        list: {list},\n        inspect: {inspect},\n        start: {{ value: PlatformCursor.start }},\n        cursor_from_str: |raw| day2_cursor_from_str_{name}(\"{name}\", raw),\n        ref_from_str: |raw| day2_ref_from_str_{name}(\"{name}\", raw),\n{selection_values}    }}\n\n"
+        );
+        let family_api = if selectable && !provisional {
+            family_api.replace(&format!(" rotate : InteractiveContext, {{ expected : ManagementSnapshot_{name} }} -> Tx(RotationOutcome_{name}),"), "")
+                .replace(&format!("        rotate: {rotate},\n"), "")
+        } else {
+            family_api
+        };
+        source.push_str(&family_api);
     }
     source.push_str("}\n");
     Ok(source)
@@ -209,9 +323,14 @@ Credentials :: [].{
     }
 
     $PREFIX$issue_fixed : Str, InteractiveContext, Credential.Label -> Tx(Issued(family))
-    $PREFIX$issue_fixed = |registration, context, label| Tx.$PREFIX$capability(
+    $PREFIX$issue_fixed = |registration, context, label| $PREFIX$issue_request(registration,
+        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str(), grant: { mode: "fixed" } }),
+    )
+
+    $PREFIX$issue_request : Str, Str -> Tx(Issued(family))
+    $PREFIX$issue_request = |registration, request| Tx.$PREFIX$capability(
         "credential_issue", "credential.issue.v1",
-        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str() }),
+        request,
     ).and_then(|raw| {
         parsed : Try({ lineage : Str, version : Str, label : Str, expires_at : I64 }, _)
         parsed = Json.parse(raw)
@@ -389,5 +508,67 @@ Credentials :: [].{
             })
         })
     })
+
+"#;
+
+// Only selectable families receive these nominal DATA types and pure codecs.
+// Static options carry the full canonical authority contract derived by the
+// pure compiler probe and compared with the final admitted worker.
+const SELECTABLE: &str = r#"
+    GrantOption(family) :: { family_contract : Str, root : Str }.{
+        operation : GrantOption(family) -> Str
+        operation = |option| option.root
+    }
+
+    SelectionWire : { family_contract : Str, roots : List(Str) }
+
+    GrantSelection(family) :: { value : SelectionWire }.{
+        to_str : GrantSelection(family) -> Str
+        to_str = |selection| Json.to_str(selection.value)
+
+        options : GrantSelection(family) -> List(GrantOption(family))
+        options = |selection| selection.value.roots.map(|root| { family_contract: selection.value.family_contract, root })
+    }
+
+    known_grant_root : Str -> Bool
+    known_grant_root = |root| $ROOTS$.any(|known| known == root)
+
+    valid_grant_contract : Str -> Bool
+    valid_grant_contract = |contract| {
+        contract.starts_with("sha256:") and contract.count_utf8_bytes() == 71 and
+            contract.drop_prefix("sha256:").to_utf8().all(|byte| (byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102))
+    }
+
+    selection_from_options : List(GrantOption(family)) -> Try(GrantSelection(family), [InvalidGrantSelection])
+    selection_from_options = |options| {
+        first = match options {
+            [head, ..] => head
+            [] => return Err(InvalidGrantSelection)
+        }
+        if options.len() > 64 or first.family_contract != "$CONTRACT$" or !valid_grant_contract(first.family_contract) or !options.all(|option| option.family_contract == first.family_contract and known_grant_root(option.root)) {
+            return Err(InvalidGrantSelection)
+        }
+        canonical = TextSet.from_list(options.map(|option| option.root)).map_err(|_| InvalidGrantSelection)?
+        Ok({ value: { family_contract: first.family_contract, roots: canonical.to_list() } })
+    }
+
+    selection_from_str : Str -> Try(GrantSelection(family), [InvalidGrantSelection])
+    selection_from_str = |raw| {
+        if raw.count_utf8_bytes() > 8192 { return Err(InvalidGrantSelection) }
+        parsed : Try(SelectionWire, _)
+        parsed = Json.parse(raw)
+        wire = parsed.map_err(|_| InvalidGrantSelection)?
+        options = wire.roots.map(|root| { family_contract: wire.family_contract, root })
+        selected = selection_from_options(options)?
+        # Accept only our complete canonical encoding. Unknown/duplicate JSON
+        # members or discarded input cannot silently become typed selection.
+        if Json.to_str(selected.value) != raw { return Err(InvalidGrantSelection) }
+        Ok(selected)
+    }
+
+    $PREFIX$issue_selected : Str, InteractiveContext, Credential.Label, GrantSelection(family) -> Tx(Issued(family))
+    $PREFIX$issue_selected = |registration, context, label, selection| $PREFIX$issue_request(registration,
+        Json.to_str({ registration, invocation: context.invocation_id(), label: label.to_str(), grant: { mode: "selected", selection: selection.value } }),
+    )
 
 "#;

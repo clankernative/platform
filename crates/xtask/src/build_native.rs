@@ -36,6 +36,7 @@ struct Bound {
     declarations: day2::registry::Catalog,
     connections: Vec<day2::connection_declaration::ConnectionDeclaration>,
     credentials: Vec<day2::credential_declaration::FamilyDeclaration>,
+    credential_manifest: Vec<day2::credential_authority::ManifestFamily>,
 }
 
 fn prepare(
@@ -225,6 +226,7 @@ fn data(_app: &Path, _isolated_job: Option<&Path>, prepared: &mut Prepared) -> R
         declarations: day2::registry::Catalog::default(),
         connections: Vec::new(),
         credentials: Vec::new(),
+        credential_manifest: Vec::new(),
     })
 }
 
@@ -284,11 +286,13 @@ fn bind(root: &Path, prepared: &mut Prepared, bound: &mut Bound) -> Result<()> {
         stage.join("registry.json"),
         serde_json::to_vec(&bound.declarations)?,
     )?;
-    for (name, source) in
-        bound
-            .declarations
-            .modules(&bound.schema, &bound.outputs, &bound.connections, false)?
-    {
+    for (name, source) in bound.declarations.modules(
+        &bound.schema,
+        &bound.outputs,
+        &bound.connections,
+        &bound.credential_manifest,
+        false,
+    )? {
         fs::write(stage.join("app").join(name), source)?;
     }
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
@@ -331,6 +335,7 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         declarations,
         connections,
         credentials,
+        credential_manifest,
     } = bound;
     let mut worker = Worker::start(&stage.join("worker"))?;
     let raw_manifest = worker.exchange(b"manifest")?;
@@ -398,9 +403,15 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
     );
     if !credentials.is_empty() {
         artifact["credential_declarations"] = serde_json::to_value(credentials)?;
-        let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
-        artifact["credential_manifest"] =
-            serde_json::to_value(day2::credential_authority::manifest(&with_declarations)?)?;
+    }
+    let with_declarations: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
+    let final_manifest = day2::credential_authority::manifest(&with_declarations)?;
+    ensure!(
+        final_manifest == *credential_manifest,
+        "credential authority changed after SDK binding"
+    );
+    if !final_manifest.is_empty() {
+        artifact["credential_manifest"] = serde_json::to_value(final_manifest)?;
     }
     let final_connections =
         day2::connection_declaration::decode(&worker.exchange(b"connection-contract")?, &checked)?;
@@ -786,18 +797,27 @@ pub fn execute(
                             budget,
                         )?;
                         let raw = Worker::start(&executable)?.exchange(b"credential-contract")?;
-                        bound.credentials = day2::credential_declaration::decode_catalog(
+                        let discovery = day2::credential_declaration::decode_discovery(
                             &raw,
                             &catalog,
                             &prepared.namespace,
                         )?;
+                        bound.credentials = discovery.families;
+                        bound.credential_manifest =
+                            day2::credential_authority::manifest_from_projection(
+                                &bound.credentials,
+                                &catalog.operation_inventory(&prepared.namespace)?,
+                                &bound.schema,
+                                &bound.outputs,
+                                &discovery.operations,
+                            )?;
                         fs::remove_file(source)?;
                         fs::remove_file(executable)?;
                     }
                     day2::credential_declaration::validate_catalog(&bound.credentials, &catalog)?;
                     fs::write(
-                        stage.join("credentials.json"),
-                        serde_json::to_vec(&bound.credentials)?,
+                        stage.join("credential-manifest.json"),
+                        serde_json::to_vec(&bound.credential_manifest)?,
                     )?;
                 }
                 "build-operation-handles" => {
@@ -807,15 +827,15 @@ pub fn execute(
                     );
                     let bound = bound.as_mut().context("bound data required")?;
                     let catalog = bind_codecs(prepared, bound)?;
-                    let modules = catalog.modules(
-                        &bound.schema,
-                        &bound.outputs,
-                        &bound.connections,
-                        false,
-                    )?;
+                    let modules =
+                        catalog.operation_modules(&bound.schema, &bound.outputs, false)?;
                     for name in ["Commands.roc", "Reads.roc"] {
                         fs::write(stage.join("app").join(name), &modules[name])?;
                     }
+                    fs::write(
+                        stage.join("app/Credentials.roc"),
+                        day2::credential_codegen::probe_module(&catalog)?,
+                    )?;
                 }
                 "build-admission" => {
                     ensure!(

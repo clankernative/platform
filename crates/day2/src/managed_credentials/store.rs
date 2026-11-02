@@ -492,7 +492,7 @@ pub(super) fn validate_restored_intent(
         anyhow::bail!("invalid restored credential lineage reference")
     };
     match intent {
-        Intent::Issue { label } => ensure!(
+        Intent::Issue { label, .. } => ensure!(
             !label.trim().is_empty() && label.len() <= 128 && !label.chars().any(char::is_control),
             "invalid restored credential label"
         ),
@@ -1546,10 +1546,7 @@ fn project_metadata(row: MetadataRow, read: &MetadataRead<'_>) -> Result<Inspect
         grant: Digest::try_from(row.grant_digest)?,
         expires_at: row.expires_at,
     };
-    let rotation = read
-        .family
-        .profile
-        .can_rotate()
+    let rotation = (read.family.grant == GrantMode::Fixed && read.family.profile.can_rotate())
         .then_some(ManagementSnapshot {
             lineage,
             head: current_version,
@@ -3059,6 +3056,7 @@ mod tests {
             family: "client".into(),
             intent: super::super::lifecycle::Intent::Issue {
                 label: "integration".into(),
+                grant: super::super::lifecycle::IssueGrant::Fixed {},
             },
             artifact: Digest::of(&"historical-artifact")?.as_str().to_owned(),
             authority: authority.clone(),

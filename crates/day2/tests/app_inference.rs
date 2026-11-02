@@ -46,6 +46,7 @@ impl Fixture {
             &contract.schema,
             &contract.outputs,
             &contract.connection_declarations,
+            &contract.credential_manifest,
             false,
         )? {
             fs::write(stage.join("app").join(name), source)?;
@@ -216,6 +217,7 @@ impl Fixture {
             &schema,
             &outputs,
             &self.contract.connection_declarations,
+            &self.contract.credential_manifest,
             false,
         )? {
             fs::write(self.stage.join("app").join(name), source)?;

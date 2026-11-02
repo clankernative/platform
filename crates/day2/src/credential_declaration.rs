@@ -21,6 +21,64 @@ struct Registration {
     lifetime_seconds: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryWire {
+    families: String,
+    operations: Vec<OperationWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationWire {
+    operation: String,
+    definition: crate::credential_authority::Definition,
+}
+
+pub struct Discovery {
+    pub families: Vec<FamilyDeclaration>,
+    pub operations: BTreeMap<String, crate::credential_authority::Definition>,
+}
+
+pub fn decode_discovery(
+    raw: &[u8],
+    catalog: &crate::registry::Catalog,
+    namespace: &str,
+) -> Result<Discovery> {
+    ensure!(
+        raw.len() <= 2 * 1024 * 1024,
+        "credential authority projection byte budget"
+    );
+    let wire: DiscoveryWire = crate::json::decode(raw)?;
+    let families = decode_catalog(wire.families.as_bytes(), catalog, namespace)?;
+    let mut operations = BTreeMap::new();
+    for entry in wire.operations {
+        ensure!(
+            operations
+                .insert(entry.operation, entry.definition)
+                .is_none(),
+            "duplicate credential operation projection"
+        );
+    }
+    let expected = catalog.operation_inventory(namespace)?;
+    ensure!(
+        operations.len() == expected.len()
+            && operations
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == expected
+                    .iter()
+                    .map(|operation| operation.name.as_str())
+                    .collect(),
+        "credential operation projection inventory differs"
+    );
+    Ok(Discovery {
+        families,
+        operations,
+    })
+}
+
 pub fn decode(raw: &[u8], artifact: &Artifact) -> Result<Vec<FamilyDeclaration>> {
     let operations = artifact
         .operations
@@ -201,9 +259,38 @@ pub fn validate_catalog(
     Ok(())
 }
 
+pub fn validate_manifest_catalog(
+    families: &[crate::credential_authority::ManifestFamily],
+    catalog: &crate::registry::Catalog,
+) -> Result<()> {
+    let mut declarations = Vec::new();
+    for family in families {
+        family.verify()?;
+        for (name, root) in &family.roots {
+            root.verify()?;
+            ensure!(
+                *name == root.operation,
+                "credential option root identity changed"
+            );
+        }
+        declarations.push(FamilyDeclaration {
+            registration: family.registration.clone(),
+            id: family.id.clone(),
+            profile: family.profile.clone(),
+            grant: family.grant.clone(),
+            roots: family.roots.keys().cloned().collect(),
+            lifetime_seconds: family.lifetime_seconds,
+            source: family.source.clone(),
+        });
+    }
+    validate_catalog(&declarations, catalog)
+}
+
 /// One projection is shared by the discovery probe and the final worker.
 pub(crate) fn projection(catalog: &crate::registry::Catalog, product: &str) -> String {
-    let families = catalog.credentials.iter().map(|(name, registration)| { let profile = &registration.profile; format!(
+    let families = catalog.credentials.iter().map(|(name, registration)| {
+        let profile = &registration.profile;
+        format!(
         "{{ registration: \"{name}\", profile: \"{profile}\", id: {product}.credentials.{name}.metadata().id, grant_mode: {product}.credentials.{name}.metadata().grant.mode, roots: {product}.credentials.{name}.metadata().grant.roots.map(|root| \"${{root.operation}}|${{root.input_type}}|${{root.output_type}}\"), lifetime_seconds: {product}.credentials.{name}.metadata().lifetime_seconds }}"
     )}).collect::<Vec<_>>().join(", ");
     format!("Json.to_str([{families}])")
@@ -214,12 +301,11 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn catalog(mode: &str) -> crate::registry::Catalog {
-        let grant = match mode {
-            "fixed" => GrantMode::Fixed,
-            "selectable" => GrantMode::Selectable,
-            _ => unreachable!(),
-        };
+    fn catalog() -> crate::registry::Catalog {
+        catalog_for(GrantMode::Fixed)
+    }
+
+    fn catalog_for(grant: GrantMode) -> crate::registry::Catalog {
         let operation = day2_contracts::registry::Operation {
             input: "Request".into(),
             output: "Reply".into(),
@@ -269,7 +355,7 @@ mod tests {
             ("fixed", GrantMode::Fixed),
             ("selectable", GrantMode::Selectable),
         ] {
-            let families = decode_value(&declarations(mode), &catalog(mode))?;
+            let families = decode_value(&declarations(mode), &catalog_for(expected.clone()))?;
             assert_eq!(families.len(), 2);
             assert_eq!(families[0].grant, expected);
             assert_eq!(families[1].grant, expected);
@@ -286,6 +372,8 @@ mod tests {
     #[test]
     fn discovery_refuses_foreign_unregistered_ambiguous_and_mismatched_root_types() -> Result<()> {
         let original = declarations("selectable");
+        let checked = catalog_for(GrantMode::Selectable);
+        decode_value(&original, &checked)?;
         for root in [
             "another.save|Request|Reply",
             "fixture.missing|Request|Reply",
@@ -297,12 +385,9 @@ mod tests {
         ] {
             let mut altered = original.clone();
             altered[0]["roots"][0] = json!(root);
-            assert!(
-                decode_value(&altered, &catalog("selectable")).is_err(),
-                "{root}"
-            );
+            assert!(decode_value(&altered, &checked).is_err(), "{root}");
         }
-        let mut ambiguous = catalog("selectable");
+        let mut ambiguous = checked;
         ambiguous
             .queries
             .insert("save".into(), ambiguous.commands["save"].clone());
@@ -318,6 +403,7 @@ mod tests {
             ("profile", json!("personal")),
             ("id", json!("personal_keys")),
             ("grant_mode", json!("default_all")),
+            ("grant_mode", json!("selectable")),
             ("roots", json!([])),
             ("roots", json!(vec!["fixture.save|Request|Reply"; 65])),
             (
@@ -330,36 +416,40 @@ mod tests {
         ] {
             let mut altered = original.clone();
             altered[0][field] = value;
-            assert!(
-                decode_value(&altered, &catalog("fixed")).is_err(),
-                "{field}"
-            );
+            assert!(decode_value(&altered, &catalog()).is_err(), "{field}");
         }
-        assert!(decode_value(&json!([]), &catalog("fixed")).is_err());
-        assert!(decode_value(&json!([original[0], original[0]]), &catalog("fixed")).is_err());
-        assert!(decode_catalog(&[b' '; 131_073], &catalog("fixed"), "fixture").is_err());
+        assert!(decode_value(&json!([]), &catalog()).is_err());
+        assert!(decode_value(&json!([original[0], original[0]]), &catalog()).is_err());
+        assert!(decode_catalog(&[b' '; 131_073], &catalog(), "fixture").is_err());
         Ok(())
     }
 
     #[test]
     fn early_catalog_and_final_artifact_use_the_same_typed_declaration_decoder() -> Result<()> {
+        let catalog = catalog();
+        let artifact: Artifact = serde_json::from_value(json!({
+            "format":crate::artifact::CURRENT_FORMAT,
+            "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
+            "roc_version":"test","worker_digest":"test","schema_digest":"test",
+            "sources":{},"admission":"local-spike-only",
+            "schema":{"models":{},"inputs":{},"foreign_keys":[]},
+            "declarations":catalog,
+            "operations":[
+                {"name":"fixture.save","kind":"command","input_type":"Request","output_type":"Reply"},
+                {"name":"fixture.read","kind":"query","input_type":"Request","output_type":"Reply"}
+            ]
+        }))?;
         for mode in ["fixed", "selectable"] {
-            let catalog = catalog(mode);
-            let artifact: Artifact = serde_json::from_value(json!({
-                "format":crate::artifact::CURRENT_FORMAT,
-                "verification_limits":crate::artifact::VerificationLimits::QUALIFIED,
-                "roc_version":"test","worker_digest":"test","schema_digest":"test",
-                "sources":{},"admission":"local-spike-only",
-                "schema":{"models":{},"inputs":{},"foreign_keys":[]},
-                "declarations":catalog,
-                "operations":[
-                    {"name":"fixture.save","kind":"command","input_type":"Request","output_type":"Reply"},
-                    {"name":"fixture.read","kind":"query","input_type":"Request","output_type":"Reply"}
-                ]
-            }))?;
+            let checked = catalog_for(if mode == "fixed" {
+                GrantMode::Fixed
+            } else {
+                GrantMode::Selectable
+            });
+            let mut artifact = artifact.clone();
+            artifact.declarations = checked.clone();
             let raw = serde_json::to_vec(&declarations(mode))?;
             assert_eq!(
-                decode_catalog(&raw, &catalog, "fixture")?,
+                decode_catalog(&raw, &checked, "fixture")?,
                 decode(&raw, &artifact)?
             );
             let mut changed = artifact.clone();
@@ -368,6 +458,7 @@ mod tests {
         }
         Ok(())
     }
+
     #[test]
     fn worker_metadata_must_preserve_checked_profile_and_grant_mode() -> Result<()> {
         for profile in ["client", "personal"] {
@@ -416,6 +507,50 @@ mod tests {
                 assert!(decode(&raw, &artifact).is_err(), "profile {profile} {mode}");
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn authority_probe_requires_complete_typed_operation_metadata_without_unknown_or_duplicate_rows()
+    -> Result<()> {
+        let definition = json!({
+            "execution":{"internal":false,"model":"","id_field":"","version_field":"","effects":[]},
+            "credential_access":{"enabled":true,"local_reads":[]},"required_all_rows":[],"export_version":1
+        });
+        let original = json!({"families":declarations("selectable").to_string(),"operations":[
+            {"operation":"fixture.save","definition":definition}, {"operation":"fixture.read","definition":definition}
+        ]});
+        let read = |value: &Value| {
+            decode_discovery(
+                &serde_json::to_vec(value)?,
+                &catalog_for(GrantMode::Selectable),
+                "fixture",
+            )
+        };
+        let decoded = read(&original)?;
+        assert_eq!(decoded.families.len(), 2);
+        assert_eq!(decoded.operations.len(), 2);
+        for case in 0..7 {
+            let mut altered = original.clone();
+            match case {
+                0 => {
+                    altered["operations"].as_array_mut().unwrap().pop();
+                }
+                1 => altered["operations"][1] = altered["operations"][0].clone(),
+                2 => altered["operations"][0]["operation"] = json!("foreign.save"),
+                3 => {
+                    altered["operations"][0]["definition"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("execution");
+                }
+                4 => altered["operations"][0]["definition"]["supplied_authority"] = json!(true),
+                5 => altered["operations"][0]["definition"]["execution"]["unknown"] = json!(true),
+                _ => altered["unknown"] = json!(true),
+            }
+            assert!(read(&altered).is_err(), "projection mutation {case}");
+        }
+        assert!(decode_discovery(&vec![b' '; 2 * 1024 * 1024 + 1], &catalog(), "fixture").is_err());
         Ok(())
     }
 }

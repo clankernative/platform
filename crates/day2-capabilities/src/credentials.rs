@@ -147,6 +147,11 @@ pub struct GrantSelection {
 }
 
 impl GrantSelection {
+    /// Selected public root names, never supplied authority contracts.
+    pub fn roots(&self) -> &[String] {
+        &self.roots
+    }
+
     pub fn new(family: &ManifestFamily, roots: Vec<String>) -> Result<Self> {
         family.verify()?;
         ensure!(

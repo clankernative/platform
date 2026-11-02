@@ -186,7 +186,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "941dd3b58a39f605b547c8ae8438a4feb14fee777e0688bed39d175a521e5537",
+        "eb03dd074152f0cbfde876b6c5a94a113f786df4a055231a3246c097134fa2ab",
     ),
     (
         "Effects.roc",
@@ -537,7 +537,14 @@ pub fn prepare(
         } else {
             serde_json::from_slice(&fs::read(stage.join("connections.json"))?)?
         };
-        for (module, source) in catalog.modules(schema, outputs, &connections, true)? {
+        let credentials = if catalog.credentials.is_empty() {
+            Vec::new()
+        } else {
+            crate::json::decode(&fs::read(stage.join("credential-manifest.json"))?)?
+        };
+        for (module, source) in
+            catalog.modules(schema, outputs, &connections, &credentials, true)?
+        {
             fs::write(target.join("app").join(module), source)?;
         }
         fs::write(

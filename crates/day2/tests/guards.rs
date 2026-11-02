@@ -70,6 +70,7 @@ fn compiler_fixture(root: &Path, stage: &Path, artifact: &LoadedArtifact) -> Res
         &artifact.contract().schema,
         &artifact.contract().outputs,
         &artifact.contract().connection_declarations,
+        &artifact.contract().credential_manifest,
         false,
     )? {
         fs::write(app.join(module), source)?;

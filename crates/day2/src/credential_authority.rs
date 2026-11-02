@@ -5,25 +5,129 @@
 use crate::protocol::{Database, Step};
 use crate::{app_contract::CredentialAccess, artifact::Artifact};
 use anyhow::{Context, Result, ensure};
+pub use day2_capabilities::credentials::ManifestFamily;
 use day2_capabilities::{
     Digest,
-    credentials::{self, CredentialRoot, ManifestFamily},
+    credentials::{self, CredentialRoot},
     oauth::{AuthorityAction, AuthorityNode, OperationAuthorityContract, OperationKind},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Complete DATA read by the canonical credential authority interpreter. The
+/// pure compiler probe can supply it without invoking examples or handlers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Definition {
+    pub execution: crate::app_contract::Execution,
+    pub credential_access: CredentialAccess,
+    pub required_all_rows: Vec<String>,
+    pub export_version: u32,
+}
+
+struct DefinitionView<'a> {
+    execution: &'a crate::app_contract::Execution,
+    credential_access: &'a CredentialAccess,
+    required_all_rows: &'a [String],
+    export_version: u32,
+}
+
+struct Inputs<'a> {
+    operations: &'a [crate::artifact::Operation],
+    schema: &'a crate::schema::Schema,
+    outputs: &'a crate::output_schema::Catalog,
+}
+
+impl<'a> From<&'a Artifact> for Inputs<'a> {
+    fn from(artifact: &'a Artifact) -> Self {
+        Self {
+            operations: &artifact.operations,
+            schema: &artifact.schema,
+            outputs: &artifact.outputs,
+        }
+    }
+}
+
+fn checked_definition<'a>(artifact: &'a Artifact, name: &str) -> Result<DefinitionView<'a>> {
+    let definition = artifact
+        .app_contract
+        .as_ref()
+        .and_then(|contract| contract.operations.get(name))
+        .with_context(|| format!("missing checked credential operation: {name}"))?;
+    Ok(DefinitionView {
+        execution: &definition.execution,
+        credential_access: &definition.credential_access,
+        required_all_rows: &definition.required_all_rows,
+        export_version: definition.export_version,
+    })
+}
+
 pub fn manifest(artifact: &Artifact) -> Result<Vec<ManifestFamily>> {
+    manifest_with(
+        &artifact.credential_declarations,
+        &Inputs::from(artifact),
+        &|name| checked_definition(artifact, name),
+    )
+}
+
+/// Static contract derivation, never runtime permission. Final publication
+/// must compare the entire result with manifest() of the admitted worker.
+pub fn manifest_from_projection(
+    declarations: &[credentials::FamilyDeclaration],
+    operations: &[crate::artifact::Operation],
+    schema: &crate::schema::Schema,
+    outputs: &crate::output_schema::Catalog,
+    definitions: &BTreeMap<String, Definition>,
+) -> Result<Vec<ManifestFamily>> {
+    ensure!(
+        definitions.len() == operations.len()
+            && definitions
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == operations
+                    .iter()
+                    .map(|operation| operation.name.as_str())
+                    .collect(),
+        "credential authority projection differs from checked operation inventory"
+    );
+    manifest_with(
+        declarations,
+        &Inputs {
+            operations,
+            schema,
+            outputs,
+        },
+        &|name| {
+            let definition = definitions
+                .get(name)
+                .context("credential authority projection missing")?;
+            Ok(DefinitionView {
+                execution: &definition.execution,
+                credential_access: &definition.credential_access,
+                required_all_rows: &definition.required_all_rows,
+                export_version: definition.export_version,
+            })
+        },
+    )
+}
+
+fn manifest_with<'a>(
+    declarations: &[credentials::FamilyDeclaration],
+    inputs: &Inputs<'_>,
+    definition: &impl Fn(&str) -> Result<DefinitionView<'a>>,
+) -> Result<Vec<ManifestFamily>> {
     let mut catalog = BTreeMap::new();
-    for family in &artifact.credential_declarations {
+    for family in declarations {
         for root in &family.roots {
             if !catalog.contains_key(root) {
-                let authority = derive(artifact, root, &mut BTreeSet::new())
+                let authority = derive(inputs, definition, root, &mut BTreeSet::new())
                     .with_context(|| format!("unsupported credential authority closure: {root}"))?;
                 catalog.insert(
                     root.clone(),
                     CredentialRoot {
                         authority,
-                        direct_ingress: !artifact.internal_command(root),
+                        direct_ingress: !definition(root)?.execution.internal,
                         interactive_security: false,
                         single_resource_model: None,
                     },
@@ -31,11 +135,16 @@ pub fn manifest(artifact: &Artifact) -> Result<Vec<ManifestFamily>> {
             }
         }
     }
-    credentials::build_manifest(artifact.credential_declarations.clone(), &catalog)
+    credentials::build_manifest(declarations.to_vec(), &catalog)
 }
 
 pub(crate) fn operation(artifact: &Artifact, name: &str) -> Result<OperationAuthorityContract> {
-    derive(artifact, name, &mut BTreeSet::new())
+    derive(
+        &Inputs::from(artifact),
+        &|name| checked_definition(artifact, name),
+        name,
+        &mut BTreeSet::new(),
+    )
 }
 
 /// The same declared bound used to build a manifest is enforced for every
@@ -88,8 +197,9 @@ fn check_access(access: &CredentialAccess, operation: &str, step: Step<'_>) -> R
     Ok(())
 }
 
-fn derive(
-    artifact: &Artifact,
+fn derive<'a>(
+    inputs: &Inputs<'_>,
+    definition: &impl Fn(&str) -> Result<DefinitionView<'a>>,
     name: &str,
     active: &mut BTreeSet<String>,
 ) -> Result<OperationAuthorityContract> {
@@ -98,26 +208,23 @@ fn derive(
         active.insert(name.to_owned()),
         "cyclic credential command dependency: {name}"
     );
-    let result = derive_inner(artifact, name, active);
+    let result = derive_inner(inputs, definition, name, active);
     active.remove(name);
     result
 }
 
-fn derive_inner(
-    artifact: &Artifact,
+fn derive_inner<'a>(
+    inputs: &Inputs<'_>,
+    definitions: &impl Fn(&str) -> Result<DefinitionView<'a>>,
     name: &str,
     active: &mut BTreeSet<String>,
 ) -> Result<OperationAuthorityContract> {
-    let registered = artifact
+    let registered = inputs
         .operations
         .iter()
         .find(|operation| operation.name == name)
         .with_context(|| format!("unregistered credential operation: {name}"))?;
-    let definition = artifact
-        .app_contract
-        .as_ref()
-        .and_then(|contract| contract.operations.get(name))
-        .with_context(|| format!("missing checked credential operation: {name}"))?;
+    let definition = definitions(name)?;
     ensure!(
         definition.credential_access.enabled,
         "credential operation requires explicit bounded authority: {name}"
@@ -140,7 +247,7 @@ fn derive_inner(
 
     let mut actions = BTreeSet::new();
     for model in &definition.credential_access.local_reads {
-        let schema = artifact
+        let schema = inputs
             .schema
             .models
             .get(model)
@@ -155,7 +262,7 @@ fn derive_inner(
     for effect in &definition.execution.effects {
         match effect.kind.as_str() {
             "request" => {
-                let child = derive(artifact, &effect.command, active)?;
+                let child = derive(inputs, definitions, &effect.command, active)?;
                 children.insert(effect.command.clone(), child.closure);
             }
             "external" => anyhow::bail!(
@@ -163,7 +270,7 @@ fn derive_inner(
                 effect.command
             ),
             "create" | "soft_delete" | "update" | "update_created" => {
-                let schema = artifact.schema.models.get(&effect.model).with_context(|| {
+                let schema = inputs.schema.models.get(&effect.model).with_context(|| {
                     format!("unknown credential write model: {name}/{}", effect.model)
                 })?;
                 // A local mutation returns its full row under the model's read
@@ -194,12 +301,12 @@ fn derive_inner(
         &registered.kind,
         &registered.input_type,
         &registered.output_type,
-        artifact
+        inputs
             .schema
             .inputs
             .get(&registered.input_type)
             .context("credential input schema missing")?,
-        artifact
+        inputs
             .outputs
             .get(&registered.output_type)
             .context("credential output schema missing")?,

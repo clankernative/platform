@@ -203,6 +203,86 @@ fn interactive_failure_campaign_confirms_both_profiles_without_staging_credentia
 }
 
 #[test]
+fn pure_authority_projection_matches_final_manifest_and_rejects_each_contract_drift() -> Result<()>
+{
+    let path = PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("credential fixture required")?,
+    );
+    let loaded = LoadedArtifact::load(&path)?;
+    let artifact = loaded.contract();
+    let definitions = artifact
+        .app_contract
+        .as_ref()
+        .context("checked app contract")?
+        .operations
+        .iter()
+        .map(|(name, operation)| {
+            (
+                name.clone(),
+                day2::credential_authority::Definition {
+                    execution: operation.execution.clone(),
+                    credential_access: operation.credential_access.clone(),
+                    required_all_rows: operation.required_all_rows.clone(),
+                    export_version: operation.export_version,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let derive = |definitions: &BTreeMap<String, day2::credential_authority::Definition>| {
+        day2::credential_authority::manifest_from_projection(
+            &artifact.credential_declarations,
+            &artifact.operations,
+            &artifact.schema,
+            &artifact.outputs,
+            definitions,
+        )
+    };
+    let expected = &artifact.credential_manifest;
+    assert!(!expected.is_empty());
+    assert_eq!(derive(&definitions)?, *expected);
+    let root = expected[0].roots.keys().next().context("credential root")?;
+    let canonical_version = definitions[root].export_version.max(1);
+    let next_version = canonical_version
+        .checked_add(1)
+        .context("version fixture overflow")?;
+    let mut normalized = definitions.clone();
+    normalized.get_mut(root).unwrap().export_version = canonical_version;
+    assert_eq!(derive(&normalized)?, *expected);
+    for mutation in [
+        "version", "access", "internal", "all_rows", "missing", "foreign",
+    ] {
+        let mut changed = definitions.clone();
+        match mutation {
+            "version" => changed.get_mut(root).unwrap().export_version = next_version,
+            "access" => changed.get_mut(root).unwrap().credential_access.enabled = false,
+            "internal" => changed.get_mut(root).unwrap().execution.internal = true,
+            "all_rows" => changed
+                .get_mut(root)
+                .unwrap()
+                .required_all_rows
+                .push("missing_model".into()),
+            "missing" => {
+                changed.remove(root);
+            }
+            "foreign" => {
+                changed.insert("foreign.operation".into(), definitions[root].clone());
+            }
+            _ => unreachable!(),
+        }
+        if let Ok(observed) = derive(&changed) {
+            assert_ne!(observed, *expected, "unbound {mutation}");
+        }
+    }
+    // A valid version change must derive a different full contract, rather
+    // than only making an invalid projection fail to parse.
+    let mut changed = definitions.clone();
+    changed.get_mut(root).unwrap().export_version = next_version;
+    assert_ne!(derive(&changed)?, *expected);
+    Ok(())
+}
+
+#[test]
 fn ordinary_creation_refuses_credentials_before_output_and_verification_preserves_complete_selection()
 -> Result<()> {
     use day2_capabilities::credentials::ManagementPredicate;
@@ -918,6 +998,10 @@ fn native_compiler_preserves_family_types_and_seals_host_read_constructors() -> 
         output_schema,
         schema::{Kind, Record, Schema},
     };
+    let fixture = LoadedArtifact::load(&PathBuf::from(
+        std::env::var_os("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT")
+            .context("compiled credential fixture required")?,
+    ))?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
@@ -928,7 +1012,7 @@ fn native_compiler_preserves_family_types_and_seals_host_read_constructors() -> 
     fs::write(stage.join("sdk/main.roc"), day2::sdk::app_platform())?;
     fs::write(
         stage.join("app/Credentials.roc"),
-        day2::credential_codegen::module(["clients", "personal"], false)?,
+        day2::credential_codegen::module(&fixture.contract().credential_manifest, false)?,
     )?;
     let base = r#"app [step] { pf: platform "../sdk/main.roc" }
 import pf.Observe
@@ -1051,7 +1135,7 @@ expect (Credentials.clients.ref_from_str)("cr1_personal_abc") == Err(InvalidRef)
     )?;
     fs::write(
         restricted.join("app/Credentials.roc"),
-        day2::credential_codegen::module(["clients", "personal"], true)?,
+        day2::credential_codegen::module(&fixture.contract().credential_manifest, true)?,
     )?;
     let (success, diagnostics) = run(&restricted, "check")?;
     ensure!(
@@ -1252,7 +1336,7 @@ step = |raw| raw
             output_schema::roc_module(&navigation_outputs)?,
         )?;
         let modules =
-            navigation_catalog.modules(&navigation_schema, &navigation_outputs, &[], false)?;
+            navigation_catalog.modules(&navigation_schema, &navigation_outputs, &[], &[], false)?;
         for module in ["SecurityActions.roc", "ProductReturns.roc"] {
             fs::write(directory.join("app").join(module), &modules[module])?;
         }
@@ -1343,6 +1427,186 @@ step = |raw| raw
                 "mixed family modes accepted: {diagnostics}"
             );
         }
+    }
+    for (directory, admission) in [(&stage, false), (&restricted, true)] {
+        for (probe, expected) in [
+            (
+                "probe = (Credentials.clients.selection_from_str)(\"{}\")",
+                "selection_from_str",
+            ),
+            (
+                "probe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant })",
+                "grant",
+            ),
+        ] {
+            fs::write(directory.join("app/main.roc"), format!("{base}\n{probe}\n"))?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "fixed selection exclusion: {diagnostics}"
+            );
+        }
+        let selectable = fixture
+            .contract()
+            .credential_manifest
+            .iter()
+            .map(|family| {
+                use day2_capabilities::credentials::{
+                    CredentialRoot, FamilyDeclaration, GrantMode, ManifestFamily,
+                };
+                let roots = family
+                    .roots
+                    .iter()
+                    .map(|(name, authority)| {
+                        (
+                            name.clone(),
+                            CredentialRoot {
+                                authority: authority.clone(),
+                                direct_ingress: true,
+                                interactive_security: false,
+                                single_resource_model: None,
+                            },
+                        )
+                    })
+                    .collect();
+                ManifestFamily::derive(
+                    FamilyDeclaration {
+                        registration: family.registration.clone(),
+                        id: family.id.clone(),
+                        profile: family.profile.clone(),
+                        grant: GrantMode::Selectable,
+                        roots: family.roots.keys().cloned().collect(),
+                        lifetime_seconds: family.lifetime_seconds,
+                        source: family.source.clone(),
+                    },
+                    &roots,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        fs::write(
+            directory.join("app/Credentials.roc"),
+            day2::credential_codegen::module(&selectable, admission)?,
+        )?;
+        let positive = format!(
+            "{issuance_base}\nprobe : InteractiveContext, Credential.Label, Credentials.GrantSelection_clients -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, {{ label, grant }})\n"
+        );
+        fs::write(directory.join("app/main.roc"), &positive)?;
+        let (success, diagnostics) = run(directory, "check")?;
+        ensure!(success, "selectable typed issuance: {diagnostics}");
+        for (probe, expected) in [
+            (
+                "probe : InteractiveContext, Credential.Label, Credentials.GrantSelection_personal -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant })",
+                "GrantSelection_personal",
+            ),
+            (
+                "probe : InteractiveContext, Credential.Label, Credentials.GrantSelection_clients -> Tx(Credentials.Issued_clients)\nprobe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant, subject: \"someone-else\" })",
+                "subject",
+            ),
+            (
+                "probe : InteractiveContext, Credential.Label -> Tx(Credentials.Issued_clients)\nprobe = |context, label| (Credentials.clients.issue)(context, { label })",
+                "grant",
+            ),
+            (
+                "probe = |context, label, grant| (Credentials.clients.issue)(context, { label, grant, subject: \"foreign\" })",
+                "subject",
+            ),
+            (
+                "probe = |context, expected| (Credentials.clients.rotate)(context, { expected })",
+                "rotate",
+            ),
+        ] {
+            fs::write(
+                directory.join("app/main.roc"),
+                format!("{issuance_base}\n{probe}\n"),
+            )?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "selectable native exclusion: {diagnostics}"
+            );
+        }
+        for (probe, expected) in [
+            (
+                "probe = (Credentials.clients.selection_from_options)(Credentials.personal.grant_options)",
+                "GrantOption_personal",
+            ),
+            (
+                "probe : Credentials.GrantSelection_clients -> Credentials.GrantSelection_personal\nprobe = |value| value",
+                "GrantSelection_personal",
+            ),
+            (
+                "probe : Credentials.GrantOption_clients\nprobe = { family_contract: \"foreign\", root: \"foreign.read\" }",
+                "GrantOption_clients",
+            ),
+            (
+                "probe : Credentials.GrantSelection_clients\nprobe = { value: { family_contract: \"foreign\", roots: [] } }",
+                "GrantSelection_clients",
+            ),
+        ] {
+            fs::write(directory.join("app/main.roc"), format!("{base}\n{probe}\n"))?;
+            let (success, diagnostics) = run(directory, "check")?;
+            ensure!(
+                !success && diagnostics.contains(expected),
+                "nominal selection exclusion: {diagnostics}"
+            );
+        }
+        let mut stale = selectable.clone();
+        stale[0].contract = Digest::new(b"stale generated family");
+        assert!(day2::credential_codegen::module(&stale, admission).is_err());
+        let family = selectable
+            .iter()
+            .find(|family| family.registration.as_str() == "clients")
+            .context("client fixture missing")?;
+        let roots = family.roots.keys().cloned().collect::<Vec<_>>();
+        let selected = json!({"family_contract":family.contract, "roots":[roots[0]]}).to_string();
+        let mut rejected = Vec::new();
+        for names in [
+            vec![],
+            vec![roots[0].clone(); 2],
+            vec!["unknown.operation".into()],
+            vec![roots[0].clone(); 65],
+        ] {
+            rejected.push(json!({"family_contract":family.contract, "roots":names}).to_string());
+        }
+        rejected.push(json!({"family_contract":"foreign","roots":[roots[0]]}).to_string());
+        rejected.push(
+            json!({"family_contract":Digest::new(b"stale family contract"),"roots":[roots[0]]})
+                .to_string(),
+        );
+        rejected.push(
+            json!({"family_contract":family.contract,"roots":[roots[1],roots[0]]}).to_string(),
+        );
+        rejected.push(
+            json!({"family_contract":family.contract,"roots":[roots[0]],"subject":"someone-else"})
+                .to_string(),
+        );
+        rejected.push(format!(
+            "{{\"family_contract\":\"{}\",\"roots\":[\"{}\"],\"roots\":[\"{}\"]}}",
+            family.contract.as_str(),
+            roots[1],
+            roots[0]
+        ));
+        let mut expectations = format!(
+            "expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => selection.to_str() == {}\n Err(_) => Bool.False }}\n",
+            serde_json::to_string(&selected)?,
+            serde_json::to_string(&selected)?
+        );
+        for bad in rejected {
+            expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(_) => Bool.False\n Err(_) => Bool.True }}\n", serde_json::to_string(&bad)?));
+        }
+        expectations.push_str("expect match (Credentials.clients.selection_from_options)([]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n");
+        expectations.push_str(&format!("expect match (Credentials.clients.selection_from_str)({}) {{ Ok(selection) => match (Credentials.clients.selection_from_options)(selection.options()) {{ Ok(copy) => copy.to_str() == selection.to_str()\n Err(_) => Bool.False }}\n Err(_) => Bool.False }}\n", serde_json::to_string(&selected)?));
+        expectations.push_str("expect match Credentials.clients.grant_options { [first, second] => match (Credentials.clients.selection_from_options)([second, first]) { Ok(selection) => selection.options().map(|option| option.operation()) == [first.operation(), second.operation()]\n Err(_) => Bool.False }\n _ => Bool.False }\n");
+        expectations.push_str("expect match Credentials.clients.grant_options { [first, ..] => match (Credentials.clients.selection_from_options)([first, first]) { Err(InvalidGrantSelection) => Bool.True\n Ok(_) => Bool.False }\n _ => Bool.False }\n");
+        fs::write(
+            directory.join("app/main.roc"),
+            format!("{base}\n{expectations}"),
+        )?;
+        let (success, diagnostics) = run(directory, "test")?;
+        ensure!(
+            success && diagnostics.contains("All (14) tests passed"),
+            "compiled selection controls: {diagnostics}"
+        );
     }
     Ok(())
 }

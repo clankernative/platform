@@ -1002,14 +1002,72 @@ fn inferred_catalog(table: &Table) -> Result<Catalog> {
 }
 
 impl Catalog {
+    pub fn operation_inventory(&self, namespace: &str) -> Result<Vec<crate::artifact::Operation>> {
+        day2_contracts::names::identifier(namespace)?;
+        let mut names = BTreeSet::new();
+        let mut operations = Vec::new();
+        for (kind, entries) in [("command", &self.commands), ("query", &self.queries)] {
+            for (name, operation) in entries {
+                day2_contracts::names::identifier(name)?;
+                ensure!(
+                    names.insert(name),
+                    "ambiguous checked operation registration"
+                );
+                operations.push(crate::artifact::Operation {
+                    name: format!("{namespace}.{name}"),
+                    kind: kind.into(),
+                    input_type: operation.input.clone(),
+                    output_type: operation.output.clone(),
+                });
+            }
+        }
+        Ok(operations)
+    }
+
+    /// Checked local operation handles are bound before pure family discovery;
+    /// this shares their exact generator with final SDK materialization.
+    pub fn operation_modules(
+        &self,
+        schema: &Schema,
+        outputs: &output_schema::Catalog,
+        admission: bool,
+    ) -> Result<BTreeMap<String, String>> {
+        let prefix = if admission { "admission_" } else { "" };
+        let imports = operation_imports(schema, outputs)?;
+        let mut modules = BTreeMap::new();
+        for (name, constructor, fields) in [
+            ("Commands", "Write", &self.commands),
+            ("Reads", "Read", &self.queries),
+        ] {
+            let mut source = format!("{imports}\n{name} :: [].{{\n");
+            for (key, definition) in fields {
+                let input = schema
+                    .inputs
+                    .get(&definition.input)
+                    .context("registered input codec missing")?
+                    .input_type()?;
+                let output = &outputs
+                    .get(&definition.output)
+                    .context("registered output codec missing")?
+                    .roc_type;
+                source.push_str(&format!("\t{key} : {constructor}({input}, {output})\n\t{key} = {constructor}.{prefix}define(AppIdentity.namespace.concat(\".{key}\"), Inputs.{}, Outputs.{})\n", definition.input, definition.output));
+            }
+            source.push_str("}\n");
+            modules.insert(format!("{name}.roc"), source);
+        }
+        Ok(modules)
+    }
+
     pub fn modules(
         &self,
         schema: &Schema,
         outputs: &output_schema::Catalog,
         connections: &[day2_capabilities::oauth::ConnectionDeclaration],
+        credentials: &[crate::credential_authority::ManifestFamily],
         admission: bool,
     ) -> Result<BTreeMap<String, String>> {
         crate::connection_declaration::validate_catalog(connections, self)?;
+        crate::credential_declaration::validate_manifest_catalog(credentials, self)?;
         let prefix = if admission { "admission_" } else { "" };
         let input_type = |key: &str| -> Result<String> {
             Ok(schema
@@ -1026,54 +1084,16 @@ impl Catalog {
                 .roc_type
                 .clone())
         };
-        let mut modules = BTreeMap::new();
+        let mut modules = self.operation_modules(schema, outputs, admission)?;
         modules.insert(
             crate::connection_codegen::MODULE.into(),
             crate::connection_codegen::module(connections, admission)?,
         );
         modules.insert(
             crate::credential_codegen::MODULE.into(),
-            crate::credential_codegen::module(
-                self.credentials.keys().map(String::as_str),
-                admission,
-            )?,
+            crate::credential_codegen::module(credentials, admission)?,
         );
-        let mut imports = "import pf.Write\nimport pf.Read\nimport pf.Model\nimport pf.Input\nimport pf.Output\nimport pf.Context\nimport pf.Tx\nimport pf.Query\nimport pf.CollectionPage\nimport pf.Cursor\nimport pf.PageSize\nimport AppIdentity\nimport Data\nimport Inputs\nimport Outputs\n".to_string();
-        if outputs
-            .values()
-            .any(|contract| contract.shape.uses_row_version())
-        {
-            imports.push_str("import pf.RowVersion\n");
-        }
-        let mut modules_used = BTreeSet::new();
-        for record in schema.inputs.values().chain(schema.models.values()) {
-            if let Some(annotation) = &record.roc_type {
-                modules_used.extend(output_schema::annotation_imports(annotation)?);
-            }
-        }
-        for output in outputs.values() {
-            modules_used.extend(output_schema::annotation_imports(&output.roc_type)?);
-        }
-        for module in modules_used {
-            if !["CollectionPage", "Cursor", "PageSize", "RowVersion"].contains(&module) {
-                if ["Ref", "Text"].contains(&module) {
-                    imports.push_str(&format!("import pf.{module}\n"));
-                } else {
-                    imports.push_str(&format!("import {module}\n"));
-                }
-            }
-        }
-        for (name, constructor, fields) in [
-            ("Commands", "Write", &self.commands),
-            ("Reads", "Read", &self.queries),
-        ] {
-            let mut source = format!("{imports}\n{name} :: [].{{\n");
-            for (key, definition) in fields {
-                source.push_str(&format!("\t{key} : {constructor}({}, {})\n\t{key} = {constructor}.{prefix}define(AppIdentity.namespace.concat(\".{key}\"), Inputs.{}, Outputs.{})\n", input_type(&definition.input)?, output_type(&definition.output)?, definition.input, definition.output));
-            }
-            source.push_str("}\n");
-            modules.insert(format!("{name}.roc"), source);
-        }
+        let imports = operation_imports(schema, outputs)?;
         if self.unified {
             let mut actions =
                 format!("{imports}import pf.SecurityAction\nSecurityActions :: [].{{\n");
@@ -1172,6 +1192,35 @@ impl Catalog {
         }
         Ok(())
     }
+}
+
+fn operation_imports(schema: &Schema, outputs: &output_schema::Catalog) -> Result<String> {
+    let mut imports = "import pf.Write\nimport pf.Read\nimport pf.Model\nimport pf.Input\nimport pf.Output\nimport pf.Context\nimport pf.Tx\nimport pf.Query\nimport pf.CollectionPage\nimport pf.Cursor\nimport pf.PageSize\nimport AppIdentity\nimport Data\nimport Inputs\nimport Outputs\n".to_string();
+    if outputs
+        .values()
+        .any(|contract| contract.shape.uses_row_version())
+    {
+        imports.push_str("import pf.RowVersion\n");
+    }
+    let mut modules = BTreeSet::new();
+    for record in schema.inputs.values().chain(schema.models.values()) {
+        if let Some(annotation) = &record.roc_type {
+            modules.extend(output_schema::annotation_imports(annotation)?);
+        }
+    }
+    for output in outputs.values() {
+        modules.extend(output_schema::annotation_imports(&output.roc_type)?);
+    }
+    for module in modules {
+        if !["CollectionPage", "Cursor", "PageSize", "RowVersion"].contains(&module) {
+            if ["Ref", "Text"].contains(&module) {
+                imports.push_str(&format!("import pf.{module}\n"));
+            } else {
+                imports.push_str(&format!("import {module}\n"));
+            }
+        }
+    }
+    Ok(imports)
 }
 
 #[cfg(test)]
