@@ -529,6 +529,7 @@ impl World {
             "recipient": "PRIVATE_RECIPIENT",
             "security_epoch": 1,
             "material_revision": 1,
+            "grant": ceiling,
         });
         let request_digest = Digest::of(&(
             "credential-metadata-fixture-issue-v1",
@@ -1519,7 +1520,7 @@ step = |raw| raw
                 "subject",
             ),
             (
-                "probe = |context, expected| (Credentials.clients.rotate)(context, { expected })",
+                "probe : InteractiveContext, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected| (Credentials.clients.rotate)(context, { expected })",
                 "grant",
             ),
         ] {
@@ -1530,7 +1531,7 @@ step = |raw| raw
             let (success, diagnostics) = run(directory, "check")?;
             ensure!(
                 !success && diagnostics.contains(expected),
-                "selectable native exclusion: {diagnostics}"
+                "selectable native exclusion for {probe}: {diagnostics}"
             );
         }
         for (probe, expected) in [
