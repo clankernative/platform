@@ -296,7 +296,12 @@ impl<'de> Deserialize<'de> for Phase {
                             }
                             fence = Some(map.next_value::<serde_json::Value>()?);
                         }
-                        _ => return Err(A::Error::unknown_field(&key, &["phase", "completion", "fence"])),
+                        _ => {
+                            return Err(A::Error::unknown_field(
+                                &key,
+                                &["phase", "completion", "fence"],
+                            ));
+                        }
                     }
                 }
                 match (phase.as_deref(), completion, fence) {
@@ -306,11 +311,9 @@ impl<'de> Deserialize<'de> for Phase {
                             completion: serde_json::from_value(value).map_err(A::Error::custom)?,
                         })
                     }
-                    (Some("fenced"), None, Some(value)) if value.is_object() => {
-                        Ok(Phase::Fenced {
-                            fence: serde_json::from_value(value).map_err(A::Error::custom)?,
-                        })
-                    }
+                    (Some("fenced"), None, Some(value)) if value.is_object() => Ok(Phase::Fenced {
+                        fence: serde_json::from_value(value).map_err(A::Error::custom)?,
+                    }),
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }
             }

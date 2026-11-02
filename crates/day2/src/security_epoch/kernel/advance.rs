@@ -38,10 +38,25 @@ impl Request {
     ) -> Result<Self> {
         let request = Self {
             operation,
-            activation: observed.activate.as_ref().context("security_epoch_advance_activation_missing")?.value.clone(),
+            activation: observed
+                .activate
+                .as_ref()
+                .context("security_epoch_advance_activation_missing")?
+                .value
+                .clone(),
             before: Versions {
-                root: observed.root.as_ref().context("security_epoch_advance_root_missing")?.version.clone(),
-                sentinel: observed.sentinel.as_ref().context("security_epoch_advance_sentinel_missing")?.version.clone(),
+                root: observed
+                    .root
+                    .as_ref()
+                    .context("security_epoch_advance_root_missing")?
+                    .version
+                    .clone(),
+                sentinel: observed
+                    .sentinel
+                    .as_ref()
+                    .context("security_epoch_advance_sentinel_missing")?
+                    .version
+                    .clone(),
             },
         };
         request.prepare(selection, observed)?;
@@ -51,8 +66,10 @@ impl Request {
     fn validate(&self, selection: &EpochStore) -> Result<()> {
         self.activation.request.validate(selection)?;
         ensure!(
-            matches!(self.activation.request, InitialRequest::CompleteInitialFirstActivation { .. })
-                && self.activation == self.activation.request.receipt()?,
+            matches!(
+                self.activation.request,
+                InitialRequest::CompleteInitialFirstActivation { .. }
+            ) && self.activation == self.activation.request.receipt()?,
             "security_epoch_advance_activation_mismatch"
         );
         ensure!(
@@ -79,10 +96,14 @@ impl Request {
             previous_epoch: root.epoch,
         };
         root.epoch = root.epoch.successor()?;
-        root.phase = Phase::Fenced { fence: Box::new(fence.clone()) };
+        root.phase = Phase::Fenced {
+            fence: Box::new(fence.clone()),
+        };
         // The bootstrap sentinel keeps its immutable initial epoch. Its new
         // phase and conditional version fence the same observed initial state.
-        sentinel.phase = Phase::Fenced { fence: Box::new(fence) };
+        sentinel.phase = Phase::Fenced {
+            fence: Box::new(fence),
+        };
         Ok((root, sentinel))
     }
 
@@ -106,17 +127,35 @@ impl Request {
     ) -> Result<Plan> {
         self.validate(selection)?;
         ensure!(
-            matches!(super::reconcile(selection, &self.activation.request, observed)?, super::Outcome::Applied(_)),
+            matches!(
+                super::reconcile(selection, &self.activation.request, observed)?,
+                super::Outcome::Applied(_)
+            ),
             "security_epoch_advance_initial_authority_not_active"
         );
         self.require_history(observed)?;
         ensure!(
-            observed.root.as_ref().context("security_epoch_advance_root_missing")?.version == self.before.root
-                && observed.sentinel.as_ref().context("security_epoch_advance_sentinel_missing")?.version == self.before.sentinel,
+            observed
+                .root
+                .as_ref()
+                .context("security_epoch_advance_root_missing")?
+                .version
+                == self.before.root
+                && observed
+                    .sentinel
+                    .as_ref()
+                    .context("security_epoch_advance_sentinel_missing")?
+                    .version
+                    == self.before.sentinel,
             "security_epoch_advance_conditional_version_changed"
         );
         let (root, sentinel) = self.records(selection)?;
-        Ok(Plan { before: self.before.clone(), root, sentinel, receipt: self.receipt(selection)? })
+        Ok(Plan {
+            before: self.before.clone(),
+            root,
+            sentinel,
+            receipt: self.receipt(selection)?,
+        })
     }
 
     fn require_history(&self, observed: &Snapshot) -> Result<()> {
@@ -124,8 +163,18 @@ impl Request {
             bootstrap: self.activation.request.bootstrap().clone(),
         };
         ensure!(
-            observed.create.as_ref().context("security_epoch_advance_create_missing")?.value == create.receipt()?
-                && observed.activate.as_ref().context("security_epoch_advance_activation_missing")?.value == self.activation,
+            observed
+                .create
+                .as_ref()
+                .context("security_epoch_advance_create_missing")?
+                .value
+                == create.receipt()?
+                && observed
+                    .activate
+                    .as_ref()
+                    .context("security_epoch_advance_activation_missing")?
+                    .value
+                    == self.activation,
             "security_epoch_advance_history_mismatch"
         );
         Ok(())
@@ -177,8 +226,14 @@ pub(in crate::security_epoch) fn reconcile(
     };
     let expected = request.receipt(selection)?;
     let (root, sentinel) = request.records(selection)?;
-    let observed_root = observed.root.as_ref().context("security_epoch_advance_root_missing")?;
-    let observed_sentinel = observed.sentinel.as_ref().context("security_epoch_advance_sentinel_missing")?;
+    let observed_root = observed
+        .root
+        .as_ref()
+        .context("security_epoch_advance_root_missing")?;
+    let observed_sentinel = observed
+        .sentinel
+        .as_ref()
+        .context("security_epoch_advance_sentinel_missing")?;
     ensure!(
         receipt.value == expected
             && observed_root.value == root
