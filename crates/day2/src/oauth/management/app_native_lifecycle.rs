@@ -1243,21 +1243,32 @@ impl LoadedOutcome<'_> {
             Outcome::Passed(_) => None,
             Outcome::Failed { kind, index, .. } => Some((*kind, *index)),
         };
-        self.failure == failure && self.records.len() == actual.records().len()
-            && self.records.iter().zip(actual.records()).all(|(saved, actual)| *saved == actual)
+        self.failure == failure
+            && self.records.len() == actual.records().len()
+            && self
+                .records
+                .iter()
+                .zip(actual.records())
+                .all(|(saved, actual)| *saved == actual)
     }
 }
 
-struct LoadedPair<'a> { first: LoadedOutcome<'a>, second: LoadedOutcome<'a> }
+struct LoadedPair<'a> {
+    first: LoadedOutcome<'a>,
+    second: LoadedOutcome<'a>,
+}
 
 impl LoadedPair<'_> {
     fn fully_observed(&self) -> bool {
-        [&self.first, &self.second].iter().all(|outcome|
-            !matches!(outcome.failure, Some((FailureKind::Unobserved, _))))
+        [&self.first, &self.second]
+            .iter()
+            .all(|outcome| !matches!(outcome.failure, Some((FailureKind::Unobserved, _))))
     }
 
     fn failure(&self) -> Option<FailureKind> {
-        if self.first != self.second { return Some(FailureKind::Replay); }
+        if self.first != self.second {
+            return Some(FailureKind::Replay);
+        }
         self.first.failure.map(|(kind, _)| kind)
     }
 
@@ -1274,7 +1285,10 @@ fn load_outcome<'a>(
     let references = match outcome {
         SavedOutcome::Passed { records } | SavedOutcome::Failed { records, .. } => records,
     };
-    ensure!(references.len() <= MAX_STEPS + 1, "consumer record count bound");
+    ensure!(
+        references.len() <= MAX_STEPS + 1,
+        "consumer record count bound"
+    );
     let mut records = Vec::new();
     for &index in references {
         records.push(chunks.get(index).context("consumer record missing")?);
@@ -1287,8 +1301,15 @@ fn load_outcome<'a>(
     Ok(LoadedOutcome { failure, records })
 }
 
-fn load_pair<'a>(pair: &SavedPair, chunks: &'a [Value], used: &mut BTreeSet<usize>) -> Result<LoadedPair<'a>> {
-    Ok(LoadedPair { first: load_outcome(&pair.first, chunks, used)?, second: load_outcome(&pair.second, chunks, used)? })
+fn load_pair<'a>(
+    pair: &SavedPair,
+    chunks: &'a [Value],
+    used: &mut BTreeSet<usize>,
+) -> Result<LoadedPair<'a>> {
+    Ok(LoadedPair {
+        first: load_outcome(&pair.first, chunks, used)?,
+        second: load_outcome(&pair.second, chunks, used)?,
+    })
 }
 
 fn retain_at(
@@ -1520,7 +1541,10 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Bundle> {
             "consumer record count bound"
         );
         for &index in records {
-            bundle.records.get(index).context("consumer record missing")?;
+            bundle
+                .records
+                .get(index)
+                .context("consumer record missing")?;
         }
     }
     Ok(bundle)
@@ -2210,30 +2234,82 @@ fn replay_unknown_causes_refuse_and_repeated_records_borrow_one_bounded_value() 
     let mut bundle = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
     let chunks = vec![json!({"complete": "x".repeat(1_048_576)})];
     let bytes = serde_json::to_vec(&chunks[0])?;
-    bundle.records = vec![RecordRef { digest: Digest::new(&bytes), bytes: bytes.len() }];
-    let repeated = SavedOutcome::Failed { kind: FailureKind::State, index: Some(MAX_STEPS - 1), records: vec![0; MAX_STEPS] };
-    bundle.original_observation = SavedPair { first: repeated.clone(), second: repeated.clone() };
-    bundle.reduced_observation = SavedPair { first: repeated.clone(), second: repeated };
+    bundle.records = vec![RecordRef {
+        digest: Digest::new(&bytes),
+        bytes: bytes.len(),
+    }];
+    let repeated = SavedOutcome::Failed {
+        kind: FailureKind::State,
+        index: Some(MAX_STEPS - 1),
+        records: vec![0; MAX_STEPS],
+    };
+    bundle.original_observation = SavedPair {
+        first: repeated.clone(),
+        second: repeated.clone(),
+    };
+    bundle.reduced_observation = SavedPair {
+        first: repeated.clone(),
+        second: repeated,
+    };
     bundle.category = FailureKind::State;
     let decoded = decode_descriptor(&serde_json::to_vec(&bundle)?)?;
     let mut used = BTreeSet::new();
     let original = load_pair(&decoded.original_observation, &chunks, &mut used)?;
     let reduced = load_pair(&decoded.reduced_observation, &chunks, &mut used)?;
-    for outcome in [&original.first, &original.second, &reduced.first, &reduced.second] {
-        ensure!(outcome.records.len() == MAX_STEPS && outcome.records.iter().all(|record| std::ptr::eq(*record, &chunks[0])), "repeated record allocated a replacement Value");
+    for outcome in [
+        &original.first,
+        &original.second,
+        &reduced.first,
+        &reduced.second,
+    ] {
+        ensure!(
+            outcome.records.len() == MAX_STEPS
+                && outcome
+                    .records
+                    .iter()
+                    .all(|record| std::ptr::eq(*record, &chunks[0])),
+            "repeated record allocated a replacement Value"
+        );
     }
-    ensure!(used == BTreeSet::from([0]) && original.failure() == Some(FailureKind::State), "shared record changed content or metadata");
+    ensure!(
+        used == BTreeSet::from([0]) && original.failure() == Some(FailureKind::State),
+        "shared record changed content or metadata"
+    );
     for (outcome, expected) in [
-        (SavedOutcome::Passed { records: vec![0; MAX_STEPS + 2] }, "consumer record count bound"),
-        (SavedOutcome::Passed { records: vec![1] }, "consumer record missing"),
+        (
+            SavedOutcome::Passed {
+                records: vec![0; MAX_STEPS + 2],
+            },
+            "consumer record count bound",
+        ),
+        (
+            SavedOutcome::Passed { records: vec![1] },
+            "consumer record missing",
+        ),
     ] {
         bundle.original_observation.first = outcome;
-        let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("invalid references accepted")?;
-        ensure!(error.to_string() == expected, "reference refusal missed actual bound");
+        let error = decode_descriptor(&serde_json::to_vec(&bundle)?)
+            .err()
+            .context("invalid references accepted")?;
+        ensure!(
+            error.to_string() == expected,
+            "reference refusal missed actual bound"
+        );
     }
-    bundle.records = vec![RecordRef { digest: Digest::new(b"bounded physical part"), bytes: MAX_RECORD_BYTES }; 16];
-    let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("physical archive overflow accepted")?;
-    ensure!(error.to_string() == "consumer archive byte bound", "physical archive bound changed");
+    bundle.records = vec![
+        RecordRef {
+            digest: Digest::new(b"bounded physical part"),
+            bytes: MAX_RECORD_BYTES
+        };
+        16
+    ];
+    let error = decode_descriptor(&serde_json::to_vec(&bundle)?)
+        .err()
+        .context("physical archive overflow accepted")?;
+    ensure!(
+        error.to_string() == "consumer archive byte bound",
+        "physical archive bound changed"
+    );
 
     Ok(())
 }
