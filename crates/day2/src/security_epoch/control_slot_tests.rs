@@ -340,37 +340,76 @@ impl Provider {
     }
 }
 
-
 #[test]
 fn compressed_provider_captures_keep_every_attempt_and_exact_complete_json() -> Result<()> {
     use std::{io::Read, os::unix::fs::PermissionsExt};
     let provider = Provider::open(":memory:");
     for _ in 0..2 {
-        provider.event("same-attempt", "dispatch", json!({"request":"x".repeat(4096),"partial":true}))?;
+        provider.event(
+            "same-attempt",
+            "dispatch",
+            json!({"request":"x".repeat(4096),"partial":true}),
+        )?;
     }
-    let expected = serde_json::to_vec_pretty(&json!({"label":"same-label","replay":provider.replay()}))?;
-    let paths = [provider.persist("same-label"), provider.persist("same-label")];
-    ensure!(paths[0] != paths[1] && paths[0].parent() != paths[1].parent(), "equal capture overwrote an attempt");
+    let expected =
+        serde_json::to_vec_pretty(&json!({"label":"same-label","replay":provider.replay()}))?;
+    let paths = [
+        provider.persist("same-label"),
+        provider.persist("same-label"),
+    ];
+    ensure!(
+        paths[0] != paths[1] && paths[0].parent() != paths[1].parent(),
+        "equal capture overwrote an attempt"
+    );
     let decode = |bytes: &[u8], limit: usize| -> Result<Vec<u8>> {
         let mut output = Vec::new();
-        flate2::read::GzDecoder::new(bytes).take(limit as u64 + 1).read_to_end(&mut output)?;
+        flate2::read::GzDecoder::new(bytes)
+            .take(limit as u64 + 1)
+            .read_to_end(&mut output)?;
         ensure!(output.len() <= limit, "fixture capture decode byte bound");
         Ok(output)
     };
     for path in paths {
-        ensure!(path.file_name() == Some(std::ffi::OsStr::new("replay.json.gz")), "capture codec filename changed");
-        ensure!(std::fs::metadata(&path)?.permissions().mode() & 0o777 == 0o600, "capture permissions changed");
+        ensure!(
+            path.file_name() == Some(std::ffi::OsStr::new("replay.json.gz")),
+            "capture codec filename changed"
+        );
+        ensure!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777 == 0o600,
+            "capture permissions changed"
+        );
         let encoded = std::fs::read(&path)?;
         let decoded = decode(&encoded, expected.len())?;
         ensure!(decoded == expected, "complete capture bytes changed");
         let wire: Value = crate::json::decode_evidence(&decoded)?;
-        let events = wire["replay"]["events"].as_array().context("captured events absent")?;
-        ensure!(events.len() == 2 && events[0]["event"] != events[1]["event"] && events[0]["payload"] == events[1]["payload"], "equal payloads collapsed distinct events");
-        ensure!(encoded.len() * 2 < expected.len(), "actual pinned codec did not compress repeated fixture data");
-        ensure!(decode(&encoded, expected.len() - 1).is_err(), "decode limit was ignored");
-        ensure!(decode(&encoded[..encoded.len() - 4], expected.len()).is_err(), "truncated gzip qualified");
-        let mut corrupt = encoded;let last = corrupt.len() - 1;corrupt[last] ^= 1;
-        ensure!(decode(&corrupt, expected.len()).is_err(), "corrupted gzip footer qualified");
+        let events = wire["replay"]["events"]
+            .as_array()
+            .context("captured events absent")?;
+        ensure!(
+            events.len() == 2
+                && events[0]["event"] != events[1]["event"]
+                && events[0]["payload"] == events[1]["payload"],
+            "equal payloads collapsed distinct events"
+        );
+        ensure!(
+            encoded.len() * 2 < expected.len(),
+            "actual pinned codec did not compress repeated fixture data"
+        );
+        ensure!(
+            decode(&encoded, expected.len() - 1).is_err(),
+            "decode limit was ignored"
+        );
+        ensure!(
+            decode(&encoded[..encoded.len() - 4], expected.len()).is_err(),
+            "truncated gzip qualified"
+        );
+        let mut corrupt = encoded;
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        ensure!(
+            decode(&corrupt, expected.len()).is_err(),
+            "corrupted gzip footer qualified"
+        );
     }
     Ok(())
 }
