@@ -12,6 +12,9 @@ exact initial activation receipt and both observed provider versions. Preparatio
 requires the selected authority's complete active initial state and exact root
 and sentinel versions. Reusing either initial operation, changing the selection,
 or presenting a different version refuses preparation.
+The request also pins the complete selected store configuration. Changing an IAM
+selector or lease bound cannot reinterpret an already prepared request, even
+when its immutable database authority key remains the same.
 
 The plan describes an atomic write of the new root, fenced sentinel and a
 create-only advance receipt. Both root and sentinel require their exact previous
@@ -44,6 +47,16 @@ exact-version CAS and create-only receipt keys, independently of the transition
 logic. Its reference transition constructs the expected fenced records and
 receipt separately. Faults before mutation, after the first transactional write
 and after commit distinguish rollback from unknown completion.
+
+Twenty histories capture the complete selected store, initial records and
+provider versions, operation and fault cut. Each round-trips its serialized input
+and runs twice against the independent complete-row model. Replay binds the
+kernel, model and dependency source, refuses a foreign source or oversized input,
+and saves complete divergent input/actual/expected data under
+`artifacts/epoch-advance-failures`. The `replay_saved_first_advance_history` test
+accepts that bundle through `DAY2_REPLAY_EPOCH_ADVANCE`; saved outcomes never
+replace the independent oracle. This is a controlled interrupted-transaction
+campaign, not a native process-kill or real Firestore qualification.
 
 This does not establish that incumbent native leases were physically fenced, that
 a historical snapshot is fresh, or that an external epoch can be safely changed

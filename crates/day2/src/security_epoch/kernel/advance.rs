@@ -24,6 +24,7 @@ pub(in crate::security_epoch) struct Fence {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::security_epoch) struct Request {
+    selection: Digest,
     operation: Digest,
     activation: InitialReceipt,
     before: Versions,
@@ -36,7 +37,9 @@ impl Request {
         operation: Digest,
         observed: &Snapshot,
     ) -> Result<Self> {
+        selection.validate()?;
         let request = Self {
+            selection: Digest::of(selection)?,
             operation,
             activation: observed
                 .activate
@@ -64,6 +67,8 @@ impl Request {
     }
 
     fn validate(&self, selection: &EpochStore) -> Result<()> {
+        selection.validate()?;
+        ensure!(self.selection == Digest::of(selection)?, "security_epoch_advance_selection_changed");
         self.activation.request.validate(selection)?;
         ensure!(
             matches!(

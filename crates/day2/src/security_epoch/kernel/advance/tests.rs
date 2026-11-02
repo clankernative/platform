@@ -309,9 +309,23 @@ fn exact_request_receipt_and_both_versions_are_required() -> Result<()> {
         }
         assert!(request.prepare(&selection, &changed).is_err());
     }
-    let mut foreign = selection.clone();
-    foreign.scope.app = "other".to_owned().try_into()?;
-    assert!(request.prepare(&foreign, &before).is_err());
+    assert_eq!(request.selection, Digest::of(&selection)?);
+    for (pointer, replacement) in [
+        ("/scope/installation",json!("other")),
+        ("/scope/environment",json!("other")),
+        ("/scope/app",json!("other")),
+        ("/provider/project",json!("other-project")),
+        ("/provider/project_number",json!(8)),
+        ("/provider/database_uid",json!("11234567-89ab-4cde-8fab-0123456789ab")),
+        ("/provider/iam_source/service_account_uid",json!("100000000000000000008")),
+        ("/key_set",json!(Digest::new(b"other keys"))),
+        ("/max_lease_seconds",json!(4)),
+    ] {
+        let mut value=serde_json::to_value(&selection)?;
+        *value.pointer_mut(pointer).context("selection fixture field")?=replacement;
+        let foreign:EpochStore=serde_json::from_value(value)?;
+        assert!(request.prepare(&foreign,&before).is_err(),"{pointer}");
+    }
     let mut provider = Provider::new(&before)?;
     provider.apply(&request.prepare(&selection, &before)?, Cut::Known)?;
     let observed = provider.snapshot()?;
@@ -323,6 +337,17 @@ fn exact_request_receipt_and_both_versions_are_required() -> Result<()> {
     let mut changed = stored.clone();
     changed.value.request_digest = Digest::new(b"foreign receipt");
     assert!(reconcile(&selection, &request, &observed, Some(&changed)).is_err());
+    for component in ["root","sentinel","create","activate"] {
+        let mut changed=observed.clone();
+        match component {
+            "root"=>changed.root=before.root.clone(),
+            "sentinel"=>changed.sentinel=before.sentinel.clone(),
+            "create"=>changed.create.as_mut().unwrap().value.request_digest=Digest::new(b"substituted history"),
+            "activate"=>changed.activate.as_mut().unwrap().value.request_digest=Digest::new(b"substituted history"),
+            _=>unreachable!(),
+        }
+        assert!(reconcile(&selection,&request,&changed,Some(&stored)).is_err(),"{component}");
+    }
     let competing = Request::new(&selection, Digest::new(b"competing"), &before)?;
     assert!(
         provider
@@ -367,5 +392,12 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     ] {
         assert!(Request::new(&selection, reused.clone(), &before).is_err());
     }
+    let fence=serde_json::to_string(&encoded["fence"])?;
+    let duplicate=format!("{{\"phase\":\"fenced\",\"fence\":{fence},\"fence\":{fence}}}");
+    assert!(serde_json::from_str::<Phase>(&duplicate).is_err());
+    assert!(crate::json::decode::<Phase>(duplicate.as_bytes()).is_err());
+    let mut unsupported=serde_json::to_value(&request.activation.request)?;
+    unsupported["action"]=json!("advance_epoch");
+    assert!(serde_json::from_value::<InitialRequest>(unsupported).is_err());
     Ok(())
 }

@@ -150,3 +150,22 @@ fn stale_or_oversized_replay_inputs_refuse_before_provider_execution() -> Result
     assert!(decode(&vec![b' ';65_537]).is_err());
     Ok(())
 }
+
+#[test]
+fn replay_saved_first_advance_history() -> Result<()> {
+    let Some(path)=std::env::var_os("DAY2_REPLAY_EPOCH_ADVANCE") else {return Ok(());};
+    let metadata=std::fs::metadata(&path)?;
+    ensure!(metadata.is_file() && metadata.len()<=262_144,"epoch_advance_history_file_budget");
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Bundle {
+        input:History,
+        #[serde(rename="first")]
+        _first:Value,
+        #[serde(rename="replay")]
+        _replay:Value,
+    }
+    let saved:Bundle=crate::json::decode(&std::fs::read(path)?)?;
+    // Saved outcomes are diagnostics, never the oracle for the replay.
+    check(&saved.input)
+}
