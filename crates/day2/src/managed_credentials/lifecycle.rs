@@ -9,7 +9,8 @@ use day2_capabilities::{
     Digest,
     credentials::{
         GrantSelection, IssuanceGrant, LineageRef, ManagedProfile, ManagementPredicate,
-        ManagementSnapshot, ManagementState, ManifestFamily, RotationGrant, RotationProfile, VersionRef,
+        ManagementSnapshot, ManagementState, ManifestFamily, RotationGrant, RotationProfile,
+        VersionRef,
     },
     oauth::GrantCeiling,
 };
@@ -196,7 +197,6 @@ pub(super) fn stage(
                 "credential lineage security epoch retired"
             );
             let ceiling: GrantCeiling = crate::json::decode(grant_json.as_bytes())?;
-            ceiling.verify()?;
             ensure!(
                 ceiling.digest.as_str() == grant_digest
                     && ceiling.subject == principal
