@@ -154,10 +154,14 @@ fn current(db: &Connection, request: &Request<'_>, now: i64) -> Result<(Target, 
         "credential rewrap namespace changed"
     );
     let stored: MaterialIdentity = crate::json::decode(row.identity_json.as_bytes())?;
-    let ceiling: day2_capabilities::oauth::GrantCeiling = crate::json::decode(row.grant.as_bytes())?;
-    super::require_grant_subset(&ceiling,&stored.grant)?;
-    ensure!(ceiling.digest.as_str()==row.grant_digest
-        && stored.grant.digest.as_str()==row.version_grant,"credential rewrap grant changed");
+    let ceiling: day2_capabilities::oauth::GrantCeiling =
+        crate::json::decode(row.grant.as_bytes())?;
+    super::require_grant_subset(&ceiling, &stored.grant)?;
+    ensure!(
+        ceiling.digest.as_str() == row.grant_digest
+            && stored.grant.digest.as_str() == row.version_grant,
+        "credential rewrap grant changed"
+    );
     let identity = MaterialIdentity {
         namespace,
         family: request.family.id.as_str().to_owned(),
