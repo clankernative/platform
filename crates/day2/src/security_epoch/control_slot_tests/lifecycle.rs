@@ -39,6 +39,9 @@ enum Fault {
     AbandonClaim,
     ReplaceCandidate,
     RewriteSlot,
+    FileTamperAfter,
+    FileReplaceAfter,
+    FileShortenAfter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -404,6 +407,32 @@ impl World {
                     .into_data();
                     self.activation = Some(snapshot_digest(&snapshot)?);
                 }
+            }
+        }
+        // External file mutation after the real conditional write completed,
+        // but before the enclosing phase's mandatory final file check. This
+        // must not erase the durable write or turn its refusal into a retry.
+        let change = match fault {
+            Fault::FileTamperAfter => Some(FileChange::Tamper),
+            Fault::FileReplaceAfter => Some(FileChange::Replace),
+            Fault::FileShortenAfter => Some(FileChange::Shorten),
+            _ => None,
+        };
+        if let Some(change) = change {
+            ensure!(
+                self.port.slots.db.is_autocommit()
+                    && counter_fixture::transaction_closed(&self.port.counter),
+                "post-write file cut encountered an open provider transaction"
+            );
+            #[cfg(target_os = "linux")]
+            self.file
+                .as_mut()
+                .context("physical fixture required")?
+                .change(change)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = change;
+                anyhow::bail!("physical lifecycle requires Linux");
             }
         }
         Ok(())
@@ -953,6 +982,9 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
                     | Fault::LostSlotReply
                     | Fault::MalformedSlotReply
                     | Fault::ExpiredSlotReply
+                    | Fault::FileTamperAfter
+                    | Fault::FileReplaceAfter
+                    | Fault::FileShortenAfter
             ),
             Event::Bootstrap {
                 operation: Operation::Settle,
@@ -965,10 +997,26 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
                     | Fault::MalformedSlotReply
                     | Fault::ExpiredSlotReply
                     | Fault::ReplaceCandidate
+                    | Fault::FileTamperAfter
+                    | Fault::FileReplaceAfter
+                    | Fault::FileShortenAfter
             ),
             _ => true,
         }),
         "lifecycle fault/operation bound"
+    );
+    ensure!(
+        program.physical.is_some()
+            || program.events.iter().all(|event| !matches!(
+                event,
+                Event::Bootstrap {
+                    fault: Fault::FileTamperAfter
+                        | Fault::FileReplaceAfter
+                        | Fault::FileShortenAfter,
+                    ..
+                }
+            )),
+        "lifecycle physical fault requires original image"
     );
     ensure!(
         program
@@ -1696,6 +1744,123 @@ proptest::proptest! {
         let result = check(&program);
         proptest::prop_assert!(result.is_ok(), "{}", result.err().unwrap());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn generated_post_write_file_refusals_preserve_commits_without_resend() -> Result<()> {
+    let mut coverage = BTreeSet::new();
+    for seed in 0..4 {
+        let mut baseline = successful(seed);
+        baseline.physical =
+            Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        let baseline: Program = serde_json::from_slice(&serde_json::to_vec(&baseline)?)?;
+        let successful_records = check(&baseline)?;
+        for (index, event) in baseline.events.iter().enumerate() {
+            let Event::Bootstrap {
+                stage, operation, ..
+            } = *event
+            else {
+                continue;
+            };
+            for fault in [
+                Fault::FileTamperAfter,
+                Fault::FileReplaceAfter,
+                Fault::FileShortenAfter,
+            ] {
+                let mut program = baseline.clone();
+                program.events.truncate(index);
+                program.events.push(Event::Bootstrap {
+                    stage,
+                    operation,
+                    fault,
+                });
+                program.events.extend([
+                    Event::Observe { stage },
+                    Event::File {
+                        change: FileChange::Restore,
+                    },
+                    Event::Reopen,
+                    Event::RestoreClock,
+                    Event::Bootstrap {
+                        stage,
+                        operation,
+                        fault: Fault::None,
+                    },
+                    Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    },
+                ]);
+                // The new cut itself must survive the same serialized input
+                // and twice-replay path as a retained divergence bundle.
+                let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
+                let records = check(&program)?;
+                let expected = &successful_records[index].state;
+                ensure!(
+                    successful_records[index].accepted,
+                    "reference write did not complete"
+                );
+                ensure!(
+                    !records[index].accepted,
+                    "post-write file failure was accepted"
+                );
+                for record in &records[index..] {
+                    ensure!(
+                        !record.state.continuation
+                            && record.state.counter == expected.counter
+                            && record.state.slots == expected.slots
+                            && record.state.slot_posts == expected.slot_posts
+                            && record.state.counter_posts == expected.counter_posts,
+                        "post-write refusal erased committed state or resent after restoration"
+                    );
+                }
+                ensure!(
+                    !records[records.len() - 2].accepted && !records.last().unwrap().accepted,
+                    "restored post-write continuation resumed"
+                );
+                coverage.insert(format!("{stage}-{operation:?}-{fault:?}"));
+            }
+        }
+    }
+    ensure!(
+        coverage.len() == 18,
+        "post-write file cut coverage incomplete"
+    );
+    Ok(())
+}
+
+#[test]
+fn post_write_file_faults_require_an_actual_original_image_before_execution() -> Result<()> {
+    let baseline = successful(0);
+    for (index, event) in baseline.events.iter().enumerate() {
+        let Event::Bootstrap {
+            stage, operation, ..
+        } = *event
+        else {
+            continue;
+        };
+        for fault in [
+            Fault::FileTamperAfter,
+            Fault::FileReplaceAfter,
+            Fault::FileShortenAfter,
+        ] {
+            let mut program = baseline.clone();
+            program.events[index] = Event::Bootstrap {
+                stage,
+                operation,
+                fault,
+            };
+            let error = run(&program)
+                .err()
+                .context("physical fault admitted without an image")?;
+            ensure!(
+                error.to_string() == "lifecycle physical fault requires original image",
+                "physical fault was not refused at input admission"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

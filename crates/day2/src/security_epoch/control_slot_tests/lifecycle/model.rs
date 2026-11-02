@@ -413,7 +413,44 @@ impl Model {
                             stage,
                             operation,
                             fault,
-                        } => self.bootstrap(stage, operation, fault),
+                        } => {
+                            // The counter/slot write succeeds first. The
+                            // independently modeled physical observation then
+                            // refuses the enclosing continuation, retaining
+                            // every committed row and send in the state.
+                            let counter_fault = match fault {
+                                Fault::FileTamperAfter
+                                | Fault::FileReplaceAfter
+                                | Fault::FileShortenAfter => Fault::None,
+                                _ => fault,
+                            };
+                            let completed = self.bootstrap(stage, operation, counter_fault);
+                            if completed
+                                && matches!(
+                                    fault,
+                                    Fault::FileTamperAfter
+                                        | Fault::FileReplaceAfter
+                                        | Fault::FileShortenAfter
+                                )
+                            {
+                                let file = self
+                                    .state
+                                    .file
+                                    .as_mut()
+                                    .context("physical fixture required")?;
+                                match fault {
+                                    Fault::FileReplaceAfter => file.named_original = false,
+                                    Fault::FileTamperAfter | Fault::FileShortenAfter => {
+                                        file.image_exact = false
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                self.file_refused = true;
+                                false
+                            } else {
+                                completed
+                            }
+                        }
                         Event::Current {
                             death_cut,
                             rewrite_provider,
