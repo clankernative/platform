@@ -92,11 +92,18 @@ impl std::error::Error for SavedFailure {}
 fn source() -> Result<Digest> {
     Digest::of(&(
         "day2-first-epoch-advance-history-v1",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
         include_str!("history.rs"),
         include_str!("../tests.rs"),
         include_str!("../../advance.rs"),
         include_str!("../../../kernel.rs"),
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")),
+        include_str!("../../../tests.rs"),
+        include_str!("../../../../json.rs"),
+        include_str!("../../../../../../day2-capabilities/src/lib.rs"),
+        include_str!("../../../../../../day2-capabilities/src/security_epoch.rs"),
+        include_str!("../../../../../../day2-capabilities/src/oauth.rs"),
+        include_str!("../../../../../../../Cargo.lock"),
     ))
 }
 
