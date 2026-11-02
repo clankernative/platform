@@ -1047,8 +1047,8 @@ fn dependency_metadata_command(cargo: PathBuf, rustc: PathBuf, home: &Path, no_d
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .env("HOME", &home)
-        .env("CARGO_HOME", &home)
+        .env("HOME", home)
+        .env("CARGO_HOME", home)
         .env("TMPDIR", home.join("tmp"))
         .env("RUSTC", rustc)
         // Metadata queries the pinned compiler; operator code-generation
