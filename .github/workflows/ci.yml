@@ -403,11 +403,11 @@ jobs:
     if: ${{ !cancelled() && needs.secrets.result == 'success' && needs.dependencies.result == 'success' && !(needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true') && inputs.verification != 'diagnostics' }}
     runs-on: macos-15
     timeout-minutes: 360
-    env:
+    env: &mac_verification_environment
       # Keep compilation parallelism within the standard Mac runner's CPU budget.
       # Preserve compiler statistics through the long runtime campaigns.
       DAY2_TEMPORAL_CLI: /tmp/day2-tools/temporal
-    steps:
+    steps: &mac_verification_steps
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -544,11 +544,54 @@ jobs:
           compression-level: 0
           retention-days: 3
 
+  admit-mac-acquisition-retry:
+    # GitHub can cancel an unacquired hosted job after fifteen minutes. A fresh
+    # allocation may retry that infrastructure failure, never an executed test.
+    needs: [verify-mac-compatibility]
+    if: ${{ !cancelled() && needs.verify-mac-compatibility.result == 'cancelled' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      admitted: ${{ steps.admit.outcome }}
+    steps:
+      - name: Require one current cancelled Mac job with no assigned runner or steps
+        id: admit
+        run: >-
+          gh api --hostname github.com --method GET
+          'repos/clankernative/platform/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs?per_page=100'
+          --jq '
+          if (.jobs | type) == "array" and .total_count == (.jobs | length) and .total_count <= 100
+          then [.jobs[] | select(.name == "verify-mac-compatibility")] |
+          if length == 1 then .[0] |
+          if .run_id == ${{ github.run_id }} and .run_attempt == ${{ github.run_attempt }}
+          and .head_sha == "${{ github.event.pull_request.head.sha || github.sha }}"
+          and .status == "completed" and .conclusion == "cancelled"
+          and .runner_id == 0 and .runner_name == "" and .labels == ["macos-15"]
+          and (.steps | type) == "array" and (.steps | length) == 0
+          then "Retrying one unacquired Mac job; no verification ran"
+          else error("Mac acquisition retry refused: current unacquired job required") end
+          else error("Mac acquisition retry refused: unique original job required") end
+          else error("Mac acquisition retry refused: complete job inventory required") end'
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  retry-mac-compatibility:
+    needs: [admit-mac-acquisition-retry]
+    if: ${{ !cancelled() && needs.admit-mac-acquisition-retry.result == 'success' && needs.admit-mac-acquisition-retry.outputs.admitted == 'success' }}
+    runs-on: macos-15
+    timeout-minutes: 360
+    env: *mac_verification_environment
+    # The identical recipe and receipt upload run once, after an allocation
+    # failure that executed none of these steps. There is no second retry.
+    steps: *mac_verification_steps
+
   publish-mac-actions:
     # On main, only the exact queue origin admitted by the existing full-proof
     # guard may supply actions. Other events use their own completed full gate.
-    needs: [verify, verify-queue-receipt, verify-mac-compatibility]
-    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.verify-mac-compatibility.result == 'success' || (needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_run != '' && needs.verify-queue-receipt.outputs.cache_attempt != '')) }}
+    needs: [verify, verify-queue-receipt, verify-mac-compatibility, retry-mac-compatibility]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.verify-mac-compatibility.result == 'success' || needs.retry-mac-compatibility.result == 'success' || (needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_run != '' && needs.verify-queue-receipt.outputs.cache_attempt != '')) }}
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
@@ -1108,7 +1151,7 @@ jobs:
           retention-days: 3
 
   verify:
-    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards, verify-mac-compatibility]
+    needs: [secrets, dependencies, verify-queue-receipt, verify-prepare, verify-shards, verify-mac-compatibility, retry-mac-compatibility]
     if: ${{ always() && inputs.verification != 'diagnostics' }}
     # A rejected source only needs the failure guard, not a macOS queue slot.
     runs-on: ubuntu-24.04
@@ -1173,7 +1216,7 @@ jobs:
           REUSED: ${{ needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' }}
           PREPARATION: ${{ needs.verify-prepare.result }}
           SHARDS: ${{ needs.verify-shards.result }}
-          MAC: ${{ needs.verify-mac-compatibility.result }}
+          MAC: ${{ needs.verify-mac-compatibility.result == 'success' && 'success' || needs.retry-mac-compatibility.result }}
       - name: Download day2-linux-verifier-${{ github.run_id }}-${{ github.run_attempt }}
         id: artifact_download_1
         timeout-minutes: 2
