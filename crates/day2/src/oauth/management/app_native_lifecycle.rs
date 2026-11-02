@@ -1178,13 +1178,20 @@ fn retain_at(root: &std::path::Path, program: &Program, original: ReplayPair, co
 fn retain_with(root: &std::path::Path, program: &Program, original: ReplayPair, control: OracleControl,
     mut probe: impl FnMut(&Program, OracleControl) -> ReplayPair) -> Result<std::path::PathBuf> {
     let category = original.failure().context("consumer archive requires disagreement")?;
-    let (steps, observed) = crate::oauth::simulation::reduce_steps(&program.steps, 96,
+    let (steps, observed) = if category == FailureKind::Unobserved {
+        // An unavailable cause cannot justify reducing the original input.
+        (program.steps.clone(), None)
+    } else {
+        crate::oauth::simulation::reduce_steps(&program.steps, 96,
         &format!("{category:?}"),
         |error| error.downcast_ref::<RetainedFailure>().map_or("unobserved".to_owned(), |failure| format!("{:?}", failure.kind)),
         |steps| {
+            // Invalid input is not a reproduction of a consumer disagreement.
+            if steps.is_empty() { return Ok(()); }
             let pair = probe(&Program { steps: steps.to_vec(), ..program.clone() }, control);
             match pair.failure() { Some(kind) => Err(anyhow::Error::new(RetainedFailure { kind, pair: Box::new(pair) })), None => Ok(()) }
-        });
+        })
+    };
     // Keep the ACTUAL last winning observation. A transient disagreement need
     // not repeat later; neither a new probe nor its failure can erase this one.
     let (reduced, reduced_pair) = match observed.and_then(|error| error.downcast::<RetainedFailure>().ok()) {
@@ -1754,5 +1761,18 @@ fn replay_with_any_unobserved_outcome_cannot_qualify_or_expand_without_bound() -
     bundle.original_observation.first = SavedOutcome::Passed { records: vec![0; MAX_STEPS] };
     let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("reference amplification accepted")?;
     ensure!(error.to_string() == "consumer expanded observation byte bound", "alias control missed actual expansion guard");
+    Ok(())
+}
+
+#[test]
+fn unobserved_consumer_failure_never_reduces_to_invalid_empty_input() -> Result<()> {
+    let program = Program { version: 1, seed: 98, steps: happy() };
+    let outcome = Outcome::Failed { kind: FailureKind::Unobserved, index: None, records: vec![] };
+    let pair = ReplayPair { first: outcome.clone(), second: outcome };
+    let root = tempfile::tempdir()?;
+    let path = retain_with(root.path(), &program, pair, OracleControl::None, |_, _| panic!("unobserved failure was minimized"))?;
+    let descriptor = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
+    ensure!(descriptor.reduced.steps == program.steps, "unknown cause lost original history");
+    ensure!(replay_file(&path).is_err(), "unobserved cause qualified");
     Ok(())
 }
