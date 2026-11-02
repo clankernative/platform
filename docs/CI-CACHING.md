@@ -86,6 +86,13 @@ campaign budgets and coverage remain required. Retried jobs can consume successf
 outputs from earlier attempts of the same run and exact source. They never consume
 another run's preparation or substitute a different prepared executable set.
 
+A Mac allocation rescued by `retry-mac-compatibility` retains that actual
+producer's job and check IDs. Selection admits it only when the unique original
+Mac job in that same run/attempt/head was cancelled without a runner or steps,
+and the unique retry succeeded on `macos-15`. An executed failure, failed latest
+retry, foreign original or retry, duplicate producer or original-job check cannot
+supply its artifact. The complete native Mac receipt remains mandatory.
+
 ### Rerunning sharded verification
 
 GitHub's **Re-run failed jobs**, individual job reruns and **Re-run all jobs** are

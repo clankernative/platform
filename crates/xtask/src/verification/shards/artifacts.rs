@@ -2,7 +2,7 @@
 use super::{Identity, identity, reuse};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -235,7 +235,41 @@ fn successful_job<'a>(
         "exactly one artifact producer job required: {}",
         role.job()
     );
-    let job = found[0];
+    let mut job = found[0];
+    if role == Role::Mac && job["conclusion"] == "cancelled" {
+        // The allocation retry runs the same recipe only when GitHub reports
+        // that the original job never acquired a runner or executed a step.
+        ensure!(
+            job["run_id"] == run["id"]
+                && job["run_attempt"] == attempt
+                && job["head_sha"] == run["head_sha"]
+                && job["status"] == "completed"
+                && job["runner_id"] == 0
+                && job["runner_name"] == ""
+                && job["labels"] == json!(["macos-15"])
+                && job["steps"].as_array().is_some_and(Vec::is_empty)
+                && job["html_url"]
+                    == format!(
+                        "https://github.com/{REPOSITORY}/actions/runs/{}/job/{}",
+                        number(run, "id")?,
+                        number(job, "id")?
+                    ),
+            "Mac retry requires the exact unacquired original job"
+        );
+        let retries: Vec<_> = jobs
+            .iter()
+            .filter(|job| job["name"] == "retry-mac-compatibility")
+            .collect();
+        ensure!(
+            retries.len() == 1,
+            "exactly one Mac retry producer required"
+        );
+        job = retries[0];
+        ensure!(
+            job["labels"] == json!(["macos-15"]),
+            "native Mac retry runner required"
+        );
+    }
     ensure!(
         job["run_id"] == run["id"]
             && job["run_attempt"] == attempt
@@ -700,6 +734,130 @@ mod tests {
         let check = json!({"id":job["id"],"name":job["name"],"head_sha":run["head_sha"],
             "status":"completed","conclusion":"success","app":{"id":15368},"check_suite":{"id":99},"details_url":job["html_url"]});
         (run, job, artifact, check)
+    }
+
+    fn mac_facts(attempt: u64) -> (Value, Vec<Value>, Value, Value) {
+        let (run, mut original, mut artifact, mut check) = facts(attempt);
+        original["name"] = json!(Role::Mac.job());
+        original["conclusion"] = json!("cancelled");
+        original["runner_id"] = json!(0);
+        original["runner_name"] = json!("");
+        original["labels"] = json!(["macos-15"]);
+        original["steps"] = json!([]);
+        let mut retry = original.clone();
+        retry["id"] = json!(1000 + attempt);
+        retry["name"] = json!("retry-mac-compatibility");
+        retry["conclusion"] = json!("success");
+        retry["runner_id"] = json!(42);
+        retry["runner_name"] = json!("assigned Mac");
+        retry["steps"] = json!([{"name":"verify-mac","conclusion":"success"}]);
+        retry["html_url"] = json!(format!(
+            "https://github.com/{REPOSITORY}/actions/runs/123/job/{}",
+            1000 + attempt
+        ));
+        artifact["name"] = json!(format!("day2-mac-compatibility-123-{attempt}"));
+        check["id"] = retry["id"].clone();
+        check["name"] = retry["name"].clone();
+        check["details_url"] = retry["html_url"].clone();
+        (run, vec![original, retry], artifact, check)
+    }
+
+    #[test]
+    fn mac_artifact_selection_admits_only_the_successful_unacquired_job_retry() -> Result<()> {
+        let (run, old, artifact, check) = mac_facts(1);
+        let (_, latest, _, _) = mac_facts(2);
+        let selected = select(
+            Role::Mac,
+            std::slice::from_ref(&artifact),
+            &run,
+            &latest,
+            &old,
+            &check,
+        )?;
+        assert_eq!(selected.attempt, 1);
+        assert_eq!(selected.job, 1001);
+        assert_eq!(selected.check, 1001);
+        for (index, field, replacement) in [
+            (0, "runner_id", json!(42)),
+            (0, "runner_name", json!("assigned Mac")),
+            (0, "steps", json!([{"name":"test","conclusion":"failure"}])),
+            (0, "steps", Value::Null),
+            (0, "labels", json!(["ubuntu-24.04"])),
+            (0, "run_id", json!(124)),
+            (0, "run_attempt", json!(2)),
+            (0, "head_sha", json!("b".repeat(40))),
+            (0, "status", json!("in_progress")),
+            (0, "conclusion", json!("failure")),
+            (0, "html_url", json!("foreign")),
+            (1, "run_id", json!(124)),
+            (1, "run_attempt", json!(2)),
+            (1, "head_sha", json!("b".repeat(40))),
+            (1, "status", json!("in_progress")),
+            (1, "conclusion", json!("failure")),
+            (1, "labels", json!(["ubuntu-24.04"])),
+            (1, "html_url", json!("foreign")),
+        ] {
+            let mut changed = old.clone();
+            changed[index][field] = replacement;
+            assert!(
+                select(
+                    Role::Mac,
+                    std::slice::from_ref(&artifact),
+                    &run,
+                    &latest,
+                    &changed,
+                    &check
+                )
+                .is_err()
+            );
+        }
+        for changed in [
+            vec![old[0].clone()],
+            vec![old[1].clone()],
+            vec![old[0].clone(), old[1].clone(), old[1].clone()],
+            vec![old[0].clone(), old[0].clone(), old[1].clone()],
+        ] {
+            assert!(
+                select(
+                    Role::Mac,
+                    std::slice::from_ref(&artifact),
+                    &run,
+                    &latest,
+                    &changed,
+                    &check
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_check = check.clone();
+        wrong_check["id"] = old[0]["id"].clone();
+        wrong_check["name"] = old[0]["name"].clone();
+        wrong_check["details_url"] = old[0]["html_url"].clone();
+        assert!(
+            select(
+                Role::Mac,
+                std::slice::from_ref(&artifact),
+                &run,
+                &latest,
+                &old,
+                &wrong_check
+            )
+            .is_err()
+        );
+        let mut failed_latest = latest;
+        failed_latest[1]["conclusion"] = json!("failure");
+        assert!(
+            select(
+                Role::Mac,
+                std::slice::from_ref(&artifact),
+                &run,
+                &failed_latest,
+                &old,
+                &check
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]
