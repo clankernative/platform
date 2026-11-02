@@ -90,6 +90,12 @@ pub(in crate::security_epoch) fn lose_before(provider: &mut Provider, enabled: b
     };
 }
 
+/// Use the existing backend's post-commit malformed acknowledgement. This
+/// changes fixture response DATA only; the real SQLite write still commits.
+pub(in crate::security_epoch) fn malformed_ack_after_commit(provider: &mut Provider) {
+    provider.fault = Fault::BadAck;
+}
+
 pub(in crate::security_epoch) fn reopen(provider: &mut Provider, path: &Path) {
     let mut replacement = Provider::open(path);
     replacement.calls = std::mem::take(&mut provider.calls);

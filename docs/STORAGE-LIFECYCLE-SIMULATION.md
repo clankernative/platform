@@ -33,6 +33,18 @@ seeds cover all sixteen operation/direction cuts through the existing serialized
 history, twice-replay and bounded reduction path. These controlled clock inputs
 do not construct a native original or qualify a real clock implementation.
 
+Further generated histories drive the existing conditional backend's malformed
+counter acknowledgement after its real SQLite commit, at both bootstrap stages.
+The consumer must return the actual primary acknowledgement decode failure,
+retain durable May and all applied counter rows/versions, and refuse further
+settlement, dispatch or Current use on that continuation. Resetting only the
+backend fault, independent historical DATA readback and provider reopen cannot
+authorize a resend. Paired ordinary acknowledgements still complete both stages
+and all three Current exchanges. Complete serialized histories use the same
+independent oracle, twice replay and bounded reduction. These schedules know
+where their fixture applied the write; a malformed real provider response alone
+does not establish application or permit rollback, retry or a new grant.
+
 The lifecycle oracle separately specifies the allowed state changes and every
 expected provider row, including immutable requests, candidate/holder data,
 receipts, attempt lineage and exact versions. It does not call production slot
