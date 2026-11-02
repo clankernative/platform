@@ -2177,7 +2177,7 @@ mod tests {
 
         let publisher = ci_job("publish-mac-actions");
         assert!(
-            publisher.contains("needs: [verify, verify-queue-receipt, verify-mac-compatibility]")
+            publisher.contains("needs: [verify, verify-queue-receipt, verify-mac-compatibility, retry-mac-compatibility]")
         );
         assert!(publisher.contains("!cancelled() && needs.verify.result == 'success'"));
         assert!(publisher.contains("needs.verify-mac-compatibility.result == 'success'"));

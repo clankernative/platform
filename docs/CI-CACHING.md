@@ -85,6 +85,26 @@ workspace paths and executable digests remain host-specific. The original
 campaign budgets and coverage remain required. A retry cannot mix preparation
 or outcomes from different attempts.
 
+### Mac runner acquisition
+
+GitHub can cancel a `macos-15` allocation before any runner starts, independently
+of the job's six-hour execution timeout. Platform CI requests one new allocation
+only after a read-only API guard authenticates the unique original job in the
+same run, attempt and head, cancelled with runner ID zero, an empty runner name,
+and no steps. Partial job inventories, missing or duplicated jobs, wrong heads
+and executed failures refuse the retry. Cancelling the entire workflow also
+prevents it. The retry uses the identical steps, runner, verification recipe,
+cache policy, and source/run/attempt-bound Mac receipt as the original job.
+
+The required `verify` join still needs successful Linux verification and a
+complete current native Mac receipt. A second acquisition failure fails the
+join; test failures and execution timeouts are not automatically retried. This
+adds no runner, paid service, branch-protection change, or verification bypass.
+It cannot reserve GitHub capacity or guarantee that the second request succeeds.
+The existing exact-success queue-reuse guard remains conservative: a rescued
+run with a cancelled original Mac job does not qualify for main's receipt reuse,
+so main executes ordinary verification instead.
+
 ### Rerunning sharded verification
 
 Use **Re-run all jobs** for a failed Platform CI verification run. From the CLI:
