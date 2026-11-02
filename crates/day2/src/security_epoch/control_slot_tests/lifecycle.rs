@@ -1448,6 +1448,11 @@ impl ConsumerLifecycle {
         Digest::of(&(source(), LifecycleHandshake::source())).unwrap()
     }
 
+    /// Denied-only DATA harness control, never an enrolled-role constructor.
+    pub(crate) fn corrupt_enrollment_reference_for_slot_control(&mut self) {
+        self.enrollment[0].corrupt_reference_for_control();
+    }
+
     pub(crate) fn observation(&self) -> Result<Value> {
         Ok(
             json!({"storage":self.world.record(false, counter_fixture::snapshot(&self.world.port.counter))?,

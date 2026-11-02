@@ -277,3 +277,44 @@ New preparation inputs require a map and reject unknown/duplicate fields and
 positional shapes. These cases cover real local syscalls and decisions under an
 unqualified test issuer; injected post-effect errors do not prove partial-syscall
 or crash durability, native enrollment, writer authority or timing margin.
+
+## Request-slot cancellation after storage bootstrap
+
+The cfg(test) request-slot campaign joins the existing generic Slot/Held
+move, completion and Drop decisions to the real SQLite ConsumerLifecycle fixture
+and its separate storage/handshake oracle. Two request slots remain distinct;
+routing clones retain the same slot and refusal latch. The request oracle is
+independent of the actual move/Drop code and never predicts authority from actual
+storage DATA.
+
+Thirty-two seeded schedules and fixed cuts cover a competing second borrow,
+normal and contended cancellation, completion of another request, failed native
+capture, storage revocation, equality at the original deadline, clock rewind and
+a foreign clock domain. Committed bootstrap rows remain separate from response
+completion. Reopen and clock restoration cannot rearm the abandoned request.
+
+Programs contain at most twelve events and are rejected before setup when they
+exceed that limit. The longest-prefix control retains every original and reduced
+observation under the same four-MiB evidence contract used for writing and
+reading. Both successful and failed histories replay twice. Nested model errors
+retain their available actual failed-step observation separately from ordinary
+refusal. Bundles bind the OAuth and storage/handshake source sets and retain
+complete slot, latch, clock, storage, transcript and reference observations.
+Duplicate keys, missing fields, unknown shapes, wrong sources and changed replay
+observations refuse; file reads are bounded on the opened handle.
+
+Replay a retained file through the normal test runner:
+
+```sh
+DAY2_REQUEST_SLOT_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::native_management::request::tests::slot_lifecycle::replay_saved_request_slot_history --exact
+```
+
+An absent replay-file input is not a saved-corpus pass. Generated and fixed
+controls still run in the ordinary cohort. Failure DATA stays in the private job
+workspace and contains synthetic fixture state, not provider credentials.
+
+ModelOriginal is deliberately unable to satisfy Original::require or produce a
+native Lease, enrolled role, writer or P3. These tests do not execute actual
+async-driver cancellation, native Lease::finish, HTTP partial delivery, kernel
+identity, physical power-loss durability or timing margin. Native App/Shell and
+provider qualification remain separate.
