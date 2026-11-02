@@ -125,42 +125,88 @@ fn roles(phase: &str) -> Result<Vec<Role>> {
     })
 }
 
-// Complete bounded pagination, not a successful first page mistaken for the inventory.
-fn pages(root: &Path, endpoint: &str, field: &str) -> Result<Vec<Value>> {
+#[derive(Clone, Copy)]
+enum Inventory {
+    Artifacts { run: u64 },
+    Jobs { run: u64, attempt: u64 },
+}
+
+impl Inventory {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Artifacts { .. } => "artifacts",
+            Self::Jobs { .. } => "jobs",
+        }
+    }
+
+    fn endpoint(self) -> String {
+        match self {
+            Self::Artifacts { run } => format!("actions/runs/{run}/artifacts"),
+            Self::Jobs { run, attempt } => format!("actions/runs/{run}/attempts/{attempt}/jobs"),
+        }
+    }
+}
+
+// A moving count/list restarts the entire inventory, never just its last page.
+// Invalid identities, duplicates and budget overruns still refuse immediately.
+fn pages(root: &Path, inventory: Inventory) -> Result<Vec<Value>> {
+    let endpoint = inventory.endpoint();
+    pages_with(inventory.field(), |page| {
+        reuse::api(root, &format!("{endpoint}?per_page=100&page={page}"))
+    })
+    // This endpoint contains only closed path components and numeric identities.
+    .with_context(|| format!("GitHub inventory endpoint={endpoint}"))
+}
+
+fn pages_with(field: &str, mut read: impl FnMut(usize) -> Result<Value>) -> Result<Vec<Value>> {
+    for _ in 0..3 {
+        if let Some(values) = inventory_snapshot(field, &mut read)? {
+            return Ok(values);
+        }
+    }
+    anyhow::bail!("GitHub inventory remained inconsistent after three complete-snapshot attempts")
+}
+
+// None means that the observed count/list changed; no partial values escape.
+fn inventory_snapshot(
+    field: &str,
+    read: &mut impl FnMut(usize) -> Result<Value>,
+) -> Result<Option<Vec<Value>>> {
     let mut values = Vec::new();
     let mut total = None;
+    let mut ids = BTreeSet::new();
     for page in 1..=10 {
-        let v = reuse::api(root, &format!("{endpoint}?per_page=100&page={page}"))?;
+        let v = read(page)?;
         let count = v["total_count"]
             .as_u64()
             .context("complete GitHub page required")?;
-        ensure!(
-            count <= 1000 && total.is_none_or(|old| old == count),
-            "GitHub inventory changed or exceeded its budget"
-        );
-        total = Some(count);
+        ensure!(count <= 1000, "GitHub inventory exceeded its budget");
         let items = v[field].as_array().context("GitHub page array required")?;
         ensure!(
-            !items.is_empty() || values.len() as u64 == count,
-            "incomplete GitHub page"
+            items.len() <= 100 && values.len() + items.len() <= 1000,
+            "GitHub inventory page exceeded its budget"
         );
+        ensure!(
+            items
+                .iter()
+                .all(|v| number(v, "id").is_ok_and(|id| ids.insert(id))),
+            "invalid or duplicate GitHub inventory entry"
+        );
+        if total.is_some_and(|old| old != count)
+            || (items.is_empty() && values.len() as u64 != count)
+        {
+            return Ok(None);
+        }
+        total = Some(count);
         values.extend(items.iter().cloned());
         if values.len() as u64 == count {
-            let mut ids = BTreeSet::new();
-            ensure!(
-                values
-                    .iter()
-                    .all(|v| number(v, "id").is_ok_and(|id| ids.insert(id))),
-                "duplicate GitHub inventory entry"
-            );
-            return Ok(values);
+            return Ok(Some(values));
         }
-        ensure!(
-            values.len() as u64 <= count,
-            "extra GitHub inventory entries"
-        );
+        if values.len() as u64 > count {
+            return Ok(None);
+        }
     }
-    anyhow::bail!("GitHub inventory pagination incomplete")
+    Ok(None)
 }
 
 fn run_identity(run: &Value, expected: &Identity) -> Result<()> {
@@ -304,16 +350,14 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
                         .is_some_and(|p| p.len() == 2 && p[1]["sha"] == run["head_sha"]))),
         "artifact API head does not bind the actual verification checkout"
     );
-    let artifacts = pages(
-        root,
-        &format!("actions/runs/{run_id}/artifacts"),
-        "artifacts",
-    )?;
+    let artifacts = pages(root, Inventory::Artifacts { run: run_id })?;
     let attempt = number(&run, "run_attempt")?;
     let latest = pages(
         root,
-        &format!("actions/runs/{run_id}/attempts/{attempt}/jobs"),
-        "jobs",
+        Inventory::Jobs {
+            run: run_id,
+            attempt,
+        },
     )?;
     let mut jobs = BTreeMap::from([(attempt, latest.clone())]);
     let mut origins = BTreeMap::new();
@@ -337,8 +381,10 @@ fn resolve(root: &Path, expected: &Identity, phase: &str) -> Result<Selection> {
         if let std::collections::btree_map::Entry::Vacant(entry) = jobs.entry(origin_attempt) {
             entry.insert(pages(
                 root,
-                &format!("actions/runs/{run_id}/attempts/{origin_attempt}/jobs"),
-                "jobs",
+                Inventory::Jobs {
+                    run: run_id,
+                    attempt: origin_attempt,
+                },
             )?);
         }
         let origin_jobs = &jobs[&origin_attempt];
@@ -492,6 +538,154 @@ pub(super) fn sample(consumer: &Identity) -> Selection {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn inventory_page(total: u64, ids: impl IntoIterator<Item = u64>) -> Value {
+        let items: Vec<_> = ids.into_iter().map(|id| json!({"id":id})).collect();
+        json!({"total_count":total,"jobs":items,"artifacts":items})
+    }
+
+    #[test]
+    fn inventory_refresh_discards_extra_entries_instead_of_truncating_them() -> Result<()> {
+        for field in ["jobs", "artifacts"] {
+            let mut script = std::collections::VecDeque::from([
+                inventory_page(1, [1, 2]),
+                inventory_page(2, [3, 4]),
+            ]);
+            let mut requests = Vec::new();
+            let actual = pages_with(field, |page| {
+                requests.push(page);
+                Ok(script.pop_front().unwrap())
+            })?;
+            assert_eq!(requests, [1, 1]);
+            assert_eq!(actual, [json!({"id":3}), json!({"id":4})]);
+            assert!(script.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_count_change_restarts_at_page_one_without_mixing_snapshots() -> Result<()> {
+        let mut script = std::collections::VecDeque::from([
+            inventory_page(3, [1]),
+            inventory_page(4, [2]),
+            inventory_page(2, [10, 11]),
+        ]);
+        let mut requests = Vec::new();
+        let actual = pages_with("jobs", |page| {
+            requests.push(page);
+            Ok(script.pop_front().unwrap())
+        })?;
+        assert_eq!(requests, [1, 2, 1]);
+        assert_eq!(actual, [json!({"id":10}), json!({"id":11})]);
+        assert!(script.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_persistent_extra_or_incomplete_pages_still_refuse() {
+        for page in [inventory_page(0, [1]), inventory_page(1, [])] {
+            let mut requests = Vec::new();
+            let error = pages_with("jobs", |number| {
+                requests.push(number);
+                Ok(page.clone())
+            })
+            .unwrap_err();
+            assert_eq!(requests, [1, 1, 1]);
+            assert!(
+                error
+                    .to_string()
+                    .contains("three complete-snapshot attempts")
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_malformed_duplicate_and_over_budget_pages_do_not_retry() {
+        for page in [
+            inventory_page(2, [1, 1]),
+            inventory_page(1, [0]),
+            inventory_page(1001, []),
+            inventory_page(101, 1..=101),
+            json!({"jobs":[]}),
+            json!({"total_count":1,"jobs":false}),
+            json!({"total_count":1,"jobs":[{"id":"1"}]}),
+        ] {
+            let mut calls = 0;
+            assert!(
+                pages_with("jobs", |_| {
+                    calls += 1;
+                    Ok(page.clone())
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn inventory_duplicate_between_pages_refuses_without_refresh() {
+        let mut requests = Vec::new();
+        assert!(
+            pages_with("jobs", |page| {
+                requests.push(page);
+                Ok(if page == 1 {
+                    inventory_page(3, [1])
+                } else {
+                    inventory_page(3, [1, 2])
+                })
+            })
+            .is_err()
+        );
+        assert_eq!(requests, [1, 2]);
+    }
+
+    #[test]
+    fn inventory_accepts_complete_bounds_but_never_accepts_a_partial_inventory() -> Result<()> {
+        let mut requests = Vec::new();
+        let actual = pages_with("jobs", |page| {
+            requests.push(page);
+            let first = (page as u64 - 1) * 100 + 1;
+            Ok(inventory_page(1000, first..first + 100))
+        })?;
+        assert_eq!(requests, (1..=10).collect::<Vec<_>>());
+        assert_eq!(actual.len(), 1000);
+        let mut requests = Vec::new();
+        assert!(
+            pages_with("jobs", |page| {
+                requests.push(page);
+                let first = (page as u64 - 1) * 100 + 1;
+                Ok(inventory_page(1000, first..first + 99))
+            })
+            .is_err()
+        );
+        assert_eq!(requests, (1..=10).cycle().take(30).collect::<Vec<_>>());
+        assert!(pages_with("jobs", |_| Ok(inventory_page(0, [])))?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_transport_errors_preserve_the_primary_error_without_retry() {
+        let mut calls = 0;
+        let error = pages_with("jobs", |_| {
+            calls += 1;
+            anyhow::bail!("fixture metadata request failed")
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.to_string(), "fixture metadata request failed");
+        assert_eq!(
+            Inventory::Jobs {
+                run: 123,
+                attempt: 2
+            }
+            .endpoint(),
+            "actions/runs/123/attempts/2/jobs"
+        );
+        assert_eq!(
+            Inventory::Artifacts { run: 123 }.endpoint(),
+            "actions/runs/123/artifacts"
+        );
+    }
 
     fn facts(attempt: u64) -> (Value, Value, Value, Value) {
         let run = json!({"id":123,"run_attempt":2,"head_sha":"a".repeat(40),"path":WORKFLOW,
