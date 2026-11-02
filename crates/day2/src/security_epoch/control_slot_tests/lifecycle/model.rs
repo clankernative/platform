@@ -137,6 +137,7 @@ impl Model {
                 slot_posts: 0,
                 counter_posts: 0,
                 clock_order_failures: 0,
+                counter_decode_failures: 0,
                 counter: Value::Null,
                 slots: Value::Null,
                 file: physical.then_some(FileState {
@@ -250,6 +251,7 @@ impl Model {
                     Fault::ExpiredCounterReply | Fault::RewoundCounterClock
                 );
                 self.state.clock_order_failures += usize::from(fault == Fault::RewoundCounterClock);
+                self.state.counter_decode_failures += usize::from(fault == Fault::MalformedCounterReply);
                 return matches!(
                     fault,
                     Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock

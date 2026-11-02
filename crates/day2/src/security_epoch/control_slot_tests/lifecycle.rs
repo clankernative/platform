@@ -37,6 +37,7 @@ enum Fault {
     ForwardSlotClock,
     LostCounterBefore,
     LostCounterAfter,
+    MalformedCounterReply,
     ExpiredCounterReply,
     RewoundCounterClock,
     ForwardCounterClock,
@@ -141,6 +142,9 @@ struct State {
     // Fixed primary budget category in the controlled port, not a native
     // clock witness. These schedules keep the domain unchanged.
     clock_order_failures: usize,
+    // Actual primary counter acknowledgement codec failures, not native DATA
+    // or a generic refusal. The model predicts this independently.
+    counter_decode_failures: usize,
     counter: Value,
     slots: Value,
     file: Option<FileState>,
@@ -167,6 +171,7 @@ struct World {
     current: usize,
     activation: Option<Digest>,
     clock_order_failures: usize,
+    counter_decode_failures: usize,
     replaced: BTreeMap<CounterRecord, Option<Value>>,
     handshake: LifecycleHandshake,
     #[cfg(target_os = "linux")]
@@ -270,6 +275,7 @@ impl World {
             current: 0,
             activation: None,
             clock_order_failures: 0,
+            counter_decode_failures: 0,
             replaced: BTreeMap::new(),
             handshake: LifecycleHandshake::new(seed)?,
             #[cfg(target_os = "linux")]
@@ -400,7 +406,19 @@ impl World {
                     }
                     _ => None,
                 };
-                claim.send(&self.selection, &mut self.port)?;
+                if fault == Fault::MalformedCounterReply {
+                    counter_fixture::malformed_ack_after_commit(&mut self.port.counter);
+                }
+                let result = claim.send(&self.selection, &mut self.port);
+                if result.as_ref().err().is_some_and(|error| {
+                    error
+                        .root_cause()
+                        .downcast_ref::<serde_json::Error>()
+                        .is_some_and(serde_json::Error::is_data)
+                }) {
+                    self.counter_decode_failures += 1;
+                }
+                result?;
                 ensure!(
                     fault != Fault::ForwardCounterClock || self.port.counter_commit_time.is_none(),
                     "fixture counter reply clock hook was not consumed"
@@ -730,6 +748,7 @@ impl World {
                 slot_posts: self.port.slot_posts,
                 counter_posts: self.port.counter_posts,
                 clock_order_failures: self.clock_order_failures,
+                counter_decode_failures: self.counter_decode_failures,
                 counter: json!({"documents":counter["documents"],"sends":counter["sends"]}),
                 slots: provider["final_rows"].clone(),
                 #[cfg(target_os = "linux")]
@@ -1613,6 +1632,65 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
         coverage.len() == 16,
         "post-commit clock cut coverage incomplete"
     );
+    Ok(())
+}
+
+#[test]
+fn generated_malformed_counter_acknowledgements_keep_commits_and_refuse_reuse() -> Result<()> {
+    let mut coverage = BTreeSet::new();
+    for seed in 0..4 {
+        let baseline = successful(seed);
+        let reference = check(&baseline)?;
+        let end = &reference.last().unwrap().state;
+        ensure!(
+            end.continuation && end.current == 3 && end.counter_decode_failures == 0,
+            "ordinary acknowledgement control did not complete"
+        );
+        for (index, event) in baseline.events.iter().enumerate() {
+            let Event::Bootstrap { stage, operation: Operation::Dispatch, .. } = *event else {
+                continue;
+            };
+            let mut program = baseline.clone();
+            program.events.truncate(index);
+            program.events.push(Event::Bootstrap {
+                stage,
+                operation: Operation::Dispatch,
+                fault: Fault::MalformedCounterReply,
+            });
+            program.events.extend([
+                Event::RestoreClock,
+                Event::Observe { stage },
+                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
+                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
+                Event::Reopen,
+                Event::Observe { stage },
+                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
+                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
+                Event::Current { death_cut: None, rewrite_provider: false },
+            ]);
+            let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
+            let records = check(&program)?;
+            let committed = &reference[index].state;
+            ensure!(!records[index].accepted, "malformed acknowledgement accepted");
+            for record in &records[index..] {
+                ensure!(
+                    !record.state.continuation
+                        && record.state.counter_decode_failures == 1
+                        && record.state.counter == committed.counter
+                        && record.state.slots == committed.slots
+                        && record.state.slot_posts == committed.slot_posts
+                        && record.state.counter_posts == committed.counter_posts,
+                    "decode cause, committed state or permanent refusal changed"
+                );
+            }
+            for (event, record) in program.events.iter().zip(&records).skip(index + 1) {
+                let historical_data = matches!(event, Event::RestoreClock | Event::Observe { .. } | Event::Reopen);
+                ensure!(record.accepted == historical_data, "readback or attempted reuse changed");
+            }
+            coverage.insert(stage);
+        }
+    }
+    ensure!(coverage == BTreeSet::from([0, 1]), "counter acknowledgement stage coverage incomplete");
     Ok(())
 }
 
