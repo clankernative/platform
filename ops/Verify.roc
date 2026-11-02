@@ -164,7 +164,14 @@ Verify :: [].{
 	mac! = |host!| {
 		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-cli", "{}", host!)?
-		for fixture in ["reports", "reports-probe", "relational", "oauth-calendar", "verification-setup"] {
+		for fixture in [
+			"reports",
+			"reports-probe",
+			"relational",
+			"oauth-calendar",
+			"verification-setup",
+			"credential-metadata",
+		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
 		_ = Capability.call!("verify-test-build", "{}", host!)?

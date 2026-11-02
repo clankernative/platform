@@ -754,7 +754,13 @@ mod tests {
             &files,
             "mac-snapshot",
         )?;
-        for fixture in ["reports", "reports-probe", "relational", "oauth-calendar"] {
+        for fixture in [
+            "reports",
+            "reports-probe",
+            "relational",
+            "oauth-calendar",
+            "credential-metadata",
+        ] {
             let mut invalid = files.clone();
             invalid
                 .get_mut("ci-verification.json")

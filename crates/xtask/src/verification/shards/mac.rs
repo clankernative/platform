@@ -24,6 +24,7 @@ const FIXTURES: &[&str] = &[
     "relational",
     "oauth-calendar",
     "verification-setup",
+    "credential-metadata",
 ];
 const CASES: &[(&str, &str, &str, &str, bool)] = &[
     (
@@ -838,6 +839,7 @@ pub(super) mod tests {
         )?;
         assert_eq!(prepared, preparation_effects());
         assert!(prepared.contains("build-verification-setup"));
+        assert!(prepared.contains("build-credential-metadata"));
         Ok(())
     }
 
