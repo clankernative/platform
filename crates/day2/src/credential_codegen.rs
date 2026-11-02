@@ -291,9 +291,13 @@ Credentials :: [].{
     }
 
     $PREFIX$rotate_fixed : Str, InteractiveContext, ManagementSnapshot(family) -> Tx(RotationOutcome(family))
-    $PREFIX$rotate_fixed = |registration, context, expected| $PREFIX$rotate_request(registration,
-        Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision(), grant: { mode: "fixed", selections: [] } }),
-    )
+    $PREFIX$rotate_fixed = |registration, context, expected| {
+        grant : { mode : Str, selections : List({ family_contract : Str, roots : List(Str) }) }
+        grant = { mode: "fixed", selections: [] }
+        $PREFIX$rotate_request(registration,
+            Json.to_str({ registration, invocation: context.invocation_id(), lineage: expected.lineage().to_str(), head: expected.head().id(), revision: expected.revision(), grant }),
+        )
+    }
 
     $PREFIX$rotate_request : Str, Str -> Tx(RotationOutcome(family))
     $PREFIX$rotate_request = |registration, input| Tx.$PREFIX$capability(
