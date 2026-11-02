@@ -17,6 +17,22 @@ versions. Further histories join peer death and identical-value provider rewrite
 to the current continuation. Restoring observations and reopening SQLite never
 restore a refused original continuation or turn stored May into send permission.
 
+Paired post-commit clock histories also cover all six slot writes and both counter
+sends. A reply at time 103 follows either an observation at 102 (forward control)
+or 104 (rewind), with the same original interval 100..105. Both samples remain
+before expiry; only the direction changes. The actual primary budget clock-order error must
+be observed, not merely any refusal. The fixture keeps the same clock domain, so
+these schedules isolate a rewind. The independent oracle predicts that closed
+cause count separately from the adapter, alongside every committed row/version
+and send count. A rewound claim acknowledgement leaves durable May without a
+counter send; a rewound counter acknowledgement retains the applied counter write.
+Clock restoration, independent DATA readback, provider reopen and repeated action
+attempts cannot revive the refused continuation or resend. The forward controls
+must still complete both bootstrap stages and all three Current exchanges. Four
+seeds cover all sixteen operation/direction cuts through the existing serialized
+history, twice-replay and bounded reduction path. These controlled clock inputs
+do not construct a native original or qualify a real clock implementation.
+
 The lifecycle oracle separately specifies the allowed state changes and every
 expected provider row, including immutable requests, candidate/holder data,
 receipts, attempt lineage and exact versions. It does not call production slot
