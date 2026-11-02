@@ -150,9 +150,12 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
             // A marker is the sole exempt metadata table, never a place to
             // hide retained private columns. Full schema/version admission
             // remains the owning installer's responsibility.
-            let mut columns = db.prepare("PRAGMA main.table_xinfo(day2_credential_schema_version)")?;
+            let mut columns =
+                db.prepare("PRAGMA main.table_xinfo(day2_credential_schema_version)")?;
             let mut fields = columns.query([])?;
-            let field = fields.next()?.context("credential restore marker missing")?;
+            let field = fields
+                .next()?
+                .context("credential restore marker missing")?;
             ensure!(
                 field.get::<_, i64>(0)? == 0
                     && field.get_ref(1)?.as_str()? == "version"
@@ -161,7 +164,10 @@ pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
                     && field.get::<_, i64>(6)? == 0,
                 "security_restore_preflight_required"
             );
-            ensure!(fields.next()?.is_none(), "security_restore_preflight_required");
+            ensure!(
+                fields.next()?.is_none(),
+                "security_restore_preflight_required"
+            );
             let strict: i64 = db.query_row(
                 "PRAGMA main.table_list('day2_credential_schema_version')",
                 [],
@@ -2253,7 +2259,8 @@ mod tests {
     }
 
     #[test]
-    fn restored_valid_credential_history_refuses_before_authority_changes_and_after_reopen() -> Result<()> {
+    fn restored_valid_credential_history_refuses_before_authority_changes_and_after_reopen()
+    -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("retired-family.sqlite");
         let mut db = Connection::open(&path)?;
@@ -2267,22 +2274,31 @@ mod tests {
         let error = crate::authority_state::invalidate_restored(
             &tx,
             std::path::Path::new("/must-not-read-or-publish-artifact"),
-        ).unwrap_err();
-        assert_eq!(error.downcast_ref::<&str>(), Some(&"security_restore_preflight_required"));
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<&str>(),
+            Some(&"security_restore_preflight_required")
+        );
         assert!(database_snapshot(&tx)? == before);
         tx.rollback()?;
         drop(db);
-        let mut db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut db =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let tx = db.transaction()?;
         let error = crate::store::require_no_managed_credential_restore_state(&tx).unwrap_err();
-        assert_eq!(error.downcast_ref::<&str>(), Some(&"security_restore_preflight_required"));
+        assert_eq!(
+            error.downcast_ref::<&str>(),
+            Some(&"security_restore_preflight_required")
+        );
         assert!(database_snapshot(&tx)? == before);
         tx.rollback()?;
         Ok(())
     }
 
     #[test]
-    fn every_credential_payload_table_requires_restore_fencing_without_reading_values() -> Result<()> {
+    fn every_credential_payload_table_requires_restore_fencing_without_reading_values() -> Result<()>
+    {
         for table in CREDENTIAL_TABLES.iter().chain(CREDENTIAL_PEER_TABLES) {
             if *table == "day2_credential_schema_version" {
                 continue;
@@ -2290,7 +2306,10 @@ mod tests {
             let db = Connection::open_in_memory()?;
             db.execute_batch(&format!("CREATE TABLE {table}(private BLOB) STRICT"))?;
             require_no_restore_state(&db)?;
-            db.execute(&format!("INSERT INTO {table} VALUES(?1)"), [vec![23_u8; 32]])?;
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(?1)"),
+                [vec![23_u8; 32]],
+            )?;
             db.execute_batch(&format!("CREATE TEMP TABLE {table}(private BLOB) STRICT"))?;
             assert!(require_no_restore_state(&db).is_err(), "{table}");
         }
@@ -2311,21 +2330,30 @@ mod tests {
             let db = Connection::open_in_memory()?;
             db.execute_batch(ddl)?;
             let error = require_no_restore_state(&db).unwrap_err();
-            assert_eq!(error.downcast_ref::<&str>(), Some(&"security_restore_preflight_required"));
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"security_restore_preflight_required")
+            );
         }
         Ok(())
     }
 
     #[test]
     fn restore_absence_check_preserves_the_callers_sqlite_progress_hook() -> Result<()> {
-        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         let db = current_database()?;
         let samples = Arc::new(AtomicUsize::new(0));
         let observed = samples.clone();
-        db.progress_handler(1, Some(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-            false
-        }))?;
+        db.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+        )?;
         require_no_restore_state(&db)?;
         let after = samples.load(Ordering::SeqCst);
         assert!(after > 0);

@@ -803,17 +803,18 @@ fn require_unsecured_restore(
             && artifact.contract().connection_declarations.is_empty(),
         "security_restore_preflight_required"
     );
-    let mut database = Connection::open_with_flags(
-        backup.join("app.sqlite"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let mut database =
+        Connection::open_with_flags(backup.join("app.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // This connection belongs only to archive preflight. Never replace a live
     // Runtime hook or derive execution authority from this historical read.
     let mut ticks = 0usize;
-    database.progress_handler(1_000, Some(move || {
-        ticks += 1;
-        ticks >= 1_000
-    }))?;
+    database.progress_handler(
+        1_000,
+        Some(move || {
+            ticks += 1;
+            ticks >= 1_000
+        }),
+    )?;
     let snapshot = database.transaction()?;
     day2::store::require_no_managed_credential_restore_state(&snapshot)?;
     snapshot.commit()?;

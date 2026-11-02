@@ -289,7 +289,12 @@ fn unsecured_restore_refuses_retained_private_state_after_selection_removal() ->
     let snapshot = scratch.path().join("backup");
     let mut manifest = backup::take(runtime.instance_path(), "app", &snapshot)?;
     assert!(manifest.instance.apps["app"].credential_families.is_empty());
-    assert!(LoadedArtifact::load(&artifact()?)?.contract().credential_declarations.is_empty());
+    assert!(
+        LoadedArtifact::load(&artifact()?)?
+            .contract()
+            .credential_declarations
+            .is_empty()
+    );
     // Imported private state is not evidence that this ordinary backup may be
     // restored. Keep the normal manifest/database digest and authority checks
     // valid, so this reaches the real write-boundary preflight.
@@ -302,12 +307,19 @@ fn unsecured_restore_refuses_retained_private_state_after_selection_removal() ->
         )?;
     }
     manifest.database = day2::digest(&fs::read(snapshot.join("app.sqlite"))?);
-    fs::write(snapshot.join("backup.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    fs::write(
+        snapshot.join("backup.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
     backup::verify(&snapshot)?;
     let source = fs::read(snapshot.join("app.sqlite"))?;
     let output = scratch.path().join("restored");
     let error = backup::restore(&snapshot, &output).unwrap_err();
-    assert!(error.to_string().contains("security_restore_preflight_required"));
+    assert!(
+        error
+            .to_string()
+            .contains("security_restore_preflight_required")
+    );
     assert!(!output.exists());
     assert!(fs::read(snapshot.join("app.sqlite"))? == source);
     Ok(())

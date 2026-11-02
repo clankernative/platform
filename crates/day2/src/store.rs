@@ -2406,7 +2406,10 @@ pub fn validate_storage_snapshot(
 /// an external epoch fence. Inspect the actual snapshot, not selected metadata.
 /// The caller owns the read/write transaction and its existing execution hook.
 pub fn require_no_managed_credential_restore_state(connection: &Connection) -> Result<()> {
-    ensure!(!connection.is_autocommit(), "credential_restore_requires_transaction");
+    ensure!(
+        !connection.is_autocommit(),
+        "credential_restore_requires_transaction"
+    );
     crate::managed_credentials::store::require_no_restore_state(connection)
 }
 
