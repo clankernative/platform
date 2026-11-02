@@ -395,7 +395,9 @@ impl World {
                 self.port.lose_counter_reply = fault == Fault::LostCounterAfter;
                 self.port.counter_commit_time = match fault {
                     Fault::ExpiredCounterReply => Some(Duration::from_secs(105)),
-                    Fault::RewoundCounterClock | Fault::ForwardCounterClock => Some(Duration::from_secs(103)),
+                    Fault::RewoundCounterClock | Fault::ForwardCounterClock => {
+                        Some(Duration::from_secs(103))
+                    }
                     _ => None,
                 };
                 claim.send(&self.selection, &mut self.port)?;
@@ -1469,10 +1471,19 @@ fn budget_order_observation_requires_the_actual_primary_error() -> Result<()> {
     port.counter.set_slot_fixture_time(Duration::from_secs(100));
     let mut budget = Budget::for_context(port.sample()?, Duration::from_secs(105))?;
     port.counter.set_slot_fixture_time(Duration::from_secs(104));
-    ensure!(budget.remaining(&mut port)? == Duration::from_secs(1), "original deadline changed");
+    ensure!(
+        budget.remaining(&mut port)? == Duration::from_secs(1),
+        "original deadline changed"
+    );
     port.counter.set_slot_fixture_time(Duration::from_secs(103));
-    let rewound = budget.remaining(&mut port).err().context("rewound budget accepted")?;
-    ensure!(is_primary_budget_order_failure(&rewound), "actual rewind cause missing");
+    let rewound = budget
+        .remaining(&mut port)
+        .err()
+        .context("rewound budget accepted")?;
+    ensure!(
+        is_primary_budget_order_failure(&rewound),
+        "actual rewind cause missing"
+    );
     ensure!(
         is_primary_budget_order_failure(&rewound.context("outer phase context")),
         "outer context erased actual rewind"
@@ -1481,10 +1492,19 @@ fn budget_order_observation_requires_the_actual_primary_error() -> Result<()> {
     port.counter.set_slot_fixture_time(Duration::from_secs(100));
     let mut budget = Budget::for_context(port.sample()?, Duration::from_secs(105))?;
     port.counter.set_slot_fixture_time(Duration::from_secs(104));
-    ensure!(budget.remaining(&mut port)? == Duration::from_secs(1), "original deadline changed");
+    ensure!(
+        budget.remaining(&mut port)? == Duration::from_secs(1),
+        "original deadline changed"
+    );
     port.counter.set_slot_fixture_time(Duration::from_secs(105));
-    let expired = budget.remaining(&mut port).err().context("equality expiry accepted")?;
-    ensure!(!is_primary_budget_order_failure(&expired), "expiry substituted for rewind");
+    let expired = budget
+        .remaining(&mut port)
+        .err()
+        .context("equality expiry accepted")?;
+    ensure!(
+        !is_primary_budget_order_failure(&expired),
+        "expiry substituted for rewind"
+    );
     ensure!(
         !is_primary_budget_order_failure(&expired.context("security_epoch_clock_domain_or_rewind")),
         "secondary label substituted for the actual primary"
@@ -1499,7 +1519,10 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
         let baseline = successful(seed);
         let reference = check(&baseline)?;
         for (index, event) in baseline.events.iter().enumerate() {
-            let Event::Bootstrap { stage, operation, .. } = *event else {
+            let Event::Bootstrap {
+                stage, operation, ..
+            } = *event
+            else {
                 continue;
             };
             let mut pairs = vec![(Fault::RewoundSlotClock, Fault::ForwardSlotClock)];
@@ -1508,26 +1531,48 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
             }
             for (rewound, forward) in pairs {
                 let mut control = baseline.clone();
-                control.events[index] = Event::Bootstrap { stage, operation, fault: forward };
+                control.events[index] = Event::Bootstrap {
+                    stage,
+                    operation,
+                    fault: forward,
+                };
                 let control: Program = serde_json::from_slice(&serde_json::to_vec(&control)?)?;
                 let positive = check(&control)?;
                 let end = &positive.last().unwrap().state;
                 ensure!(
-                    positive[index].accepted && end.continuation && end.current == 3
-                        && end.clock_order_failures == 0 && positive[index].state == reference[index].state,
+                    positive[index].accepted
+                        && end.continuation
+                        && end.current == 3
+                        && end.clock_order_failures == 0
+                        && positive[index].state == reference[index].state,
                     "forward clock control did not complete the same lifecycle"
                 );
 
                 let mut program = baseline.clone();
                 program.events.truncate(index);
-                program.events.push(Event::Bootstrap { stage, operation, fault: rewound });
+                program.events.push(Event::Bootstrap {
+                    stage,
+                    operation,
+                    fault: rewound,
+                });
                 program.events.extend([
                     Event::RestoreClock,
                     Event::Observe { stage },
-                    Event::Bootstrap { stage, operation, fault: Fault::None },
+                    Event::Bootstrap {
+                        stage,
+                        operation,
+                        fault: Fault::None,
+                    },
                     Event::Reopen,
-                    Event::Bootstrap { stage, operation, fault: Fault::None },
-                    Event::Current { death_cut: None, rewrite_provider: false },
+                    Event::Bootstrap {
+                        stage,
+                        operation,
+                        fault: Fault::None,
+                    },
+                    Event::Current {
+                        death_cut: None,
+                        rewrite_provider: false,
+                    },
                 ]);
                 let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
                 let records = check(&program)?;
@@ -1535,17 +1580,17 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
                 // A rewound claim reply is not a known claim: May is durable,
                 // but no counter send is admitted. A counter-reply rewind
                 // occurs after that counter write has actually committed.
-                let committed_counter = if operation == Operation::Dispatch
-                    && rewound == Fault::RewoundSlotClock
-                {
-                    &reference[index - 1].state
-                } else {
-                    committed_slot
-                };
+                let committed_counter =
+                    if operation == Operation::Dispatch && rewound == Fault::RewoundSlotClock {
+                        &reference[index - 1].state
+                    } else {
+                        committed_slot
+                    };
                 ensure!(!records[index].accepted, "rewound reply was accepted");
                 for record in &records[index..] {
                     ensure!(
-                        !record.state.continuation && record.state.clock_order_failures == 1
+                        !record.state.continuation
+                            && record.state.clock_order_failures == 1
                             && record.state.counter == committed_counter.counter
                             && record.state.slots == committed_slot.slots
                             && record.state.slot_posts == committed_slot.slot_posts
@@ -1554,7 +1599,8 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
                     );
                 }
                 ensure!(
-                    !records[index + 3].accepted && !records[index + 5].accepted
+                    !records[index + 3].accepted
+                        && !records[index + 5].accepted
                         && !records.last().unwrap().accepted,
                     "restored clock or reopened provider revived the actual continuation"
                 );
@@ -1563,7 +1609,10 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
             }
         }
     }
-    ensure!(coverage.len() == 16, "post-commit clock cut coverage incomplete");
+    ensure!(
+        coverage.len() == 16,
+        "post-commit clock cut coverage incomplete"
+    );
     Ok(())
 }
 

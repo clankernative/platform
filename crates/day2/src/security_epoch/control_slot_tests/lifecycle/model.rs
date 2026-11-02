@@ -222,8 +222,10 @@ impl Model {
                         | Fault::RewoundSlotClock
                         | Fault::AbandonClaim
                 ) {
-                    self.clock_invalid = matches!(fault, Fault::ExpiredSlotReply | Fault::RewoundSlotClock);
-                    self.state.clock_order_failures += usize::from(fault == Fault::RewoundSlotClock);
+                    self.clock_invalid =
+                        matches!(fault, Fault::ExpiredSlotReply | Fault::RewoundSlotClock);
+                    self.state.clock_order_failures +=
+                        usize::from(fault == Fault::RewoundSlotClock);
                     return false;
                 }
                 self.state.counter_posts += 1;
@@ -243,9 +245,15 @@ impl Model {
                     );
                     self.applied += 1;
                 }
-                self.clock_invalid = matches!(fault, Fault::ExpiredCounterReply | Fault::RewoundCounterClock);
+                self.clock_invalid = matches!(
+                    fault,
+                    Fault::ExpiredCounterReply | Fault::RewoundCounterClock
+                );
                 self.state.clock_order_failures += usize::from(fault == Fault::RewoundCounterClock);
-                return matches!(fault, Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock);
+                return matches!(
+                    fault,
+                    Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock
+                );
             }
             Operation::Settle => {
                 if current != Some("may_have_been_sent") || self.applied <= stage {
@@ -460,7 +468,8 @@ impl Model {
                             death_cut,
                             rewrite_provider,
                         } => {
-                            if !self.active || self.clock_invalid || !self.active_documents_match() {
+                            if !self.active || self.clock_invalid || !self.active_documents_match()
+                            {
                                 false
                             } else {
                                 if rewrite_provider && death_cut.is_none() {
