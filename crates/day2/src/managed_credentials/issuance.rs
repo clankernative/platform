@@ -1283,20 +1283,23 @@ mod tests {
         let selection = serde_json::from_value(
             serde_json::json!({"family_contract":Digest::new(b"rotation family"),"roots":["fixture.read","fixture.save"]}),
         )?;
-        let lineage=day2_capabilities::credentials::LineageRef {
-            namespace:day2_capabilities::credentials::Namespace {
-                installation:day2_capabilities::Name::try_from("localdev".to_owned())?,
-                environment:day2_capabilities::Name::try_from("disposable".to_owned())?,
-                app:day2_capabilities::Name::try_from("app".to_owned())?,
-                binding_generation:1,
+        let lineage = day2_capabilities::credentials::LineageRef {
+            namespace: day2_capabilities::credentials::Namespace {
+                installation: day2_capabilities::Name::try_from("localdev".to_owned())?,
+                environment: day2_capabilities::Name::try_from("disposable".to_owned())?,
+                app: day2_capabilities::Name::try_from("app".to_owned())?,
+                binding_generation: 1,
             },
-            family:day2_capabilities::Name::try_from(proof.family.clone())?,
-            id:"lineage-1".into(),
+            family: day2_capabilities::Name::try_from(proof.family.clone())?,
+            id: "lineage-1".into(),
         };
-        let other=day2_capabilities::credentials::LineageRef {id:"lineage-2".into(),..lineage.clone()};
-        let registration=proof.family.clone();
+        let other = day2_capabilities::credentials::LineageRef {
+            id: "lineage-2".into(),
+            ..lineage.clone()
+        };
+        let registration = proof.family.clone();
         proof.intent = Intent::Rotate {
-            lineage: crate::managed_credentials::encode_ref(&registration,&lineage)?,
+            lineage: crate::managed_credentials::encode_ref(&registration, &lineage)?,
             head: "version-1".into(),
             revision: 1,
             grant: lifecycle::RotateGrant::Narrow(selection),
@@ -1308,7 +1311,10 @@ mod tests {
         for (pointer, replacement) in [
             (
                 "/confirmation/intent/lineage",
-                serde_json::json!(crate::managed_credentials::encode_ref(&registration,&other)?),
+                serde_json::json!(crate::managed_credentials::encode_ref(
+                    &registration,
+                    &other
+                )?),
             ),
             ("/confirmation/intent/head", serde_json::json!("version-2")),
             ("/confirmation/intent/revision", serde_json::json!(2)),
