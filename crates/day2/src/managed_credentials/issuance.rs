@@ -1245,8 +1245,10 @@ mod tests {
             let value = changed.pointer_mut(pointer).unwrap();
             *value = if pointer.ends_with("family_contract") {
                 Digest::new(b"different contract").as_str().into()
+            } else if pointer.ends_with("/0") {
+                "fixture.read_alternative".into()
             } else {
-                "fixture.other".into()
+                "fixture.save_alternative".into()
             };
             let before = changed["commitment"].clone();
             rehash_fixture_value(&mut changed)?;

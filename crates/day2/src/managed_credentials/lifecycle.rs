@@ -435,6 +435,10 @@ mod tests {
         ] {
             assert!(crate::json::decode::<RotateGrant>(value.to_string().as_bytes()).is_err(),"accepted {value}");
         }
+        for roots in [vec![],vec!["app.read","app.read"],vec!["app.write","app.read"],vec!["invalid root"]] {
+            let selection:GrantSelection=serde_json::from_value(json!({"family_contract":Digest::new(b"family"),"roots":roots}))?;
+            assert!(validate_selection(&selection).is_err());
+        }
         let duplicate=r#"{"mode":"keep_existing","mode":"narrow","selections":[]}"#;
         assert!(crate::json::decode::<RotateGrant>(duplicate.as_bytes()).is_err());
         Ok(())
