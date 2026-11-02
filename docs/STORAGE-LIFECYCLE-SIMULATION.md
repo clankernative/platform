@@ -138,6 +138,16 @@ failure category. A failed hosted day2 shard uploads these bundles as the
 fixture data, never live provider values, credentials, certificates or native
 process identities.
 
+The conditional provider additionally saves every before-dispatch and
+post-outcome journal prefix under `artifacts/control-slot-replays/`. Each private
+capture contains `replay.json.gz`: lossless gzip of the complete previous JSON
+payload, including its label, event/attempt identities and final rows. Duplicate
+payloads still receive distinct captures. Decompress these diagnostic records
+before inspecting JSON; they are not the typed `failure.json` replay input.
+Compression changes no campaign, evidence or scratch-space bound and does not
+establish filesystem durability. Original uncompressed captures remain retained
+as historical evidence; no compatibility reader or state migration is added.
+
 ```console
 DAY2_STORAGE_LIFECYCLE_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::control_slot_tests::lifecycle::replay_saved_storage_lifecycle_history --exact
 ```

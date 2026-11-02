@@ -310,7 +310,7 @@ impl Provider {
         json!({"seed":3664912422_u64,"events":events,"final_rows":final_rows})
     }
 
-    fn persist(&self, label: &str) {
+    fn persist(&self, label: &str) -> std::path::PathBuf {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/control-slot-replays");
         std::fs::create_dir_all(&root).unwrap();
@@ -323,14 +323,56 @@ impl Provider {
             .tempdir_in(root)
             .unwrap()
             .keep();
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let path = directory.join("replay.json.gz");
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(directory.join("replay.json"))
+            .mode(0o600)
+            .open(&path)
             .unwrap();
-        file.write_all(&payload).unwrap();
+        // Preserve the exact complete previous JSON bytes and every capture.
+        // Compression is evidence storage, never sampling, reduction or admission.
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        encoder.write_all(&payload).unwrap();
+        encoder.finish().unwrap();
+        path
     }
+}
+
+
+#[test]
+fn compressed_provider_captures_keep_every_attempt_and_exact_complete_json() -> Result<()> {
+    use std::{io::Read, os::unix::fs::PermissionsExt};
+    let provider = Provider::open(":memory:");
+    for _ in 0..2 {
+        provider.event("same-attempt", "dispatch", json!({"request":"x".repeat(4096),"partial":true}))?;
+    }
+    let expected = serde_json::to_vec_pretty(&json!({"label":"same-label","replay":provider.replay()}))?;
+    let paths = [provider.persist("same-label"), provider.persist("same-label")];
+    ensure!(paths[0] != paths[1] && paths[0].parent() != paths[1].parent(), "equal capture overwrote an attempt");
+    let decode = |bytes: &[u8], limit: usize| -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+        flate2::read::GzDecoder::new(bytes).take(limit as u64 + 1).read_to_end(&mut output)?;
+        ensure!(output.len() <= limit, "fixture capture decode byte bound");
+        Ok(output)
+    };
+    for path in paths {
+        ensure!(path.file_name() == Some(std::ffi::OsStr::new("replay.json.gz")), "capture codec filename changed");
+        ensure!(std::fs::metadata(&path)?.permissions().mode() & 0o777 == 0o600, "capture permissions changed");
+        let encoded = std::fs::read(&path)?;
+        let decoded = decode(&encoded, expected.len())?;
+        ensure!(decoded == expected, "complete capture bytes changed");
+        let wire: Value = crate::json::decode_evidence(&decoded)?;
+        let events = wire["replay"]["events"].as_array().context("captured events absent")?;
+        ensure!(events.len() == 2 && events[0]["event"] != events[1]["event"] && events[0]["payload"] == events[1]["payload"], "equal payloads collapsed distinct events");
+        ensure!(encoded.len() * 2 < expected.len(), "actual pinned codec did not compress repeated fixture data");
+        ensure!(decode(&encoded, expected.len() - 1).is_err(), "decode limit was ignored");
+        ensure!(decode(&encoded[..encoded.len() - 4], expected.len()).is_err(), "truncated gzip qualified");
+        let mut corrupt = encoded;let last = corrupt.len() - 1;corrupt[last] ^= 1;
+        ensure!(decode(&corrupt, expected.len()).is_err(), "corrupted gzip footer qualified");
+    }
+    Ok(())
 }
 
 #[test]
