@@ -1671,19 +1671,36 @@ fn saved_replay_checks_source_wire_shape_and_original_history_before_execution()
     // Keep a full witness in the reduction slot so changing both original
     // outcomes leaves every chunk referenced. Only actual content replay can
     // reject this otherwise valid repeated-reference substitution.
-    let full = retain_with(root.path(), &program, first, OracleControl::OvercountFirstRead, |_, _| ReplayPair {
-        first: Outcome::Passed(vec![]), second: Outcome::Passed(vec![]),
-    })?;
+    let full = retain_with(
+        root.path(),
+        &program,
+        first,
+        OracleControl::OvercountFirstRead,
+        |_, _| ReplayPair {
+            first: Outcome::Passed(vec![]),
+            second: Outcome::Passed(vec![]),
+        },
+    )?;
     let full_bytes = bounded_file(&full, MAX_RECORD_BYTES)?;
     let mut repeated: Value = crate::json::decode_evidence(&full_bytes)?;
     for outcome in ["first", "second"] {
-        let records = repeated["original_observation"][outcome]["records"].as_array_mut().unwrap();
-        ensure!(records.len() > 1 && records[0] != records[1], "reference substitution did not change a record");
+        let records = repeated["original_observation"][outcome]["records"]
+            .as_array_mut()
+            .unwrap();
+        ensure!(
+            records.len() > 1 && records[0] != records[1],
+            "reference substitution did not change a record"
+        );
         records[1] = records[0].clone();
     }
     std::fs::write(&full, serde_json::to_vec(&repeated)?)?;
-    let error = replay_file_inner(&full).err().context("wrong repeated record qualified")?;
-    ensure!(error.to_string() == "consumer original observation changed", "substitution did not reach actual replay comparison");
+    let error = replay_file_inner(&full)
+        .err()
+        .context("wrong repeated record qualified")?;
+    ensure!(
+        error.to_string() == "consumer original observation changed",
+        "substitution did not reach actual replay comparison"
+    );
     std::fs::write(&full, full_bytes)?;
     replay_file(&full)?;
     for entry in std::fs::read_dir(path.parent().unwrap())? {
