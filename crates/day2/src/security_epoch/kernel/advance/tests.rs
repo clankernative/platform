@@ -72,8 +72,20 @@ struct Provider {
     db: Connection,
 }
 
+fn require_fixture_versions(before: &Snapshot) -> Result<()> {
+    ensure!(
+        before.root.as_ref().is_some_and(|r|r.version==version(2))
+            && before.sentinel.as_ref().is_some_and(|r|r.version==version(2))
+            && before.create.as_ref().is_some_and(|r|r.version==version(1))
+            && before.activate.as_ref().is_some_and(|r|r.version==version(2)),
+        "epoch_advance_fixture_version_domain"
+    );
+    Ok(())
+}
+
 impl Provider {
     fn new(initial: &Snapshot) -> Result<Self> {
+        require_fixture_versions(initial)?;
         let db = Connection::open_in_memory()?;
         db.execute_batch("CREATE TABLE records(name TEXT PRIMARY KEY, body TEXT NOT NULL, version INTEGER NOT NULL); CREATE TABLE sends(id INTEGER PRIMARY KEY);")?;
         let provider = Self { db };
@@ -396,6 +408,19 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     let duplicate=format!("{{\"phase\":\"fenced\",\"fence\":{fence},\"fence\":{fence}}}");
     assert!(serde_json::from_str::<Phase>(&duplicate).is_err());
     assert!(crate::json::decode::<Phase>(duplicate.as_bytes()).is_err());
+    let repeated=serde_json::to_string(&encoded["fence"]["operation"])?;
+    let nested=fence.replacen("{",&format!("{{\"operation\":{repeated},"),1);
+    let nested=format!("{{\"phase\":\"fenced\",\"fence\":{nested}}}");
+    assert!(serde_json::from_str::<Phase>(&nested).is_err());
+    let mut sequence=encoded.clone();
+    sequence["fence"]=Value::Array(encoded["fence"].as_object().unwrap().values().cloned().collect());
+    assert!(serde_json::from_value::<Phase>(sequence).is_err());
+    let completion=serde_json::to_value(&before.root.as_ref().unwrap().value.phase)?;
+    let completion_payload=serde_json::to_string(&completion["completion"])?;
+    let repeated=serde_json::to_string(&completion["completion"]["operation"])?;
+    let duplicate_completion=completion_payload.replacen("{",&format!("{{\"operation\":{repeated},"),1);
+    let raw=format!("{{\"phase\":\"active_first_holder\",\"completion\":{duplicate_completion}}}");
+    assert!(serde_json::from_str::<Phase>(&raw).is_err());
     let mut unsupported=serde_json::to_value(&request.activation.request)?;
     unsupported["action"]=json!("advance_epoch");
     assert!(serde_json::from_value::<InitialRequest>(unsupported).is_err());

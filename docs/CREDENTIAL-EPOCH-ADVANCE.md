@@ -45,8 +45,12 @@ acknowledgement does not erase committed records or authorize a second advance.
 These are controlled protocol properties. The SQLite oracle interprets only
 exact-version CAS and create-only receipt keys, independently of the transition
 logic. Its reference transition constructs the expected fenced records and
-receipt separately. Faults before mutation, after the first transactional write
-and after commit distinguish rollback from unknown completion.
+receipt separately. Faults before mutation, after either transactional record
+write and after commit distinguish rollback from
+unknown completion. This fixture accepts only its declared initial provider
+versions (root, sentinel and activation 2; create 1); changed replay metadata
+refuses before opening SQLite, rather than being silently normalized. The pure
+kernel continues to compare opaque provider versions exactly.
 
 Twenty histories capture the complete selected store, initial records and
 provider versions, operation and fault cut. Each round-trips its serialized input
@@ -55,7 +59,11 @@ kernel, model and dependency source, refuses a foreign source or oversized input
 and saves complete divergent input/actual/expected data under
 `artifacts/epoch-advance-failures`. The `replay_saved_first_advance_history` test
 accepts that bundle through `DAY2_REPLAY_EPOCH_ADVANCE`; saved outcomes never
-replace the independent oracle. This is a controlled interrupted-transaction
+replace the independent oracle. Unexpected runner errors after input admission
+also retain the complete input with a closed failure stage, while preserving the
+original error without formatting or serializing foreign error text. Invalid
+source identities, bounds and fixture-version inputs refuse before execution.
+This is a controlled interrupted-transaction
 campaign, not a native process-kill or real Firestore qualification.
 
 This does not establish that incumbent native leases were physically fenced, that

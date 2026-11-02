@@ -46,6 +46,21 @@ struct Report {
     expected:Value,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")]
+enum FailureStage { FirstRun, ReplayRun, ModelComparison }
+
+#[derive(Debug)]
+struct SavedFailure(std::path::PathBuf);
+
+impl std::fmt::Display for SavedFailure {
+    fn fmt(&self, formatter:&mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("epoch_advance_history_failure_saved")
+    }
+}
+
+impl std::error::Error for SavedFailure {}
+
 fn source() -> Result<Digest> {
     Digest::of(&(
         "day2-first-epoch-advance-history-v1",
@@ -73,7 +88,7 @@ fn rows(before:&Snapshot, after:Option<&(AuthorityRecord,SentinelRecord,Receipt)
 }
 
 fn run(history:&History) -> Result<Report> {
-    ensure!(history.format==1 && history.source==source()?,"epoch_advance_history_source");
+    validate_input(history)?;
     let before=history.before.load();
     let request=Request::new(&history.selection,history.operation.clone(),&before)?;
     let reference=expected(&request,&before)?;
@@ -107,13 +122,13 @@ fn decode(bytes:&[u8]) -> Result<History> {
     crate::json::decode(bytes)
 }
 
-fn check(history:&History) -> Result<()> {
-    let encoded=serde_json::to_vec(history)?;
-    let history=decode(&encoded)?;
-    let first=run(&history)?;
-    let replay=run(&decode(&encoded)?)?;
-    if first.actual != first.expected || replay != first {
-        let bundle=json!({"input":history,"first":first,"replay":replay});
+fn validate_input(history:&History) -> Result<()> {
+    ensure!(history.format==1 && history.source==source()?,"epoch_advance_history_source");
+    require_fixture_versions(&history.before.load())
+}
+
+fn save_failure(history:&History,stage:FailureStage,first:Option<&Report>,replay:Option<&Report>) -> Result<std::path::PathBuf> {
+        let bundle=json!({"input":history,"failure_stage":stage,"first":first,"replay":replay});
         let bytes=serde_json::to_vec_pretty(&bundle)?;
         ensure!(bytes.len()<=262_144,"epoch_advance_history_output_budget");
         let id=Digest::of(&bundle)?;
@@ -121,14 +136,39 @@ fn check(history:&History) -> Result<()> {
         std::fs::create_dir_all(&directory)?;
         let path=directory.join(format!("{}.json",&id.as_str()[7..]));
         use std::io::Write;
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file)=>file.write_all(&bytes)?,
-            Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>{},
+            Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>{
+                ensure!(std::fs::read(&path)?==bytes,"epoch_advance_history_saved_bytes_changed");
+            },
             Err(error)=>return Err(error.into()),
         }
-        anyhow::bail!("epoch_advance_history_divergence_saved");
+        Ok(path)
+}
+
+fn retain(error:anyhow::Error,history:&History,stage:FailureStage,first:Option<&Report>,replay:Option<&Report>) -> anyhow::Error {
+    match save_failure(history,stage,first,replay) {
+        Ok(path)=>error.context(SavedFailure(path)),
+        Err(_)=>error.context("epoch_advance_history_retention_refused"),
+    }
+}
+
+fn check_with(history:&History,runner:fn(&History)->Result<Report>) -> Result<()> {
+    let encoded=serde_json::to_vec(history)?;
+    let history=decode(&encoded)?;
+    // Invalid source/bounds/fixture metadata refuse before executing a history.
+    // Once admitted, any unexpected runner error retains this complete input.
+    validate_input(&history)?;
+    let first=runner(&history).map_err(|error|retain(error,&history,FailureStage::FirstRun,None,None))?;
+    let replay=runner(&decode(&encoded)?).map_err(|error|retain(error,&history,FailureStage::ReplayRun,Some(&first),None))?;
+    if first.actual != first.expected || replay != first {
+        return Err(retain(anyhow::anyhow!("epoch_advance_history_divergence"),&history,FailureStage::ModelComparison,Some(&first),Some(&replay)));
     }
     Ok(())
+}
+
+fn check(history:&History) -> Result<()> {
+    check_with(history,run)
 }
 
 #[test]
@@ -148,6 +188,41 @@ fn stale_or_oversized_replay_inputs_refuse_before_provider_execution() -> Result
     let history=History {format:1,source:Digest::new(b"foreign source"),selection,before:SavedSnapshot::save(&before),operation:Digest::new(b"advance"),cut:Cut::Known};
     assert!(run(&history).is_err());
     assert!(decode(&vec![b' ';65_537]).is_err());
+    for component in ["root","sentinel","create","activate"] {
+        let mut changed=history.clone();
+        changed.source=source()?;
+        match component {
+            "root"=>changed.before.root.1=version(9),
+            "sentinel"=>changed.before.sentinel.1=version(9),
+            "create"=>changed.before.create.1=version(9),
+            "activate"=>changed.before.activate.1=version(9),
+            _=>unreachable!(),
+        }
+        assert!(run(&changed).is_err(),"{component}");
+        assert!(Provider::new(&changed.before.load()).is_err(),"{component}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unexpected_prepare_error_retains_complete_input_and_original_error_without_display() -> Result<()> {
+    #[derive(Debug)]
+    struct Refusal;
+    impl std::fmt::Display for Refusal {
+        fn fmt(&self,_:&mut std::fmt::Formatter<'_>)->std::fmt::Result {panic!("foreign error must not be formatted")}
+    }
+    impl std::error::Error for Refusal {}
+    fn failed_prepare(_:&History)->Result<Report> {Err(anyhow::Error::new(Refusal))}
+    let (selection,before)=initial();
+    let history=History {format:1,source:source()?,selection,before:SavedSnapshot::save(&before),operation:Digest::new(b"prepare-error-retention-control"),cut:Cut::Known};
+    let error=check_with(&history,failed_prepare).unwrap_err();
+    assert!(error.downcast_ref::<Refusal>().is_some());
+    let path=&error.downcast_ref::<SavedFailure>().context("valid input was not retained")?.0;
+    let saved:Value=crate::json::decode(&std::fs::read(path)?)?;
+    assert_eq!(saved["input"],serde_json::to_value(&history)?);
+    assert_eq!(saved["failure_stage"],json!("first_run"));
+    assert_eq!(saved["first"],Value::Null);
+    assert_eq!(saved["replay"],Value::Null);
     Ok(())
 }
 
@@ -160,6 +235,8 @@ fn replay_saved_first_advance_history() -> Result<()> {
     #[serde(deny_unknown_fields)]
     struct Bundle {
         input:History,
+        #[serde(rename="failure_stage")]
+        _failure_stage:FailureStage,
         #[serde(rename="first")]
         _first:Value,
         #[serde(rename="replay")]

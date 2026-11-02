@@ -256,6 +256,27 @@ pub(super) enum Phase {
     Fenced { fence: Box<advance::Fence> },
 }
 
+/// Preserve the original typed map: Value would erase duplicate nested keys.
+struct PhaseObject<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PhaseObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a typed external epoch phase object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData)).map(Self)
+    }
+}
+
 impl<'de> Deserialize<'de> for Phase {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Serde's internally tagged UNIT visitor ignores extras. Also require a
@@ -288,13 +309,13 @@ impl<'de> Deserialize<'de> for Phase {
                             if completion.is_some() {
                                 return Err(A::Error::duplicate_field("completion"));
                             }
-                            completion = Some(map.next_value::<serde_json::Value>()?);
+                            completion = Some(map.next_value::<PhaseObject<Box<Completion>>>()?.0);
                         }
                         "fence" => {
                             if fence.is_some() {
                                 return Err(A::Error::duplicate_field("fence"));
                             }
-                            fence = Some(map.next_value::<serde_json::Value>()?);
+                            fence = Some(map.next_value::<PhaseObject<Box<advance::Fence>>>()?.0);
                         }
                         _ => {
                             return Err(A::Error::unknown_field(
@@ -306,14 +327,8 @@ impl<'de> Deserialize<'de> for Phase {
                 }
                 match (phase.as_deref(), completion, fence) {
                     (Some("pending_first_holder"), None, None) => Ok(Phase::PendingFirstHolder),
-                    (Some("active_first_holder"), Some(value), None) if value.is_object() => {
-                        Ok(Phase::ActiveFirstHolder {
-                            completion: serde_json::from_value(value).map_err(A::Error::custom)?,
-                        })
-                    }
-                    (Some("fenced"), None, Some(value)) if value.is_object() => Ok(Phase::Fenced {
-                        fence: serde_json::from_value(value).map_err(A::Error::custom)?,
-                    }),
+                    (Some("active_first_holder"), Some(completion), None) => Ok(Phase::ActiveFirstHolder { completion }),
+                    (Some("fenced"), None, Some(fence)) => Ok(Phase::Fenced { fence }),
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }
             }
