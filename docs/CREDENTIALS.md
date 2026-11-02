@@ -164,6 +164,19 @@ only `/_day2/credentials/api/*` to host authentication. The human and default
 backends retain IAP. This is deployment composition, not live qualification:
 `Runtime::load` still installs no credential authority, and a short-lived
 `SelectedAuthority` snapshot is not an external epoch/clock or identity adapter.
+Within one host authority, successful selection replacements retain the highest
+observed security epoch for each exact namespace and epoch-store binding.
+Removing a family does not erase this floor; another family using the same
+domain cannot reinstall a lower epoch. A replacement must give all families in
+one domain the same epoch. The whole replacement and its floors publish under
+one lock, and an invalid batch changes neither. At most 128 domains are retained;
+exhaustion refuses rather than evicting history.
+
+This is process-local refusal memory, not persistent authority or readiness.
+Old bearer versions and prepared issuance keys still face the current epoch,
+binding, policy, key-version and deadline checks. Restart and whole-database
+rollback still require the genuine outside-backup epoch source; this guard
+does not enable maintenance, restore or a new writer.
 Those adapters, separated shell transport and a deployed consumer canary remain
 required before claiming this channel ready for an installation.
 

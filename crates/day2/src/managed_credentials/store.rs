@@ -3658,6 +3658,340 @@ mod tests {
         Ok(receipt)
     }
 
+    struct EpochKeys;
+
+    impl crate::oauth::approval_registry::ApprovalKeyProvider for EpochKeys {
+        fn load(
+            &self,
+            reference: &crate::oauth::approval_registry::ApprovalKeyRef,
+            purpose: crate::oauth::approval_registry::ApprovalKeyPurpose,
+        ) -> Result<crate::oauth::approval_registry::ApprovalKeyMaterial> {
+            use crate::oauth::approval_registry::{ApprovalKeyMaterial, ApprovalKeyPurpose};
+            let bytes = match purpose {
+                ApprovalKeyPurpose::CustodyVerifier => [3; 32],
+                ApprovalKeyPurpose::CustodyEncryption => [4; 32],
+                _ => anyhow::bail!("unexpected fixture key purpose"),
+            };
+            Ok(ApprovalKeyMaterial {
+                binding: reference.binding.clone(),
+                version: reference.version.clone(),
+                purpose,
+                bytes,
+            })
+        }
+    }
+
+    fn epoch_selection(epoch: u64) -> super::super::authority::Selection {
+        use crate::oauth::approval_registry::ApprovalKeyRef;
+        use day2_capabilities::credentials::{DeliveryProfile, RotationProfile};
+        let pin = |value: &str| BindingRef::pin(name(value), &value).unwrap();
+        let binding = day2_capabilities::credentials::CredentialFamilyBinding {
+            namespace: namespace(),
+            family: family().id,
+            approved_authority: pin("authority"),
+            management: pin("management"),
+            rotation: RotationProfile::AtomicReplace,
+            delivery: DeliveryProfile::AuthenticatedCreatorReveal,
+            verifier: pin("verifier"),
+            custody: pin("custody"),
+            security_shell: day2_capabilities::oauth::SecurityOriginRef(pin("security")),
+            audience: ResourceAudienceRef(pin("audience")),
+            epoch_store: pin("epoch"),
+            max_lifetime_seconds: 2000,
+            reveal_window_seconds: 300,
+            quota: pin("quota"),
+        };
+        super::super::authority::Selection {
+            verifier: ApprovalKeyRef {
+                binding: binding.verifier.clone(),
+                version: "verify-v1".into(),
+            },
+            encryption: ApprovalKeyRef {
+                binding: binding.custody.clone(),
+                version: "encrypt-v1".into(),
+            },
+            binding,
+            security_origin: "https://security.example.com".into(),
+            management: creator_policy(),
+            security_epoch: epoch,
+            observed_at: 1000,
+            ready_until: 1200,
+            grant_until: 3000,
+            max_active_lineages: 10,
+            issuers: BTreeMap::from([("issuer/human-1".into(), "issuer/human-1".into())]),
+        }
+    }
+
+    #[test]
+    fn selected_epoch_advance_fences_real_bearer_and_prepared_readiness_after_reopen() -> Result<()>
+    {
+        use super::super::{authority::SelectedAuthority, issuance::Authority};
+        super::super::effects::scope(super::super::simulation::World::new(712), || {
+            let initial = epoch_selection(7);
+            let authority =
+                SelectedAuthority::new(vec![initial.clone()], std::sync::Arc::new(EpochKeys))?;
+            let (dir, mut db) = database()?;
+            let receipt = committed_issue(&mut db)?;
+            let token = authorize_reveal(
+                &mut db,
+                post(receipt.version.as_ref().unwrap(), "epoch-token"),
+            )?
+            .context("fixture reveal")?
+            .into_response_body(&lease())?;
+            let ready = authority.prepare(
+                &initial.binding,
+                &initial.management,
+                "issuer/human-1",
+                "issuer/human-1",
+                1100,
+            )?;
+            let root = ceiling().roots["SubmitTranscription"].clone();
+            let check = |db: &Connection| -> Result<bool> {
+                let epoch = authority
+                    .verification_epoch(&initial.binding, &initial.management, "verify-v1", 1100)?
+                    .context("current fixture epoch")?;
+                Ok(verify_ingress(
+                    db,
+                    &authority.verification_keys(&initial.binding, &initial.management, 1100)?,
+                    ingress(
+                        &initial.binding.namespace,
+                        &family().contract,
+                        &root,
+                        epoch,
+                        1100,
+                    ),
+                    &token,
+                )?
+                .is_some())
+            };
+            assert!(check(&db)?);
+            authority.replace(vec![epoch_selection(8)])?;
+            assert!(!check(&db)?);
+            assert!(
+                authority
+                    .validate(
+                        &initial.binding,
+                        &initial.management,
+                        "issuer/human-1",
+                        "issuer/human-1",
+                        &ready,
+                        1100
+                    )
+                    .is_err()
+            );
+            assert!(authority.replace(vec![initial.clone()]).is_err());
+            drop(db);
+            let db = Connection::open(dir.path().join("app.sqlite"))?;
+            assert!(!check(&db)?);
+            assert_eq!(
+                db.query_row(
+                    "SELECT security_epoch FROM day2_credential_versions",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                7
+            );
+            assert_eq!(
+                authority.reveal_epoch(
+                    &initial.binding,
+                    &initial.management,
+                    "issuer/human-1",
+                    "issuer/human-1",
+                    1100
+                )?,
+                8
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn selected_epoch_removal_and_family_changes_cannot_forget_a_floor() -> Result<()> {
+        use super::super::{authority::SelectedAuthority, issuance::Authority};
+        let initial = epoch_selection(8);
+        let authority =
+            SelectedAuthority::new(vec![initial.clone()], std::sync::Arc::new(EpochKeys))?;
+        authority.replace(Vec::new())?;
+        assert!(authority.replace(vec![epoch_selection(7)]).is_err());
+        assert!(
+            authority
+                .verification_epoch(&initial.binding, &initial.management, "verify-v1", 1100)
+                .is_err()
+        );
+        let mut sibling = epoch_selection(7);
+        sibling.binding.family = name("another-family");
+        assert!(authority.replace(vec![sibling.clone()]).is_err());
+        sibling.security_epoch = 9;
+        assert!(authority.replace(vec![initial.clone(), sibling]).is_err());
+        // A rejected mixed batch did not advance the floor or publish either entry.
+        authority.replace(vec![initial.clone()])?;
+        assert_eq!(
+            authority.verification_epoch(
+                &initial.binding,
+                &initial.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(8)
+        );
+        let mut independent = epoch_selection(1);
+        independent.binding.namespace.environment = name("independent");
+        authority.replace(vec![initial.clone(), independent.clone()])?;
+        assert_eq!(
+            authority.verification_epoch(
+                &independent.binding,
+                &independent.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(1)
+        );
+        let mut independent_next = independent.clone();
+        independent_next.security_epoch = 2;
+        authority.replace(vec![initial.clone(), independent_next.clone()])?;
+        assert!(
+            authority
+                .replace(vec![epoch_selection(9), independent.clone()])
+                .is_err()
+        );
+        assert_eq!(
+            authority.verification_epoch(
+                &independent_next.binding,
+                &independent_next.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(2)
+        );
+        // Nor may a valid higher entry in a different domain leak from a batch
+        // whose otherwise valid sibling rewound an already observed epoch.
+        authority.replace(vec![initial.clone(), independent_next])?;
+        assert!(authority.replace(vec![epoch_selection(7)]).is_err());
+        assert_eq!(
+            authority.verification_epoch(
+                &initial.binding,
+                &initial.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(8)
+        );
+        let mut different_store = epoch_selection(1);
+        different_store.binding.epoch_store.revision = Digest::new(b"different-store-revision");
+        authority.replace(vec![different_store.clone()])?;
+        assert_eq!(
+            authority.verification_epoch(
+                &different_store.binding,
+                &different_store.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(1)
+        );
+        assert!(authority.replace(vec![epoch_selection(7)]).is_err());
+        authority.replace(vec![initial])?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_epoch_history_budget_refuses_without_eviction_or_partial_publication() -> Result<()>
+    {
+        use super::super::{authority::SelectedAuthority, issuance::Authority};
+        let authority = SelectedAuthority::new(Vec::new(), std::sync::Arc::new(EpochKeys))?;
+        for generation in 1..=128 {
+            let mut selection = epoch_selection(8);
+            selection.binding.namespace.binding_generation = generation;
+            authority.replace(vec![selection])?;
+            authority.replace(Vec::new())?;
+        }
+        let mut overflow = epoch_selection(9);
+        overflow.binding.namespace.binding_generation = 129;
+        assert!(authority.replace(vec![overflow.clone()]).is_err());
+        assert!(
+            authority
+                .verification_epoch(&overflow.binding, &overflow.management, "verify-v1", 1100)
+                .is_err()
+        );
+        for generation in [1, 64, 128] {
+            let mut selection = epoch_selection(7);
+            selection.binding.namespace.binding_generation = generation;
+            assert!(authority.replace(vec![selection.clone()]).is_err());
+            selection.security_epoch = 8;
+            authority.replace(vec![selection.clone()])?;
+            assert_eq!(
+                authority.verification_epoch(
+                    &selection.binding,
+                    &selection.management,
+                    "verify-v1",
+                    1100
+                )?,
+                Some(8)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_epoch_concurrent_advances_cannot_publish_the_losing_lower_epoch() -> Result<()> {
+        use super::super::{authority::SelectedAuthority, issuance::Authority};
+        let authority = std::sync::Arc::new(SelectedAuthority::new(
+            vec![epoch_selection(7)],
+            std::sync::Arc::new(EpochKeys),
+        )?);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = [8, 9].map(|epoch| {
+            let authority = authority.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                (
+                    epoch,
+                    authority.replace(vec![epoch_selection(epoch)]).is_ok(),
+                )
+            })
+        });
+        barrier.wait();
+        for worker in workers {
+            let (epoch, accepted) = worker.join().expect("epoch fixture worker");
+            assert!(epoch == 8 || accepted);
+        }
+        let initial = epoch_selection(7);
+        assert_eq!(
+            authority.verification_epoch(
+                &initial.binding,
+                &initial.management,
+                "verify-v1",
+                1100
+            )?,
+            Some(9)
+        );
+        assert!(authority.replace(vec![epoch_selection(8)]).is_err());
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn selected_epoch_histories_preserve_the_maximum_after_removal(events in prop::collection::vec(0_u64..16, 1..64)) {
+            use super::super::{authority::SelectedAuthority, issuance::Authority};
+            let authority = SelectedAuthority::new(Vec::new(), std::sync::Arc::new(EpochKeys)).unwrap();
+            let mut maximum = 0;
+            let mut available = None;
+            let binding = epoch_selection(1);
+            for epoch in events {
+                if epoch == 0 {
+                    authority.replace(Vec::new()).unwrap();
+                    available = None;
+                } else {
+                    let accepted = authority.replace(vec![epoch_selection(epoch)]).is_ok();
+                    prop_assert_eq!(accepted, epoch >= maximum);
+                    if accepted { maximum = epoch; available = Some(epoch); }
+                }
+                let observed = authority.verification_epoch(&binding.binding, &binding.management, "verify-v1", 1100);
+                match available { Some(epoch) => prop_assert_eq!(observed.unwrap(), Some(epoch)), None => prop_assert!(observed.is_err()), }
+            }
+        }
+    }
+
     fn creator_policy() -> ManagementPolicy {
         ManagementPolicy {
             identity_authority: BindingRef::pin(name("people"), &"people-v1").unwrap(),

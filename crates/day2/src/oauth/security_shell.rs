@@ -3051,7 +3051,7 @@ mod tests {
                 &token,
                 world.now,
             )?;
-            for change in ["epoch", "verifier", "unavailable", "account"] {
+            for change in ["verifier", "unavailable", "account"] {
                 if change == "account" && family != "personal_keys" {
                     continue;
                 }
@@ -3069,7 +3069,6 @@ mod tests {
                     .find(|selected| selected.binding.family.as_str() == family)
                     .context("selected family")?;
                 match change {
-                    "epoch" => selected.security_epoch += 1,
                     "verifier" => selected.verifier.version = "verifier_2".into(),
                     "account" => selected.issuers.clear(),
                     _ => changed.clear(),
@@ -3095,8 +3094,8 @@ mod tests {
                 } else {
                     assert_eq!(outcome?.status, "blocked");
                 }
-                // Disposable snapshots simulate independent adapter decisions;
-                // production epoch monotonicity needs its selected live adapter.
+                // These independent cases change no epoch. The separate epoch
+                // case advances the whole cohort and never rewinds the host.
                 world.authority.replace(world.selections.clone())?;
             }
             let missing = format!("missing-origin-{family}");
@@ -3179,6 +3178,92 @@ mod tests {
                 |row| row.get(0),
             )?;
             assert_eq!(reason, "credential_authority_changed");
+            token.into_bytes().fill(0);
+        }
+        let _ = stop.send(());
+        serving.await??;
+        selected_epoch_http_advance_fences_both_families_and_saved_invocations().await?;
+        Ok(())
+    }
+
+    async fn selected_epoch_http_advance_fences_both_families_and_saved_invocations() -> Result<()>
+    {
+        use crate::managed_credentials::ingress;
+        let world = browser_world(10)?;
+        let shell = credential_shell(&world, true)?;
+        let server =
+            crate::web::LocalServer::bind(world.runtime.clone(), "alice@example.com", 0).await?;
+        let origin = server.origin.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(server.serve(async {
+            let _ = stopped.await;
+        }));
+        let client = reqwest::Client::new();
+        let url = format!("{origin}{}credential_metadata.ping", ingress::PREFIX);
+        let mut captured = Vec::new();
+        for (operation, id) in [
+            ("credential_metadata.create_client", "epoch-client"),
+            ("credential_metadata.create_personal", "epoch-personal"),
+        ] {
+            let (path, headers, session) = navigate(&world, &shell, operation, id)?;
+            shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                world.now,
+            )?;
+            let token = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::OK
+            );
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.ping",
+                &token,
+                world.now,
+            )?;
+            let pending = format!("pending-{id}");
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &pending,
+                &serde_json::json!({}),
+                world.now,
+            )?;
+            captured.push((token, pending));
+        }
+        let mut advanced = world.selections.clone();
+        for selection in &mut advanced {
+            selection.security_epoch += 1;
+        }
+        world.authority.replace(advanced.clone())?;
+        assert!(world.authority.replace(world.selections.clone()).is_err());
+        world.authority.replace(Vec::new())?;
+        assert!(world.authority.replace(world.selections.clone()).is_err());
+        world.authority.replace(advanced)?;
+        for (token, pending) in captured {
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                world
+                    .runtime
+                    .execute(&pending, crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
             token.into_bytes().fill(0);
         }
         let _ = stop.send(());
@@ -3942,7 +4027,9 @@ mod tests {
             "current-required",
         )?;
         let mut selections = world.selections.clone();
-        selections[0].security_epoch += 1;
+        for selection in &mut selections {
+            selection.security_epoch += 1;
+        }
         world.authority.replace(Vec::new())?;
         assert!(
             shell
@@ -3971,7 +4058,7 @@ mod tests {
                 .status(),
             StatusCode::SEE_OTHER
         );
-        world.authority.replace(selections)?;
+        world.authority.replace(selections.clone())?;
         let before = world.keys.0.load(Ordering::SeqCst);
         assert!(
             shell
@@ -3986,7 +4073,8 @@ mod tests {
                 .is_err()
         );
         assert_eq!(world.keys.0.load(Ordering::SeqCst), before);
-        world.authority.replace(world.selections.clone())?;
+        assert!(world.authority.replace(world.selections.clone()).is_err());
+        world.authority.replace(selections)?;
         let (path, headers, session) = navigate(
             &world,
             &shell,
