@@ -34,14 +34,32 @@ pub(crate) struct Selection {
 }
 
 pub(crate) struct SelectedAuthority {
-    entries: RwLock<Vec<Selection>>,
+    entries: RwLock<Selections>,
     keys: Arc<dyn ApprovalKeyProvider>,
+}
+
+struct Selections {
+    current: Vec<Selection>,
+    // Process-local refusal memory only, never an external epoch witness.
+    // Removing a family must not make an already observed epoch forgettable.
+    epoch_floor: BTreeMap<Digest, u64>,
+}
+
+fn epoch_domain(binding: &CredentialFamilyBinding) -> Result<Digest> {
+    Digest::of(&(
+        "day2-credential-selection-epoch-domain-v1",
+        &binding.namespace,
+        &binding.epoch_store,
+    ))
 }
 
 impl SelectedAuthority {
     pub(crate) fn new(entries: Vec<Selection>, keys: Arc<dyn ApprovalKeyProvider>) -> Result<Self> {
         let result = Self {
-            entries: RwLock::new(Vec::new()),
+            entries: RwLock::new(Selections {
+                current: Vec::new(),
+                epoch_floor: BTreeMap::new(),
+            }),
             keys,
         };
         result.replace(entries)?;
@@ -51,7 +69,9 @@ impl SelectedAuthority {
     pub(crate) fn replace(&self, entries: Vec<Selection>) -> Result<()> {
         ensure!(entries.len() <= 128, "credential admission budget");
         let mut seen = std::collections::BTreeSet::new();
+        let mut epochs = BTreeMap::new();
         for entry in &entries {
+            entry.binding.namespace.validate()?;
             let origin = url::Url::parse(&entry.security_origin)?;
             ensure!(
                 origin.scheme() == "https"
@@ -93,11 +113,31 @@ impl SelectedAuthority {
                     "invalid credential subject"
                 );
             }
+            if let Some(epoch) = epochs.insert(epoch_domain(&entry.binding)?, entry.security_epoch) {
+                ensure!(epoch == entry.security_epoch, "credential epoch cohort mismatch");
+            }
         }
-        *self
+        let mut selected = self
             .entries
             .write()
-            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))? = entries;
+            .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
+        // Validate the whole replacement under the same lock as readers and
+        // competing updates. A rejected batch neither advances a floor nor
+        // publishes a partially changed selection. No floor is ever evicted.
+        ensure!(
+            selected.epoch_floor.len()
+                + epochs.keys().filter(|domain| !selected.epoch_floor.contains_key(*domain)).count()
+                <= 128,
+            "credential epoch history budget"
+        );
+        for (domain, epoch) in &epochs {
+            ensure!(
+                selected.epoch_floor.get(domain).is_none_or(|previous| epoch >= previous),
+                "credential security epoch rewound"
+            );
+        }
+        selected.epoch_floor.extend(epochs);
+        selected.current = entries;
         Ok(())
     }
 
@@ -179,7 +219,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        let selected = Self::verification_selection(&entries.current, binding, management, now)?;
         Ok((selected.verifier.version == verifier_version).then_some(selected.security_epoch))
     }
 
@@ -193,7 +233,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        let selected = Self::verification_selection(&entries.current, binding, management, now)?;
         let mut bytes = self.key(&selected.verifier, ApprovalKeyPurpose::CustodyVerifier)?;
         let result = VerifierLease::new(&bytes, selected.verifier.version.clone());
         bytes.fill(0);
@@ -211,7 +251,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::verification_selection(&entries, binding, management, now)?;
+        let selected = Self::verification_selection(&entries.current, binding, management, now)?;
         let actors = selected
             .issuers
             .iter()
@@ -234,7 +274,7 @@ impl Authority for SelectedAuthority {
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
         ensure!(
-            entries
+            entries.current
                 .iter()
                 .any(|entry| &entry.binding == binding && entry.security_origin == origin),
             "credential shell not selected for family"
@@ -253,7 +293,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::selected(&entries, binding, management, actor, subject, now)?;
+        let selected = Self::selected(&entries.current, binding, management, actor, subject, now)?;
         Ok(ReadyKeys {
             keys: self.lease(selected)?,
             binding: Digest::of(binding)?,
@@ -276,7 +316,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::selected(&entries, binding, management, actor, subject, now)?;
+        let selected = Self::selected(&entries.current, binding, management, actor, subject, now)?;
         ensure!(
             ready.binding == Digest::of(binding)?
                 && ready.security_epoch == selected.security_epoch
@@ -302,7 +342,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        Ok(Self::selected(&entries, binding, management, actor, subject, now)?.security_epoch)
+        Ok(Self::selected(&entries.current, binding, management, actor, subject, now)?.security_epoch)
     }
 
     fn human_keys(
@@ -318,7 +358,7 @@ impl Authority for SelectedAuthority {
             .entries
             .read()
             .map_err(|_| anyhow::anyhow!("credential admission lock poisoned"))?;
-        let selected = Self::selected(&entries, binding, management, actor, subject, now)?;
+        let selected = Self::selected(&entries.current, binding, management, actor, subject, now)?;
         ensure!(
             permit.encryption_version() == selected.encryption.version
                 && permit.security_epoch() == selected.security_epoch,
