@@ -22,12 +22,12 @@ enum StartupPhase {
     Restart,
 }
 
-/// Only fixed categories from a bounded log tail leave this private fixture.
+/// Only fixed categories from bounded log samples leave this private fixture.
 /// Raw server output can contain workflow data and is never embedded in errors.
 #[derive(Debug, Default)]
 struct StartupLogEvidence {
     bytes: usize,
-    prefix_omitted: bool,
+    middle_omitted: bool,
     log_reset: bool,
     read_limit_reached: bool,
     read_failed: bool,
@@ -36,24 +36,33 @@ struct StartupLogEvidence {
     permission_denied: bool,
     database_locked: bool,
     resource_exhausted: bool,
+    panic_or_fatal: bool,
+    thread_creation_failed: bool,
 }
 
 impl StartupLogEvidence {
-    fn from_bytes(bytes: &[u8], prefix_omitted: bool) -> Self {
-        let bounded = &bytes[..bytes.len().min(STARTUP_LOG_LIMIT)];
-        let text = String::from_utf8_lossy(bounded).to_ascii_lowercase();
+    fn from_bytes(prefix: &[u8], tail: &[u8], middle_omitted: bool) -> Self {
+        let prefix = &prefix[..prefix.len().min(STARTUP_LOG_LIMIT)];
+        let tail = &tail[..tail.len().min(STARTUP_LOG_LIMIT - prefix.len())];
+        let bytes = prefix.len() + tail.len();
+        let prefix = String::from_utf8_lossy(prefix).to_ascii_lowercase();
+        let tail = String::from_utf8_lossy(tail).to_ascii_lowercase();
+        // Classify separately: concatenation could invent a phrase across a gap.
+        let contains = |needle: &str| prefix.contains(needle) || tail.contains(needle);
         Self {
-            bytes: bounded.len(),
-            prefix_omitted,
-            read_limit_reached: bounded.len() == STARTUP_LOG_LIMIT,
-            address_in_use: text.contains("address already in use"),
-            permission_denied: text.contains("permission denied"),
-            database_locked: text.contains("database is locked")
-                || text.contains("database is busy"),
-            resource_exhausted: text.contains("resource temporarily unavailable")
-                || text.contains("cannot allocate memory")
-                || text.contains("too many open files")
-                || text.contains("no space left on device"),
+            bytes,
+            middle_omitted,
+            read_limit_reached: bytes == STARTUP_LOG_LIMIT,
+            address_in_use: contains("address already in use"),
+            permission_denied: contains("permission denied"),
+            database_locked: contains("database is locked") || contains("database is busy"),
+            resource_exhausted: contains("resource temporarily unavailable")
+                || contains("cannot allocate memory")
+                || contains("too many open files")
+                || contains("no space left on device"),
+            panic_or_fatal: contains("panic:") || contains("fatal error:"),
+            thread_creation_failed: contains("failed to create new os thread")
+                || contains("pthread_create failed"),
             ..Self::default()
         }
     }
@@ -68,11 +77,30 @@ impl StartupLogEvidence {
                     ..Self::default()
                 });
             }
-            let start = launch_offset.max(end.saturating_sub(STARTUP_LOG_LIMIT as u64));
-            file.seek(SeekFrom::Start(start))?;
-            let mut bytes = vec![0; (end - start) as usize];
-            file.read_exact(&mut bytes)?;
-            Ok(Self::from_bytes(&bytes, start > launch_offset))
+            let available = end - launch_offset;
+            let count = available.min(STARTUP_LOG_LIMIT as u64) as usize;
+            let middle_omitted = available > STARTUP_LOG_LIMIT as u64;
+            let prefix_len = if middle_omitted {
+                STARTUP_LOG_LIMIT / 2
+            } else {
+                count
+            };
+            let tail_len = count - prefix_len;
+            let ranges = [
+                (launch_offset, prefix_len),
+                (end - tail_len as u64, tail_len),
+            ];
+            let mut samples = [Vec::new(), Vec::new()];
+            for ((start, len), sample) in ranges.into_iter().zip(&mut samples) {
+                if len == 0 {
+                    continue;
+                }
+                file.seek(SeekFrom::Start(start))?;
+                let mut bytes = vec![0; len];
+                file.read_exact(&mut bytes)?;
+                *sample = bytes;
+            }
+            Ok(Self::from_bytes(&samples[0], &samples[1], middle_omitted))
         };
         read().unwrap_or_else(|error| Self {
             read_failed: true,
@@ -119,13 +147,13 @@ impl std::fmt::Display for StartupFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "Temporal startup failed [phase={:?} code={:?} signal={:?} readiness_timed_out={} log_bytes={} log_prefix_omitted={} log_reset={} log_read_limit_reached={} log_read_failed={} log_read_errno={:?} address_in_use={} permission_denied={} database_locked={} resource_exhausted={}]",
+            "Temporal startup failed [phase={:?} code={:?} signal={:?} readiness_timed_out={} log_bytes={} log_middle_omitted={} log_reset={} log_read_limit_reached={} log_read_failed={} log_read_errno={:?} address_in_use={} permission_denied={} database_locked={} resource_exhausted={} panic_or_fatal={} thread_creation_failed={}]",
             self.phase,
             self.code,
             self.signal,
             self.readiness_timed_out,
             self.log.bytes,
-            self.log.prefix_omitted,
+            self.log.middle_omitted,
             self.log.log_reset,
             self.log.read_limit_reached,
             self.log.read_failed,
@@ -134,6 +162,8 @@ impl std::fmt::Display for StartupFailure {
             self.log.permission_denied,
             self.log.database_locked,
             self.log.resource_exhausted,
+            self.log.panic_or_fatal,
+            self.log.thread_creation_failed,
         )
     }
 }
@@ -322,7 +352,7 @@ mod tests {
             assert_eq!(failure.signal, None);
             assert!(!failure.readiness_timed_out);
             assert_eq!(failure.log.bytes, STARTUP_LOG_LIMIT);
-            assert!(failure.log.prefix_omitted && failure.log.read_limit_reached);
+            assert!(failure.log.middle_omitted && failure.log.read_limit_reached);
             assert!(failure.log.address_in_use && failure.log.database_locked);
             assert!(!failure.log.read_failed);
             assert!(!failure.to_string().contains("PRIVATE"));
@@ -347,7 +377,7 @@ mod tests {
         fs::write(&log, bytes)?;
         let current = StartupLogEvidence::capture(&log, old.len() as u64);
         assert!(!current.address_in_use);
-        assert!(!current.prefix_omitted);
+        assert!(!current.middle_omitted);
         assert!(!format!("{current:?}").contains("PRIVATE"));
         let reset = StartupLogEvidence::capture(&log, u64::MAX);
         assert!(reset.log_reset);
@@ -357,19 +387,50 @@ mod tests {
 
     #[test]
     fn unknown_startup_output_stays_unknown_and_categories_are_not_exit_causes() {
-        let unknown = StartupLogEvidence::from_bytes(b"PRIVATE_UNRECOGNIZED_OUTPUT", false);
+        let unknown = StartupLogEvidence::from_bytes(b"PRIVATE_UNRECOGNIZED_OUTPUT", &[], false);
         assert!(!unknown.address_in_use);
         assert!(!unknown.permission_denied);
         assert!(!unknown.database_locked);
         assert!(!unknown.resource_exhausted);
+        assert!(!unknown.panic_or_fatal && !unknown.thread_creation_failed);
         assert!(!format!("{unknown:?}").contains("PRIVATE"));
         let categories = StartupLogEvidence::from_bytes(
             b"permission denied; database is busy; too many open files",
+            &[],
             false,
         );
         assert!(categories.permission_denied);
         assert!(categories.database_locked);
         assert!(categories.resource_exhausted);
+    }
+
+    #[test]
+    fn long_startup_failure_keeps_prefix_and_tail_without_cross_gap_categories() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let log = directory.path().join("PRIVATE_LOG_PATH");
+        let previous = b"address already in use PRIVATE_PREVIOUS_LAUNCH\n";
+        let mut bytes = previous.to_vec();
+        bytes.extend_from_slice(b"fatal error: failed to create new OS thread PRIVATE_DETAIL\n");
+        bytes.extend(vec![b'x'; STARTUP_LOG_LIMIT * 3]);
+        bytes.extend_from_slice(b"permission denied PRIVATE_TRAILING_DETAIL");
+        fs::write(&log, bytes)?;
+        let evidence = StartupLogEvidence::capture(&log, previous.len() as u64);
+        assert_eq!(evidence.bytes, STARTUP_LOG_LIMIT);
+        assert!(evidence.middle_omitted && evidence.read_limit_reached);
+        assert!(evidence.panic_or_fatal && evidence.thread_creation_failed);
+        assert!(evidence.permission_denied);
+        assert!(!evidence.address_in_use && !evidence.read_failed);
+        assert!(!format!("{evidence:?}").contains("PRIVATE"));
+        let split = StartupLogEvidence::from_bytes(b"address already ", b"in use", true);
+        assert!(!split.address_in_use);
+        let bounded = StartupLogEvidence::from_bytes(
+            &vec![b'x'; STARTUP_LOG_LIMIT * 2],
+            b"PRIVATE_OVER_BOUND_PANIC: detail",
+            true,
+        );
+        assert_eq!(bounded.bytes, STARTUP_LOG_LIMIT);
+        assert!(!bounded.panic_or_fatal);
+        Ok(())
     }
 
     #[tokio::test]
