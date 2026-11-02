@@ -1036,8 +1036,12 @@ pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<
     )
 }
 
-
-fn dependency_metadata_command(cargo: PathBuf, rustc: PathBuf, home: &Path, no_dependencies: bool) -> Command {
+fn dependency_metadata_command(
+    cargo: PathBuf,
+    rustc: PathBuf,
+    home: &Path,
+    no_dependencies: bool,
+) -> Command {
     let mut command = Command::new(cargo);
     command.args(["metadata", "--locked", "--format-version=1"]);
     if no_dependencies {
@@ -1109,16 +1113,52 @@ mod tests {
     fn dependency_metadata_pins_compiler_and_disables_configured_codegen_wrappers() -> Result<()> {
         use std::ffi::OsStr;
         for no_dependencies in [false, true] {
-            let command = dependency_metadata_command(PathBuf::from("/pinned/cargo"), PathBuf::from("/pinned/rustc"), Path::new("/isolated/home"), no_dependencies);
-            ensure!(command.get_program() == OsStr::new("/pinned/cargo"), "metadata compiler selector changed");
+            let command = dependency_metadata_command(
+                PathBuf::from("/pinned/cargo"),
+                PathBuf::from("/pinned/rustc"),
+                Path::new("/isolated/home"),
+                no_dependencies,
+            );
+            ensure!(
+                command.get_program() == OsStr::new("/pinned/cargo"),
+                "metadata compiler selector changed"
+            );
             let mut args = vec!["metadata", "--locked", "--format-version=1"];
-            if no_dependencies { args.push("--no-deps"); }
-            ensure!(command.get_args().eq(args.iter().map(OsStr::new)), "metadata query flags changed");
+            if no_dependencies {
+                args.push("--no-deps");
+            }
+            ensure!(
+                command.get_args().eq(args.iter().map(OsStr::new)),
+                "metadata query flags changed"
+            );
             let env: BTreeMap<_, _> = command.get_envs().collect();
-            ensure!(env.keys().copied().collect::<BTreeSet<_>>() == ["LANG", "LC_ALL", "HOME", "CARGO_HOME", "TMPDIR", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "PATH"].map(OsStr::new).into_iter().collect(), "metadata environment names changed");
-            ensure!(env.get(OsStr::new("RUSTC")) == Some(&Some(OsStr::new("/pinned/rustc"))), "metadata compiler pin lost");
+            ensure!(
+                env.keys().copied().collect::<BTreeSet<_>>()
+                    == [
+                        "LANG",
+                        "LC_ALL",
+                        "HOME",
+                        "CARGO_HOME",
+                        "TMPDIR",
+                        "RUSTC",
+                        "RUSTC_WRAPPER",
+                        "RUSTC_WORKSPACE_WRAPPER",
+                        "PATH"
+                    ]
+                    .map(OsStr::new)
+                    .into_iter()
+                    .collect(),
+                "metadata environment names changed"
+            );
+            ensure!(
+                env.get(OsStr::new("RUSTC")) == Some(&Some(OsStr::new("/pinned/rustc"))),
+                "metadata compiler pin lost"
+            );
             for name in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
-                ensure!(env.get(OsStr::new(name)) == Some(&Some(OsStr::new(""))), "metadata query retained a code-generation wrapper");
+                ensure!(
+                    env.get(OsStr::new(name)) == Some(&Some(OsStr::new(""))),
+                    "metadata query retained a code-generation wrapper"
+                );
             }
         }
         Ok(())
