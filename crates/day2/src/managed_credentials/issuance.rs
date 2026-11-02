@@ -1278,6 +1278,47 @@ mod tests {
     }
 
     #[test]
+    fn rotation_confirmation_binds_choice_predecessor_and_frozen_successor_grant() -> Result<()> {
+        let (mut proof,original)=golden()?;
+        let selection=serde_json::from_value(serde_json::json!({"family_contract":Digest::new(b"rotation family"),"roots":["fixture.read","fixture.save"]}))?;
+        proof.intent=Intent::Rotate {
+            lineage:"cr1_api_keys_fixture".into(),head:"version-1".into(),revision:1,
+            grant:lifecycle::RotateGrant::Narrow(selection),
+        };
+        proof.rotation_grant=Some(Digest::new(b"frozen successor grant"));
+        let encoded=encode_record(proof,original)?;
+        decode_record("invocation-1",encoded.as_bytes())?;
+        let original:Value=crate::json::decode(encoded.as_bytes())?;
+        for (pointer,replacement) in [
+            ("/confirmation/intent/lineage",serde_json::json!("cr1_api_keys_other")),
+            ("/confirmation/intent/head",serde_json::json!("version-2")),
+            ("/confirmation/intent/revision",serde_json::json!(2)),
+            ("/confirmation/intent/grant",serde_json::json!({"mode":"keep_existing","selections":[]})),
+            ("/confirmation/intent/grant/selections/0/family_contract",serde_json::json!(Digest::new(b"other family"))),
+            ("/confirmation/intent/grant/selections/0/roots/0",serde_json::json!("fixture.read_alternative")),
+            ("/confirmation/intent/grant/selections/0/roots/1",serde_json::json!("fixture.save_alternative")),
+            ("/confirmation/rotation_grant",serde_json::json!(Digest::new(b"different successor"))),
+        ] {
+            let mut changed=original.clone();
+            *changed.pointer_mut(pointer).unwrap()=replacement;
+            let previous=changed["commitment"].clone();
+            assert!(decode_record("invocation-1",changed.to_string().as_bytes()).is_err(),"unbound {pointer}");
+            rehash_fixture_value(&mut changed)?;
+            assert_ne!(changed["commitment"],previous,"unhashed {pointer}");
+        }
+        for missing in ["grant","head","revision"] {
+            let mut changed=original.clone();
+            changed["confirmation"]["intent"].as_object_mut().unwrap().remove(missing);
+            assert!(decode_record("invocation-1",changed.to_string().as_bytes()).is_err());
+        }
+        let mut missing_grant=original;
+        missing_grant["confirmation"]["rotation_grant"]=Value::Null;
+        assert!(rehash_fixture_value(&mut missing_grant).is_ok());
+        assert!(decode_record("invocation-1",missing_grant.to_string().as_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn selected_confirmation_accepts_the_complete_portable_root_name_bound() -> Result<()> {
         use day2_capabilities::oauth::{AuthorityNode, OperationAuthorityContract, OperationKind};
         fn record(root: &str) -> Result<String> {
