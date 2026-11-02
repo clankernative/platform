@@ -90,7 +90,10 @@ impl LifecycleHandshake {
         death_cut: Option<usize>,
         endpoint: usize,
     ) -> Result<()> {
-        ensure!(!self.failed && endpoint < 2 && self.pending.is_empty(), LifecycleModelError);
+        ensure!(
+            !self.failed && endpoint < 2 && self.pending.is_empty(),
+            LifecycleModelError
+        );
         let mut events = Vec::new();
         let sequence = if self.events == 0 {
             0
@@ -123,7 +126,10 @@ impl LifecycleHandshake {
             events.push(event);
         }
         ensure!(events.len() <= MAX_EVENTS, LifecycleModelError);
-        ensure!(self.events <= 96 * MAX_EVENTS - events.len(), LifecycleModelError);
+        ensure!(
+            self.events <= 96 * MAX_EVENTS - events.len(),
+            LifecycleModelError
+        );
         self.sequence = sequence;
         self.pending = events.into();
         Ok(())
@@ -191,11 +197,19 @@ impl LifecycleHandshake {
 #[test]
 fn lifecycle_stepper_preserves_complete_exchanges_and_every_pause() -> Result<()> {
     for seed in 0..32 {
-        for protocol in [Protocol::Enrollment, Protocol::InitialStorage, Protocol::InitialServing] {
+        for protocol in [
+            Protocol::Enrollment,
+            Protocol::InitialStorage,
+            Protocol::InitialServing,
+        ] {
             let mut complete = LifecycleHandshake::selected(seed, protocol)?;
             let mut stepped = LifecycleHandshake::selected(seed, protocol)?;
             let mut replay = LifecycleHandshake::selected(seed, protocol)?;
-            let rounds = if protocol == Protocol::Enrollment { 1 } else { 3 };
+            let rounds = if protocol == Protocol::Enrollment {
+                1
+            } else {
+                3
+            };
             for _ in 0..rounds {
                 assert!(complete.exchange(None)?);
                 stepped.begin_exchange(None, 0)?;
@@ -223,35 +237,35 @@ fn lifecycle_stepper_preserves_death_and_permanent_refusal_at_every_cut() -> Res
     for seed in 0..2 {
         for protocol in [Protocol::InitialStorage, Protocol::InitialServing] {
             for current in [false, true] {
-            let mut successful = LifecycleHandshake::selected(seed, protocol)?;
-            if current {
-                assert!(successful.exchange(None)?);
-            }
-            successful.begin_exchange(None, 0)?;
-            let count = successful.pending.len();
-            for cut in 0..count {
-                for endpoint in 0..2 {
-                    let mut complete = LifecycleHandshake::selected(seed, protocol)?;
-                    let mut stepped = LifecycleHandshake::selected(seed, protocol)?;
-                    if current {
-                        assert!(complete.exchange(None)?);
-                        assert!(stepped.exchange(None)?);
-                    }
-                    assert!(!complete.exchange_peer(Some(cut), endpoint)?);
-                    stepped.begin_exchange(Some(cut), endpoint)?;
-                    loop {
-                        if let Some(result) = stepped.advance_exchange()? {
-                            assert!(!result);
-                            break;
-                        }
-                        assert!(!stepped.current()?);
-                    }
-                    assert_eq!(stepped.snapshot(), complete.snapshot());
-                    assert!(!stepped.exchange(None)?);
-                    assert!(!complete.exchange(None)?);
-                    assert_eq!(stepped.snapshot(), complete.snapshot());
+                let mut successful = LifecycleHandshake::selected(seed, protocol)?;
+                if current {
+                    assert!(successful.exchange(None)?);
                 }
-            }
+                successful.begin_exchange(None, 0)?;
+                let count = successful.pending.len();
+                for cut in 0..count {
+                    for endpoint in 0..2 {
+                        let mut complete = LifecycleHandshake::selected(seed, protocol)?;
+                        let mut stepped = LifecycleHandshake::selected(seed, protocol)?;
+                        if current {
+                            assert!(complete.exchange(None)?);
+                            assert!(stepped.exchange(None)?);
+                        }
+                        assert!(!complete.exchange_peer(Some(cut), endpoint)?);
+                        stepped.begin_exchange(Some(cut), endpoint)?;
+                        loop {
+                            if let Some(result) = stepped.advance_exchange()? {
+                                assert!(!result);
+                                break;
+                            }
+                            assert!(!stepped.current()?);
+                        }
+                        assert_eq!(stepped.snapshot(), complete.snapshot());
+                        assert!(!stepped.exchange(None)?);
+                        assert!(!complete.exchange(None)?);
+                        assert_eq!(stepped.snapshot(), complete.snapshot());
+                    }
+                }
             }
         }
     }
