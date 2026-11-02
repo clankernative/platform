@@ -136,16 +136,24 @@ OAuth and credential proof APIs are unchanged. OAuth's schema admission scans
 remain a separate bounded-work obligation; the build journal's budget does not
 cover them.
 
-Provider world-coverage tests now require exactly 11 reviewed pending actions
-across LocalNotifications, SyntheticGoogleDirectory, SyntheticLinear,
-and SyntheticOperatorAlerts. Delegation's query, send and status now pass the
-common action-attribution gate through an instance and activated resource-policy
-harness with pinned caller/callee contracts. Twin worlds vary only delegation;
-independent response/effect checks and constant/wrong-world negatives retain
-their scope. These host-contract fixtures run the real offline delegation
-handler; they do not qualify a Roc worker or a remote callee. Carta's two actions
-retired their debt: both drive the live capture pipeline and a local record read against
-distinguishable Carta wire worlds. Each action names
+Provider world-coverage tests require exactly reviewed debt for every remaining
+pending action. Delegation's query, send and status pass the common
+attribution gate through an instance and activated resource-policy harness with
+pinned caller/callee contracts. Notifications, synthetic Linear and operator
+alerts likewise use their admitted host/adapter harnesses. Each keeps independent
+world/effect expectations and constant/wrong-world negatives; these host fixtures
+do not qualify a Roc worker, remote callee or live provider.
+
+Carta's two actions obtain real resource handles through an admitted instance
+and invocation, close admission SQL before the offline capture handler, and read
+the published capture through that same connection. Independent complete-record
+and multi-page expectations, constant/wrong-world substitutions through the
+common supplied-observer gate, and actor/handle/issuer/connection/cursor negatives
+strengthen its existing coverage without retiring any additional debt. Other
+provider worlds stay fixed, reads cannot mutate any provider world, and local
+record reads make no provider calls. This fixture runs no Roc worker or live
+Carta request. Google Directory's five actions remain explicitly pending.
+Each remaining pending action names
 an owner, reason and removal condition. New debt, duplicate records and stale
 records fail before either gate can skip an action. Closing a provider's coverage
 requires retiring its records; adding an action to a pending provider requires
