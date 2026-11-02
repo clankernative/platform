@@ -96,6 +96,12 @@ pub(in crate::security_epoch) fn malformed_ack_after_commit(provider: &mut Provi
     provider.fault = Fault::BadAck;
 }
 
+/// Fail after two real writes inside the existing SQLite transaction. Its
+/// ordinary rollback must keep all three counter records at the before state.
+pub(in crate::security_epoch) fn fail_during_commit(provider: &mut Provider) {
+    provider.fault = Fault::FailAfterTwo;
+}
+
 pub(in crate::security_epoch) fn reopen(provider: &mut Provider, path: &Path) {
     let mut replacement = Provider::open(path);
     replacement.calls = std::mem::take(&mut provider.calls);
