@@ -23,7 +23,7 @@ pub(in crate::security_epoch) struct LifecycleHandshake {
     events: usize,
     initial: Protocol,
     pending: VecDeque<Event>,
-    failed: bool,
+    failed: std::cell::Cell<bool>,
 }
 
 impl LifecycleHandshake {
@@ -58,7 +58,7 @@ impl LifecycleHandshake {
             events: 0,
             initial,
             pending: VecDeque::new(),
-            failed: false,
+            failed: std::cell::Cell::new(false),
         })
     }
 
@@ -91,7 +91,7 @@ impl LifecycleHandshake {
         endpoint: usize,
     ) -> Result<()> {
         ensure!(
-            !self.failed && endpoint < 2 && self.pending.is_empty(),
+            !self.failed.get() && endpoint < 2 && self.pending.is_empty(),
             LifecycleModelError
         );
         let mut events = Vec::new();
@@ -138,7 +138,7 @@ impl LifecycleHandshake {
     /// Advance one actual/oracle event. Only the final event returns the known
     /// result; an intermediate pause is never a completed exchange or authority.
     pub(in crate::security_epoch) fn advance_exchange(&mut self) -> Result<Option<bool>> {
-        ensure!(!self.failed, LifecycleModelError);
+        ensure!(!self.failed.get(), LifecycleModelError);
         let event = self.pending.pop_front().ok_or(LifecycleModelError)?;
         self.events += 1;
         let result = (|| {
@@ -158,13 +158,13 @@ impl LifecycleHandshake {
             }
         })();
         if result.is_err() {
-            self.failed = true;
+            self.failed.set(true);
         }
         result
     }
 
     pub(in crate::security_epoch) fn current(&self) -> Result<bool> {
-        ensure!(!self.failed, LifecycleModelError);
+        ensure!(!self.failed.get(), LifecycleModelError);
         let actual = self
             .actual
             .endpoints
@@ -175,7 +175,10 @@ impl LifecycleHandshake {
             .endpoints
             .iter()
             .all(|e| !e.refused && e.alive && e.machine.complete());
-        ensure!(actual == expected, LifecycleModelError);
+        if actual != expected {
+            self.failed.set(true);
+            return Err(LifecycleModelError.into());
+        }
         Ok(self.pending.is_empty() && actual)
     }
 
@@ -189,7 +192,7 @@ impl LifecycleHandshake {
         serde_json::json!({
             "actual":self.actual.snapshot(),"oracle":self.oracle.snapshot(),
             "seed":self.seed,"sequence":self.sequence,"events":self.events,
-            "initial":self.initial,"pending":self.pending,"failed":self.failed,
+            "initial":self.initial,"pending":self.pending,"failed":self.failed.get(),
         })
     }
 }
@@ -298,6 +301,17 @@ fn lifecycle_stepper_rejects_overlap_exhaustion_bounds_and_oracle_divergence() -
     assert!(world.advance_exchange().is_err());
     assert!(world.begin_exchange(None, 0).is_err());
     assert_eq!(world.snapshot(), failed);
+
+    let mut completed = LifecycleHandshake::new(17)?;
+    assert!(completed.exchange(None)?);
+    completed.corrupt_reference_for_control();
+    assert!(completed.current().unwrap_err().is::<LifecycleModelError>());
+    let failed = completed.snapshot();
+    assert_eq!(failed["failed"], true);
+    assert!(completed.begin_exchange(None, 0).is_err());
+    assert!(completed.advance_exchange().is_err());
+    assert!(completed.current().is_err());
+    assert_eq!(completed.snapshot(), failed);
 
     let mut bounded = LifecycleHandshake::new(17)?;
     bounded.events = 96 * MAX_EVENTS;
