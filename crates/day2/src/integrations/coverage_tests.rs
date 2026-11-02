@@ -30,8 +30,8 @@
 //! Scope: this covers transport simulations and the Workspace Directory and
 //! admitted Carta native capture/read pipeline, the admitted local mailbox,
 //! delegation's admitted-resource offline handler and the scoped synthetic Linear
-//! and operator-alert handlers. Remaining pending native/synthetic providers have
-//! explicit debt below.
+//! and operator-alert handlers plus the admitted synthetic Google Directory
+//! handler. Any future pending actions require explicit reviewed debt below.
 //! Their exact actions have reviewed debt records with owners and removal
 //! conditions. Both gates reject new or stale debt before skipping an action;
 //! classifying a whole additional provider as pending cannot shrink coverage.
@@ -62,6 +62,8 @@ mod alerts;
 mod carta;
 #[path = "delegation_coverage_tests.rs"]
 mod delegation;
+#[path = "google_directory_coverage_tests.rs"]
+mod google_directory;
 #[path = "linear_coverage_tests.rs"]
 mod linear;
 #[path = "notifications_coverage_tests.rs"]
@@ -124,8 +126,13 @@ fn demonstration(action: Action) -> Demonstration {
         Action::SlackRead
         | Action::SnowflakeRead
         | Action::DelegateQuery
-        | Action::DelegateStatus => Demonstration::ResultReflectsWorld,
+        | Action::DelegateStatus
+        | Action::GoogleDirectorySnapshot
+        | Action::GoogleDirectoryRecord => Demonstration::ResultReflectsWorld,
         Action::DelegateSend => Demonstration::EffectLandsInWorld,
+        Action::GoogleDirectoryCreateUser
+        | Action::GoogleDirectoryPatchAttributes
+        | Action::GoogleDirectoryEnsureGroupMember => Demonstration::EffectLandsInWorld,
         Action::SlackPost | Action::SlackWebhookPost => Demonstration::EffectLandsInWorld,
         // Head reads the object record; a grant refuses a key the world does not
         // hold, so both depend on the world's contents rather than only on config.
@@ -162,11 +169,6 @@ fn demonstration(action: Action) -> Demonstration {
         Action::NotificationsResolve | Action::NotificationsLatest | Action::NotificationsSend => {
             Demonstration::NotificationsAdapter
         }
-        Action::GoogleDirectorySnapshot
-        | Action::GoogleDirectoryRecord
-        | Action::GoogleDirectoryCreateUser
-        | Action::GoogleDirectoryPatchAttributes
-        | Action::GoogleDirectoryEnsureGroupMember => Demonstration::PendingAdapterSeam,
         Action::WorkspaceDirectoryCapture
         | Action::WorkspaceDirectoryUserPath
         | Action::WorkspaceDirectoryHierarchy
@@ -190,44 +192,10 @@ struct PendingDebt {
     remove_when: &'static str,
 }
 
-const ADAPTER_REASON: &str = "This action runs at the native/synthetic adapter seam and needs an admitted instance/policy harness.";
-const ADAPTER_REMOVAL: &str = "Remove when every action of this provider is driven through its real offline handler against distinguishable own worlds, with read/effect attribution and constant/wrong-world negatives.";
-
 // Existing coverage debt, not permission to admit a provider without evidence.
 // Keep individual action keys: adding an action to an existing pending provider
 // must also fail until its exact debt and removal condition receive review.
-const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[
-    PendingDebt {
-        action: Action::GoogleDirectorySnapshot,
-        owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::GoogleDirectoryRecord,
-        owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::GoogleDirectoryCreateUser,
-        owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::GoogleDirectoryPatchAttributes,
-        owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-    PendingDebt {
-        action: Action::GoogleDirectoryEnsureGroupMember,
-        owner: "platform Google directory/people adapter",
-        reason: ADAPTER_REASON,
-        remove_when: ADAPTER_REMOVAL,
-    },
-];
+const REVIEWED_PENDING_DEBT: &[PendingDebt] = &[];
 
 fn current_coverage() -> BTreeMap<Action, Demonstration> {
     Action::ALL
@@ -772,6 +740,9 @@ fn observe(action: Action, variant: Variant) -> Result<Observed> {
     }
     if action.provider() == Provider::Carta {
         return carta::observe(action, variant);
+    }
+    if action.provider() == Provider::SyntheticGoogleDirectory {
+        return google_directory::observe(action, variant);
     }
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("app.sqlite");
@@ -1459,7 +1430,7 @@ fn every_provider_is_covered_or_declared_pending() -> Result<()> {
 
 #[test]
 fn the_current_catalog_has_exactly_its_reviewed_pending_debt() -> Result<()> {
-    assert_eq!(REVIEWED_PENDING_DEBT.len(), 5);
+    assert_eq!(REVIEWED_PENDING_DEBT.len(), 0);
     validate_pending_debt(&current_coverage(), REVIEWED_PENDING_DEBT)
 }
 

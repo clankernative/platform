@@ -152,8 +152,18 @@ common supplied-observer gate, and actor/handle/issuer/connection/cursor negativ
 strengthen its existing coverage without retiring any additional debt. Other
 provider worlds stay fixed, reads cannot mutate any provider world, and local
 record reads make no provider calls. This fixture runs no Roc worker or live
-Carta request. Google Directory's five actions remain explicitly pending.
-Each remaining pending action names
+Carta request.
+
+Synthetic Google Directory's five actions now run through an admitted instance,
+activated authority/resource policies and real resource-handle binding before
+the production offline handler. Only its own customer world differs in the
+paired fixtures. Independent scoped capture/record and complete write-state
+expectations, constant/wrong-world controls, foreign actor/handle/customer and
+domain/path/group refusals cover the common attribution gate. World comparisons
+retain every customer partition and exclude only call/ledger/fault bookkeeping.
+These contract fixtures do not qualify a compiled Roc worker or Google's live
+protocol. No registered action remains pending in this composed catalog.
+Any future pending action must name
 an owner, reason and removal condition. New debt, duplicate records and stale
 records fail before either gate can skip an action. Closing a provider's coverage
 requires retiring its records; adding an action to a pending provider requires
