@@ -1545,7 +1545,7 @@ step = |raw| raw
             ),
             (
                 "probe : InteractiveContext, Credentials.ManagementSnapshot_clients -> Tx(Credentials.RotationOutcome_clients)\nprobe = |context, expected| (Credentials.clients.rotate)(context, { expected, grant: \"keep_existing\" })",
-                "RotationChoice_clients",
+                "Narrow(Credentials.GrantSelection_clients)",
             ),
             (
                 "probe = (Credentials.clients.selection_from_options)(Credentials.personal.grant_options)",
