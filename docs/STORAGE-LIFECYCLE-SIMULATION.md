@@ -53,6 +53,20 @@ control does not assert SQLite schema or data integrity. OS identities are
 compared as retained identity relationships, so replay does not depend on coincidentally reused file
 descriptor or inode numbers.
 
+A second physical matrix mutates the file after each of the six real bootstrap
+operations completes its conditional write, before the enclosing fixture phase's
+mandatory final file observation. Tampering, leaf replacement and shortening all
+refuse that phase. The independent oracle first predicts the successful durable
+write, then the physical refusal. Complete counter/slot rows and both send counts
+must equal the successful prefix even though the operation reports failure.
+Independent DATA readback, exact file restoration, provider reopen and clock
+restoration cannot erase those committed rows, revive the refused continuation
+or resend either write. Four seeds cover all eighteen operation/fault cuts, and
+each serialized history is replayed twice. A file-fault history without an actual
+initial-image input is rejected before fixture execution. These cuts model a
+known committed write followed by local refusal; they do not assert that a lost
+provider reply was unapplied or construct a native writer.
+
 The physical campaign projects the retained file's actual selection, policy,
 seed and marker after original validation and checks them again before returning
 those immutable inputs. Both conditional requests and the independent model use
