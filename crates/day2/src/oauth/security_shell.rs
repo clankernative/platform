@@ -3182,10 +3182,10 @@ mod tests {
         }
         let _ = stop.send(());
         serving.await??;
+        selected_epoch_http_advance_fences_both_families_and_saved_invocations().await?;
         Ok(())
     }
 
-    #[tokio::test]
     async fn selected_epoch_http_advance_fences_both_families_and_saved_invocations() -> Result<()>
     {
         use crate::managed_credentials::ingress;

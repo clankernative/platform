@@ -3787,7 +3787,7 @@ mod tests {
                 db.query_row(
                     "SELECT security_epoch FROM day2_credential_versions",
                     [],
-                    |r| r.get::<_, u64>(0)
+                    |r| r.get::<_, i64>(0)
                 )?,
                 7
             );
