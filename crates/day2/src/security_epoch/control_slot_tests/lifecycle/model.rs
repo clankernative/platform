@@ -251,7 +251,8 @@ impl Model {
                     Fault::ExpiredCounterReply | Fault::RewoundCounterClock
                 );
                 self.state.clock_order_failures += usize::from(fault == Fault::RewoundCounterClock);
-                self.state.counter_decode_failures += usize::from(fault == Fault::MalformedCounterReply);
+                self.state.counter_decode_failures +=
+                    usize::from(fault == Fault::MalformedCounterReply);
                 return matches!(
                     fault,
                     Fault::None | Fault::ForwardSlotClock | Fault::ForwardCounterClock

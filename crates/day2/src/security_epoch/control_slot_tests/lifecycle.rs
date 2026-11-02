@@ -1647,7 +1647,12 @@ fn generated_malformed_counter_acknowledgements_keep_commits_and_refuse_reuse() 
             "ordinary acknowledgement control did not complete"
         );
         for (index, event) in baseline.events.iter().enumerate() {
-            let Event::Bootstrap { stage, operation: Operation::Dispatch, .. } = *event else {
+            let Event::Bootstrap {
+                stage,
+                operation: Operation::Dispatch,
+                ..
+            } = *event
+            else {
                 continue;
             };
             let mut program = baseline.clone();
@@ -1660,18 +1665,40 @@ fn generated_malformed_counter_acknowledgements_keep_commits_and_refuse_reuse() 
             program.events.extend([
                 Event::RestoreClock,
                 Event::Observe { stage },
-                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
-                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Settle,
+                    fault: Fault::None,
+                },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault: Fault::None,
+                },
                 Event::Reopen,
                 Event::Observe { stage },
-                Event::Bootstrap { stage, operation: Operation::Dispatch, fault: Fault::None },
-                Event::Bootstrap { stage, operation: Operation::Settle, fault: Fault::None },
-                Event::Current { death_cut: None, rewrite_provider: false },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault: Fault::None,
+                },
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Settle,
+                    fault: Fault::None,
+                },
+                Event::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                },
             ]);
             let program: Program = serde_json::from_slice(&serde_json::to_vec(&program)?)?;
             let records = check(&program)?;
             let committed = &reference[index].state;
-            ensure!(!records[index].accepted, "malformed acknowledgement accepted");
+            ensure!(
+                !records[index].accepted,
+                "malformed acknowledgement accepted"
+            );
             for record in &records[index..] {
                 ensure!(
                     !record.state.continuation
@@ -1684,13 +1711,22 @@ fn generated_malformed_counter_acknowledgements_keep_commits_and_refuse_reuse() 
                 );
             }
             for (event, record) in program.events.iter().zip(&records).skip(index + 1) {
-                let historical_data = matches!(event, Event::RestoreClock | Event::Observe { .. } | Event::Reopen);
-                ensure!(record.accepted == historical_data, "readback or attempted reuse changed");
+                let historical_data = matches!(
+                    event,
+                    Event::RestoreClock | Event::Observe { .. } | Event::Reopen
+                );
+                ensure!(
+                    record.accepted == historical_data,
+                    "readback or attempted reuse changed"
+                );
             }
             coverage.insert(stage);
         }
     }
-    ensure!(coverage == BTreeSet::from([0, 1]), "counter acknowledgement stage coverage incomplete");
+    ensure!(
+        coverage == BTreeSet::from([0, 1]),
+        "counter acknowledgement stage coverage incomplete"
+    );
     Ok(())
 }
 
