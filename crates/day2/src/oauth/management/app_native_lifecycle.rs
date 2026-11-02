@@ -9,7 +9,7 @@ use crate::{
 };
 use day2_capabilities::security_epoch::{AuthorityScope, bootstrap::NativeRole};
 use serde_json::Value;
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeSet};
 
 const MAX_STEPS: usize = 64;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -1072,6 +1072,10 @@ impl Outcome {
 struct ReplayPair { first: Outcome, second: Outcome }
 
 impl ReplayPair {
+    fn fully_observed(&self) -> bool {
+        [&self.first, &self.second].iter().all(|outcome| !matches!(outcome, Outcome::Failed { kind: FailureKind::Unobserved, .. }))
+    }
+
     fn failure(&self) -> Option<FailureKind> {
         if self.first != self.second { return Some(FailureKind::Replay); }
         match &self.first { Outcome::Passed(_) => None, Outcome::Failed { kind, .. } => Some(*kind) }
@@ -1167,17 +1171,28 @@ fn load_pair(pair: &SavedPair, chunks: &[Value], used: &mut BTreeSet<usize>) -> 
 }
 
 fn retain_at(root: &std::path::Path, program: &Program, original: ReplayPair, control: OracleControl) -> Result<std::path::PathBuf> {
+    retain_with(root, program, original, control, replay_pair)
+}
+
+// Private test-campaign probe seam only: neither a native callback nor an SDK.
+fn retain_with(root: &std::path::Path, program: &Program, original: ReplayPair, control: OracleControl,
+    mut probe: impl FnMut(&Program, OracleControl) -> ReplayPair) -> Result<std::path::PathBuf> {
     let category = original.failure().context("consumer archive requires disagreement")?;
-    let (steps, _) = crate::oauth::simulation::reduce_steps(&program.steps, 96,
+    let (steps, observed) = crate::oauth::simulation::reduce_steps(&program.steps, 96,
         &format!("{category:?}"),
-        |error| error.downcast_ref::<RetainedFailure>().map_or("unobserved".to_owned(), |failure| format!("{:?}", failure.0)),
+        |error| error.downcast_ref::<RetainedFailure>().map_or("unobserved".to_owned(), |failure| format!("{:?}", failure.kind)),
         |steps| {
-            let pair = replay_pair(&Program { steps: steps.to_vec(), ..program.clone() }, control);
-            match pair.failure() { Some(kind) => Err(anyhow::Error::new(RetainedFailure(kind))), None => Ok(()) }
+            let pair = probe(&Program { steps: steps.to_vec(), ..program.clone() }, control);
+            match pair.failure() { Some(kind) => Err(anyhow::Error::new(RetainedFailure { kind, pair: Box::new(pair) })), None => Ok(()) }
         });
-    let reduced = Program { steps, ..program.clone() };
-    let reduced_pair = replay_pair(&reduced, control);
-    ensure!(reduced_pair.failure() == Some(category), "consumer reduction category changed");
+    // Keep the ACTUAL last winning observation. A transient disagreement need
+    // not repeat later; neither a new probe nor its failure can erase this one.
+    let (reduced, reduced_pair) = match observed.and_then(|error| error.downcast::<RetainedFailure>().ok()) {
+        Some(observed) if observed.kind == category && observed.pair.failure() == Some(category) => {
+            (Program { steps, ..program.clone() }, *observed.pair)
+        }
+        _ => (program.clone(), original.clone()),
+    };
     let mut chunks = Vec::new();
     let original_observation = store_pair(&original, &mut chunks)?;
     let reduced_observation = store_pair(&reduced_pair, &mut chunks)?;
@@ -1204,7 +1219,7 @@ fn retain_at(root: &std::path::Path, program: &Program, original: ReplayPair, co
 }
 
 #[derive(Debug)]
-struct RetainedFailure(FailureKind);
+struct RetainedFailure { kind: FailureKind, pair: Box<ReplayPair> }
 impl std::fmt::Display for RetainedFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("consumer oracle disagreement") }
 }
@@ -1235,6 +1250,19 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Bundle> {
     ensure!(bundle.records.len() <= MAX_RECORDS && bundle.records.iter().all(|record| record.bytes > 0 && record.bytes <= MAX_RECORD_BYTES), "consumer replay record bound");
     let total = bundle.records.iter().try_fold(bytes.len(), |total, record| total.checked_add(record.bytes).context("consumer archive size overflow"))?;
     ensure!(total as u64 <= MAX_BYTES, "consumer archive byte bound");
+    // Hash-pool sharing is lossless, but repeated references must not amplify a
+    // small physical archive into an unchecked giant in-memory observation.
+    let mut expanded = bytes.len();
+    for outcome in [&bundle.original_observation.first, &bundle.original_observation.second,
+        &bundle.reduced_observation.first, &bundle.reduced_observation.second] {
+        let records = match outcome { SavedOutcome::Passed { records } | SavedOutcome::Failed { records, .. } => records };
+        ensure!(records.len() <= MAX_STEPS + 1, "consumer record count bound");
+        for &index in records {
+            let record = bundle.records.get(index).context("consumer record missing")?;
+            expanded = expanded.checked_add(record.bytes).context("consumer expanded size overflow")?;
+            ensure!(expanded as u64 <= MAX_BYTES, "consumer expanded observation byte bound");
+        }
+    }
     Ok(bundle)
 }
 
@@ -1270,10 +1298,10 @@ fn replay_file_inner(path: &std::path::Path) -> Result<()> {
     let reduced = load_pair(&bundle.reduced_observation, &chunks, &mut used)?;
     ensure!(used.len() == chunks.len(), "consumer archive has unreferenced records");
     ensure!(original.failure() == Some(bundle.category) && reduced.failure() == Some(bundle.category), "consumer saved category mismatch");
+    ensure!(original.fully_observed() && reduced.fully_observed(), "unobserved consumer failure remains unqualified");
     // Validate the complete original as well as the deletion-only reduction.
     ensure!(replay_pair(&bundle.original, bundle.oracle_control) == original, "consumer original observation changed");
     ensure!(replay_pair(&bundle.reduced, bundle.oracle_control) == reduced, "consumer reduced observation changed");
-    ensure!(bundle.category != FailureKind::Unobserved, "unobserved consumer failure remains unqualified");
     Ok(())
 }
 
@@ -1317,6 +1345,19 @@ fn saved_replay_checks_source_wire_shape_and_original_history_before_execution()
         std::fs::write(&path, serde_json::to_vec(&wire)?)?;
         ensure!(replay_file(&path).is_err(), "changed counterexample was accepted");
     }
+    for step in [json!({"step":"read","extra":true}), json!({"step":"fault_refresh","fault":{"fault":"lost_reply","extra":true}})] {
+        let mut wire: Value = crate::json::decode_evidence(&original)?;
+        wire["original"]["steps"][0] = step;
+        std::fs::write(&path, serde_json::to_vec(&wire)?)?;
+        let error = replay_file_inner(&path).err().context("extra replay content accepted")?;
+        ensure!(error.to_string() == "consumer replay discarded input fields", "structural control did not hit actual discarded-field guard");
+    }
+    let mut inserted: Value = crate::json::decode_evidence(&original)?;
+    inserted["reduced"]["steps"] = json!([{"step":"fail","owner":"controller","cut":99}]);
+    std::fs::write(&path, serde_json::to_vec(&inserted)?)?;
+    let error = replay_file_inner(&path).err().context("new fault inserted by reduction")?;
+    ensure!(error.to_string() == "consumer replay reduction is not deletion-only", "inserted fault missed actual deletion guard");
+    ensure!(NATIVE.with(|slot| slot.borrow().is_none()), "rejected manifest created a native model world");
     std::fs::write(&path, &original)?;
     let bundle = decode_descriptor(&original)?;
     let record = path.parent().unwrap().join(record_name(0));let bytes = std::fs::read(&record)?;
@@ -1667,5 +1708,51 @@ fn successful_consumer_execution_is_not_a_saved_disagreement() -> Result<()> {
     let root = tempfile::tempdir()?;
     ensure!(retain_at(root.path(), &program, pair, OracleControl::None).is_err(), "success saved as failure");
     ensure!(std::fs::read_dir(root.path())?.next().is_none(), "success created failure output");
+    Ok(())
+}
+
+#[test]
+fn intermittent_consumer_failure_keeps_actual_winning_evidence_without_rerunning() -> Result<()> {
+    let program = Program { version: 1, seed: 96, steps: happy() };
+    let original = replay_pair(&program, OracleControl::OvercountFirstRead);
+    ensure!(original.failure() == Some(FailureKind::State), "initial disagreement absent");
+    for first_wins in [false, true] {
+        let mut calls = 0;
+        let root = tempfile::tempdir()?;
+        let path = retain_with(root.path(), &program, original.clone(), OracleControl::OvercountFirstRead, |_, _| {
+            calls += 1;
+            if first_wins && calls == 1 { original.clone() }
+            else { ReplayPair { first: Outcome::Passed(vec![]), second: Outcome::Passed(vec![]) } }
+        })?;
+        ensure!(calls > 1, "intermittent control never stopped reproducing");
+        let bundle = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
+        let directory = path.parent().unwrap();
+        let mut chunks = Vec::new();
+        for (index, reference) in bundle.records.iter().enumerate() {
+            let bytes = bounded_file(&directory.join(record_name(index)), reference.bytes)?;
+            chunks.push(crate::json::decode_evidence(&bytes)?);
+        }
+        let mut used = BTreeSet::new();
+        ensure!(load_pair(&bundle.original_observation, &chunks, &mut used)? == original, "original captured pair was lost");
+        ensure!(load_pair(&bundle.reduced_observation, &chunks, &mut used)? == original, "last winning pair was lost");
+        ensure!(bundle.reduced.steps.len() == program.steps.len() - usize::from(first_wins), "unwitnessed reduction was retained");
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_with_any_unobserved_outcome_cannot_qualify_or_expand_without_bound() -> Result<()> {
+    let program = Program { version: 1, seed: 97, steps: happy() };
+    let unknown = ReplayPair { first: Outcome::Failed { kind: FailureKind::Unobserved, index: None, records: vec![] }, second: Outcome::Passed(vec![]) };
+    ensure!(unknown.failure() == Some(FailureKind::Replay) && !unknown.fully_observed(), "unknown replay control invalid");
+    let root = tempfile::tempdir()?;
+    let path = retain_with(root.path(), &program, unknown, OracleControl::None, |_, _| ReplayPair { first: Outcome::Passed(vec![]), second: Outcome::Passed(vec![]) })?;
+    let error = replay_file_inner(&path).err().context("unobserved outcome qualified")?;
+    ensure!(error.to_string() == "unobserved consumer failure remains unqualified", "unknown guard did not inspect actual outcomes");
+    let mut bundle = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
+    bundle.records = vec![RecordRef { digest: Digest::new(b"bounded alias"), bytes: MAX_RECORD_BYTES }];
+    bundle.original_observation.first = SavedOutcome::Passed { records: vec![0; MAX_STEPS] };
+    let error = decode_descriptor(&serde_json::to_vec(&bundle)?).err().context("reference amplification accepted")?;
+    ensure!(error.to_string() == "consumer expanded observation byte bound", "alias control missed actual expansion guard");
     Ok(())
 }
