@@ -187,6 +187,47 @@ fn is_primary_budget_order_failure(error: &anyhow::Error) -> bool {
     error.root_cause().to_string() == "security_epoch_clock_domain_or_rewind"
 }
 
+fn is_fixture_mid_commit_failure(error: &anyhow::Error) -> bool {
+    // Pinned anyhow stores the fixture's bare bail!("literal") as &'static str.
+    // Refuse wrappers/lookalikes rather than formatting an unknown error or
+    // mistaking an outer context label for the actual primary fixture cause.
+    error.chain().count() == 1
+        && error.downcast_ref::<&'static str>().is_some_and(|message| {
+            *message == "scripted mid-commit failure"
+        })
+}
+
+#[test]
+fn fixture_rollback_classification_never_formats_or_replaces_unknown_errors() {
+    struct Opaque;
+    impl std::fmt::Display for Opaque {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("foreign Display must not run")
+        }
+    }
+    impl std::fmt::Debug for Opaque {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("foreign Debug must not run")
+        }
+    }
+    impl std::error::Error for Opaque {}
+
+    let fixed = anyhow::anyhow!("scripted mid-commit failure");
+    let primary = fixed.root_cause();
+    assert!(is_fixture_mid_commit_failure(&fixed));
+    assert!(std::ptr::eq(primary, fixed.root_cause()));
+    for unknown in [
+        anyhow::anyhow!("another fixture failure"),
+        anyhow::Error::msg("scripted mid-commit failure".to_owned()),
+        anyhow::Error::new(Opaque),
+        anyhow::Error::new(Opaque).context("scripted mid-commit failure"),
+    ] {
+        let primary = unknown.root_cause();
+        assert!(!is_fixture_mid_commit_failure(&unknown));
+        assert!(std::ptr::eq(primary, unknown.root_cause()));
+    }
+}
+
 impl World {
     fn new(seed: u64, physical: Option<&[u8]>) -> Result<Self> {
         Self::selected(seed, physical, None)
@@ -427,9 +468,7 @@ impl World {
                 }
                 // Closed synthetic fixture cause only. Do not export or keep
                 // formatted errors; a different refusal cannot satisfy this cut.
-                if result.as_ref().err().is_some_and(|error| {
-                    error.root_cause().to_string() == "scripted mid-commit failure"
-                }) {
+                if result.as_ref().err().is_some_and(is_fixture_mid_commit_failure) {
                     self.counter_rollback_failures += 1;
                 }
                 result?;
