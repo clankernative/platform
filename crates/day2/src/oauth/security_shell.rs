@@ -3186,14 +3186,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_epoch_http_advance_fences_both_families_and_saved_invocations() -> Result<()> {
+    async fn selected_epoch_http_advance_fences_both_families_and_saved_invocations() -> Result<()>
+    {
         use crate::managed_credentials::ingress;
         let world = browser_world(10)?;
         let shell = credential_shell(&world, true)?;
-        let server = crate::web::LocalServer::bind(world.runtime.clone(), "alice@example.com", 0).await?;
+        let server =
+            crate::web::LocalServer::bind(world.runtime.clone(), "alice@example.com", 0).await?;
         let origin = server.origin.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
-        let serving = tokio::spawn(server.serve(async { let _ = stopped.await; }));
+        let serving = tokio::spawn(server.serve(async {
+            let _ = stopped.await;
+        }));
         let client = reqwest::Client::new();
         let url = format!("{origin}{}credential_metadata.ping", ingress::PREFIX);
         let mut captured = Vec::new();
@@ -3202,24 +3206,64 @@ mod tests {
             ("credential_metadata.create_personal", "epoch-personal"),
         ] {
             let (path, headers, session) = navigate(&world, &shell, operation, id)?;
-            shell.dispatch(&Method::POST, &path, None, &headers, &credential_body(&session, "confirm"), world.now)?;
-            let token = credential_token(shell.dispatch(&Method::POST, &path, None, &headers, &credential_body(&session, "reveal"), world.now)?).await?;
-            assert_eq!(client.get(&url).bearer_auth(&token).send().await?.status(), StatusCode::OK);
-            let admission = ingress::prepare(&world.runtime, "credential_metadata.ping", &token, world.now)?;
+            shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "confirm"),
+                world.now,
+            )?;
+            let token = credential_token(shell.dispatch(
+                &Method::POST,
+                &path,
+                None,
+                &headers,
+                &credential_body(&session, "reveal"),
+                world.now,
+            )?)
+            .await?;
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::OK
+            );
+            let admission = ingress::prepare(
+                &world.runtime,
+                "credential_metadata.ping",
+                &token,
+                world.now,
+            )?;
             let pending = format!("pending-{id}");
-            world.runtime.accept_credential("credential_metadata.ping", &admission, &pending, &serde_json::json!({}), world.now)?;
+            world.runtime.accept_credential(
+                "credential_metadata.ping",
+                &admission,
+                &pending,
+                &serde_json::json!({}),
+                world.now,
+            )?;
             captured.push((token, pending));
         }
         let mut advanced = world.selections.clone();
-        for selection in &mut advanced { selection.security_epoch += 1; }
+        for selection in &mut advanced {
+            selection.security_epoch += 1;
+        }
         world.authority.replace(advanced.clone())?;
         assert!(world.authority.replace(world.selections.clone()).is_err());
         world.authority.replace(Vec::new())?;
         assert!(world.authority.replace(world.selections.clone()).is_err());
         world.authority.replace(advanced)?;
         for (token, pending) in captured {
-            assert_eq!(client.get(&url).bearer_auth(&token).send().await?.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(world.runtime.execute(&pending, crate::store::Fault::None)?.status, "blocked");
+            assert_eq!(
+                client.get(&url).bearer_auth(&token).send().await?.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                world
+                    .runtime
+                    .execute(&pending, crate::store::Fault::None)?
+                    .status,
+                "blocked"
+            );
             token.into_bytes().fill(0);
         }
         let _ = stop.send(());
