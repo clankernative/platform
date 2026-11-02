@@ -217,6 +217,19 @@ reconciliation refuses the fenced phase; a new writer is never activated by the
 advance. Native maintenance authorization, incumbent-lease fencing, provider
 dispatch and operational restore remain separate, unsupported work.
 
+Ordinary disabled restore also refuses retained managed-credential state when
+the current artifact and manifest no longer declare or select its family. It
+checks the actual archive in a bounded read-only preflight before creating any
+output, then checks the copied state again inside the restore transaction before
+changing authority. Committed lineage, material, receipt and delivery history,
+pending browser/confirmation records and recorded ingress origins all require
+the separate security-restore preflight; terminal state is not an exemption.
+Unknown credential-owned tables, views and case aliases refuse as well. An empty
+credential unit can still accompany an ordinary backup. These are absence
+checks, not current schema/key/epoch admission: backup verification remains
+historical inspection, and restoring private security state still needs genuine
+outside-backup fencing and its own qualified workflow.
+
 Canonical requests exclude derived after-record hashes. A domain-separated
 request digest determines both records; the immutable receipt then commits the
 request and those derived records. This avoids a recursive hash definition.

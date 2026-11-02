@@ -791,6 +791,7 @@ pub fn verify(backup: &Path) -> Result<Manifest> {
 fn require_unsecured_restore(
     manifest: &Manifest,
     artifact: &day2::artifact::LoadedArtifact,
+    backup: &Path,
 ) -> Result<()> {
     ensure!(
         artifact.id() == manifest.artifact,
@@ -802,6 +803,21 @@ fn require_unsecured_restore(
             && artifact.contract().connection_declarations.is_empty(),
         "security_restore_preflight_required"
     );
+    let mut database =
+        Connection::open_with_flags(backup.join("app.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // This connection belongs only to archive preflight. Never replace a live
+    // Runtime hook or derive execution authority from this historical read.
+    let mut ticks = 0usize;
+    database.progress_handler(
+        1_000,
+        Some(move || {
+            ticks += 1;
+            ticks >= 1_000
+        }),
+    )?;
+    let snapshot = database.transaction()?;
+    day2::store::require_no_managed_credential_restore_state(&snapshot)?;
+    snapshot.commit()?;
     Ok(())
 }
 
@@ -810,7 +826,7 @@ pub fn restore(backup: &Path, output: &Path) -> Result<PathBuf> {
     let manifest = verify(backup)?;
     let artifact_relative = format!("artifacts/{}", day2_assets::hash_part(&manifest.artifact)?);
     let artifact = day2::artifact::LoadedArtifact::load(&backup.join(&artifact_relative))?;
-    require_unsecured_restore(&manifest, &artifact)?;
+    require_unsecured_restore(&manifest, &artifact, backup)?;
     private_new(output)?;
     private_new(&output.join("artifacts"))?;
     copy_tree(

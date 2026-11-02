@@ -1300,6 +1300,7 @@ fn apply_transition_in(
 /// The caller relocates the verified artifact and commits this fence atomically.
 pub fn invalidate_restored(connection: &Connection, artifact_path: &Path) -> Result<()> {
     require_transaction(connection)?;
+    crate::store::require_no_managed_credential_restore_state(connection)?;
     upgrade(connection)?;
     if !exists(connection)? {
         return Ok(());

@@ -122,6 +122,72 @@ const CREDENTIAL_PEER_TABLES: &[&str] = &[
     "day2_credential_origins",
 ];
 
+/// Ordinary restore has no outside-backup epoch fence. Historical private
+/// state must not become restorable merely because its family was removed.
+/// This is a read-only absence check, never schema admission or permission.
+pub(crate) fn require_no_restore_state(db: &Connection) -> Result<()> {
+    let mut statement = db.prepare(
+        "SELECT type,name FROM main.sqlite_master
+         WHERE type IN ('table','view') AND lower(name) GLOB 'day2_credential_*'
+         ORDER BY name",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0usize;
+    while let Some(row) = rows.next()? {
+        count += 1;
+        ensure!(
+            count <= CREDENTIAL_TABLES.len() + CREDENTIAL_PEER_TABLES.len(),
+            "security_restore_preflight_required"
+        );
+        let kind = row.get_ref(0)?.as_str()?;
+        let name = row.get_ref(1)?.as_str()?;
+        ensure!(
+            kind == "table"
+                && (CREDENTIAL_TABLES.contains(&name) || CREDENTIAL_PEER_TABLES.contains(&name)),
+            "security_restore_preflight_required"
+        );
+        if name == "day2_credential_schema_version" {
+            // A marker is the sole exempt metadata table, never a place to
+            // hide retained private columns. Full schema/version admission
+            // remains the owning installer's responsibility.
+            let mut columns =
+                db.prepare("PRAGMA main.table_xinfo(day2_credential_schema_version)")?;
+            let mut fields = columns.query([])?;
+            let field = fields
+                .next()?
+                .context("credential restore marker missing")?;
+            ensure!(
+                field.get::<_, i64>(0)? == 0
+                    && field.get_ref(1)?.as_str()? == "version"
+                    && field.get_ref(2)?.as_str()? == "INTEGER"
+                    && field.get::<_, i64>(5)? == 1
+                    && field.get::<_, i64>(6)? == 0,
+                "security_restore_preflight_required"
+            );
+            ensure!(
+                fields.next()?.is_none(),
+                "security_restore_preflight_required"
+            );
+            let strict: i64 = db.query_row(
+                "PRAGMA main.table_list('day2_credential_schema_version')",
+                [],
+                |row| row.get(5),
+            )?;
+            ensure!(strict == 1, "security_restore_preflight_required");
+            continue;
+        }
+        // The name is one of the owning schema's constant identifiers. Never
+        // interpolate an imported identifier or read a private row's contents.
+        let occupied: bool = db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM main.{name})"),
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(!occupied, "security_restore_preflight_required");
+    }
+    Ok(())
+}
+
 /// Raw connections grant this installer ownership of a temporary progress
 /// callback. Runtime connections must enter `admit_with_runtime_hook` first;
 /// nested admission preserves their existing callback and cumulative counter.
@@ -2173,6 +2239,126 @@ mod tests {
             db.execute_batch(&guard)?;
         }
         db.execute_batch("PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON")?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_restore_allows_empty_credential_units_without_mutation() -> Result<()> {
+        let mut db = Connection::open_in_memory()?;
+        require_no_restore_state(&db)?;
+        install_schema(&db)?;
+        super::super::issuance::install(&db)?;
+        let before = database_snapshot(&db)?;
+        assert!(crate::store::require_no_managed_credential_restore_state(&db).is_err());
+        let tx = db.transaction()?;
+        crate::store::require_no_managed_credential_restore_state(&tx)?;
+        crate::authority_state::invalidate_restored(&tx, std::path::Path::new("/unused-artifact"))?;
+        tx.rollback()?;
+        assert!(database_snapshot(&db)? == before);
+        Ok(())
+    }
+
+    #[test]
+    fn restored_valid_credential_history_refuses_before_authority_changes_and_after_reopen()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("retired-family.sqlite");
+        let mut db = Connection::open(&path)?;
+        install_schema(&db)?;
+        committed_issue(&mut db)?;
+        // This is valid committed private history, independent of a currently
+        // selected family or an artifact's now-removed declaration.
+        install_schema(&db)?;
+        let before = database_snapshot(&db)?;
+        let tx = db.transaction()?;
+        let error = crate::authority_state::invalidate_restored(
+            &tx,
+            std::path::Path::new("/must-not-read-or-publish-artifact"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<&str>(),
+            Some(&"security_restore_preflight_required")
+        );
+        assert!(database_snapshot(&tx)? == before);
+        tx.rollback()?;
+        drop(db);
+        let mut db =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let tx = db.transaction()?;
+        let error = crate::store::require_no_managed_credential_restore_state(&tx).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<&str>(),
+            Some(&"security_restore_preflight_required")
+        );
+        assert!(database_snapshot(&tx)? == before);
+        tx.rollback()?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_credential_payload_table_requires_restore_fencing_without_reading_values() -> Result<()>
+    {
+        for table in CREDENTIAL_TABLES.iter().chain(CREDENTIAL_PEER_TABLES) {
+            if *table == "day2_credential_schema_version" {
+                continue;
+            }
+            let db = Connection::open_in_memory()?;
+            db.execute_batch(&format!("CREATE TABLE {table}(private BLOB) STRICT"))?;
+            require_no_restore_state(&db)?;
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(?1)"),
+                [vec![23_u8; 32]],
+            )?;
+            db.execute_batch(&format!("CREATE TEMP TABLE {table}(private BLOB) STRICT"))?;
+            assert!(require_no_restore_state(&db).is_err(), "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restore_refuses_unknown_case_aliased_view_and_payload_marker_objects() -> Result<()> {
+        for ddl in [
+            "CREATE TABLE day2_credential_future(value TEXT)",
+            "CREATE TABLE DAY2_CREDENTIAL_LINEAGES(value TEXT)",
+            "CREATE VIEW day2_credential_lineages AS SELECT * FROM must_not_execute",
+            "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY,private BLOB) STRICT",
+            "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY);
+             CREATE TABLE pragma_table_list(schema TEXT,name TEXT,strict INTEGER);
+             INSERT INTO pragma_table_list VALUES('main','day2_credential_schema_version',1)",
+        ] {
+            let db = Connection::open_in_memory()?;
+            db.execute_batch(ddl)?;
+            let error = require_no_restore_state(&db).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"security_restore_preflight_required")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restore_absence_check_preserves_the_callers_sqlite_progress_hook() -> Result<()> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let db = current_database()?;
+        let samples = Arc::new(AtomicUsize::new(0));
+        let observed = samples.clone();
+        db.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+        )?;
+        require_no_restore_state(&db)?;
+        let after = samples.load(Ordering::SeqCst);
+        assert!(after > 0);
+        db.query_row("SELECT 1", [], |_| Ok(()))?;
+        assert!(samples.load(Ordering::SeqCst) > after);
         Ok(())
     }
 

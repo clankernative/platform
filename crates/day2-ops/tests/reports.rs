@@ -283,6 +283,49 @@ fn online_backup_restores_wal_data_into_a_new_instance_and_rejects_tampering() -
 /// Current backups remain bound to their admitted artifact. Ordinary disabled
 /// restore must read declarations before creating any output directory.
 #[test]
+fn unsecured_restore_refuses_retained_private_state_after_selection_removal() -> Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let runtime = development::create(&artifact()?, &scratch.path().join("original"), None)?;
+    let snapshot = scratch.path().join("backup");
+    let mut manifest = backup::take(runtime.instance_path(), "app", &snapshot)?;
+    assert!(manifest.instance.apps["app"].credential_families.is_empty());
+    assert!(
+        LoadedArtifact::load(&artifact()?)?
+            .contract()
+            .credential_declarations
+            .is_empty()
+    );
+    // Imported private state is not evidence that this ordinary backup may be
+    // restored. Keep the normal manifest/database digest and authority checks
+    // valid, so this reaches the real write-boundary preflight.
+    {
+        let database = rusqlite::Connection::open(snapshot.join("app.sqlite"))?;
+        database.execute_batch(
+            "CREATE TABLE day2_credential_unrecognized_history(private BLOB) STRICT;
+             INSERT INTO day2_credential_unrecognized_history VALUES(zeroblob(32));
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+    }
+    manifest.database = day2::digest(&fs::read(snapshot.join("app.sqlite"))?);
+    fs::write(
+        snapshot.join("backup.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    backup::verify(&snapshot)?;
+    let source = fs::read(snapshot.join("app.sqlite"))?;
+    let output = scratch.path().join("restored");
+    let error = backup::restore(&snapshot, &output).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("security_restore_preflight_required")
+    );
+    assert!(!output.exists());
+    assert!(fs::read(snapshot.join("app.sqlite"))? == source);
+    Ok(())
+}
+
+#[test]
 fn unsecured_restore_refuses_declared_credentials_and_oauth_before_output_mutation() -> Result<()> {
     for (variable, credentials) in [
         ("DAY2_TEST_CREDENTIAL_METADATA_ARTIFACT", true),
