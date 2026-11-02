@@ -1178,7 +1178,7 @@ fn retain_at(root: &std::path::Path, program: &Program, original: ReplayPair, co
 fn retain_with(root: &std::path::Path, program: &Program, original: ReplayPair, control: OracleControl,
     mut probe: impl FnMut(&Program, OracleControl) -> ReplayPair) -> Result<std::path::PathBuf> {
     let category = original.failure().context("consumer archive requires disagreement")?;
-    let (steps, observed) = if category == FailureKind::Unobserved {
+    let (steps, observed) = if !original.fully_observed() {
         // An unavailable cause cannot justify reducing the original input.
         (program.steps.clone(), None)
     } else {
@@ -1768,11 +1768,18 @@ fn replay_with_any_unobserved_outcome_cannot_qualify_or_expand_without_bound() -
 fn unobserved_consumer_failure_never_reduces_to_invalid_empty_input() -> Result<()> {
     let program = Program { version: 1, seed: 98, steps: happy() };
     let outcome = Outcome::Failed { kind: FailureKind::Unobserved, index: None, records: vec![] };
-    let pair = ReplayPair { first: outcome.clone(), second: outcome };
-    let root = tempfile::tempdir()?;
-    let path = retain_with(root.path(), &program, pair, OracleControl::None, |_, _| panic!("unobserved failure was minimized"))?;
-    let descriptor = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
-    ensure!(descriptor.reduced.steps == program.steps, "unknown cause lost original history");
-    ensure!(replay_file(&path).is_err(), "unobserved cause qualified");
+    for other in [outcome.clone(), Outcome::Passed(vec![]),
+        Outcome::Failed { kind: FailureKind::State, index: Some(0), records: vec![] }] {
+        for (first, second) in [(outcome.clone(), other.clone()), (other, outcome.clone())] {
+            let pair = ReplayPair { first, second };
+            let root = tempfile::tempdir()?;
+            let path = retain_with(root.path(), &program, pair.clone(), OracleControl::None, |_, _| panic!("unobserved failure was minimized"))?;
+            let descriptor = decode_descriptor(&bounded_file(&path, MAX_RECORD_BYTES)?)?;
+            ensure!(descriptor.reduced.steps == program.steps, "unknown cause lost original history");
+            let mut used = BTreeSet::new();
+            ensure!(load_pair(&descriptor.reduced_observation, &[], &mut used)? == pair, "unknown outcomes changed");
+            ensure!(replay_file(&path).is_err(), "unobserved cause qualified");
+        }
+    }
     Ok(())
 }
