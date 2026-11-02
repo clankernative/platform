@@ -74,10 +74,22 @@ struct Provider {
 
 fn require_fixture_versions(before: &Snapshot) -> Result<()> {
     ensure!(
-        before.root.as_ref().is_some_and(|r|r.version==version(2))
-            && before.sentinel.as_ref().is_some_and(|r|r.version==version(2))
-            && before.create.as_ref().is_some_and(|r|r.version==version(1))
-            && before.activate.as_ref().is_some_and(|r|r.version==version(2)),
+        before
+            .root
+            .as_ref()
+            .is_some_and(|r| r.version == version(2))
+            && before
+                .sentinel
+                .as_ref()
+                .is_some_and(|r| r.version == version(2))
+            && before
+                .create
+                .as_ref()
+                .is_some_and(|r| r.version == version(1))
+            && before
+                .activate
+                .as_ref()
+                .is_some_and(|r| r.version == version(2)),
         "epoch_advance_fixture_version_domain"
     );
     Ok(())
@@ -131,7 +143,7 @@ impl Provider {
         row.map(|(body, revision)| {
             Ok(Versioned {
                 value: serde_json::from_str(&body)?,
-                    version: version(revision.try_into()?),
+                version: version(revision.try_into()?),
             })
         })
         .transpose()
@@ -184,7 +196,10 @@ impl Provider {
                 [name],
                 |r| r.get(0),
             )?;
-            ensure!(&version(revision.try_into()?) == expected, "fixture CAS refused");
+            ensure!(
+                &version(revision.try_into()?) == expected,
+                "fixture CAS refused"
+            );
         }
         let key = plan.receipt.request.operation.as_str();
         for (name, body, revision) in [
@@ -323,20 +338,28 @@ fn exact_request_receipt_and_both_versions_are_required() -> Result<()> {
     }
     assert_eq!(request.selection, Digest::of(&selection)?);
     for (pointer, replacement) in [
-        ("/scope/installation",json!("other")),
-        ("/scope/environment",json!("other")),
-        ("/scope/app",json!("other")),
-        ("/provider/project",json!("other-project")),
-        ("/provider/project_number",json!(8)),
-        ("/provider/database_uid",json!("11234567-89ab-4cde-8fab-0123456789ab")),
-        ("/provider/iam_source/service_account_uid",json!("100000000000000000008")),
-        ("/key_set",json!(Digest::new(b"other keys"))),
-        ("/max_lease_seconds",json!(4)),
+        ("/scope/installation", json!("other")),
+        ("/scope/environment", json!("other")),
+        ("/scope/app", json!("other")),
+        ("/provider/project", json!("other-project")),
+        ("/provider/project_number", json!(8)),
+        (
+            "/provider/database_uid",
+            json!("11234567-89ab-4cde-8fab-0123456789ab"),
+        ),
+        (
+            "/provider/iam_source/service_account_uid",
+            json!("100000000000000000008"),
+        ),
+        ("/key_set", json!(Digest::new(b"other keys"))),
+        ("/max_lease_seconds", json!(4)),
     ] {
-        let mut value=serde_json::to_value(&selection)?;
-        *value.pointer_mut(pointer).context("selection fixture field")?=replacement;
-        let foreign:EpochStore=serde_json::from_value(value)?;
-        assert!(request.prepare(&foreign,&before).is_err(),"{pointer}");
+        let mut value = serde_json::to_value(&selection)?;
+        *value
+            .pointer_mut(pointer)
+            .context("selection fixture field")? = replacement;
+        let foreign: EpochStore = serde_json::from_value(value)?;
+        assert!(request.prepare(&foreign, &before).is_err(), "{pointer}");
     }
     let mut provider = Provider::new(&before)?;
     provider.apply(&request.prepare(&selection, &before)?, Cut::Known)?;
@@ -349,16 +372,25 @@ fn exact_request_receipt_and_both_versions_are_required() -> Result<()> {
     let mut changed = stored.clone();
     changed.value.request_digest = Digest::new(b"foreign receipt");
     assert!(reconcile(&selection, &request, &observed, Some(&changed)).is_err());
-    for component in ["root","sentinel","create","activate"] {
-        let mut changed=observed.clone();
+    for component in ["root", "sentinel", "create", "activate"] {
+        let mut changed = observed.clone();
         match component {
-            "root"=>changed.root=before.root.clone(),
-            "sentinel"=>changed.sentinel=before.sentinel.clone(),
-            "create"=>changed.create.as_mut().unwrap().value.request_digest=Digest::new(b"substituted history"),
-            "activate"=>changed.activate.as_mut().unwrap().value.request_digest=Digest::new(b"substituted history"),
-            _=>unreachable!(),
+            "root" => changed.root = before.root.clone(),
+            "sentinel" => changed.sentinel = before.sentinel.clone(),
+            "create" => {
+                changed.create.as_mut().unwrap().value.request_digest =
+                    Digest::new(b"substituted history")
+            }
+            "activate" => {
+                changed.activate.as_mut().unwrap().value.request_digest =
+                    Digest::new(b"substituted history")
+            }
+            _ => unreachable!(),
         }
-        assert!(reconcile(&selection,&request,&changed,Some(&stored)).is_err(),"{component}");
+        assert!(
+            reconcile(&selection, &request, &changed, Some(&stored)).is_err(),
+            "{component}"
+        );
     }
     let competing = Request::new(&selection, Digest::new(b"competing"), &before)?;
     assert!(
@@ -404,25 +436,34 @@ fn fenced_phase_wire_is_closed_and_preserves_the_bootstrap_epoch() -> Result<()>
     ] {
         assert!(Request::new(&selection, reused.clone(), &before).is_err());
     }
-    let fence=serde_json::to_string(&encoded["fence"])?;
-    let duplicate=format!("{{\"phase\":\"fenced\",\"fence\":{fence},\"fence\":{fence}}}");
+    let fence = serde_json::to_string(&encoded["fence"])?;
+    let duplicate = format!("{{\"phase\":\"fenced\",\"fence\":{fence},\"fence\":{fence}}}");
     assert!(serde_json::from_str::<Phase>(&duplicate).is_err());
     assert!(crate::json::decode::<Phase>(duplicate.as_bytes()).is_err());
-    let repeated=serde_json::to_string(&encoded["fence"]["operation"])?;
-    let nested=fence.replacen("{",&format!("{{\"operation\":{repeated},"),1);
-    let nested=format!("{{\"phase\":\"fenced\",\"fence\":{nested}}}");
+    let repeated = serde_json::to_string(&encoded["fence"]["operation"])?;
+    let nested = fence.replacen("{", &format!("{{\"operation\":{repeated},"), 1);
+    let nested = format!("{{\"phase\":\"fenced\",\"fence\":{nested}}}");
     assert!(serde_json::from_str::<Phase>(&nested).is_err());
-    let mut sequence=encoded.clone();
-    sequence["fence"]=Value::Array(encoded["fence"].as_object().unwrap().values().cloned().collect());
+    let mut sequence = encoded.clone();
+    sequence["fence"] = Value::Array(
+        encoded["fence"]
+            .as_object()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect(),
+    );
     assert!(serde_json::from_value::<Phase>(sequence).is_err());
-    let completion=serde_json::to_value(&before.root.as_ref().unwrap().value.phase)?;
-    let completion_payload=serde_json::to_string(&completion["completion"])?;
-    let repeated=serde_json::to_string(&completion["completion"]["operation"])?;
-    let duplicate_completion=completion_payload.replacen("{",&format!("{{\"operation\":{repeated},"),1);
-    let raw=format!("{{\"phase\":\"active_first_holder\",\"completion\":{duplicate_completion}}}");
+    let completion = serde_json::to_value(&before.root.as_ref().unwrap().value.phase)?;
+    let completion_payload = serde_json::to_string(&completion["completion"])?;
+    let repeated = serde_json::to_string(&completion["completion"]["operation"])?;
+    let duplicate_completion =
+        completion_payload.replacen("{", &format!("{{\"operation\":{repeated},"), 1);
+    let raw =
+        format!("{{\"phase\":\"active_first_holder\",\"completion\":{duplicate_completion}}}");
     assert!(serde_json::from_str::<Phase>(&raw).is_err());
-    let mut unsupported=serde_json::to_value(&request.activation.request)?;
-    unsupported["action"]=json!("advance_epoch");
+    let mut unsupported = serde_json::to_value(&request.activation.request)?;
+    unsupported["action"] = json!("advance_epoch");
     assert!(serde_json::from_value::<InitialRequest>(unsupported).is_err());
     Ok(())
 }

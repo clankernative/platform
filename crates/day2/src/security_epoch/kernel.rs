@@ -273,7 +273,9 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for PhaseObject<T> {
                 T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
             }
         }
-        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData)).map(Self)
+        deserializer
+            .deserialize_map(ObjectVisitor(std::marker::PhantomData))
+            .map(Self)
     }
 }
 
@@ -327,7 +329,9 @@ impl<'de> Deserialize<'de> for Phase {
                 }
                 match (phase.as_deref(), completion, fence) {
                     (Some("pending_first_holder"), None, None) => Ok(Phase::PendingFirstHolder),
-                    (Some("active_first_holder"), Some(completion), None) => Ok(Phase::ActiveFirstHolder { completion }),
+                    (Some("active_first_holder"), Some(completion), None) => {
+                        Ok(Phase::ActiveFirstHolder { completion })
+                    }
                     (Some("fenced"), None, Some(fence)) => Ok(Phase::Fenced { fence }),
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
                 }
