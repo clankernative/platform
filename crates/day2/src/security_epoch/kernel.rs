@@ -7,6 +7,8 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize};
 
+pub(super) mod advance;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
@@ -251,6 +253,7 @@ pub(super) struct Completion {
 pub(super) enum Phase {
     PendingFirstHolder,
     ActiveFirstHolder { completion: Box<Completion> },
+    Fenced { fence: Box<advance::Fence> },
 }
 
 impl<'de> Deserialize<'de> for Phase {
@@ -272,6 +275,7 @@ impl<'de> Deserialize<'de> for Phase {
                 use serde::de::Error;
                 let mut phase = None;
                 let mut completion = None;
+                let mut fence = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "phase" => {
@@ -286,14 +290,25 @@ impl<'de> Deserialize<'de> for Phase {
                             }
                             completion = Some(map.next_value::<serde_json::Value>()?);
                         }
-                        _ => return Err(A::Error::unknown_field(&key, &["phase", "completion"])),
+                        "fence" => {
+                            if fence.is_some() {
+                                return Err(A::Error::duplicate_field("fence"));
+                            }
+                            fence = Some(map.next_value::<serde_json::Value>()?);
+                        }
+                        _ => return Err(A::Error::unknown_field(&key, &["phase", "completion", "fence"])),
                     }
                 }
-                match (phase.as_deref(), completion) {
-                    (Some("pending_first_holder"), None) => Ok(Phase::PendingFirstHolder),
-                    (Some("active_first_holder"), Some(value)) if value.is_object() => {
+                match (phase.as_deref(), completion, fence) {
+                    (Some("pending_first_holder"), None, None) => Ok(Phase::PendingFirstHolder),
+                    (Some("active_first_holder"), Some(value), None) if value.is_object() => {
                         Ok(Phase::ActiveFirstHolder {
                             completion: serde_json::from_value(value).map_err(A::Error::custom)?,
+                        })
+                    }
+                    (Some("fenced"), None, Some(value)) if value.is_object() => {
+                        Ok(Phase::Fenced {
+                            fence: serde_json::from_value(value).map_err(A::Error::custom)?,
                         })
                     }
                     _ => Err(A::Error::custom("invalid closed external epoch phase")),
@@ -471,6 +486,7 @@ pub(super) fn reconcile(
             );
             receipt.request.clone()
         }
+        Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
     };
     let (expected_root, expected_sentinel) = state_request.records()?;
     ensure!(
@@ -496,6 +512,7 @@ pub(super) fn reconcile(
                 );
                 Ok(Outcome::Applied(Box::new(request.receipt()?)))
             }
+            Phase::Fenced { .. } => anyhow::bail!("security_epoch_authority_fenced"),
         },
     }
 }
