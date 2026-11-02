@@ -1428,6 +1428,7 @@ mod tests {
                     "input",
                     "family",
                     "intent",
+                    "rotation_grant",
                     "artifact",
                     "authority",
                     "binding",
