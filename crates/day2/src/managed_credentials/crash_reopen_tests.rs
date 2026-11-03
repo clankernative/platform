@@ -36,8 +36,7 @@ mod delivery;
 const ACTOR: &str = "alice@example.com";
 const INVOCATION: &str = "credential-crash-issuance";
 const NOW: i64 = 1_000;
-const CHILD: &str =
-    "managed_credentials::simulation::crash_reopen::credential_crash_child";
+const CHILD: &str = "managed_credentials::simulation::crash_reopen::credential_crash_child";
 const CHILD_CONFIG: &str = "DAY2_CREDENTIAL_CRASH_CHILD";
 const WAIT: Duration = Duration::from_secs(60);
 const PRIVATE_TABLES: &[&str] = &[
@@ -119,7 +118,12 @@ struct Case {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "case", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "operation",
+    content = "case",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 enum ChildCase {
     Issue(Case),
     Delivery(delivery::Case),
@@ -442,8 +446,7 @@ fn capture_lifecycle(db: &Connection, e: &Expected) -> Result<Snapshot> {
         available: false,
     };
     ensure!(
-        count(db, "use_receipts")? == 0
-            && n("day2_credential_revocations") == 0,
+        count(db, "use_receipts")? == 0 && n("day2_credential_revocations") == 0,
         "issuance changed an unrelated lifecycle table"
     );
     let (status, outcome): (String, Option<String>) = db.query_row(
@@ -750,43 +753,43 @@ fn credential_crash_child() -> Result<()> {
             phase = 4;
             match config.case {
                 ChildCase::Issue(case) => {
-            let armed = matches!(
-                config.behavior,
-                Behavior::Pause | Behavior::ExitAtCheckpoint
-            );
-            if armed {
-                FRAME.with(|slot| {
-                    ensure!(
-                        slot.borrow().is_none(),
-                        "credential child checkpoint already armed"
+                    let armed = matches!(
+                        config.behavior,
+                        Behavior::Pause | Behavior::ExitAtCheckpoint
                     );
-                    *slot.borrow_mut() = Some(Frame {
-                        id: INVOCATION.into(),
-                        database: runtime.db().to_owned(),
-                        artifact: runtime.artifact().id().into(),
-                        pid: std::process::id(),
-                        thread: std::thread::current().id(),
-                        expected: expectation,
-                        cut: case.cut,
-                        before: None,
-                        exit_instead: matches!(config.behavior, Behavior::ExitAtCheckpoint),
-                    });
-                    Ok::<_, anyhow::Error>(())
-                })?;
-            }
-            struct Reset;
-            impl Drop for Reset {
-                fn drop(&mut self) {
-                    FRAME.with(|slot| *slot.borrow_mut() = None);
-                }
-            }
-            let _reset = Reset;
-            let outcome = runtime.execute(INVOCATION, Fault::None)?;
-            ensure!(
-                outcome.status == "success",
-                "credential child command failed"
-            );
-            ensure!(!armed, "credential requested checkpoint was never reached");
+                    if armed {
+                        FRAME.with(|slot| {
+                            ensure!(
+                                slot.borrow().is_none(),
+                                "credential child checkpoint already armed"
+                            );
+                            *slot.borrow_mut() = Some(Frame {
+                                id: INVOCATION.into(),
+                                database: runtime.db().to_owned(),
+                                artifact: runtime.artifact().id().into(),
+                                pid: std::process::id(),
+                                thread: std::thread::current().id(),
+                                expected: expectation,
+                                cut: case.cut,
+                                before: None,
+                                exit_instead: matches!(config.behavior, Behavior::ExitAtCheckpoint),
+                            });
+                            Ok::<_, anyhow::Error>(())
+                        })?;
+                    }
+                    struct Reset;
+                    impl Drop for Reset {
+                        fn drop(&mut self) {
+                            FRAME.with(|slot| *slot.borrow_mut() = None);
+                        }
+                    }
+                    let _reset = Reset;
+                    let outcome = runtime.execute(INVOCATION, Fault::None)?;
+                    ensure!(
+                        outcome.status == "success",
+                        "credential child command failed"
+                    );
+                    ensure!(!armed, "credential requested checkpoint was never reached");
                 }
                 ChildCase::Delivery(case) => {
                     delivery::execute(&runtime, case, config.behavior, &expectation)?;
@@ -1074,19 +1077,22 @@ async fn checked(case: Case, artifact: &str) -> Result<Observation> {
 
 fn retain_failure(case: ChildCase, artifact: &str) -> Result<()> {
     // No downstream error, private snapshots, identifiers or entropy.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../artifacts/credential-crash-reopen");
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/credential-crash-reopen");
     fs::create_dir_all(&root)?;
     let directory = tempfile::Builder::new()
         .prefix("failure-")
         .tempdir_in(root)?
         .keep();
-    fs::write(directory.join("failure.json"), serde_json::to_vec(&Replay {
-        format: 2,
-        implementation: implementation(),
-        artifact: artifact.into(),
-        case,
-    })?)?;
+    fs::write(
+        directory.join("failure.json"),
+        serde_json::to_vec(&Replay {
+            format: 2,
+            implementation: implementation(),
+            artifact: artifact.into(),
+            case,
+        })?,
+    )?;
     Ok(())
 }
 
@@ -1109,7 +1115,13 @@ async fn fixed_client_and_personal_issuance_survive_real_process_loss_and_reopen
             seed: 11,
         };
         let fixture = Fixture::new(baseline_case)?;
-        child(&fixture, ChildCase::Issue(baseline_case), Behavior::Complete, false).await?;
+        child(
+            &fixture,
+            ChildCase::Issue(baseline_case),
+            Behavior::Complete,
+            false,
+        )
+        .await?;
         let ports = Ports::new(12);
         effects::scope(ports, || -> Result<()> {
             let runtime = load_runtime(&fixture.instance, 11)?;
@@ -1200,13 +1212,24 @@ async fn real_child_cut_and_death_guards_refuse_normal_exit_and_missing_checkpoi
     child(&baseline, ChildCase::Issue(case), Behavior::Pause, true).await?;
     let skipped = Fixture::new(case)?;
     ensure!(
-        child(&skipped, ChildCase::Issue(case), Behavior::SkipCheckpoint, true)
-            .await
-            .is_err(),
+        child(
+            &skipped,
+            ChildCase::Issue(case),
+            Behavior::SkipCheckpoint,
+            true
+        )
+        .await
+        .is_err(),
         "missing checkpoint passed actual guard"
     );
     let graceful = Fixture::new(case)?;
-    let status = child(&graceful, ChildCase::Issue(case), Behavior::ExitAtCheckpoint, false).await?;
+    let status = child(
+        &graceful,
+        ChildCase::Issue(case),
+        Behavior::ExitAtCheckpoint,
+        false,
+    )
+    .await?;
     ensure!(
         require_killed(&status).is_err(),
         "normal child exit counted as crash"
@@ -1294,8 +1317,12 @@ async fn replay_saved_credential_process_loss() -> Result<()> {
     fs::File::open(path)?.take(4097).read_to_end(&mut bytes)?;
     let artifact = artifact_id()?;
     match decode_replay(&bytes, &artifact)? {
-        ChildCase::Issue(case) => { checked(case, &artifact).await?; }
-        ChildCase::Delivery(case) => { delivery::checked(case, &artifact).await?; }
+        ChildCase::Issue(case) => {
+            checked(case, &artifact).await?;
+        }
+        ChildCase::Delivery(case) => {
+            delivery::checked(case, &artifact).await?;
+        }
     }
     Ok(())
 }
