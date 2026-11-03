@@ -453,15 +453,23 @@ pub(in crate::security_epoch) struct LifecycleReference {
 
 impl LifecycleReference {
     pub(in crate::security_epoch) fn new(seed: u64) -> Result<Self> {
+        Self::selected(seed, Protocol::InitialStorage)
+    }
+
+    pub(in crate::security_epoch) fn serving(seed: u64) -> Result<Self> {
+        Self::selected(seed, Protocol::InitialServing)
+    }
+
+    fn selected(seed: u64, protocol: Protocol) -> Result<Self> {
         let program = Program {
             version: 1,
             seed,
-            protocol: Protocol::InitialStorage,
+            protocol,
             events: vec![],
         };
         Ok(Self {
             world: World::new(&program)?,
-            schedule: Schedule::new(seed, Protocol::InitialStorage),
+            schedule: Schedule::new(seed, protocol),
             failed: std::cell::Cell::new(false),
         })
     }
