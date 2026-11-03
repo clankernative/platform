@@ -36,6 +36,7 @@ struct Schedule {
     sequence: u64,
     events: usize,
     initial: Protocol,
+    purpose: StagePurpose,
     started: bool,
     pending: VecDeque<Event>,
 }
@@ -47,13 +48,36 @@ impl Schedule {
             sequence: 0,
             events: 0,
             initial,
+            purpose: if initial == Protocol::InitialStorage {
+                StagePurpose::InitialFirstHolder
+            } else {
+                StagePurpose::CurrentRole
+            },
             started: false,
             pending: VecDeque::new(),
         }
     }
 
-    fn begin(&mut self, death_cut: Option<usize>, endpoint: usize) -> Result<()> {
+    fn begin(
+        &mut self,
+        death_cut: Option<usize>,
+        endpoint: usize,
+        purpose: StagePurpose,
+    ) -> Result<()> {
         ensure!(endpoint < 2 && self.pending.is_empty(), LifecycleModelError);
+        ensure!(
+            matches!(
+                (self.started, self.initial, purpose),
+                (false, _, StagePurpose::CurrentRole)
+                    | (
+                        true,
+                        Protocol::InitialStorage,
+                        StagePurpose::CurrentRole | StagePurpose::StorageBootstrap,
+                    )
+                    | (true, Protocol::InitialServing, StagePurpose::CurrentRole)
+            ),
+            LifecycleModelError
+        );
         let mut events = Vec::new();
         let sequence = if !self.started {
             0
@@ -67,7 +91,7 @@ impl Schedule {
                 events.push(Event::BeginCurrent {
                     endpoint,
                     sequence,
-                    purpose: StagePurpose::CurrentRole,
+                    purpose,
                 });
             }
             match self.initial {
@@ -91,6 +115,9 @@ impl Schedule {
             LifecycleModelError
         );
         self.sequence = sequence;
+        if self.started {
+            self.purpose = purpose;
+        }
         self.started = true;
         self.pending = events.into();
         Ok(())
@@ -111,7 +138,7 @@ impl Schedule {
 
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({"seed":self.seed,"sequence":self.sequence,
-            "events":self.events,"initial":self.initial,"started":self.started,"pending":self.pending})
+            "events":self.events,"initial":self.initial,"purpose":self.purpose,"started":self.started,"pending":self.pending})
     }
 }
 
@@ -171,7 +198,18 @@ impl LifecycleHandshake {
         endpoint: usize,
     ) -> Result<()> {
         ensure!(!self.failed.get(), LifecycleModelError);
-        self.schedule.begin(death_cut, endpoint)
+        self.schedule
+            .begin(death_cut, endpoint, StagePurpose::CurrentRole)
+    }
+
+    pub(in crate::security_epoch) fn begin_bootstrap_exchange(
+        &mut self,
+        death_cut: Option<usize>,
+        endpoint: usize,
+    ) -> Result<()> {
+        ensure!(!self.failed.get(), LifecycleModelError);
+        self.schedule
+            .begin(death_cut, endpoint, StagePurpose::StorageBootstrap)
     }
 
     /// Advance one actual/oracle event. Only the final event returns the known
@@ -252,6 +290,61 @@ impl LifecycleHandshake {
         Ok(self.schedule.initial == Protocol::InitialStorage
             && self.schedule.sequence == 0
             && actual)
+    }
+
+    fn controller_next_is(&self, step: super::super::Step) -> Result<bool> {
+        if self.progress()? == LifecycleProgress::Refused {
+            return Ok(false);
+        }
+        let actual = (
+            self.actual.endpoints[1].machine.next(),
+            matches!(self.actual.endpoints[1].attempt, Attempt::Idle),
+        );
+        let expected = (
+            self.oracle.endpoints[1].machine.next(),
+            matches!(self.oracle.endpoints[1].attempt, Attempt::Idle),
+        );
+        if actual != expected {
+            self.failed.set(true);
+            return Err(LifecycleModelError.into());
+        }
+        Ok(self.schedule.sequence > 0
+            && actual
+                == (
+                    Some((
+                        Direction::Send,
+                        Frame {
+                            protocol: Protocol::CurrentStorage,
+                            step,
+                            sequence: None,
+                        },
+                    )),
+                    true,
+                ))
+    }
+
+    pub(in crate::security_epoch) fn bootstrap_work_ready(&self) -> Result<bool> {
+        Ok(self.schedule.purpose == StagePurpose::StorageBootstrap
+            && self.controller_next_is(super::super::Step::Known)?)
+    }
+
+    pub(in crate::security_epoch) fn controller_consumed_checked(&self) -> Result<bool> {
+        self.controller_next_is(super::super::Step::Released)
+    }
+
+    pub(in crate::security_epoch) fn lose_packet(&mut self, sender: usize) -> Result<bool> {
+        ensure!(!self.failed.get() && sender < 2, LifecycleModelError);
+        self.observation_budget()?;
+        let event = Event::Lose { sender };
+        match (self.actual.step(&event), self.oracle.step(&event)) {
+            (Ok(actual), Ok(expected)) if actual == expected => {
+                Ok(actual.outcome == Outcome::Accepted)
+            }
+            _ => {
+                self.failed.set(true);
+                Err(LifecycleModelError.into())
+            }
+        }
     }
 
     fn observation_budget(&mut self) -> Result<()> {
@@ -379,7 +472,18 @@ impl LifecycleReference {
         endpoint: usize,
     ) -> Result<()> {
         ensure!(!self.failed.get(), LifecycleModelError);
-        self.schedule.begin(death_cut, endpoint)
+        self.schedule
+            .begin(death_cut, endpoint, StagePurpose::CurrentRole)
+    }
+
+    pub(in crate::security_epoch) fn begin_bootstrap_exchange(
+        &mut self,
+        death_cut: Option<usize>,
+        endpoint: usize,
+    ) -> Result<()> {
+        ensure!(!self.failed.get(), LifecycleModelError);
+        self.schedule
+            .begin(death_cut, endpoint, StagePurpose::StorageBootstrap)
     }
 
     pub(in crate::security_epoch) fn advance_exchange(&mut self) -> Result<Option<bool>> {
@@ -435,6 +539,42 @@ impl LifecycleReference {
             && self.schedule.sequence == 0
             && self.world.endpoints[1].machine.complete()
             && matches!(self.world.endpoints[1].attempt, Attempt::Idle))
+    }
+
+    fn controller_next_is(&self, step: super::super::Step) -> Result<bool> {
+        Ok(self.progress()? != LifecycleProgress::Refused
+            && self.schedule.sequence > 0
+            && matches!(self.world.endpoints[1].attempt, Attempt::Idle)
+            && self.world.endpoints[1].machine.next()
+                == Some((
+                    Direction::Send,
+                    Frame {
+                        protocol: Protocol::CurrentStorage,
+                        step,
+                        sequence: None,
+                    },
+                )))
+    }
+
+    pub(in crate::security_epoch) fn bootstrap_work_ready(&self) -> Result<bool> {
+        Ok(self.schedule.purpose == StagePurpose::StorageBootstrap
+            && self.controller_next_is(super::super::Step::Known)?)
+    }
+
+    pub(in crate::security_epoch) fn controller_consumed_checked(&self) -> Result<bool> {
+        self.controller_next_is(super::super::Step::Released)
+    }
+
+    pub(in crate::security_epoch) fn lose_packet(&mut self, sender: usize) -> Result<bool> {
+        ensure!(!self.failed.get() && sender < 2, LifecycleModelError);
+        self.observation_budget()?;
+        match self.world.step(&Event::Lose { sender }) {
+            Ok(record) => Ok(record.outcome == Outcome::Accepted),
+            Err(_) => {
+                self.failed.set(true);
+                Err(LifecycleModelError.into())
+            }
+        }
     }
 
     fn observation_budget(&mut self) -> Result<()> {
@@ -617,6 +757,41 @@ fn checked_accepted_is_endpoint_history_not_a_global_empty_queue() -> Result<()>
         reference.check_file_boundary(1)?
     );
     assert_eq!(actual.snapshot()["actual"], reference.snapshot()["world"]);
+    Ok(())
+}
+
+#[test]
+fn bootstrap_schedule_is_explicit_and_cannot_replace_initial_or_serving_purpose() -> Result<()> {
+    let mut actual = LifecycleHandshake::new(17)?;
+    let mut reference = LifecycleReference::new(17)?;
+    let before = actual.snapshot();
+    assert!(actual.begin_bootstrap_exchange(None, 0).is_err());
+    assert!(reference.begin_bootstrap_exchange(None, 0).is_err());
+    assert_eq!(actual.snapshot(), before);
+    actual.begin_exchange(None, 0)?;
+    reference.begin_exchange(None, 0)?;
+    loop {
+        let result = actual.advance_exchange()?;
+        assert_eq!(result, reference.advance_exchange()?);
+        if result.is_some() {
+            break;
+        }
+    }
+    actual.begin_bootstrap_exchange(None, 0)?;
+    reference.begin_bootstrap_exchange(None, 0)?;
+    assert_eq!(actual.advance_exchange()?, reference.advance_exchange()?);
+    assert_eq!(actual.advance_exchange()?, reference.advance_exchange()?);
+    for endpoint in actual.snapshot()["actual"]["endpoints"].as_array().unwrap() {
+        assert_eq!(endpoint["machine"]["purpose"], "storage_bootstrap");
+        let origin: Duration = serde_json::from_value(endpoint["clock"]["origin"].clone())?;
+        let deadline: Duration = serde_json::from_value(endpoint["clock"]["deadline"].clone())?;
+        assert_eq!(deadline - origin, Duration::from_secs(60));
+    }
+    let mut serving = LifecycleHandshake::serving(17)?;
+    assert!(serving.exchange(None)?);
+    let before = serving.snapshot();
+    assert!(serving.begin_bootstrap_exchange(None, 0).is_err());
+    assert_eq!(serving.snapshot(), before);
     Ok(())
 }
 

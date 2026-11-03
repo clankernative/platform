@@ -32,6 +32,42 @@ enum Operation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "work", rename_all = "snake_case", deny_unknown_fields)]
+enum CompletionWork {
+    Bootstrap {
+        stage: usize,
+        operation: Operation,
+        fault: Fault,
+    },
+    Current {
+        rewrite_provider: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CompletionPhase {
+    Wire,
+    Mutation,
+    AfterMutation,
+    Release,
+    Releasing,
+    FinalFile,
+    Complete,
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletionState {
+    work: CompletionWork,
+    phase: CompletionPhase,
+    mutation_known: bool,
+    consumed_checked: bool,
+    peer_complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Fault {
     None,
@@ -115,6 +151,21 @@ enum Event {
     FileRewind {
         nanos: u64,
     },
+    StartCompletion {
+        work: CompletionWork,
+        death_cut: Option<usize>,
+    },
+    AdvanceCompletion,
+    MutateCompletion,
+    PrepareCompletionRelease,
+    FinishCompletion,
+    LosePacket {
+        sender: usize,
+    },
+    WorkTime {
+        wire_nanos: u64,
+        provider_nanos: u64,
+    },
     Bootstrap {
         stage: usize,
         operation: Operation,
@@ -172,6 +223,10 @@ struct State {
     first_holder: bool,
     checked_accepted: bool,
     holder_phase: HolderPhase,
+    completion: Option<CompletionState>,
+    // Controlled environment tick in the independent provider fixture's
+    // controller-process-clock domain, never a fresh native clock witness.
+    provider_time: Duration,
     current: usize,
     slot_posts: usize,
     counter_posts: usize,
@@ -208,6 +263,7 @@ struct World {
     first_holder: bool,
     checked_accepted: bool,
     holder_phase: HolderPhase,
+    completion: Option<CompletionState>,
     current: usize,
     activation: Option<Digest>,
     counter_rollback_failures: usize,
@@ -381,6 +437,7 @@ impl World {
             first_holder: false,
             checked_accepted: false,
             holder_phase: HolderPhase::NotStarted,
+            completion: None,
             current: 0,
             activation: None,
             counter_rollback_failures: 0,
@@ -516,7 +573,12 @@ impl World {
         Ok((counter, slot, context))
     }
 
-    fn bootstrap(&mut self, stage: usize, operation: Operation, fault: Fault) -> Result<()> {
+    fn bootstrap_mutation(
+        &mut self,
+        stage: usize,
+        operation: Operation,
+        fault: Fault,
+    ) -> Result<()> {
         ensure!(
             self.first_holder,
             "fixture first-holder transcript incomplete"
@@ -665,15 +727,6 @@ impl World {
                 )?;
                 Self::before_commit_clock(&mut self.port, fault);
                 mutation.send(&self.selection, &mut self.port)?;
-                if stage == 1 {
-                    let snapshot = counter_fixture::observe_selected(
-                        &mut self.port.counter,
-                        &self.selection,
-                        &self.cores[1].counter,
-                    )?
-                    .into_data();
-                    self.activation = Some(snapshot_digest(&snapshot)?);
-                }
             }
         }
         // External file mutation after the real conditional write completed,
@@ -702,6 +755,30 @@ impl World {
                 anyhow::bail!("physical lifecycle requires Linux");
             }
         }
+        // The real action's successful return is not its strong post-read.
+        // Preserve native run_phase order; an actual mutation Err exits above
+        // without starting new provider I/O on its refused port.
+        let core = self.cores[stage].clone();
+        let budget = Budget::for_context(self.port.sample()?, Duration::from_secs(105))?;
+        let (observed, slot) =
+            guarded::read_with_counter(&self.selection, &core, &mut self.port, budget)?;
+        let action = match operation {
+            Operation::Reserve => crate::security_epoch::bootstrap::Action::Reserve,
+            Operation::Dispatch => crate::security_epoch::bootstrap::Action::Dispatch,
+            Operation::Settle => crate::security_epoch::bootstrap::Action::Settle,
+        };
+        crate::security_epoch::bootstrap::validate_after_fixture(
+            action,
+            &self.selection,
+            &core.counter,
+            &core,
+            observed.snapshot(),
+            &slot,
+        )?;
+        self.port.sample()?;
+        if stage == 1 && operation == Operation::Settle {
+            self.activation = Some(snapshot_digest(observed.snapshot())?);
+        }
         Ok(())
     }
 
@@ -721,12 +798,7 @@ impl World {
         }
     }
 
-    fn current(
-        &mut self,
-        death_cut: Option<usize>,
-        rewrite_provider: bool,
-        endpoint: usize,
-    ) -> Result<()> {
+    fn check_current_before(&mut self) -> Result<()> {
         let activation = self.activation.clone().context("activation not settled")?;
         let observed = counter_fixture::observe_selected(
             &mut self.port.counter,
@@ -740,10 +812,11 @@ impl World {
             &activation,
             &observed,
         )?;
-        ensure!(
-            self.handshake.exchange_peer(death_cut, endpoint)?,
-            "current exchange incomplete"
-        );
+        Ok(())
+    }
+
+    fn check_current_after(&mut self, rewrite_provider: bool) -> Result<()> {
+        let activation = self.activation.clone().context("activation not settled")?;
         if rewrite_provider {
             counter_fixture::rewrite_selected_root(
                 &mut self.port.counter,
@@ -763,8 +836,220 @@ impl World {
             &activation,
             &observed,
         )?;
-        self.current += 1;
         Ok(())
+    }
+
+    fn completion_file(&mut self, physical: bool) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(file) = &mut self.file {
+            file.check(physical)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = physical;
+        Ok(())
+    }
+
+    fn completion_step(&mut self, event: Event, endpoint: usize) -> Result<()> {
+        match event {
+            Event::StartCompletion { work, death_cut } => {
+                ensure!(self.first_holder, "completion first holder missing");
+                ensure!(
+                    self.completion
+                        .is_none_or(|state| state.phase == CompletionPhase::Complete),
+                    "completion already pending or refused"
+                );
+                self.completion = Some(CompletionState {
+                    work,
+                    phase: CompletionPhase::Wire,
+                    mutation_known: false,
+                    consumed_checked: false,
+                    peer_complete: false,
+                });
+                self.completion_file(matches!(work, CompletionWork::Current { .. }))?;
+                ensure!(
+                    self.port.slots.db.is_autocommit()
+                        && counter_fixture::transaction_closed(&self.port.counter),
+                    "completion holds provider transaction across wire"
+                );
+                match work {
+                    CompletionWork::Bootstrap { .. } => self
+                        .handshake
+                        .begin_bootstrap_exchange(death_cut, endpoint)?,
+                    CompletionWork::Current { .. } => {
+                        self.check_current_before()?;
+                        self.handshake.begin_exchange(death_cut, endpoint)?;
+                    }
+                }
+            }
+            Event::AdvanceCompletion => {
+                let state = self.completion.context("completion not started")?;
+                ensure!(
+                    matches!(
+                        state.phase,
+                        CompletionPhase::Wire
+                            | CompletionPhase::AfterMutation
+                            | CompletionPhase::Releasing
+                    ),
+                    "completion callback obligation pending"
+                );
+                ensure!(
+                    self.handshake.progress()? != LifecycleProgress::Refused,
+                    "completion peer refused"
+                );
+                self.handshake.advance_exchange()?;
+                ensure!(
+                    self.handshake.progress()? != LifecycleProgress::Refused,
+                    "completion peer refused"
+                );
+                let mut next = state;
+                if matches!(state.work, CompletionWork::Bootstrap { .. })
+                    && state.phase == CompletionPhase::Wire
+                    && self.handshake.bootstrap_work_ready()?
+                {
+                    next.phase = CompletionPhase::Mutation;
+                } else if state.phase != CompletionPhase::Releasing
+                    && self.handshake.controller_consumed_checked()?
+                {
+                    ensure!(
+                        !matches!(state.work, CompletionWork::Bootstrap { .. })
+                            || state.mutation_known,
+                        "completion mutation not known"
+                    );
+                    next.consumed_checked = true;
+                    next.phase = CompletionPhase::Release;
+                } else if self.handshake.progress()? == LifecycleProgress::ProtocolComplete {
+                    ensure!(
+                        state.phase == CompletionPhase::Releasing && state.consumed_checked,
+                        "completion release not checked"
+                    );
+                    next.peer_complete = true;
+                    next.phase = CompletionPhase::FinalFile;
+                }
+                self.completion = Some(next);
+            }
+            Event::MutateCompletion => {
+                let state = self.completion.context("completion not started")?;
+                ensure!(
+                    state.phase == CompletionPhase::Mutation
+                        && self.handshake.bootstrap_work_ready()?,
+                    "completion mutation order"
+                );
+                let CompletionWork::Bootstrap {
+                    stage,
+                    operation,
+                    fault,
+                } = state.work
+                else {
+                    anyhow::bail!("current cannot mutate bootstrap");
+                };
+                ensure!(
+                    self.handshake.check_file_boundary(1)?,
+                    "completion original before mutation"
+                );
+                let requested = self.bootstrap_mutation(stage, operation, fault);
+                let checked = self.handshake.check_file_boundary(1);
+                requested?;
+                ensure!(checked?, "completion original after mutation");
+                ensure!(
+                    self.port.slots.db.is_autocommit()
+                        && counter_fixture::transaction_closed(&self.port.counter),
+                    "completion mutation retained transaction"
+                );
+                self.completion_file(false)?;
+                self.completion = Some(CompletionState {
+                    phase: CompletionPhase::AfterMutation,
+                    mutation_known: true,
+                    ..state
+                });
+            }
+            Event::PrepareCompletionRelease => {
+                let state = self.completion.context("completion not started")?;
+                ensure!(
+                    state.phase == CompletionPhase::Release
+                        && state.consumed_checked
+                        && self.handshake.controller_consumed_checked()?,
+                    "completion consumed not checked"
+                );
+                ensure!(
+                    self.handshake.check_file_boundary(1)?,
+                    "completion original before release"
+                );
+                // Activation still needs its last INITIAL-byte guard before
+                // App release. Only the subsequent final guard is physical.
+                let requested =
+                    self.completion_file(matches!(state.work, CompletionWork::Current { .. }));
+                let checked = self.handshake.check_file_boundary(1);
+                requested?;
+                ensure!(checked?, "completion original after release guard");
+                self.completion = Some(CompletionState {
+                    phase: CompletionPhase::Releasing,
+                    ..state
+                });
+            }
+            Event::FinishCompletion => {
+                let state = self.completion.context("completion not started")?;
+                ensure!(
+                    state.phase == CompletionPhase::FinalFile
+                        && state.peer_complete
+                        && self.handshake.progress()? == LifecycleProgress::ProtocolComplete,
+                    "completion peer unfinished"
+                );
+                ensure!(
+                    self.handshake.check_file_boundary(1)?,
+                    "completion original before final file"
+                );
+                let requested = (|| {
+                    if let CompletionWork::Current { rewrite_provider } = state.work {
+                        self.check_current_after(rewrite_provider)?;
+                    }
+                    let physical = matches!(
+                        state.work,
+                        CompletionWork::Current { .. }
+                            | CompletionWork::Bootstrap {
+                                stage: 1,
+                                operation: Operation::Settle,
+                                ..
+                            }
+                    );
+                    self.completion_file(physical)
+                })();
+                let checked = self.handshake.check_file_boundary(1);
+                requested?;
+                ensure!(checked?, "completion original after final file");
+                if matches!(state.work, CompletionWork::Current { .. }) {
+                    self.current += 1;
+                }
+                self.completion = Some(CompletionState {
+                    phase: CompletionPhase::Complete,
+                    ..state
+                });
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn complete_work(
+        &mut self,
+        work: CompletionWork,
+        death_cut: Option<usize>,
+        endpoint: usize,
+    ) -> Result<()> {
+        self.completion_step(Event::StartCompletion { work, death_cut }, endpoint)?;
+        loop {
+            let state = self.completion.context("completion not started")?;
+            let event = match state.phase {
+                CompletionPhase::Wire
+                | CompletionPhase::AfterMutation
+                | CompletionPhase::Releasing => Event::AdvanceCompletion,
+                CompletionPhase::Mutation => Event::MutateCompletion,
+                CompletionPhase::Release => Event::PrepareCompletionRelease,
+                CompletionPhase::FinalFile => Event::FinishCompletion,
+                CompletionPhase::Complete => return Ok(()),
+                CompletionPhase::Refused => anyhow::bail!("completion refused"),
+            };
+            self.completion_step(event, endpoint)?;
+        }
     }
 
     fn counter_name(&self, record: CounterRecord) -> Result<String> {
@@ -849,6 +1134,15 @@ impl World {
 
     fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<Record> {
         let accepted = match event {
+            Event::WorkTime {
+                wire_nanos,
+                provider_nanos,
+            } => {
+                self.handshake.advance_file_time(wire_nanos)?;
+                counter_fixture::advance_clock(&mut self.port.counter, provider_nanos)?;
+                true
+            }
+            Event::LosePacket { sender } => self.handshake.lose_packet(sender)?,
             Event::FileTime { nanos } => {
                 self.handshake.advance_file_time(nanos)?;
                 true
@@ -910,12 +1204,6 @@ impl World {
                 // second grant. The operation still uses only DATA contexts.
                 let mut continuation = self.continuation;
                 let result = lifecycle_fixture::phase(&mut continuation, || {
-                    #[cfg(target_os = "linux")]
-                    if matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
-                        && let Some(file) = &mut self.file
-                    {
-                        file.check(matches!(event, Event::Current { .. }))?;
-                    }
                     match event {
                         Event::FirstHolder { death_cut } => self.complete_first_holder(death_cut),
                         Event::StartFirstHolder { .. }
@@ -926,22 +1214,39 @@ impl World {
                             stage,
                             operation,
                             fault,
-                        } => self.bootstrap(stage, operation, fault),
+                        } => self.complete_work(
+                            CompletionWork::Bootstrap {
+                                stage,
+                                operation,
+                                fault,
+                            },
+                            None,
+                            endpoint,
+                        ),
                         Event::Current {
                             death_cut,
                             rewrite_provider,
-                        } => self.current(death_cut, rewrite_provider, endpoint),
+                        } => self.complete_work(
+                            CompletionWork::Current { rewrite_provider },
+                            death_cut,
+                            endpoint,
+                        ),
+                        Event::StartCompletion { .. }
+                        | Event::AdvanceCompletion
+                        | Event::MutateCompletion
+                        | Event::PrepareCompletionRelease
+                        | Event::FinishCompletion => self.completion_step(event, endpoint),
                         _ => unreachable!(),
                     }?;
-                    #[cfg(target_os = "linux")]
-                    if matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
-                        && let Some(file) = &mut self.file
-                    {
-                        file.check(matches!(event, Event::Current { .. }))?;
-                    }
                     Ok(())
                 });
                 self.continuation = continuation;
+                if result.is_err()
+                    && let Some(state) = self.completion.as_mut()
+                    && state.phase != CompletionPhase::Complete
+                {
+                    state.phase = CompletionPhase::Refused;
+                }
                 match result {
                     Ok(()) => true,
                     Err(error)
@@ -980,6 +1285,8 @@ impl World {
                 first_holder: self.first_holder,
                 checked_accepted: self.checked_accepted,
                 holder_phase: self.holder_phase,
+                completion: self.completion,
+                provider_time: counter_fixture::clock_data(&self.port.counter),
                 current: self.current,
                 slot_posts: self.port.slot_posts,
                 counter_posts: self.port.counter_posts,
@@ -1112,7 +1419,12 @@ impl ConsumerLifecycle {
         }
         let actual = (|| {
             ensure!(
-                self.world.continuation && self.world.first_holder,
+                self.world.continuation
+                    && self.world.first_holder
+                    && self
+                        .world
+                        .completion
+                        .is_none_or(|state| state.phase == CompletionPhase::Complete),
                 "consumer native continuation refused"
             );
             let activation = self
@@ -1196,7 +1508,10 @@ impl ConsumerLifecycle {
             .world
             .step_peer(event, endpoint)
             .map_err(|_| ConsumerModelError)?;
-        let (accepted, state) = self.model.step(event).map_err(|_| ConsumerModelError)?;
+        let (accepted, state) = self
+            .model
+            .step_peer(event, endpoint)
+            .map_err(|_| ConsumerModelError)?;
         ensure!(
             (actual.accepted, &actual.state) == (accepted, &state),
             ConsumerModelError
@@ -1272,7 +1587,7 @@ struct Divergence {
     expected: Value,
 }
 
-fn initial_reference_matches(actual: &Record, reference: &Value) -> bool {
+fn reference_matches(actual: &Record, reference: &Value) -> bool {
     actual.handshake["oracle"] == reference["world"]
         && actual.handshake["schedule"] == reference["schedule"]
         && actual.handshake["failed"] == reference["failed"]
@@ -1286,20 +1601,32 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             && program
                 .events
                 .iter()
-                .filter(|event| matches!(event, Event::AdvanceFirstHolder))
+                .filter(|event| matches!(
+                    event,
+                    Event::AdvanceFirstHolder | Event::AdvanceCompletion
+                ))
                 .count()
                 <= MAX_HANDSHAKE_ADVANCES
             && program
                 .events
                 .iter()
-                .filter(|event| !matches!(event, Event::AdvanceFirstHolder))
+                .filter(|event| !matches!(
+                    event,
+                    Event::AdvanceFirstHolder | Event::AdvanceCompletion
+                ))
                 .count()
                 <= MAX_EVENTS,
         "lifecycle version/history bound"
     );
     ensure!(
         program.events.iter().all(|e| match e {
-            Event::Bootstrap { stage, .. } | Event::Observe { stage } => *stage < 2,
+            Event::Bootstrap { stage, .. }
+            | Event::Observe { stage }
+            | Event::StartCompletion {
+                work: CompletionWork::Bootstrap { stage, .. },
+                ..
+            } => *stage < 2,
+            Event::LosePacket { sender } => *sender < 2,
             _ => true,
         }),
         "lifecycle stage bound"
@@ -1309,6 +1636,15 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             Event::Bootstrap {
                 operation: Operation::Reserve,
                 fault,
+                ..
+            }
+            | Event::StartCompletion {
+                work:
+                    CompletionWork::Bootstrap {
+                        operation: Operation::Reserve,
+                        fault,
+                        ..
+                    },
                 ..
             } => matches!(
                 fault,
@@ -1325,6 +1661,15 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
             Event::Bootstrap {
                 operation: Operation::Settle,
                 fault,
+                ..
+            }
+            | Event::StartCompletion {
+                work:
+                    CompletionWork::Bootstrap {
+                        operation: Operation::Settle,
+                        fault,
+                        ..
+                    },
                 ..
             } => matches!(
                 fault,
@@ -1351,6 +1696,14 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
                     fault: Fault::FileTamperAfter
                         | Fault::FileReplaceAfter
                         | Fault::FileShortenAfter,
+                    ..
+                } | Event::StartCompletion {
+                    work: CompletionWork::Bootstrap {
+                        fault: Fault::FileTamperAfter
+                            | Fault::FileReplaceAfter
+                            | Fault::FileShortenAfter,
+                        ..
+                    },
                     ..
                 }
             )),
@@ -1405,17 +1758,9 @@ fn run(program: &Program) -> Result<std::result::Result<Vec<Record>, Divergence>
         };
         actual.reference = Some(model.handshake_snapshot());
         records.push(actual.clone());
-        // Initial wire clocks, queues and endpoint knowledge must agree too;
-        // equal aggregate dispositions alone could hide a changed observation.
-        // Subsequent Current exchanges have their own retained paired oracle.
-        if (!actual.state.first_holder
-            || (actual.accepted
-                && matches!(
-                    event,
-                    Event::FirstHolder { .. } | Event::RetainFirstHolder { .. }
-                )))
-            && !initial_reference_matches(&actual, actual.reference.as_ref().unwrap())
-        {
+        // Compare every retained wire world and original observation, including
+        // bootstrap and ordinary Current. Equal aggregate status is insufficient.
+        if !reference_matches(&actual, actual.reference.as_ref().unwrap()) {
             return Ok(Err(Divergence {
                 index,
                 category: "handshake-reference",
@@ -1725,20 +2070,20 @@ fn reference_comparison_observes_clocks_queues_and_endpoints_not_only_the_dispos
         .find(|record| record.state.holder_phase == HolderPhase::AppObservation)
         .unwrap();
     let reference = paused.reference.as_ref().unwrap();
-    assert!(initial_reference_matches(paused, reference));
+    assert!(reference_matches(paused, reference));
     for field in ["now", "queues", "endpoints"] {
         let mut changed = reference.clone();
         changed["world"][field] = Value::Null;
-        assert!(!initial_reference_matches(paused, &changed));
+        assert!(!reference_matches(paused, &changed));
     }
     for field in ["schedule", "failed"] {
         let mut changed = reference.clone();
         changed[field] = Value::Null;
-        assert!(!initial_reference_matches(paused, &changed));
+        assert!(!reference_matches(paused, &changed));
     }
     let mut bad = paused.clone();
     bad.handshake["oracle"]["now"] = Value::Null;
-    assert!(!initial_reference_matches(&bad, reference));
+    assert!(!reference_matches(&bad, reference));
     Ok(())
 }
 
@@ -2193,6 +2538,541 @@ fn real_original_file_mutation_at_offer_and_after_accepted_never_becomes_retenti
     Ok(())
 }
 
+fn stepped_completion(seed: u64, target: Event) -> Result<(Program, usize)> {
+    let baseline = successful(seed);
+    let index = baseline
+        .events
+        .iter()
+        .position(|event| *event == target)
+        .context("completion target absent")?;
+    let input = World::new(seed, None)?;
+    // Immutable fixture inputs only; no actual execution or observation selects
+    // the expected schedule. All decisions below belong to the separate oracle.
+    let mut reference = model::Model::new(seed, &input.cores, false, &input.image_binding)?;
+    let mut events = baseline.events[..index].to_vec();
+    for &event in &events {
+        ensure!(reference.step(event)?.0, "reference prefix refused");
+    }
+    let (work, death_cut) = match target {
+        Event::Bootstrap {
+            stage,
+            operation,
+            fault,
+        } => (
+            CompletionWork::Bootstrap {
+                stage,
+                operation,
+                fault,
+            },
+            None,
+        ),
+        Event::Current {
+            death_cut,
+            rewrite_provider,
+        } => (CompletionWork::Current { rewrite_provider }, death_cut),
+        _ => anyhow::bail!("unsupported completion target"),
+    };
+    let start = events.len();
+    let begin = Event::StartCompletion { work, death_cut };
+    ensure!(reference.step(begin)?.0, "reference start refused");
+    events.push(begin);
+    loop {
+        let state: State = serde_json::from_value(reference.observation())?;
+        let completion = state.completion.context("reference completion missing")?;
+        let event = match completion.phase {
+            CompletionPhase::Wire | CompletionPhase::AfterMutation | CompletionPhase::Releasing => {
+                Event::AdvanceCompletion
+            }
+            CompletionPhase::Mutation => Event::MutateCompletion,
+            CompletionPhase::Release => Event::PrepareCompletionRelease,
+            CompletionPhase::FinalFile => Event::FinishCompletion,
+            CompletionPhase::Complete => break,
+            CompletionPhase::Refused => anyhow::bail!("reference completion refused"),
+        };
+        ensure!(reference.step(event)?.0, "reference event refused");
+        events.push(event);
+    }
+    events.extend_from_slice(&baseline.events[index + 1..]);
+    Ok((Program { events, ..baseline }, start))
+}
+
+fn completion_targets() -> Vec<Event> {
+    let mut targets = Vec::new();
+    for stage in 0..2 {
+        for operation in [Operation::Reserve, Operation::Dispatch, Operation::Settle] {
+            targets.push(Event::Bootstrap {
+                stage,
+                operation,
+                fault: Fault::None,
+            });
+        }
+    }
+    targets.push(Event::Current {
+        death_cut: None,
+        rewrite_provider: false,
+    });
+    targets
+}
+
+#[test]
+fn stepped_completions_keep_local_ready_separate_from_receipt_and_final_completion() -> Result<()> {
+    for seed in 0..4 {
+        for target in completion_targets() {
+            let (program, start) = stepped_completion(seed, target)?;
+            let records = check(&program)?;
+            let finish = program
+                .events
+                .iter()
+                .position(|event| matches!(event, Event::FinishCompletion))
+                .unwrap();
+            let pending = records[finish - 1].state.completion.unwrap();
+            assert_eq!(pending.phase, CompletionPhase::FinalFile);
+            assert!(pending.peer_complete && pending.consumed_checked);
+            assert_eq!(
+                records[finish].state.completion.unwrap().phase,
+                CompletionPhase::Complete
+            );
+            if matches!(target, Event::Current { .. }) {
+                assert_eq!(records[finish - 1].state.current, 0);
+                assert_eq!(records[finish].state.current, 1);
+            } else {
+                let mutation = program
+                    .events
+                    .iter()
+                    .position(|event| matches!(event, Event::MutateCompletion))
+                    .unwrap();
+                // The Controller's checked local Ready send permits its mutation;
+                // App receipt is a separate later event, not an invented barrier.
+                assert_eq!(
+                    records[mutation - 1].handshake["actual"]["endpoints"][1]["machine"]["position"],
+                    5
+                );
+                assert_eq!(
+                    records[mutation - 1].handshake["actual"]["endpoints"][0]["machine"]["position"],
+                    4
+                );
+                assert!(
+                    !records[mutation - 1]
+                        .state
+                        .completion
+                        .unwrap()
+                        .mutation_known
+                );
+                assert!(records[mutation].state.completion.unwrap().mutation_known);
+            }
+            for record in &records[start..=finish] {
+                assert!(record.accepted);
+            }
+            assert_eq!(
+                records.last().unwrap().state,
+                check(&successful(seed))?.last().unwrap().state
+            );
+            assert_eq!(
+                records.last().unwrap().handshake,
+                check(&successful(seed))?.last().unwrap().handshake
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_completion_cannot_start_another_scope_or_publish_current_even_with_active_rows()
+-> Result<()> {
+    for target in completion_targets() {
+        for obligation in [
+            Event::MutateCompletion,
+            Event::PrepareCompletionRelease,
+            Event::FinishCompletion,
+        ] {
+            let (mut program, _) = stepped_completion(17, target)?;
+            let Some(cut) = program.events.iter().position(|event| *event == obligation) else {
+                continue;
+            };
+            program.events.truncate(cut);
+            program.events.extend([
+                Event::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                },
+                Event::Reopen,
+                Event::RestoreClock,
+                obligation,
+                Event::FinishCompletion,
+                Event::Bootstrap {
+                    stage: 0,
+                    operation: Operation::Reserve,
+                    fault: Fault::None,
+                },
+            ]);
+            let records = check(&program)?;
+            let before = records[cut - 1].state.clone();
+            for record in &records[cut..] {
+                assert!(!record.state.continuation);
+                assert_eq!(
+                    record.state.completion.unwrap().phase,
+                    CompletionPhase::Refused
+                );
+                assert_eq!(record.state.counter, before.counter);
+                assert_eq!(record.state.slots, before.slots);
+                assert_eq!(
+                    (
+                        record.state.counter_posts,
+                        record.state.slot_posts,
+                        record.state.current
+                    ),
+                    (before.counter_posts, before.slot_posts, before.current)
+                );
+            }
+            assert!(!records[cut].accepted && !records.last().unwrap().accepted);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn actual_consumer_with_active_rows_stays_blocked_until_its_pending_completion_finishes()
+-> Result<()> {
+    let scope = tests::selection().scope;
+    let mut consumer = ConsumerLifecycle::new(17, &scope)?;
+    let (program, _) = stepped_completion(
+        17,
+        Event::Bootstrap {
+            stage: 1,
+            operation: Operation::Settle,
+            fault: Fault::None,
+        },
+    )?;
+    let finish = program
+        .events
+        .iter()
+        .position(|event| matches!(event, Event::FinishCompletion))
+        .unwrap();
+    for &event in &program.events[..finish] {
+        let actual = consumer.world.step(event)?;
+        let expected = consumer.model.step(event)?;
+        assert_eq!((actual.accepted, &actual.state), (expected.0, &expected.1));
+    }
+    assert!(consumer.world.activation.is_some());
+    assert_eq!(
+        consumer.world.completion.unwrap().phase,
+        CompletionPhase::FinalFile
+    );
+    assert!(!consumer.model.consumer_current());
+    let before = counter_fixture::snapshot(&consumer.world.port.counter)["calls"].clone();
+    assert!(consumer.check(&scope, false).is_err());
+    assert_eq!(
+        counter_fixture::snapshot(&consumer.world.port.counter)["calls"],
+        before
+    );
+    let actual = consumer.world.step(Event::FinishCompletion)?;
+    let expected = consumer.model.step(Event::FinishCompletion)?;
+    assert_eq!((actual.accepted, &actual.state), (expected.0, &expected.1));
+    assert!(actual.accepted);
+    consumer.check(&scope, false)?;
+    Ok(())
+}
+
+#[test]
+fn unknown_counter_completion_keeps_may_and_applied_rows_without_known_or_reuse() -> Result<()> {
+    for stage in 0..2 {
+        for fault in [
+            Fault::LostCounterAfter,
+            Fault::MalformedCounterReply,
+            Fault::RolledBackCounterWrite,
+        ] {
+            let (mut program, start) = stepped_completion(
+                17,
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault: Fault::None,
+                },
+            )?;
+            program.events[start] = Event::StartCompletion {
+                work: CompletionWork::Bootstrap {
+                    stage,
+                    operation: Operation::Dispatch,
+                    fault,
+                },
+                death_cut: None,
+            };
+            let cut = program
+                .events
+                .iter()
+                .position(|event| matches!(event, Event::MutateCompletion))
+                .unwrap();
+            program.events.extend([
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::Observe { stage },
+                Event::FinishCompletion,
+                Event::Bootstrap {
+                    stage,
+                    operation: Operation::Settle,
+                    fault: Fault::None,
+                },
+            ]);
+            let records = check(&program)?;
+            let failed = &records[cut];
+            assert!(!failed.accepted && !failed.state.continuation);
+            let completion = failed.state.completion.unwrap();
+            assert!(!completion.mutation_known && !completion.peer_complete);
+            assert_eq!(completion.phase, CompletionPhase::Refused);
+            assert_eq!(failed.state.counter_posts, stage + 1);
+            let before = &records[cut - 1].state.counter;
+            if fault == Fault::RolledBackCounterWrite {
+                assert_eq!(failed.state.counter["documents"], before["documents"]);
+                assert_eq!(failed.state.counter_rollback_failures, 1);
+            } else {
+                assert_ne!(failed.state.counter["documents"], before["documents"]);
+            }
+            for record in &records[cut..] {
+                assert_eq!(record.state.counter, failed.state.counter);
+                assert_eq!(record.state.slots, failed.state.slots);
+                assert_eq!(record.state.counter_posts, failed.state.counter_posts);
+                assert!(!record.state.continuation);
+            }
+            assert!(!records.last().unwrap().accepted);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn lost_known_consumed_and_released_packets_never_become_remote_receipts() -> Result<()> {
+    let mut covered = BTreeSet::new();
+    for target in completion_targets() {
+        for (sender, packet) in [(1, "known"), (0, "consumed"), (1, "released")] {
+            let (mut program, start) = stepped_completion(17, target)?;
+            let input = World::new(17, None)?;
+            let mut reference = model::Model::new(17, &input.cores, false, &input.image_binding)?;
+            let mut found = None;
+            for (index, &event) in program.events.iter().enumerate() {
+                ensure!(reference.step(event)?.0, "loss prefix refused");
+                if index >= start
+                    && reference.handshake_snapshot()["world"]["queues"][sender][0]["frame"]["step"]
+                        == packet
+                {
+                    found = Some(index + 1);
+                    break;
+                }
+            }
+            let cut = found.context("completion packet not actually queued")?;
+            program.events.insert(cut, Event::LosePacket { sender });
+            program.events.extend([
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::FinishCompletion,
+                Event::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                },
+            ]);
+            let records = check(&program)?;
+            assert!(records[cut].accepted);
+            let known = &records[cut - 1].state;
+            let refused = records[cut + 1..]
+                .iter()
+                .position(|record| !record.accepted)
+                .context("lost packet did not refuse")?
+                + cut
+                + 1;
+            for record in &records[refused..] {
+                assert!(!record.state.continuation);
+                assert!(!record.state.completion.unwrap().peer_complete);
+                assert_eq!(record.state.counter, known.counter);
+                assert_eq!(record.state.slots, known.slots);
+                assert_eq!(record.state.current, known.current);
+            }
+            assert!(!records.last().unwrap().accepted);
+            covered.insert(format!("{target:?}/{packet}"));
+        }
+    }
+    assert_eq!(covered.len(), 21);
+    Ok(())
+}
+
+#[test]
+fn explicit_work_time_keeps_wire_and_provider_origins_separate_without_renewal() -> Result<()> {
+    let target = Event::Bootstrap {
+        stage: 0,
+        operation: Operation::Reserve,
+        fault: Fault::None,
+    };
+    let (mut program, _) = stepped_completion(17, target)?;
+    let cut = program
+        .events
+        .iter()
+        .position(|event| matches!(event, Event::MutateCompletion))
+        .unwrap();
+    let mut forward = program.clone();
+    forward.events.insert(
+        cut,
+        Event::WorkTime {
+            wire_nanos: 1_000_000,
+            provider_nanos: 1_000_000,
+        },
+    );
+    let forward_records = check(&forward)?;
+    assert!(forward_records.iter().all(|record| record.accepted));
+    assert_eq!(forward_records.last().unwrap().state.current, 3);
+    assert_eq!(
+        forward_records.last().unwrap().state.provider_time,
+        Duration::from_secs(100) + Duration::from_millis(1)
+    );
+    program.events.insert(
+        cut,
+        Event::WorkTime {
+            wire_nanos: 5_000_000_000,
+            provider_nanos: 5_000_000_000,
+        },
+    );
+    let records = check(&program)?;
+    assert!(records[cut].accepted && !records[cut + 1].accepted);
+    assert_eq!(records[cut].state.provider_time, Duration::from_secs(105));
+    assert_eq!(
+        (
+            records[cut + 1].state.slot_posts,
+            records[cut + 1].state.counter_posts
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        records[cut].handshake["actual"]["endpoints"][1]["machine"]["purpose"],
+        "storage_bootstrap"
+    );
+    let wire = &records[cut].handshake["actual"]["endpoints"][1]["clock"];
+    let origin: Duration = serde_json::from_value(wire["origin"].clone())?;
+    let deadline: Duration = serde_json::from_value(wire["deadline"].clone())?;
+    assert_eq!(deadline - origin, Duration::from_secs(60));
+    assert!(!records.last().unwrap().state.continuation);
+
+    let (mut current, _) = stepped_completion(
+        17,
+        Event::Current {
+            death_cut: None,
+            rewrite_provider: false,
+        },
+    )?;
+    let cut = current
+        .events
+        .iter()
+        .position(|event| matches!(event, Event::PrepareCompletionRelease))
+        .unwrap();
+    let input = World::new(17, None)?;
+    let mut reference = model::Model::new(17, &input.cores, false, &input.image_binding)?;
+    for &event in &current.events[..cut] {
+        assert!(reference.step(event)?.0);
+    }
+    let clock = reference.handshake_snapshot();
+    let now: Duration = serde_json::from_value(clock["world"]["now"].clone())?;
+    let deadline: Duration =
+        serde_json::from_value(clock["world"]["endpoints"][1]["clock"]["deadline"].clone())?;
+    let equality = u64::try_from((deadline - now).as_nanos())?;
+    current.events.insert(
+        cut,
+        Event::WorkTime {
+            wire_nanos: equality,
+            provider_nanos: equality,
+        },
+    );
+    let records = check(&current)?;
+    assert!(records[cut].accepted && !records[cut + 1].accepted);
+    assert_eq!(records.last().unwrap().state.current, 0);
+    assert_eq!(
+        records[cut].handshake["actual"]["endpoints"][1]["machine"]["purpose"],
+        "current_role"
+    );
+    assert!(!records.last().unwrap().state.continuation);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn activation_checks_initial_bytes_before_release_then_physical_identity_after_peer_finish()
+-> Result<()> {
+    let target = Event::Bootstrap {
+        stage: 1,
+        operation: Operation::Settle,
+        fault: Fault::None,
+    };
+    for (boundary, change, accepted) in [
+        (Event::PrepareCompletionRelease, FileChange::AppWrite, false),
+        (Event::FinishCompletion, FileChange::AppWrite, true),
+        (Event::FinishCompletion, FileChange::Replace, false),
+    ] {
+        let (mut program, _) = stepped_completion(17, target)?;
+        program.physical =
+            Some(crate::security_epoch::storage_authority::FileFixture::initial_image());
+        let cut = program
+            .events
+            .iter()
+            .position(|event| *event == boundary)
+            .unwrap();
+        if !accepted {
+            program.events.truncate(cut);
+        }
+        program.events.insert(cut, Event::File { change });
+        if !accepted {
+            program.events.extend([
+                boundary,
+                Event::File {
+                    change: FileChange::Restore,
+                },
+                Event::Reopen,
+                Event::RestoreClock,
+                Event::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                },
+            ]);
+        }
+        let records = check(&program)?;
+        assert_eq!(records[cut + 1].accepted, accepted);
+        if accepted {
+            assert_eq!(records.last().unwrap().state.current, 3);
+        } else {
+            assert!(!records[cut + 1].state.continuation);
+            let state = records[cut + 1].state.completion.unwrap();
+            assert!(state.consumed_checked);
+            assert_eq!(
+                state.peer_complete,
+                matches!(boundary, Event::FinishCompletion)
+            );
+            for record in &records[cut + 1..] {
+                assert!(!record.state.continuation);
+                assert_eq!(record.state.counter, records[cut].state.counter);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bootstrap_and_current_completion_helpers_keep_distinct_purpose_and_final_release() -> Result<()>
+{
+    let records = check(&successful(17))?;
+    let final_record = records.last().unwrap();
+    assert_eq!(final_record.state.current, 3);
+    let completed = final_record.state.completion.unwrap();
+    assert_eq!(completed.phase, CompletionPhase::Complete);
+    assert!(completed.consumed_checked && completed.peer_complete);
+    assert_eq!(final_record.state.provider_time, Duration::from_secs(100));
+    for endpoint in final_record.handshake["actual"]["endpoints"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(endpoint["machine"]["sequence"], 9);
+        assert_eq!(endpoint["machine"]["purpose"], "current_role");
+    }
+    assert!(reference_matches(
+        final_record,
+        final_record.reference.as_ref().unwrap()
+    ));
+    Ok(())
+}
+
 #[test]
 fn seeded_storage_first_holder_activation_and_current_histories_replay() -> Result<()> {
     let mut coverage = BTreeSet::new();
@@ -2370,12 +3250,32 @@ fn generated_post_commit_clock_rewinds_keep_durable_state_and_refuse_reuse() -> 
                 let control: Program = serde_json::from_slice(&serde_json::to_vec(&control)?)?;
                 let positive = check(&control)?;
                 let end = &positive.last().unwrap().state;
+                // The controlled tick and selected fault are now retained
+                // explicitly. They differ by design; every other field must
+                // still equal the same successful untimed lifecycle.
+                let mut expected = reference[index].state.clone();
+                ensure!(
+                    expected.provider_time == Duration::from_secs(100)
+                        && expected.completion.is_some_and(|state| state.work
+                            == CompletionWork::Bootstrap {
+                                stage,
+                                operation,
+                                fault: Fault::None
+                            }),
+                    "baseline clock/control metadata changed"
+                );
+                expected.provider_time = Duration::from_secs(103);
+                expected.completion.as_mut().unwrap().work = CompletionWork::Bootstrap {
+                    stage,
+                    operation,
+                    fault: forward,
+                };
                 ensure!(
                     positive[index].accepted
                         && end.continuation
                         && end.current == 3
                         && end.clock_order_failures == 0
-                        && positive[index].state == reference[index].state,
+                        && positive[index].state == expected,
                     "forward clock control did not complete the same lifecycle"
                 );
 

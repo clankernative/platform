@@ -1027,6 +1027,21 @@ pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<
     let rustc = tool(root, "rustc")?;
     let home = root.join(".cache/dependency-inputs");
     fs::create_dir_all(home.join("tmp"))?;
+    let mut command = dependency_metadata_command(cargo, rustc, &home, no_dependencies);
+    capture_query(
+        root,
+        &mut command,
+        Duration::from_secs(600),
+        16 * 1024 * 1024,
+    )
+}
+
+fn dependency_metadata_command(
+    cargo: PathBuf,
+    rustc: PathBuf,
+    home: &Path,
+    no_dependencies: bool,
+) -> Command {
     let mut command = Command::new(cargo);
     command.args(["metadata", "--locked", "--format-version=1"]);
     if no_dependencies {
@@ -1036,17 +1051,16 @@ pub(crate) fn dependency_metadata(root: &Path, no_dependencies: bool) -> Result<
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .env("HOME", &home)
-        .env("CARGO_HOME", &home)
+        .env("HOME", home)
+        .env("CARGO_HOME", home)
         .env("TMPDIR", home.join("tmp"))
         .env("RUSTC", rustc)
+        // Metadata queries the pinned compiler; operator code-generation
+        // wrappers must not interpose through ancestor Cargo configuration.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env("PATH", "/usr/bin:/bin");
-    capture_query(
-        root,
-        &mut command,
-        Duration::from_secs(600),
-        16 * 1024 * 1024,
-    )
+    command
 }
 
 /// One closed image compilation operation; Docker retains image assembly order.
@@ -1094,6 +1108,61 @@ pub(crate) fn image_programs(root: &Path, enrollment_only: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_metadata_pins_compiler_and_disables_configured_codegen_wrappers() -> Result<()> {
+        use std::ffi::OsStr;
+        for no_dependencies in [false, true] {
+            let command = dependency_metadata_command(
+                PathBuf::from("/pinned/cargo"),
+                PathBuf::from("/pinned/rustc"),
+                Path::new("/isolated/home"),
+                no_dependencies,
+            );
+            ensure!(
+                command.get_program() == OsStr::new("/pinned/cargo"),
+                "metadata compiler selector changed"
+            );
+            let mut args = vec!["metadata", "--locked", "--format-version=1"];
+            if no_dependencies {
+                args.push("--no-deps");
+            }
+            ensure!(
+                command.get_args().eq(args.iter().map(OsStr::new)),
+                "metadata query flags changed"
+            );
+            let env: BTreeMap<_, _> = command.get_envs().collect();
+            ensure!(
+                env.keys().copied().collect::<BTreeSet<_>>()
+                    == [
+                        "LANG",
+                        "LC_ALL",
+                        "HOME",
+                        "CARGO_HOME",
+                        "TMPDIR",
+                        "RUSTC",
+                        "RUSTC_WRAPPER",
+                        "RUSTC_WORKSPACE_WRAPPER",
+                        "PATH"
+                    ]
+                    .map(OsStr::new)
+                    .into_iter()
+                    .collect(),
+                "metadata environment names changed"
+            );
+            ensure!(
+                env.get(OsStr::new("RUSTC")) == Some(&Some(OsStr::new("/pinned/rustc"))),
+                "metadata compiler pin lost"
+            );
+            for name in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
+                ensure!(
+                    env.get(OsStr::new(name)) == Some(&Some(OsStr::new(""))),
+                    "metadata query retained a code-generation wrapper"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn dependency_contexts_refuse_stale_manifests_models_and_uncovered_inputs() -> Result<()> {

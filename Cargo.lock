@@ -459,6 +459,7 @@ dependencies = [
  "day2-contracts",
  "day2-sandbox",
  "ego-tree",
+ "flate2",
  "futures-executor",
  "futures-util",
  "getrandom 0.3.4",
