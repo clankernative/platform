@@ -1094,7 +1094,10 @@ fn shell_reference_matches(record: &Value) -> bool {
         && actual["oracle"] == reference["world"]
         && actual["schedule"] == reference["schedule"]
         && actual["failed"] == reference["failed"]
-        && matches!(record["shell_progress"].as_str(), Some("pending" | "completed" | "refused"))
+        && matches!(
+            record["shell_progress"].as_str(),
+            Some("pending" | "completed" | "refused")
+        )
         && record["native"]["serving_progress"] == record["shell_progress"]
 }
 
@@ -2101,7 +2104,7 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
         world.boot()?;
         native_event(ConsumerEvent::BeginShell { death_cut: None })?;
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
-        let before = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        let mut before = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
         ensure!(
             effects::Hooks::native_check(hooks.as_ref(), NativeRole::AppHost, Some(&scope)).is_ok(),
             "pending Shell blocked App"
@@ -2127,7 +2130,15 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
                 .is_err(),
             "foreign scope accepted"
         );
-        let after = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        let mut after = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        // Both selected roles still perform their real read-only counter
+        // observation. Preserve that complete journal; compare all remaining
+        // state without mistaking these mandatory reads for writes.
+        let before_calls = before["storage"]["provider"]["counter"].as_object_mut().unwrap().remove("calls").unwrap();
+        let after_calls = after["storage"]["provider"]["counter"].as_object_mut().unwrap().remove("calls").unwrap();
+        let before_calls = before_calls.as_array().unwrap();
+        let after_calls = after_calls.as_array().unwrap();
+        ensure!(after_calls.starts_with(before_calls) && after_calls.len() > before_calls.len(), "selected roles skipped fresh reads");
         ensure!(
             before == after && hooks.journal.lock().unwrap().is_empty(),
             "hook changed state or called a provider"
@@ -2152,24 +2163,44 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
 
 #[test]
 fn consumer_progress_requires_complete_known_reference_observations() -> Result<()> {
-    let records = verify(&Program { version: 1, seed: 4, steps: vec![Step::BeginShell { death_cut: None }] })?;
+    let records = verify(&Program {
+        version: 1,
+        seed: 4,
+        steps: vec![Step::BeginShell { death_cut: None }],
+    })?;
     let original = &records[0];
-    ensure!(shell_reference_matches(original), "complete pending observation refused");
-    for (side, field) in [("shell_reference", "world"), ("shell_reference", "schedule"), ("shell_reference", "failed")] {
+    ensure!(
+        shell_reference_matches(original),
+        "complete pending observation refused"
+    );
+    for (side, field) in [
+        ("shell_reference", "world"),
+        ("shell_reference", "schedule"),
+        ("shell_reference", "failed"),
+    ] {
         let mut changed = original.clone();
         changed[side].as_object_mut().unwrap().remove(field);
-        ensure!(!shell_reference_matches(&changed), "absent reference field accepted");
+        ensure!(
+            !shell_reference_matches(&changed),
+            "absent reference field accepted"
+        );
     }
     for value in [Value::Null, json!("unknown"), json!(true)] {
         let mut changed = original.clone();
         changed["shell_progress"] = value.clone();
         changed["native"]["serving_progress"] = value;
-        ensure!(!shell_reference_matches(&changed), "unknown progress accepted");
+        ensure!(
+            !shell_reference_matches(&changed),
+            "unknown progress accepted"
+        );
     }
     let mut changed = original.clone();
     changed["shell_reference"]["world"] = Value::Null;
     changed["native"]["serving"]["oracle"] = Value::Null;
-    ensure!(!shell_reference_matches(&changed), "two absent worlds compared equal");
+    ensure!(
+        !shell_reference_matches(&changed),
+        "two absent worlds compared equal"
+    );
     Ok(())
 }
 
