@@ -2478,6 +2478,229 @@ mod tests {
         Ok(())
     }
 
+    /// SQLite's VACUUM INTO creates a complete transactionally consistent copy,
+    /// including committed WAL state. This fixture is not the ops backup bundle
+    /// or a security-restore implementation; copies reopen read-only.
+    fn credential_backup(db: &Connection, path: &std::path::Path) -> Result<Connection> {
+        assert!(db.is_autocommit());
+        db.execute(
+            "VACUUM main INTO ?1",
+            [path.to_str().context("fixture backup path")?],
+        )?;
+        Ok(Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?)
+    }
+
+    fn assert_backup_restore_refused(db: &mut Connection) -> Result<()> {
+        let before = database_snapshot(db)?;
+        let tx = db.transaction()?;
+        let error = crate::authority_state::invalidate_restored(
+            &tx,
+            std::path::Path::new("/must-not-load-backup-artifact"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<&str>(),
+            Some(&"security_restore_preflight_required")
+        );
+        // Do not print the private snapshot on failure.
+        assert!(database_snapshot(&tx)? == before);
+        tx.rollback()?;
+        assert!(database_snapshot(db)? == before);
+        Ok(())
+    }
+
+    fn backup_rotation(tx: &Transaction<'_>, first: &PublicReceipt) -> Result<PublicReceipt> {
+        match stage_rotation(
+            tx,
+            &lease(),
+            &snapshot(first),
+            RotationIntent {
+                invocation: "backup-rotation",
+                grant: &ceiling(),
+                instruction_slot: 0,
+                recipient: "issuer/human-1",
+                session: "session-1",
+                issued_at: 1_100,
+                expires_at: 2_100,
+                reveal_until: 1_400,
+            },
+        )? {
+            RotationResult::Rotated(pending) => Ok(pending.public_identity().clone()),
+            RotationResult::Conflict => anyhow::bail!("fixture backup rotation conflicted"),
+        }
+    }
+
+    #[test]
+    fn credential_backups_before_and_after_terminal_changes_require_external_fencing() -> Result<()>
+    {
+        use super::super::{authority::SelectedAuthority, issuance::Authority};
+        #[derive(Clone, Copy)]
+        enum Change {
+            Rotate,
+            Revoke,
+            Acknowledge,
+        }
+        for change in [Change::Rotate, Change::Revoke, Change::Acknowledge] {
+            super::super::effects::scope(super::super::simulation::World::new(870), || {
+                let (directory, mut db) = database()?;
+                db.pragma_update(None, "journal_mode", "WAL")?;
+                let receipt = committed_issue(&mut db)?;
+                let version = receipt.version.as_deref().context("fixture version")?;
+                let token = authorize_reveal(&mut db, post(version, "backup-token"))?
+                    .context("fixture reveal")?
+                    .into_response_body(&lease())?;
+                let original = database_snapshot(&db)?;
+                let mut old = credential_backup(&db, &directory.path().join("before.sqlite"))?;
+                assert!(database_snapshot(&old)? == original);
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                match change {
+                    Change::Rotate => {
+                        backup_rotation(&tx, &receipt)?;
+                    }
+                    Change::Revoke => {
+                        assert!(stage_revoke(&tx, &namespace(), &receipt.lineage)?);
+                    }
+                    Change::Acknowledge => {
+                        assert!(close_delivery(&tx, version, "acknowledged")?);
+                    }
+                }
+                tx.commit()?;
+                let terminal = database_snapshot(&db)?;
+                let mut new = credential_backup(&db, &directory.path().join("after.sqlite"))?;
+                assert!(database_snapshot(&new)? == terminal);
+                // A backup really retains the earlier world: same-epoch token
+                // verification alone cannot notice a later revoke or rotation.
+                let family = family();
+                let namespace = namespace();
+                let operation = ceiling().roots["SubmitTranscription"].clone();
+                let accepts = |copy: &Connection, epoch, now| -> Result<bool> {
+                    Ok(verify_ingress(
+                        copy,
+                        &lease(),
+                        ingress(&namespace, &family.contract, &operation, epoch, now),
+                        &token,
+                    )?
+                    .is_some())
+                };
+                assert!(accepts(&old, 7, 1_100)?);
+                // Acknowledgement closes delivery, not the bearer credential.
+                let bearer_survives = matches!(change, Change::Acknowledge);
+                assert_eq!(accepts(&db, 7, 1_100)?, bearer_survives);
+                assert_eq!(accepts(&new, 7, 1_100)?, bearer_survives);
+                let delivery = |copy: &Connection| -> Result<String> {
+                    Ok(copy.query_row(
+                        "SELECT state FROM day2_credential_deliveries WHERE version=?1",
+                        [version],
+                        |row| row.get(0),
+                    )?)
+                };
+                assert_eq!(delivery(&old)?, "available");
+                assert_eq!(delivery(&new)?, "closed");
+                assert!(!accepts(&old, 7, 999)?);
+                assert!(!accepts(&old, 7, 2_000)?);
+                // Fresh controlled readiness is supplied independently of both
+                // database copies, not recovered from either backup's epoch.
+                let selected = epoch_selection(8);
+                let authority =
+                    SelectedAuthority::new(vec![selected.clone()], std::sync::Arc::new(EpochKeys))?;
+                let current_epoch = authority
+                    .verification_epoch(
+                        &selected.binding,
+                        &selected.management,
+                        "verify-v1",
+                        1_100,
+                    )?
+                    .context("fixture current epoch")?;
+                assert_eq!(current_epoch, 8);
+                for copy in [&old, &new] {
+                    assert!(
+                        verify_ingress(
+                            copy,
+                            &authority.verification_keys(
+                                &selected.binding,
+                                &selected.management,
+                                1_100,
+                            )?,
+                            ingress(
+                                &namespace,
+                                &family.contract,
+                                &operation,
+                                current_epoch,
+                                1_100,
+                            ),
+                            &token,
+                        )?
+                        .is_none()
+                    );
+                }
+                assert_backup_restore_refused(&mut old)?;
+                assert_backup_restore_refused(&mut new)?;
+                assert!(database_snapshot(&old)? == original);
+                assert!(database_snapshot(&new)? == terminal);
+                assert!(database_snapshot(&db)? == terminal);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn credential_backups_never_publish_an_uncommitted_rotation() -> Result<()> {
+        for commit in [false, true] {
+            super::super::effects::scope(super::super::simulation::World::new(871), || {
+                let (directory, mut db) = database()?;
+                db.pragma_update(None, "journal_mode", "WAL")?;
+                let first = committed_issue(&mut db)?;
+                let reader = Connection::open_with_flags(
+                    directory.path().join("app.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let original = database_snapshot(&reader)?;
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let pending = backup_rotation(&tx, &first)?;
+                let mut during =
+                    credential_backup(&reader, &directory.path().join("during.sqlite"))?;
+                assert!(database_snapshot(&during)? == original);
+                if commit {
+                    tx.commit()?;
+                } else {
+                    tx.rollback()?;
+                }
+                let mut after =
+                    credential_backup(&reader, &directory.path().join("settled.sqlite"))?;
+                assert!(database_snapshot(&after)? == database_snapshot(&db)?);
+                let count: i64 = after.query_row(
+                    "SELECT count(*) FROM day2_credential_versions",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let head: String =
+                    after.query_row("SELECT head FROM day2_credential_lineages", [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(count, if commit { 2 } else { 1 });
+                assert!(
+                    Some(&head)
+                        == if commit {
+                            pending.version.as_ref()
+                        } else {
+                            first.version.as_ref()
+                        }
+                );
+                if !commit {
+                    assert!(database_snapshot(&after)? == original);
+                }
+                assert_backup_restore_refused(&mut during)?;
+                assert_backup_restore_refused(&mut after)?;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn every_credential_payload_table_requires_restore_fencing_without_reading_values() -> Result<()>
     {
