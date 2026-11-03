@@ -2104,7 +2104,8 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
         world.boot()?;
         native_event(ConsumerEvent::BeginShell { death_cut: None })?;
         let scope = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().scope.clone());
-        let mut before = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        let mut before =
+            NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
         ensure!(
             effects::Hooks::native_check(hooks.as_ref(), NativeRole::AppHost, Some(&scope)).is_ok(),
             "pending Shell blocked App"
@@ -2130,15 +2131,27 @@ fn pending_shell_hook_checks_exact_role_scope_and_model_errors() -> Result<()> {
                 .is_err(),
             "foreign scope accepted"
         );
-        let mut after = NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
+        let mut after =
+            NATIVE.with(|slot| slot.borrow().as_ref().unwrap().lifecycle.observation())?;
         // Both selected roles still perform their real read-only counter
         // observation. Preserve that complete journal; compare all remaining
         // state without mistaking these mandatory reads for writes.
-        let before_calls = before["storage"]["provider"]["counter"].as_object_mut().unwrap().remove("calls").unwrap();
-        let after_calls = after["storage"]["provider"]["counter"].as_object_mut().unwrap().remove("calls").unwrap();
+        let before_calls = before["storage"]["provider"]["counter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("calls")
+            .unwrap();
+        let after_calls = after["storage"]["provider"]["counter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("calls")
+            .unwrap();
         let before_calls = before_calls.as_array().unwrap();
         let after_calls = after_calls.as_array().unwrap();
-        ensure!(after_calls.starts_with(before_calls) && after_calls.len() > before_calls.len(), "selected roles skipped fresh reads");
+        ensure!(
+            after_calls.starts_with(before_calls) && after_calls.len() > before_calls.len(),
+            "selected roles skipped fresh reads"
+        );
         ensure!(
             before == after && hooks.journal.lock().unwrap().is_empty(),
             "hook changed state or called a provider"
