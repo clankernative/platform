@@ -116,7 +116,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-queue-receipt-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
@@ -231,7 +231,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-${{ matrix.part }}-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel
@@ -709,7 +709,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
-          key: day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   verify-prepare:
     needs: [secrets, dependencies, verify-queue-receipt, verify-prepare-parts]
@@ -763,7 +763,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled actions from this run preparation only
@@ -974,7 +974,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-shards-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled actions from this run preparation only
@@ -1303,7 +1303,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled actions from this run preparation only
@@ -1567,7 +1567,7 @@ jobs:
           key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-${{ github.sha }}-
-            day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-
+            day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verification-diagnostics-
             day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and install the current verifier with Bazel

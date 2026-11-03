@@ -26,9 +26,10 @@ compile again or publish runtime, fixture, documentation or installation
 outcomes. All existing verification and native admission remain mandatory.
 
 Linux test preparation retains its completed compiler-action archive after the
-ordinary recipe succeeds. The Linux publisher gives these actions a separate
-namespace that all Linux consumers prefer over older bootstrap-only fallbacks;
-exact-source cache keys still take precedence. A missing archive, including on a
+ordinary recipe succeeds. The Linux publisher uses the existing test-action keys,
+avoiding duplicate snapshots within a branch. All Linux consumers prefer those
+keys over older bootstrap-only fallbacks; exact-source keys still take precedence.
+A missing archive, including on a
 failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
 acceleration. It cannot supply a receipt or skip the current verification gate.
 

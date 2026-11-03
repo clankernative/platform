@@ -2651,7 +2651,7 @@ mod tests {
         let save = ci_step(&publisher, "Publish compiler actions in this branch scope");
         assert!(save.contains("steps.actions_extract.outcome == 'success'"));
         assert!(save.contains("path: ~/.cache/bazel-disk"));
-        assert!(save.contains("key: day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
+        assert!(save.contains("key: day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-verify-prepare-parts-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"));
         // Every Linux consumer prefers completed test actions over the smaller
         // bootstrap-only fallback, while retaining exact-source precedence.
         for consumer in [
@@ -2667,8 +2667,12 @@ mod tests {
             let keys = restore.split_once("restore-keys: |\n").unwrap().1;
             let keys: Vec<_> = keys.lines().collect();
             assert!(keys[0].contains("${{ github.sha }}-"));
-            assert!(
-                keys[1].contains("day2-bazel-linux-actions-v1-${{ runner.os }}-${{ runner.arch }}-")
+            assert_eq!(
+                keys[1].trim(),
+                concat!(
+                    "day2-bazel-actions-v1-${{ runner.os }}-${{ runner.arch }}-",
+                    "verify-prepare-parts-tests-"
+                )
             );
         }
         assert!(publisher.contains("contents: read") && publisher.contains("actions: read"));
