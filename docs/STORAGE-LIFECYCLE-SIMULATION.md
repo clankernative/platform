@@ -106,17 +106,20 @@ initial-image input is rejected before fixture execution. These cuts model a
 known committed write followed by local refusal; they do not assert that a lost
 provider reply was unapplied or construct a native writer.
 
-The physical campaign projects the retained file's actual selection, policy,
-seed and marker after original validation and checks them again before returning
-those immutable inputs. Both conditional requests and the independent model use
-that exact blueprint. The input binding also includes the validated initial
+The physical campaign first projects immutable proposed selection, policy and
+seed DATA to initialize its fixture models. That is neither a provider call nor
+permission. After the scheduled actual preparation succeeds, the existing strict
+blueprint checks the retained file and proposal before first-holder work can
+begin. Both conditional requests and the independent model retain those same
+immutable inputs. The input binding also includes the validated initial
 image digest and length. The complete initial image is captured once as a bounded
 history input: the real initializer contains authority entropy and a temporary
 artifact path, so rerunning it would produce different bytes. Each replay validates
 the captured image through the normal schema/core/marker decoder before preparing
-its fresh unqualified file. The saved original and reduced programs retain those
-same bytes. This projection happens once, before the history; current
-writes cannot restamp or replace it. Saved bundles also bind those fixture inputs,
+its fresh unqualified file at the explicit preparation event. The saved
+original and reduced programs retain those same bytes. Proposed DATA is fixed
+before the history, and the checked post-preparation blueprint never restamps it;
+current writes cannot replace it. Saved bundles also bind those fixture inputs,
 so replay refuses changed runtime fixture definitions even with the same Rust
 campaign source.
 
@@ -186,8 +189,9 @@ owns its own independent wire model and never reads the actual transcript to
 predict an outcome. Pending file obligations, restoration, late packets and
 SQLite reopen cannot repair a refused continuation. Linux histories use the
 existing unqualified held-file fixture at the actual observation cuts. They do
-not qualify fsync, physical durability, enrolled peers, P3 or writer authority;
-exclusive creation and preparation still precede these generated histories.
+not qualify physical durability, enrolled peers, P3 or writer authority. The
+explicit preparation event below calls real file/directory sync operations but
+does not simulate their behavior across power loss.
 
 
 ## Stepped bootstrap and Current completion
@@ -228,3 +232,48 @@ renew a context. These are synthetic observations, not a physical clock-rate or
 native timing qualification. Linux uses the existing unqualified held-file
 fixture; its observations and DATA contexts do not construct native authority,
 P3, current-writer ownership or a real request original.
+
+
+## Original-file preparation inside the history
+
+Linux physical histories explicitly schedule `PrepareOriginal`; the fixture no
+longer creates the selected file in its constructor. The event calls the same
+production `prepare_original_file` synchronously, retains its exact owning
+outcome before fallible observation, and records its closed checkpoint. No new
+native factory, resumable owner or syscall pause is introduced. Only actual
+Prepared can reach the existing checked blueprint and subsequent fresh
+first-holder/file checks. Prepared is historical local success, not lasting
+readiness, P3 or permission to skip later checks.
+
+Sixteen seeds cover the six existing post-effect cuts (create, first write,
+file sync, directory sync, readback and decode), wrong proposal, and existing
+file/symlink/directory/hardlink leaves, with paired successes through bootstrap
+and Current. The write cut also uses a multi-batch image: exactly its first MiB
+is retained before refusal. The complete image is
+one immutable replay input. Prefix observations reference every exact byte of
+that input losslessly; non-prefix observations preserve all bytes instead of
+hashing or truncating them.
+
+The oracle derives disposition, attempted status, returned descriptor and
+named/held/foreign observations from immutable inputs, never the coordinator's
+outcome or diagnostic phase. Historical observations at return stay separate
+from live observations while pending/refused; later successful app writes use
+the existing current physical checks. A missing returned FD never proves no
+creation or no committed effect. Refused owners retain their descriptor when
+one returned, original anchor and proposal.
+
+Restoration repairs the injected plan/fault and file inputs, then verifies that
+the actual native refusal still rejects the original and a replacement interval
+outside the expected-refusal path. Reopen and repaired inputs cannot revive the
+same continuation; a later preparation attempt remains refused. Tests exercise pending
+use and repeated preparation before and after first-holder retention. Fixture
+SQLite initialization and read-only DATA observations remain distinct from
+conditional provider protocol calls, whose sends stay zero until actual
+preparation and first-holder completion.
+
+The existing 96 ordinary events, separate 512 wire advances, complete reference
+comparison, twice replay, reduction, source binding and bundle bounds remain.
+New preparation inputs require a map and reject unknown/duplicate fields and
+positional shapes. These cases cover real local syscalls and decisions under an
+unqualified test issuer; injected post-effect errors do not prove partial-syscall
+or crash durability, native enrollment, writer authority or timing margin.

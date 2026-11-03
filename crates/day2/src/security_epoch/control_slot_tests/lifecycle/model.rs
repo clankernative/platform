@@ -22,6 +22,7 @@ pub(super) struct Model {
     clock_invalid: bool,
     active: bool,
     file_refused: bool,
+    image_length: Option<usize>,
     handshake: LifecycleReference,
 }
 
@@ -71,7 +72,7 @@ impl Model {
     pub(super) fn new(
         seed: u64,
         cores: &[LogicalCore; 2],
-        physical: bool,
+        physical: Option<usize>,
         image_binding: &Option<Digest>,
     ) -> Result<Self> {
         let values = [
@@ -155,10 +156,16 @@ impl Model {
                 counter_decode_failures: 0,
                 counter: Value::Null,
                 slots: Value::Null,
-                file: physical.then_some(FileState {
-                    named_original: true,
-                    held_original: true,
-                    image_exact: true,
+                file: physical.map(|_| FileState {
+                    named_original: false,
+                    held_original: false,
+                    image_exact: false,
+                }),
+                preparation: None,
+                preparation_files: physical.map(|_| PreparationFiles {
+                    named: preparation::PreparationNamed::Missing,
+                    held: None,
+                    foreign: None,
                 }),
             },
             cores: values,
@@ -179,6 +186,7 @@ impl Model {
             clock_invalid: false,
             active: false,
             file_refused: false,
+            image_length: physical,
             handshake: LifecycleReference::new(seed)?,
         })
     }
@@ -818,6 +826,77 @@ impl Model {
 
     pub(super) fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<(bool, State)> {
         let accepted = match event {
+            Event::PrepareOriginal { input } => {
+                if !self.state.continuation {
+                    false
+                } else if self.state.preparation.is_some() {
+                    self.state.continuation = false;
+                    if !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
+                    false
+                } else {
+                    let observation = preparation::expected(
+                        input,
+                        self.image_length.context("physical preparation required")?,
+                    );
+                    let accepted =
+                        observation.disposition == preparation::PreparationDisposition::Prepared;
+                    self.state.file = Some(FileState {
+                        named_original: observation.descriptor_returned,
+                        held_original: observation.descriptor_returned,
+                        image_exact: observation.held
+                            == Some(preparation::PreparationBytes::InitialPrefix {
+                                length: self.image_length.unwrap(),
+                            }),
+                    });
+                    self.state.preparation_files = (!accepted).then(|| PreparationFiles {
+                        named: observation.named.clone(),
+                        held: observation.held.clone(),
+                        foreign: Some(observation.foreign.clone()),
+                    });
+                    self.state.preparation = Some(observation);
+                    self.state.continuation = accepted;
+                    if !accepted && !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
+                    accepted
+                }
+            }
+            Event::RestorePreparation {} => {
+                let observed = self
+                    .state
+                    .preparation
+                    .as_ref()
+                    .context("preparation required")?;
+                ensure!(
+                    matches!(
+                        observed.disposition,
+                        preparation::PreparationDisposition::RefusedBeforeAttempt
+                            | preparation::PreparationDisposition::RefusedAfterAttempt
+                    ),
+                    "refused preparation required"
+                );
+                let file = self.state.file.as_mut().unwrap();
+                file.image_exact = observed.descriptor_returned;
+                let contents = observed.descriptor_returned.then_some(
+                    preparation::PreparationBytes::InitialPrefix {
+                        length: self.image_length.unwrap(),
+                    },
+                );
+                self.state.preparation_files = Some(PreparationFiles {
+                    named: contents.as_ref().map_or(
+                        preparation::PreparationNamed::Missing,
+                        |bytes| preparation::PreparationNamed::File {
+                            contents: bytes.clone(),
+                            links: 1,
+                        },
+                    ),
+                    held: contents,
+                    foreign: Some(preparation::FOREIGN_BYTES.to_vec()),
+                });
+                true
+            }
             Event::WorkTime {
                 wire_nanos,
                 provider_nanos,
