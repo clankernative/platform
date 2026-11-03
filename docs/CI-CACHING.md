@@ -17,18 +17,25 @@ those entries cannot seed main or another PR. Existing repository storage limits
 and eviction apply. No paid cache allowance is enabled.
 
 Main publishes the Linux bootstrap actions it already compiled. Its queue-proof
-fast path skips native preparation, so a separate Mac publisher downloads only
-the compiler-action archive from the exact origin run and attempt admitted by
+fast path skips native preparation, so separate Linux and Mac publishers download only
+the compiler-action archives from the exact origin run and attempt admitted by
 the existing full-proof guard. The origin identifiers are emitted only after
 source, latest-attempt, checks and receipt admission succeed. On ordinary full
 runs the publisher uses that same run after verification succeeds. It does not
 compile again or publish runtime, fixture, documentation or installation
 outcomes. All existing verification and native admission remain mandatory.
 
-Mac actions retain their OS/architecture partition and source/run/attempt keys.
+Linux test preparation retains its completed compiler-action archive after the
+ordinary recipe succeeds. The Linux publisher gives these actions a separate
+namespace that all Linux consumers prefer over older bootstrap-only fallbacks;
+exact-source cache keys still take precedence. A missing archive, including on a
+failed-jobs-only rerun with an earlier producer attempt, merely loses this optional
+acceleration. It cannot supply a receipt or skip the current verification gate.
+
+Both platforms retain their OS/architecture partition and source/run/attempt keys.
 The publisher runs in the caller's GitHub cache scope: PRs still cannot write
 main's cache. The trusted main push is what makes its snapshot available to
-later PRs. Artifact download has a two-minute deadline and one automatic retry;
+later PRs and merge groups. Artifact download has a two-minute deadline and one automatic retry;
 cache-only transport/extraction/save failures fall back to normal compilation.
 No new server, cloud resource, permission to write repository contents, or paid
 storage setting is introduced.
