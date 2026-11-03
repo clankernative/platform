@@ -330,6 +330,17 @@ variable "backup_scratch_size_limit" {
   default     = "2Gi"
 }
 
+variable "backup_cpu_request_millis" {
+  description = "CPU scheduling reservation for the co-located backup Job, in millicores. The hard CPU limit remains one core. Select from measured backup behavior and the app node's available reservation."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.backup_cpu_request_millis == floor(var.backup_cpu_request_millis) && var.backup_cpu_request_millis >= 1 && var.backup_cpu_request_millis <= 1000
+    error_message = "backup_cpu_request_millis must be a whole number from 1 to 1000, no greater than the one-core backup limit."
+  }
+}
+
 variable "backup_memory" {
   description = "Memory limit of the day2-backup container. Copies, digests and uploads stream, so it does not grow with the database."
   type        = string

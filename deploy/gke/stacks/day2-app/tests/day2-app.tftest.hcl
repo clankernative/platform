@@ -2,6 +2,54 @@
 # override, so this never contacts a cluster.
 mock_provider "kubernetes" {}
 
+run "backup_keeps_its_default_cpu_reservation" {
+  command = plan
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "100m" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1"
+    )
+    error_message = "Existing installations keep the 100m reservation and one-core backup limit."
+  }
+}
+
+run "backup_can_fit_fractional_headroom_without_changing_hard_limits" {
+  command = plan
+
+  variables {
+    backup_cpu_request_millis = 50
+  }
+
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "50m" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].requests.cpu == "1000m" &&
+      kubernetes_stateful_set_v1.day2.spec[0].template[0].spec[0].container[0].resources[0].limits.cpu == "1000m"
+    )
+    error_message = "Only the backup scheduling reservation changes; backup and serving CPU limits stay intact."
+  }
+}
+
+run "backup_refuses_a_zero_cpu_reservation" {
+  command = plan
+  variables { backup_cpu_request_millis = 0 }
+  expect_failures = [var.backup_cpu_request_millis]
+}
+
+run "backup_refuses_fractional_millicores" {
+  command = plan
+  variables { backup_cpu_request_millis = 50.5 }
+  expect_failures = [var.backup_cpu_request_millis]
+}
+
+run "backup_refuses_a_reservation_above_its_limit" {
+  command = plan
+  variables { backup_cpu_request_millis = 1001 }
+  expect_failures = [var.backup_cpu_request_millis]
+}
+
 run "loopback_services_are_absent_by_default" {
   command = plan
 
