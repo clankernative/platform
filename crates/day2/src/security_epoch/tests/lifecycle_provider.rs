@@ -9,6 +9,20 @@ pub(in crate::security_epoch) fn transaction_closed(provider: &Provider) -> bool
     provider.db.is_autocommit()
 }
 
+pub(in crate::security_epoch) fn clock_data(provider: &Provider) -> Duration {
+    provider.tick
+}
+
+/// Controlled environment time, not a clock/grant factory. Retain the same
+/// domain and never clear the adapter's permanent-refusal latch.
+pub(in crate::security_epoch) fn advance_clock(provider: &mut Provider, nanos: u64) -> Result<()> {
+    provider.tick = provider
+        .tick
+        .checked_add(Duration::from_nanos(nanos))
+        .context("fixture clock overflow")?;
+    Ok(())
+}
+
 /// Independent historical DATA, not a replacement writer/continuation owner.
 /// The refused writer port is untouched; this connection cannot create or
 /// mutate even the fixture schema, and a missing file refuses.

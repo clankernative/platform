@@ -22,6 +22,7 @@ pub(super) struct Model {
     clock_invalid: bool,
     active: bool,
     file_refused: bool,
+    image_length: Option<usize>,
     handshake: LifecycleReference,
 }
 
@@ -60,6 +61,10 @@ impl Model {
         self.active
             && self.state.first_holder
             && self.state.continuation
+            && self
+                .state
+                .completion
+                .is_none_or(|state| state.phase == CompletionPhase::Complete)
             && !self.clock_invalid
             && !self.file_refused
     }
@@ -67,7 +72,7 @@ impl Model {
     pub(super) fn new(
         seed: u64,
         cores: &[LogicalCore; 2],
-        physical: bool,
+        physical: Option<usize>,
         image_binding: &Option<Digest>,
     ) -> Result<Self> {
         let values = [
@@ -141,6 +146,8 @@ impl Model {
                 first_holder: false,
                 checked_accepted: false,
                 holder_phase: HolderPhase::NotStarted,
+                completion: None,
+                provider_time: Duration::from_secs(100),
                 current: 0,
                 slot_posts: 0,
                 counter_posts: 0,
@@ -149,10 +156,16 @@ impl Model {
                 counter_decode_failures: 0,
                 counter: Value::Null,
                 slots: Value::Null,
-                file: physical.then_some(FileState {
-                    named_original: true,
-                    held_original: true,
-                    image_exact: true,
+                file: physical.map(|_| FileState {
+                    named_original: false,
+                    held_original: false,
+                    image_exact: false,
+                }),
+                preparation: None,
+                preparation_files: physical.map(|_| PreparationFiles {
+                    named: preparation::PreparationNamed::Missing,
+                    held: None,
+                    foreign: None,
                 }),
             },
             cores: values,
@@ -173,6 +186,7 @@ impl Model {
             clock_invalid: false,
             active: false,
             file_refused: false,
+            image_length: physical,
             handshake: LifecycleReference::new(seed)?,
         })
     }
@@ -313,9 +327,24 @@ impl Model {
         self.state.slot_posts += 1;
     }
 
+    fn fault_time(&mut self, fault: Fault) {
+        match fault {
+            Fault::ExpiredSlotReply | Fault::ExpiredCounterReply => {
+                self.state.provider_time = Duration::from_secs(105)
+            }
+            Fault::RewoundSlotClock
+            | Fault::ForwardSlotClock
+            | Fault::RewoundCounterClock
+            | Fault::ForwardCounterClock => self.state.provider_time = Duration::from_secs(103),
+            _ => {}
+        }
+    }
+
     fn bootstrap(&mut self, stage: usize, operation: Operation, fault: Fault) -> bool {
         if !self.state.first_holder
             || self.clock_invalid
+            || self.state.provider_time < Duration::from_secs(100)
+            || self.state.provider_time >= Duration::from_secs(105)
             || fault == Fault::ReplaceCandidate
             || !self.observed_documents_match()
         {
@@ -355,6 +384,12 @@ impl Model {
                 );
                 if matches!(
                     fault,
+                    Fault::ExpiredSlotReply | Fault::RewoundSlotClock | Fault::ForwardSlotClock
+                ) {
+                    self.fault_time(fault);
+                }
+                if matches!(
+                    fault,
                     Fault::LostSlotReply
                         | Fault::MalformedSlotReply
                         | Fault::ExpiredSlotReply
@@ -387,6 +422,7 @@ impl Model {
                     );
                     self.applied += 1;
                 }
+                self.fault_time(fault);
                 self.clock_invalid = matches!(
                     fault,
                     Fault::ExpiredCounterReply | Fault::RewoundCounterClock
@@ -421,9 +457,278 @@ impl Model {
                 }
             }
         }
+        self.fault_time(fault);
         self.clock_invalid = matches!(fault, Fault::ExpiredSlotReply | Fault::RewoundSlotClock);
         self.state.clock_order_failures += usize::from(fault == Fault::RewoundSlotClock);
         matches!(fault, Fault::None | Fault::ForwardSlotClock)
+    }
+
+    fn completion_file_valid(&mut self, physical: bool) -> bool {
+        let valid = !self.file_refused
+            && self.state.file.as_ref().is_none_or(|file| {
+                file.named_original && file.held_original && (physical || file.image_exact)
+            });
+        self.file_refused |= !valid;
+        valid
+    }
+
+    fn completion_step(&mut self, event: Event, endpoint: usize) -> Result<bool> {
+        if !self.state.continuation {
+            return Ok(false);
+        }
+        let accepted = match event {
+            Event::StartCompletion { work, death_cut } => {
+                if !self.state.first_holder
+                    || self
+                        .state
+                        .completion
+                        .is_some_and(|state| state.phase != CompletionPhase::Complete)
+                {
+                    false
+                } else {
+                    self.state.completion = Some(CompletionState {
+                        work,
+                        phase: CompletionPhase::Wire,
+                        mutation_known: false,
+                        consumed_checked: false,
+                        peer_complete: false,
+                    });
+                    if !self.completion_file_valid(matches!(work, CompletionWork::Current { .. })) {
+                        false
+                    } else {
+                        match work {
+                            CompletionWork::Bootstrap { .. } => {
+                                self.handshake
+                                    .begin_bootstrap_exchange(death_cut, endpoint)?;
+                                true
+                            }
+                            CompletionWork::Current { .. } => {
+                                if !self.active
+                                    || self.clock_invalid
+                                    || !self.active_documents_match()
+                                {
+                                    false
+                                } else {
+                                    self.handshake.begin_exchange(death_cut, endpoint)?;
+                                    true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Event::AdvanceCompletion => {
+                if let Some(mut state) = self.state.completion {
+                    if !matches!(
+                        state.phase,
+                        CompletionPhase::Wire
+                            | CompletionPhase::AfterMutation
+                            | CompletionPhase::Releasing
+                    ) || self.handshake.progress()? == LifecycleProgress::Refused
+                    {
+                        false
+                    } else {
+                        self.handshake.advance_exchange()?;
+                        if self.handshake.progress()? == LifecycleProgress::Refused {
+                            false
+                        } else {
+                            let mut valid = true;
+                            if matches!(state.work, CompletionWork::Bootstrap { .. })
+                                && state.phase == CompletionPhase::Wire
+                                && self.handshake.bootstrap_work_ready()?
+                            {
+                                state.phase = CompletionPhase::Mutation;
+                            } else if state.phase != CompletionPhase::Releasing
+                                && self.handshake.controller_consumed_checked()?
+                            {
+                                if matches!(state.work, CompletionWork::Bootstrap { .. })
+                                    && !state.mutation_known
+                                {
+                                    valid = false;
+                                } else {
+                                    state.consumed_checked = true;
+                                    state.phase = CompletionPhase::Release;
+                                }
+                            } else if self.handshake.progress()?
+                                == LifecycleProgress::ProtocolComplete
+                            {
+                                if state.phase != CompletionPhase::Releasing
+                                    || !state.consumed_checked
+                                {
+                                    valid = false;
+                                } else {
+                                    state.peer_complete = true;
+                                    state.phase = CompletionPhase::FinalFile;
+                                }
+                            }
+                            self.state.completion = Some(state);
+                            valid
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            Event::MutateCompletion => {
+                if let Some(mut state) = self.state.completion {
+                    if state.phase != CompletionPhase::Mutation
+                        || !self.handshake.bootstrap_work_ready()?
+                    {
+                        false
+                    } else if let CompletionWork::Bootstrap {
+                        stage,
+                        operation,
+                        fault,
+                    } = state.work
+                    {
+                        if !self.handshake.check_file_boundary(1)? {
+                            false
+                        } else {
+                            let counter_fault = match fault {
+                                Fault::FileTamperAfter
+                                | Fault::FileReplaceAfter
+                                | Fault::FileShortenAfter => Fault::None,
+                                _ => fault,
+                            };
+                            let requested = self.bootstrap(stage, operation, counter_fault);
+                            if requested && let Some(file) = self.state.file.as_mut() {
+                                match fault {
+                                    Fault::FileReplaceAfter => file.named_original = false,
+                                    Fault::FileTamperAfter | Fault::FileShortenAfter => {
+                                        file.image_exact = false
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let checked = self.handshake.check_file_boundary(1)?;
+                            if requested
+                                && checked
+                                && self.completion_file_valid(false)
+                                && self.observed_documents_match()
+                            {
+                                state.phase = CompletionPhase::AfterMutation;
+                                state.mutation_known = true;
+                                self.state.completion = Some(state);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Event::PrepareCompletionRelease => {
+                if let Some(mut state) = self.state.completion {
+                    if state.phase != CompletionPhase::Release
+                        || !state.consumed_checked
+                        || !self.handshake.controller_consumed_checked()?
+                        || !self.handshake.check_file_boundary(1)?
+                    {
+                        false
+                    } else {
+                        let requested = self.completion_file_valid(matches!(
+                            state.work,
+                            CompletionWork::Current { .. }
+                        ));
+                        let checked = self.handshake.check_file_boundary(1)?;
+                        if requested && checked {
+                            state.phase = CompletionPhase::Releasing;
+                            self.state.completion = Some(state);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            Event::FinishCompletion => {
+                if let Some(mut state) = self.state.completion {
+                    if state.phase != CompletionPhase::FinalFile
+                        || !state.peer_complete
+                        || self.handshake.progress()? != LifecycleProgress::ProtocolComplete
+                        || !self.handshake.check_file_boundary(1)?
+                    {
+                        false
+                    } else {
+                        let requested = match state.work {
+                            CompletionWork::Bootstrap {
+                                stage, operation, ..
+                            } => self.completion_file_valid(
+                                stage == 1 && operation == Operation::Settle,
+                            ),
+                            CompletionWork::Current { rewrite_provider } => {
+                                if rewrite_provider {
+                                    self.documents.get_mut(&self.names[0]).unwrap().1 += 1;
+                                }
+                                self.active
+                                    && !self.clock_invalid
+                                    && self.active_documents_match()
+                                    && self.completion_file_valid(true)
+                            }
+                        };
+                        let checked = self.handshake.check_file_boundary(1)?;
+                        if requested && checked {
+                            if matches!(state.work, CompletionWork::Current { .. }) {
+                                self.state.current += 1;
+                            }
+                            state.phase = CompletionPhase::Complete;
+                            self.state.completion = Some(state);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => unreachable!(),
+        };
+        if !accepted {
+            self.state.continuation = false;
+            if let Some(state) = self.state.completion.as_mut()
+                && state.phase != CompletionPhase::Complete
+            {
+                state.phase = CompletionPhase::Refused;
+            }
+        }
+        Ok(accepted)
+    }
+
+    fn complete_work(
+        &mut self,
+        work: CompletionWork,
+        death_cut: Option<usize>,
+        endpoint: usize,
+    ) -> Result<bool> {
+        if !self.completion_step(Event::StartCompletion { work, death_cut }, endpoint)? {
+            return Ok(false);
+        }
+        loop {
+            let state = self
+                .state
+                .completion
+                .context("reference completion absent")?;
+            let event = match state.phase {
+                CompletionPhase::Wire
+                | CompletionPhase::AfterMutation
+                | CompletionPhase::Releasing => Event::AdvanceCompletion,
+                CompletionPhase::Mutation => Event::MutateCompletion,
+                CompletionPhase::Release => Event::PrepareCompletionRelease,
+                CompletionPhase::FinalFile => Event::FinishCompletion,
+                CompletionPhase::Complete => return Ok(true),
+                CompletionPhase::Refused => return Ok(false),
+            };
+            if !self.completion_step(event, endpoint)? {
+                return Ok(false);
+            }
+        }
     }
 
     fn counter_name(&self, record: CounterRecord) -> String {
@@ -516,7 +821,100 @@ impl Model {
     }
 
     pub(super) fn step(&mut self, event: Event) -> Result<(bool, State)> {
+        self.step_peer(event, 0)
+    }
+
+    pub(super) fn step_peer(&mut self, event: Event, endpoint: usize) -> Result<(bool, State)> {
         let accepted = match event {
+            Event::PrepareOriginal { input } => {
+                if !self.state.continuation {
+                    false
+                } else if self.state.preparation.is_some() {
+                    self.state.continuation = false;
+                    if !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
+                    false
+                } else {
+                    let observation = preparation::expected(
+                        input,
+                        self.image_length.context("physical preparation required")?,
+                    );
+                    let accepted =
+                        observation.disposition == preparation::PreparationDisposition::Prepared;
+                    self.state.file = Some(FileState {
+                        named_original: observation.descriptor_returned,
+                        held_original: observation.descriptor_returned,
+                        image_exact: observation.held
+                            == Some(preparation::PreparationBytes::InitialPrefix {
+                                length: self.image_length.unwrap(),
+                            }),
+                    });
+                    self.state.preparation_files = (!accepted).then(|| PreparationFiles {
+                        named: observation.named.clone(),
+                        held: observation.held.clone(),
+                        foreign: Some(observation.foreign.clone()),
+                    });
+                    self.state.preparation = Some(observation);
+                    self.state.continuation = accepted;
+                    if !accepted && !self.state.first_holder {
+                        self.state.holder_phase = HolderPhase::Refused;
+                    }
+                    accepted
+                }
+            }
+            Event::RestorePreparation {} => {
+                let observed = self
+                    .state
+                    .preparation
+                    .as_ref()
+                    .context("preparation required")?;
+                ensure!(
+                    matches!(
+                        observed.disposition,
+                        preparation::PreparationDisposition::RefusedBeforeAttempt
+                            | preparation::PreparationDisposition::RefusedAfterAttempt
+                    ),
+                    "refused preparation required"
+                );
+                let file = self.state.file.as_mut().unwrap();
+                file.image_exact = observed.descriptor_returned;
+                let contents = observed.descriptor_returned.then_some(
+                    preparation::PreparationBytes::InitialPrefix {
+                        length: self.image_length.unwrap(),
+                    },
+                );
+                self.state.preparation_files = Some(PreparationFiles {
+                    named: contents.as_ref().map_or(
+                        preparation::PreparationNamed::Missing,
+                        |bytes| preparation::PreparationNamed::File {
+                            contents: bytes.clone(),
+                            links: 1,
+                        },
+                    ),
+                    held: contents,
+                    foreign: Some(preparation::FOREIGN_BYTES.to_vec()),
+                });
+                true
+            }
+            Event::WorkTime {
+                wire_nanos,
+                provider_nanos,
+            } => {
+                self.handshake.advance_file_time(wire_nanos)?;
+                self.state.provider_time = self
+                    .state
+                    .provider_time
+                    .checked_add(Duration::from_nanos(provider_nanos))
+                    .context("reference clock overflow")?;
+                true
+            }
+            Event::LosePacket { sender } => self.handshake.lose_packet(sender)?,
+            Event::StartCompletion { .. }
+            | Event::AdvanceCompletion
+            | Event::MutateCompletion
+            | Event::PrepareCompletionRelease
+            | Event::FinishCompletion => self.completion_step(event, endpoint)?,
             Event::FileTime { nanos } => {
                 self.handshake.advance_file_time(nanos)?;
                 true
@@ -534,6 +932,7 @@ impl Model {
             Event::Reopen => true,
             Event::RestoreClock => {
                 self.clock_invalid = false;
+                self.state.provider_time = Duration::from_secs(100);
                 true
             }
             // An independent read-only DATA observation may use a fresh read
@@ -562,11 +961,14 @@ impl Model {
             event => {
                 let file_valid = self.state.file.as_ref().is_none_or(|file| {
                     file.named_original
-                        && (matches!(event, Event::Current { .. }) || file.image_exact)
+                        && (matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
+                            || file.image_exact)
                 });
                 if !self.state.continuation {
                     false
-                } else if self.file_refused || !file_valid {
+                } else if !matches!(event, Event::Bootstrap { .. } | Event::Current { .. })
+                    && (self.file_refused || !file_valid)
+                {
                     self.file_refused = true;
                     self.state.continuation = false;
                     if !self.state.first_holder {
@@ -582,63 +984,23 @@ impl Model {
                             stage,
                             operation,
                             fault,
-                        } => {
-                            // The counter/slot write succeeds first. The
-                            // independently modeled physical observation then
-                            // refuses the enclosing continuation, retaining
-                            // every committed row and send in the state.
-                            let counter_fault = match fault {
-                                Fault::FileTamperAfter
-                                | Fault::FileReplaceAfter
-                                | Fault::FileShortenAfter => Fault::None,
-                                _ => fault,
-                            };
-                            let completed = self.bootstrap(stage, operation, counter_fault);
-                            if completed
-                                && matches!(
-                                    fault,
-                                    Fault::FileTamperAfter
-                                        | Fault::FileReplaceAfter
-                                        | Fault::FileShortenAfter
-                                )
-                            {
-                                let file = self
-                                    .state
-                                    .file
-                                    .as_mut()
-                                    .context("physical fixture required")?;
-                                match fault {
-                                    Fault::FileReplaceAfter => file.named_original = false,
-                                    Fault::FileTamperAfter | Fault::FileShortenAfter => {
-                                        file.image_exact = false
-                                    }
-                                    _ => unreachable!(),
-                                }
-                                self.file_refused = true;
-                                false
-                            } else {
-                                completed
-                            }
-                        }
+                        } => self.complete_work(
+                            CompletionWork::Bootstrap {
+                                stage,
+                                operation,
+                                fault,
+                            },
+                            None,
+                            endpoint,
+                        )?,
                         Event::Current {
                             death_cut,
                             rewrite_provider,
-                        } => {
-                            if !self.active || self.clock_invalid || !self.active_documents_match()
-                            {
-                                false
-                            } else {
-                                if rewrite_provider && death_cut.is_none() {
-                                    self.documents.get_mut(&self.names[0]).unwrap().1 += 1;
-                                }
-                                if death_cut.is_some() || rewrite_provider {
-                                    false
-                                } else {
-                                    self.state.current += 1;
-                                    true
-                                }
-                            }
-                        }
+                        } => self.complete_work(
+                            CompletionWork::Current { rewrite_provider },
+                            death_cut,
+                            endpoint,
+                        )?,
                         _ => unreachable!(),
                     };
                     self.state.continuation = accepted;

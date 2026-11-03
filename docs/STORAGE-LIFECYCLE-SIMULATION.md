@@ -106,17 +106,20 @@ initial-image input is rejected before fixture execution. These cuts model a
 known committed write followed by local refusal; they do not assert that a lost
 provider reply was unapplied or construct a native writer.
 
-The physical campaign projects the retained file's actual selection, policy,
-seed and marker after original validation and checks them again before returning
-those immutable inputs. Both conditional requests and the independent model use
-that exact blueprint. The input binding also includes the validated initial
+The physical campaign first projects immutable proposed selection, policy and
+seed DATA to initialize its fixture models. That is neither a provider call nor
+permission. After the scheduled actual preparation succeeds, the existing strict
+blueprint checks the retained file and proposal before first-holder work can
+begin. Both conditional requests and the independent model retain those same
+immutable inputs. The input binding also includes the validated initial
 image digest and length. The complete initial image is captured once as a bounded
 history input: the real initializer contains authority entropy and a temporary
 artifact path, so rerunning it would produce different bytes. Each replay validates
 the captured image through the normal schema/core/marker decoder before preparing
-its fresh unqualified file. The saved original and reduced programs retain those
-same bytes. This projection happens once, before the history; current
-writes cannot restamp or replace it. Saved bundles also bind those fixture inputs,
+its fresh unqualified file at the explicit preparation event. The saved
+original and reduced programs retain those same bytes. Proposed DATA is fixed
+before the history, and the checked post-preparation blueprint never restamps it;
+current writes cannot replace it. Saved bundles also bind those fixture inputs,
 so replay refuses changed runtime fixture definitions even with the same Rust
 campaign source.
 
@@ -137,6 +140,16 @@ failure category. A failed hosted day2 shard uploads these bundles as the
 `day2-storage-lifecycle-failures` artifact. Bundles contain only fixed synthetic
 fixture data, never live provider values, credentials, certificates or native
 process identities.
+
+The conditional provider additionally saves every before-dispatch and
+post-outcome journal prefix under `artifacts/control-slot-replays/`. Each private
+capture contains `replay.json.gz`: lossless gzip of the complete previous JSON
+payload, including its label, event/attempt identities and final rows. Duplicate
+payloads still receive distinct captures. Decompress these diagnostic records
+before inspecting JSON; they are not the typed `failure.json` replay input.
+Compression changes no campaign, evidence or scratch-space bound and does not
+establish filesystem durability. Original uncompressed captures remain retained
+as historical evidence; no compatibility reader or state migration is added.
 
 ```console
 DAY2_STORAGE_LIFECYCLE_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib security_epoch::control_slot_tests::lifecycle::replay_saved_storage_lifecycle_history --exact
@@ -176,5 +189,132 @@ owns its own independent wire model and never reads the actual transcript to
 predict an outcome. Pending file obligations, restoration, late packets and
 SQLite reopen cannot repair a refused continuation. Linux histories use the
 existing unqualified held-file fixture at the actual observation cuts. They do
-not qualify fsync, physical durability, enrolled peers, P3 or writer authority;
-exclusive creation and preparation still precede these generated histories.
+not qualify physical durability, enrolled peers, P3 or writer authority. The
+explicit preparation event below calls real file/directory sync operations but
+does not simulate their behavior across power loss.
+
+
+## Stepped bootstrap and Current completion
+
+Each complete bootstrap or ordinary Current event now drains the same explicit
+completion path used by paused histories. Bootstrap selects the closed
+StorageBootstrap purpose; ordinary Current keeps CurrentRole. A checked local
+Controller Ready send precedes its conditional mutation; App receipt remains a
+separate later observation. Only a successful mutation reaches the strong
+counter/slot post-read and the production `validate_after` decision before
+Known. A mutation error still receives its retained-original postcheck, keeps
+its actual primary error, and starts no additional provider read.
+
+Histories separately pause after checked Consumed before Released and after
+peer completion before final file validation. Final activation keeps its last
+initial-byte check before App release, then checks physical identity at final
+finish. A late file or provider refusal retains committed rows, consumed and
+peer-complete history while denying usable completion. Current's completion
+count advances only after its post-read and final file check. A pending
+completion also fences the actual shared consumer-readiness fixture before any
+provider call; later readiness after a successful finish does not reuse or
+unpoison a refused outer request original.
+
+The outer reference now independently drives every bootstrap and Current wire
+conversation. Complete worlds, queues, original observations and cumulative
+schedule state are compared after every event. Fixed/generated cuts cover all
+six bootstrap actions and ordinary Current, lost Known/Consumed/Released,
+applied-but-unacknowledged and rolled-back counter writes, pending operation
+exclusion, restoration/reopen, deadline equality and a positive small-work
+control. Only one target conversation is expanded per history, retaining the
+existing independent ordinary-event and wire-advance input caps.
+
+The provider fixture's controller-process-clock execution interval stays fixed
+at 100..105. Wire observations retain their distinct seed/endpoint/sequence
+domains and original purpose-bound intervals. Controlled work explicitly advances
+each domain; numeric samples are never translated into each other or used to
+renew a context. These are synthetic observations, not a physical clock-rate or
+native timing qualification. Linux uses the existing unqualified held-file
+fixture; its observations and DATA contexts do not construct native authority,
+P3, current-writer ownership or a real request original.
+
+
+## Original-file preparation inside the history
+
+Linux physical histories explicitly schedule `PrepareOriginal`; the fixture no
+longer creates the selected file in its constructor. The event calls the same
+production `prepare_original_file` synchronously, retains its exact owning
+outcome before fallible observation, and records its closed checkpoint. No new
+native factory, resumable owner or syscall pause is introduced. Only actual
+Prepared can reach the existing checked blueprint and subsequent fresh
+first-holder/file checks. Prepared is historical local success, not lasting
+readiness, P3 or permission to skip later checks.
+
+Sixteen seeds cover the six existing post-effect cuts (create, first write,
+file sync, directory sync, readback and decode), wrong proposal, and existing
+file/symlink/directory/hardlink leaves, with paired successes through bootstrap
+and Current. The write cut also uses a multi-batch image: exactly its first MiB
+is retained before refusal. The complete image is
+one immutable replay input. Prefix observations reference every exact byte of
+that input losslessly; non-prefix observations preserve all bytes instead of
+hashing or truncating them.
+
+The oracle derives disposition, attempted status, returned descriptor and
+named/held/foreign observations from immutable inputs, never the coordinator's
+outcome or diagnostic phase. Historical observations at return stay separate
+from live observations while pending/refused; later successful app writes use
+the existing current physical checks. A missing returned FD never proves no
+creation or no committed effect. Refused owners retain their descriptor when
+one returned, original anchor and proposal.
+
+Restoration repairs the injected plan/fault and file inputs, then verifies that
+the actual native refusal still rejects the original and a replacement interval
+outside the expected-refusal path. Reopen and repaired inputs cannot revive the
+same continuation; a later preparation attempt remains refused. Tests exercise pending
+use and repeated preparation before and after first-holder retention. Fixture
+SQLite initialization and read-only DATA observations remain distinct from
+conditional provider protocol calls, whose sends stay zero until actual
+preparation and first-holder completion.
+
+The existing 96 ordinary events, separate 512 wire advances, complete reference
+comparison, twice replay, reduction, source binding and bundle bounds remain.
+New preparation inputs require a map and reject unknown/duplicate fields and
+positional shapes. These cases cover real local syscalls and decisions under an
+unqualified test issuer; injected post-effect errors do not prove partial-syscall
+or crash durability, native enrollment, writer authority or timing margin.
+
+## Request-slot cancellation after storage bootstrap
+
+The cfg(test) request-slot campaign joins the existing generic Slot/Held
+move, completion and Drop decisions to the real SQLite ConsumerLifecycle fixture
+and its separate storage/handshake oracle. Two request slots remain distinct;
+routing clones retain the same slot and refusal latch. The request oracle is
+independent of the actual move/Drop code and never predicts authority from actual
+storage DATA.
+
+Thirty-two seeded schedules and fixed cuts cover a competing second borrow,
+normal and contended cancellation, completion of another request, failed native
+capture, storage revocation, equality at the original deadline, clock rewind and
+a foreign clock domain. Committed bootstrap rows remain separate from response
+completion. Reopen and clock restoration cannot rearm the abandoned request.
+
+Programs contain at most twelve events and are rejected before setup when they
+exceed that limit. The longest-prefix control retains every original and reduced
+observation under the same four-MiB evidence contract used for writing and
+reading. Both successful and failed histories replay twice. Nested model errors
+retain their available actual failed-step observation separately from ordinary
+refusal. Bundles bind the OAuth and storage/handshake source sets and retain
+complete slot, latch, clock, storage, transcript and reference observations.
+Duplicate keys, missing fields, unknown shapes, wrong sources and changed replay
+observations refuse; file reads are bounded on the opened handle.
+
+Replay a retained file through the normal test runner:
+
+```sh
+DAY2_REQUEST_SLOT_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::native_management::request::tests::slot_lifecycle::replay_saved_request_slot_history --exact
+```
+
+An absent replay-file input is not a saved-corpus pass. Generated and fixed
+controls still run in the ordinary cohort. Failure DATA stays in the private job
+workspace and contains synthetic fixture state, not provider credentials.
+
+ModelOriginal is deliberately unable to satisfy Original::require or produce a
+native Lease, enrolled role, writer or P3. These tests do not execute actual
+async-driver cancellation, native Lease::finish, HTTP partial delivery, kernel
+identity, physical power-loss durability or timing margin. Native App/Shell and
+provider qualification remain separate.

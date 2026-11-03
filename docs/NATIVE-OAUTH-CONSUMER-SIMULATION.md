@@ -64,11 +64,27 @@ bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::manage
 ```
 
 The normal fast/full library discovery includes the campaign. Model or replay
-divergence saves an original schedule, a bounded deletion reduction, full
-observations through divergence and the compiled source identity under
-`artifacts/oauth-native-consumer-simulation/failure-*/failure.json`. Directories
-are private temporary directories and files are created with mode 0600. The
-workspace day2 CI shard retains these bundles when it fails.
+divergence saves an original schedule, a bounded deletion reduction, both runs
+of each schedule, complete observations through divergence and the compiled
+source identity under
+`artifacts/oauth-native-consumer-simulation/failure-*/failure.json`. This file is
+the manifest: preserve its entire directory, including every sibling
+`record-*.json` file. Copying only the manifest cannot replay the counterexample.
+Directories are private temporary directories and files are created with mode
+0600. The workspace day2 CI shard retains the manifest and all record files when
+it fails.
+
+Each complete record uses the existing four-MiB evidence decoder limit; the
+whole archive is bounded to 64 MiB. Histories retain the existing 64-step limit.
+Whole identical records share one parsed value through bounded, borrowed record
+references; replay does not expand those references into copied value trees.
+Every complete original and reduced observation is still compared, without
+truncation. The manifest binds every record's
+length and digest and is written only after its referenced files are synced and
+closed. This is not a directory-fsync or power-loss durability claim. Reduction
+retains the actual last winning observation, including an intermittent failure
+that no longer reproduces later. An unavailable failure cause keeps the original
+history and remains unqualified by replay.
 
 ```console
 DAY2_NATIVE_OAUTH_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask:xtask -- test-rust //crates/day2:unit_lib oauth::management::app::tests::native_lifecycle::replay_saved_native_oauth_consumer_history --exact
@@ -76,10 +92,14 @@ DAY2_NATIVE_OAUTH_REPLAY=/absolute/path/to/failure.json bazel run //crates/xtask
 
 Replay refuses another compiled source, unknown fields, duplicate JSON fields,
 positional descriptors, changed seeds, histories outside the bounds and a reduced
-schedule that is not a deletion of its original. Without a replay file the entry
-point returns without running a saved corpus. The suite separately exercises
-actual saved-file replay and negative descriptor controls. Preserve failing
-evidence and add its semantic schedule as a regression when fixing a defect.
+schedule that is not a deletion of its original. It checks the complete original
+and reduced observations, including the failure category, twice. Missing,
+changed, additional or unreferenced record files are refused; success cannot be
+saved as a disagreement. Without a replay file the entry point returns without
+running a saved corpus. The suite separately exercises actual saved-file replay,
+the maximum-length history, intermittent retention and negative descriptor
+controls. Preserve failing evidence and add its semantic schedule as a regression
+when fixing a defect.
 
 All provider values are fixed synthetic fixtures. Evidence records allowlisted
 provider event classifications and redacted SQL, not request bodies, tokens,

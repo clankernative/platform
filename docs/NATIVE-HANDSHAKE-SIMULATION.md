@@ -112,8 +112,23 @@ follows checked Offer, and Controller retention follows checked Accepted.
 Historical checked Accepted stays distinct from usable retention after a late
 file or original-clock refusal. Complete initial reference clocks, queues and
 endpoint knowledge are compared, not just aggregate completion. These remain
-DATA and unqualified filesystem fixtures; initial preparation still precedes
-the generated history, and no native owner or P3 is constructed.
+DATA and unqualified filesystem fixtures. Their explicit preparation event now
+calls the real synchronous local attempt before first-holder steps; only its actual
+Prepared outcome can pass the existing fresh file checks. Refused owning
+outcomes and optional descriptors are retained without noncreation or retry
+claims. The independent oracle and full observations remain source-bound; no
+enrolled execution owner, P3 or power-loss qualification is constructed. See the
+[preparation histories](STORAGE-LIFECYCLE-SIMULATION.md#original-file-preparation-inside-the-history).
+
+The retained wrapper additionally selects bootstrap-purpose conversations through
+a separate closed entry. Initial/enrollment/serving cannot acquire that class,
+and ordinary Current retains its own limit. Endpoint-local checked Ready and
+Consumed expose the existing durable-work and release cuts without claiming a
+remote receipt from local send. Controlled packet loss mutates only an actually
+queued packet; it cannot manufacture a message or repeat a refused continuation.
+The storage lifecycle's independent reference follows these conversations too,
+including complete clocks/queues, while each world keeps its original observations.
+
 
 ## Failure evidence and replay
 

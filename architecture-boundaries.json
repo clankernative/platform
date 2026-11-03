@@ -119,6 +119,16 @@
         {
           "default_features": true,
           "features": [],
+          "kind": "dev",
+          "local_path": null,
+          "name": "flate2",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
           "kind": "normal",
           "local_path": null,
           "name": "futures-executor",
