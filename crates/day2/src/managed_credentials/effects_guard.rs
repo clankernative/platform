@@ -186,6 +186,7 @@ const REVIEWED_SOURCES: &[&str] = &[
     "browser.rs",
     "crash_reopen_tests.rs",
     "crypto.rs",
+    "delivery_crash_reopen_tests.rs",
     "effects.rs",
     "effects_guard.rs",
     "ingress.rs",

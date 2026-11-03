@@ -1,4 +1,4 @@
-//! Actual process loss around the ordinary fixed-family issuance transaction.
+//! Actual process loss around fixed-family issuance and private delivery commits.
 //! Only closed observations leave the fixture; private rows never implement Debug
 //! or serialization. This is disposable Runtime/SQLite evidence, not live custody.
 #![cfg(unix)]
@@ -30,11 +30,14 @@ use std::{
 };
 use tokio::io::AsyncReadExt as _;
 
+#[path = "delivery_crash_reopen_tests.rs"]
+mod delivery;
+
 const ACTOR: &str = "alice@example.com";
 const INVOCATION: &str = "credential-crash-issuance";
 const NOW: i64 = 1_000;
 const CHILD: &str =
-    "managed_credentials::simulation::crash_reopen::credential_issuance_crash_child";
+    "managed_credentials::simulation::crash_reopen::credential_crash_child";
 const CHILD_CONFIG: &str = "DAY2_CREDENTIAL_CRASH_CHILD";
 const WAIT: Duration = Duration::from_secs(60);
 const PRIVATE_TABLES: &[&str] = &[
@@ -113,6 +116,40 @@ struct Case {
     profile: Profile,
     cut: Cut,
     seed: u64,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "case", rename_all = "snake_case", deny_unknown_fields)]
+enum ChildCase {
+    Issue(Case),
+    Delivery(delivery::Case),
+}
+
+impl ChildCase {
+    fn profile(self) -> Profile {
+        match self {
+            Self::Issue(case) => case.profile,
+            Self::Delivery(case) => case.profile,
+        }
+    }
+    fn seed(self) -> u64 {
+        match self {
+            Self::Issue(case) => case.seed,
+            Self::Delivery(case) => case.seed,
+        }
+    }
+    fn require_marker(self, bytes: &[u8; 16], completion: bool) -> Result<()> {
+        match self {
+            Self::Issue(case) => require_marker(bytes, case, completion),
+            Self::Delivery(case) => delivery::require_marker(bytes, case, completion),
+        }
+    }
+    fn completion(self) -> [u8; 16] {
+        match self {
+            Self::Issue(case) => marker(case.profile, None, 2, 0),
+            Self::Delivery(case) => delivery::marker(case, None, 2),
+        }
+    }
 }
 
 // Intentionally separate from replayable ID entropy. Different material on a
@@ -380,6 +417,15 @@ fn count(db: &Connection, table: &str) -> Result<u64> {
 }
 
 fn capture(db: &Connection, e: &Expected) -> Result<Snapshot> {
+    let snapshot = capture_lifecycle(db, e)?;
+    ensure!(
+        snapshot.private.0["day2_credential_reveals"].is_empty(),
+        "issuance changed an unrelated lifecycle table"
+    );
+    Ok(snapshot)
+}
+
+fn capture_lifecycle(db: &Connection, e: &Expected) -> Result<Snapshot> {
     let private = private_image(db)?;
     let n = |name: &str| private.0[name].len() as u64;
     let mut projection = Projection {
@@ -397,7 +443,6 @@ fn capture(db: &Connection, e: &Expected) -> Result<Snapshot> {
     };
     ensure!(
         count(db, "use_receipts")? == 0
-            && n("day2_credential_reveals") == 0
             && n("day2_credential_revocations") == 0,
         "issuance changed an unrelated lifecycle table"
     );
@@ -554,8 +599,8 @@ fn check(model: &Model, p: &Projection) -> Result<()> {
             && p.receipts == n
             && p.revision == model.revision
             && p.committed == model.issued
-            && p.active == model.issued
-            && p.available == model.issued,
+            && p.active == (model.issued && !model.revoked)
+            && p.available == (model.issued && !model.closed),
         "credential crash independent oracle divergence"
     );
     Ok(())
@@ -659,7 +704,7 @@ enum Behavior {
 struct ChildInput {
     format: u32,
     instance: PathBuf,
-    case: Case,
+    case: ChildCase,
     behavior: Behavior,
 }
 
@@ -685,7 +730,7 @@ fn require_marker(bytes: &[u8; 16], case: Case, completion: bool) -> Result<()> 
 // The helper is not a coverage control. Without an explicit parent-created
 // configuration it performs no work; only the parent campaign claims cases.
 #[test]
-fn credential_issuance_crash_child() -> Result<()> {
+fn credential_crash_child() -> Result<()> {
     let Some(path) = std::env::var_os(CHILD_CONFIG) else {
         return Ok(());
     };
@@ -695,13 +740,16 @@ fn credential_issuance_crash_child() -> Result<()> {
         fs::File::open(path)?.take(4097).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 4096, "credential child configuration bound");
         let config: ChildInput = crate::json::decode(&bytes)?;
-        ensure!(config.format == 1, "credential child configuration version");
-        let ports = Ports::new(config.case.seed.wrapping_add(0x1000));
+        ensure!(config.format == 2, "credential child configuration version");
+        let ports = Ports::new(config.case.seed().wrapping_add(0x1000));
         effects::scope(ports, || -> Result<()> {
             phase = 2;
-            let runtime = load_runtime(&config.instance, config.case.seed)?;
+            let runtime = load_runtime(&config.instance, config.case.seed())?;
             phase = 3;
-            let expectation = expected(&runtime, config.case.profile)?;
+            let expectation = expected(&runtime, config.case.profile())?;
+            phase = 4;
+            match config.case {
+                ChildCase::Issue(case) => {
             let armed = matches!(
                 config.behavior,
                 Behavior::Pause | Behavior::ExitAtCheckpoint
@@ -719,7 +767,7 @@ fn credential_issuance_crash_child() -> Result<()> {
                         pid: std::process::id(),
                         thread: std::thread::current().id(),
                         expected: expectation,
-                        cut: config.case.cut,
+                        cut: case.cut,
                         before: None,
                         exit_instead: matches!(config.behavior, Behavior::ExitAtCheckpoint),
                     });
@@ -733,16 +781,19 @@ fn credential_issuance_crash_child() -> Result<()> {
                 }
             }
             let _reset = Reset;
-            phase = 4;
             let outcome = runtime.execute(INVOCATION, Fault::None)?;
-            phase = 5;
             ensure!(
                 outcome.status == "success",
                 "credential child command failed"
             );
             ensure!(!armed, "credential requested checkpoint was never reached");
+                }
+                ChildCase::Delivery(case) => {
+                    delivery::execute(&runtime, case, config.behavior, &expectation)?;
+                }
+            }
             phase = 6;
-            std::io::stderr().write_all(&marker(config.case.profile, None, 2, 0))?;
+            std::io::stderr().write_all(&config.case.completion())?;
             std::io::stderr().flush()?;
             Ok(())
         })
@@ -787,14 +838,14 @@ async fn cleanup(child: &mut tokio::process::Child) -> Result<()> {
 
 async fn child(
     fixture: &Fixture,
-    case: Case,
+    case: ChildCase,
     behavior: Behavior,
     kill: bool,
 ) -> Result<ChildStatus> {
     use std::os::unix::{fs::OpenOptionsExt, process::ExitStatusExt};
     let config = fixture.directory.path().join("child.json");
     let body = serde_json::to_vec(&ChildInput {
-        format: 1,
+        format: 2,
         instance: fixture.instance.clone(),
         case,
         behavior,
@@ -829,7 +880,7 @@ async fn child(
             .await
             .map_err(|_| anyhow::anyhow!("credential child checkpoint deadline"))?
             .map_err(|_| anyhow::anyhow!("credential child checkpoint unavailable"))?;
-        require_marker(&bytes, case, matches!(behavior, Behavior::Complete))?;
+        case.require_marker(&bytes, matches!(behavior, Behavior::Complete))?;
         if kill {
             child
                 .start_kill()
@@ -883,7 +934,7 @@ struct Observation {
 async fn history(case: Case) -> Result<Observation> {
     let fixture =
         Fixture::new(case).map_err(|_| anyhow::anyhow!("credential crash fixture setup failed"))?;
-    let status = child(&fixture, case, Behavior::Pause, true).await?;
+    let status = child(&fixture, ChildCase::Issue(case), Behavior::Pause, true).await?;
     let ports = Ports::new(case.seed.wrapping_add(0x2000));
     effects::scope(ports.clone(), || -> Result<Observation> {
         let runtime = load_runtime(&fixture.instance, case.seed)?;
@@ -969,6 +1020,7 @@ fn implementation() -> Digest {
     Digest::of(&(
         "credential-runtime-crash-v1",
         include_str!("crash_reopen_tests.rs"),
+        include_str!("delivery_crash_reopen_tests.rs"),
         include_str!("simulation.rs"),
         include_str!("store.rs"),
         include_str!("issuance.rs"),
@@ -984,14 +1036,14 @@ struct Replay {
     format: u32,
     implementation: Digest,
     artifact: String,
-    case: Case,
+    case: ChildCase,
 }
 
-fn decode_replay(bytes: &[u8], artifact: &str) -> Result<Case> {
+fn decode_replay(bytes: &[u8], artifact: &str) -> Result<ChildCase> {
     ensure!(bytes.len() <= 4096, "credential crash replay bound");
     let replay: Replay = crate::json::decode(bytes)?;
     ensure!(
-        replay.format == 1
+        replay.format == 2
             && replay.implementation == implementation()
             && replay.artifact == artifact,
         "credential crash replay source/artifact differs"
@@ -1012,28 +1064,30 @@ async fn checked(case: Case, artifact: &str) -> Result<Observation> {
     match result {
         Ok(observed) => Ok(observed),
         Err(_) => {
-            // No downstream error, private snapshots, identifiers or entropy.
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../artifacts/credential-crash-reopen");
-            fs::create_dir_all(&root)?;
-            let directory = tempfile::Builder::new()
-                .prefix("failure-")
-                .tempdir_in(root)?
-                .keep();
-            fs::write(
-                directory.join("failure.json"),
-                serde_json::to_vec(&Replay {
-                    format: 1,
-                    implementation: implementation(),
-                    artifact: artifact.into(),
-                    case,
-                })?,
-            )?;
+            retain_failure(ChildCase::Issue(case), artifact)?;
             anyhow::bail!(
                 "credential crash/reopen case diverged; redacted source-bound case retained"
             );
         }
     }
+}
+
+fn retain_failure(case: ChildCase, artifact: &str) -> Result<()> {
+    // No downstream error, private snapshots, identifiers or entropy.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../artifacts/credential-crash-reopen");
+    fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new()
+        .prefix("failure-")
+        .tempdir_in(root)?
+        .keep();
+    fs::write(directory.join("failure.json"), serde_json::to_vec(&Replay {
+        format: 2,
+        implementation: implementation(),
+        artifact: artifact.into(),
+        case,
+    })?)?;
+    Ok(())
 }
 
 fn artifact_id() -> Result<String> {
@@ -1055,7 +1109,7 @@ async fn fixed_client_and_personal_issuance_survive_real_process_loss_and_reopen
             seed: 11,
         };
         let fixture = Fixture::new(baseline_case)?;
-        child(&fixture, baseline_case, Behavior::Complete, false).await?;
+        child(&fixture, ChildCase::Issue(baseline_case), Behavior::Complete, false).await?;
         let ports = Ports::new(12);
         effects::scope(ports, || -> Result<()> {
             let runtime = load_runtime(&fixture.instance, 11)?;
@@ -1143,16 +1197,16 @@ async fn real_child_cut_and_death_guards_refuse_normal_exit_and_missing_checkpoi
         seed: 31,
     };
     let baseline = Fixture::new(case)?;
-    child(&baseline, case, Behavior::Pause, true).await?;
+    child(&baseline, ChildCase::Issue(case), Behavior::Pause, true).await?;
     let skipped = Fixture::new(case)?;
     ensure!(
-        child(&skipped, case, Behavior::SkipCheckpoint, true)
+        child(&skipped, ChildCase::Issue(case), Behavior::SkipCheckpoint, true)
             .await
             .is_err(),
         "missing checkpoint passed actual guard"
     );
     let graceful = Fixture::new(case)?;
-    let status = child(&graceful, case, Behavior::ExitAtCheckpoint, false).await?;
+    let status = child(&graceful, ChildCase::Issue(case), Behavior::ExitAtCheckpoint, false).await?;
     ensure!(
         require_killed(&status).is_err(),
         "normal child exit counted as crash"
@@ -1239,7 +1293,10 @@ async fn replay_saved_credential_process_loss() -> Result<()> {
     let mut bytes = Vec::new();
     fs::File::open(path)?.take(4097).read_to_end(&mut bytes)?;
     let artifact = artifact_id()?;
-    checked(decode_replay(&bytes, &artifact)?, &artifact).await?;
+    match decode_replay(&bytes, &artifact)? {
+        ChildCase::Issue(case) => { checked(case, &artifact).await?; }
+        ChildCase::Delivery(case) => { delivery::checked(case, &artifact).await?; }
+    }
     Ok(())
 }
 
@@ -1252,13 +1309,13 @@ fn credential_crash_replay_refuses_unknown_fields_source_and_size() -> Result<()
         seed: 3,
     };
     let mut value = serde_json::to_value(Replay {
-        format: 1,
+        format: 2,
         implementation: implementation(),
         artifact: artifact.into(),
-        case,
+        case: ChildCase::Issue(case),
     })?;
     ensure!(
-        decode_replay(&serde_json::to_vec(&value)?, artifact)? == case,
+        matches!(decode_replay(&serde_json::to_vec(&value)?, artifact)?, ChildCase::Issue(found) if found == case),
         "valid crash replay refused"
     );
     value["artifact"] = json!("foreign");
