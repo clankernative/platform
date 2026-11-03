@@ -660,6 +660,11 @@ jobs:
     needs: [verify, verify-queue-receipt, verify-prepare-parts]
     if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.verify-prepare-parts.result == 'success' || (needs.verify-queue-receipt.result == 'success' && needs.verify-queue-receipt.outputs.reused == 'true' && needs.verify-queue-receipt.outputs.cache_run != '' && needs.verify-queue-receipt.outputs.cache_attempt != '')) }}
     runs-on: ubuntu-24.04
+    # actions/cache archives paths relative to GITHUB_WORKSPACE. Match the
+    # producer's container workspace/HOME layout, not the Ubuntu host layout.
+    container:
+      image: rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959
+      options: --memory=1g --memory-swap=1g --cpus=2 --pids-limit=128
     timeout-minutes: 15
     permissions:
       contents: read
