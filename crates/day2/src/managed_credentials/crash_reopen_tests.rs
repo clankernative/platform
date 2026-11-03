@@ -1021,13 +1021,15 @@ async fn history(case: Case) -> Result<Observation> {
 
 fn implementation() -> Digest {
     Digest::of(&(
-        "credential-runtime-crash-v1",
+        "credential-runtime-crash-v2",
         include_str!("crash_reopen_tests.rs"),
         include_str!("delivery_crash_reopen_tests.rs"),
+        include_str!("crypto.rs"),
         include_str!("simulation.rs"),
         include_str!("store.rs"),
         include_str!("issuance.rs"),
         include_str!("../store.rs"),
+        include_str!("../write_queue.rs"),
         include_str!("../../../../toolchain.json"),
     ))
     .expect("fixed source tuple serializes")
