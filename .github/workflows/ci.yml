@@ -190,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [inputs, tests]
+        part: [inputs, fixtures, tests]
     env:
       # Do not compile the largest test targets concurrently inside 6 GiB.
       # Partition optimized tests into smaller LLVM units without local LTO.
@@ -268,12 +268,12 @@ jobs:
       - name: Restore completed fixture builds
         id: fixture_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ matrix.part == 'inputs' }}
+        if: ${{ matrix.part != 'tests' }}
         with:
           lookup-only: ${{ inputs.compilation_cache == 'empty' }}
-          key: day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
+          key: day2-fixtures-v4-bazel-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-${{ hashFiles('cli/**', 'fixtures/**', 'examples/**') }}
           restore-keys: |
-            day2-fixtures-v3-bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
+            day2-fixtures-v4-bazel-${{ matrix.part }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'BUILD.bazel', 'MODULE.bazel', 'MODULE.bazel.lock', 'build/bazel/**', 'Cargo.toml', 'Cargo.lock', 'build-dependencies/**', '.dockerignore', 'rust-toolchain.toml', 'toolchain.json', 'architecture*.json', 'architecture/**', '.github/workflows/ci.yml', 'crates/**', 'tools/**', 'vendor/**', 'assets/**', 'ops/**', 'infra/**', 'deploy/**', 'toolchains/**', 'sdk/**') }}-
           path: |
             artifacts/all-verification-cache.json
             artifacts/????????????????????????????????????????????????????????????????
@@ -294,7 +294,7 @@ jobs:
       - name: Restore pinned native compiler and formatter inputs
         id: native_tools
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
-        if: ${{ matrix.part == 'inputs' }}
+        if: ${{ matrix.part != 'tests' }}
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
@@ -304,7 +304,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
       - name: Save pinned native compiler and formatter inputs
-        if: ${{ matrix.part == 'inputs' && steps.native_tools.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.part != 'tests' && steps.native_tools.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
@@ -323,10 +323,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
       - name: Retain fixture compiler input identity and inventory
-        if: ${{ matrix.part == 'inputs' }}
+        if: ${{ matrix.part != 'tests' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: day2-fixture-cache-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          name: day2-fixture-cache-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/all-verification-cache.json
             artifacts/bazel-compiler-inputs.json
@@ -361,7 +361,7 @@ jobs:
           retention-days: 3
       - name: Save completed fixture builds
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ matrix.part == 'inputs' && steps.fixture_cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.part != 'tests' && steps.fixture_cache.outputs.cache-hit != 'true' }}
         with:
           key: ${{ steps.fixture_cache.outputs.cache-primary-key }}
           path: |
@@ -378,7 +378,7 @@ jobs:
             build-out/tests/*
 
       - name: Persist newly compiled actions under the captured source key
-        if: ${{ !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
+        if: ${{ matrix.part != 'fixtures' && !cancelled() && steps.bazel_actions.outputs.cache-primary-key != '' && steps.bazel_actions.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.ref, 'refs/pull/'))) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/bazel-disk
@@ -761,6 +761,31 @@ jobs:
           path: /tmp/day2-preparation-tests
       - name: Restore fixture and check outputs
         run: tar -xzf /tmp/day2-preparation-inputs/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
+      - name: Download the second fixture preparation part
+        id: artifact_download_fixtures
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.artifact_plan.outputs.fixtures }}
+          merge-multiple: true
+          path: /tmp/day2-preparation-fixtures
+      - name: Retry download of the second fixture preparation part
+        if: ${{ !cancelled() && steps.artifact_download_fixtures.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          repository: clankernative/platform
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.artifact_plan.outputs.fixtures }}
+          merge-multiple: true
+          path: /tmp/day2-preparation-fixtures
+      - name: Restore the second fixture preparation outputs
+        run: tar -xzf /tmp/day2-preparation-fixtures/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
       - name: Restore test compilation outputs
         run: tar -xzf /tmp/day2-preparation-tests/day2-preparation.tgz -C "$GITHUB_WORKSPACE"
       - name: Restore pinned native compiler and formatter inputs
@@ -780,7 +805,7 @@ jobs:
       - name: Admit pinned formatter input on cache miss
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         run: build-out/bin/xtask bootstrap-formatter /tmp/day2-tools/roc-fmt-day2-x86_64-unknown-linux-gnu
-      - name: Admit both preparation parts
+      - name: Admit all three preparation parts
         run: build-out/bin/xtask verify-prepare-join
         env:
           GH_TOKEN: ${{ github.token }}

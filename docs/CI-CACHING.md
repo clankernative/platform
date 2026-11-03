@@ -51,12 +51,16 @@ Independent diagnostics can collect repair facts but cannot replace required
 checks. The required `verify` job rejects missing, failed or skipped preparation,
 portable campaigns or Mac obligations.
 
-Preparation runs inputs and tests jobs concurrently. Inputs retains formatting,
-CLI compilation, all required fixture builds and lint checks in their existing
-Roc order. Tests builds the complete selected normal-program/harness graph once,
-then executes documentation tests. The join requires exact current-run
-identities, disjoint and exhaustive effects, admitted fixtures and a complete
-executable inventory. Permission-preserving transport records its original run
+Preparation runs inputs, fixtures and tests jobs concurrently. Inputs retains
+formatting, CLI compilation, eight fixture builds, browser checks
+and lint. Fixtures builds the remaining eighteen fixtures; all imported-peer
+pairs stay in the inputs part in their original order. Both fixture parts retain
+their existing compiler and artifact admission, and have separate cache keys.
+Tests builds the complete selected normal-program/harness graph once, then
+executes documentation tests. The join requires all three authenticated parts,
+exact current-run identities, disjoint and exhaustive effects, admitted fixtures and a complete
+executable inventory. Missing, swapped, duplicated or foreign parts refuse the
+join, including an incomplete second fixture set. Permission-preserving transport records its original run
 and producer attempt; it is separate from persistent build caches.
 
 Five Linux campaigns execute the disjoint day2, control and remaining-package

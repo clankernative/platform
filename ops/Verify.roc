@@ -41,25 +41,39 @@ Verify :: [].{
 		Capability.call!("verify-receipt", Json.to_str({ scope: "reports" }), host!)
 	}
 
-	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
-	inputs! = |host!| {
+	input_checks! : (Str => Try(Str, Str)) => Try(Str, Str)
+	input_checks! = |host!| {
 		_ = Capability.call!("verify-bazel-controls", "{}", host!)?
 		_ = Capability.call!("verify-format", Json.to_str({ scope: "all" }), host!)?
-		_ = Capability.call!("verify-cli", "{}", host!)?
+		Capability.call!("verify-cli", "{}", host!)
+	}
+
+	# Imported fixtures stay beside their producers, in the same recipe order.
+	input_fixtures! : (Str => Try(Str, Str)) => Try(Str, Str)
+	input_fixtures! = |host!| {
 		for fixture in [
 			"http",
 			"delegation-peer",
 			"delegation",
-			"credential-metadata",
-			"credential-selectable",
-			"connection-declaration",
-			"oauth-calendar",
-			"oauth-gitlab",
 			"stock-ledger",
 			"request-desk",
 			"app-ownership",
 			"notifications",
 			"chart-live",
+		] {
+			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
+		}
+		Ok("{}")
+	}
+
+	remaining_fixtures! : (Str => Try(Str, Str)) => Try(Str, Str)
+	remaining_fixtures! = |host!| {
+		for fixture in [
+			"credential-metadata",
+			"credential-selectable",
+			"connection-declaration",
+			"oauth-calendar",
+			"oauth-gitlab",
 			"redirect",
 			"relational",
 			"lifecycle",
@@ -76,9 +90,21 @@ Verify :: [].{
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}
-		_ = Capability.call!("verify-browser", "{}", host!)?
-		_ = Capability.call!("verify-lint", "{}", host!)?
 		Ok("{}")
+	}
+
+	input_finish! : (Str => Try(Str, Str)) => Try(Str, Str)
+	input_finish! = |host!| {
+		_ = Capability.call!("verify-browser", "{}", host!)?
+		Capability.call!("verify-lint", "{}", host!)
+	}
+
+	inputs! : (Str => Try(Str, Str)) => Try(Str, Str)
+	inputs! = |host!| {
+		_ = input_checks!(host!)?
+		_ = input_fixtures!(host!)?
+		_ = remaining_fixtures!(host!)?
+		input_finish!(host!)
 	}
 
 	all! : (Str => Try(Str, Str)) => Try(Str, Str)
@@ -113,7 +139,15 @@ Verify :: [].{
 	prepare_part! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	prepare_part! = |part, host!| {
 		_ = match part {
-			"inputs" => inputs!(host!)
+			"inputs" => {
+				_ = input_checks!(host!)?
+				_ = input_fixtures!(host!)?
+				input_finish!(host!)
+			}
+			"fixtures" => {
+				_ = UiDependency.install!(host!)?
+				remaining_fixtures!(host!)
+			}
 			"tests" => {
 				_ = Capability.call!("verify-test-build", "{}", host!)?
 				Capability.call!("verify-test-docs", "{}", host!)

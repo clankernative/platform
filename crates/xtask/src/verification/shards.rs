@@ -22,6 +22,7 @@ const BINARIES: &str = "artifacts/ci-test-binaries.json";
 const BUILD_CACHE: &str = "artifacts/ci-test-build-cache.json";
 const PROGRAM_CACHE: &str = "artifacts/ci-test-programs";
 const RESULTS: &str = "artifacts/ci-results";
+const PARTS: [&str; 3] = ["inputs", "fixtures", "tests"];
 const SHARDS: &[&str] = &[
     "workspace-day2",
     "workspace-control",
@@ -754,23 +755,51 @@ fn preparation_steps() -> Result<BTreeSet<String>> {
 
 fn part_steps(part: &str) -> Result<BTreeSet<String>> {
     ensure!(
-        ["all", "inputs", "tests"].contains(&part),
+        part == "all" || PARTS.contains(&part),
         "unknown preparation part"
     );
     Ok(preparation_steps()?
         .into_iter()
         .filter(|step| match part {
-            "inputs" => !step.starts_with("test-"),
+            "inputs" => !step.starts_with("test-") && !remaining_fixture(step),
+            "fixtures" => remaining_fixture(step),
             "tests" => step.starts_with("test-"),
             _ => true,
         })
         .collect())
 }
 
+// Independent admission contract for the second Roc fixture partition. New
+// fixture declarations still have to satisfy the unchanged complete step set.
+fn remaining_fixture(step: &str) -> bool {
+    [
+        "build-credential-metadata",
+        "build-credential-selectable",
+        "build-connection-declaration",
+        "build-oauth-calendar",
+        "build-oauth-gitlab",
+        "build-redirect",
+        "build-relational",
+        "build-lifecycle",
+        "build-verification-actors",
+        "build-verification-setup",
+        "build-relational-next",
+        "build-collection",
+        "build-owned",
+        "build-owned-probe",
+        "build-repeated-field",
+        "build-reports",
+        "build-reports-probe",
+        "build-reports-search",
+    ]
+    .contains(&step)
+}
+
 fn preparation_path(part: &str) -> Result<&'static str> {
     match part {
         "all" => Ok(PREPARED),
         "inputs" => Ok("artifacts/ci-preparation-inputs.json"),
+        "fixtures" => Ok("artifacts/ci-preparation-fixtures.json"),
         "tests" => Ok("artifacts/ci-preparation-tests.json"),
         _ => anyhow::bail!("unknown preparation part"),
     }
@@ -788,12 +817,12 @@ pub(super) fn save(
         *passed == part_steps(part)?,
         "incomplete hosted verification preparation"
     );
-    let binaries: Vec<Binary> = if part == "inputs" {
+    let binaries: Vec<Binary> = if ["inputs", "fixtures"].contains(&part) {
         Vec::new()
     } else {
         day2::json::decode(&fs::read(root.join(BINARIES))?)?
     };
-    let programs = if part == "inputs" {
+    let programs = if ["inputs", "fixtures"].contains(&part) {
         Vec::new()
     } else {
         let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
@@ -803,7 +832,7 @@ pub(super) fn save(
         );
         cache.programs
     };
-    let auxiliaries = if part == "inputs" {
+    let auxiliaries = if ["inputs", "fixtures"].contains(&part) {
         Vec::new()
     } else {
         let cache: BuildCache = day2::json::decode(&fs::read(root.join(BUILD_CACHE))?)?;
@@ -861,7 +890,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
             .iter()
             .map(|binary| binary.package.as_str())
             .collect::<BTreeSet<_>>()
-            == if part == "inputs" {
+            == if ["inputs", "fixtures"].contains(&part) {
                 BTreeSet::new()
             } else {
                 packages()
@@ -927,7 +956,7 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
     }
     validate_auxiliary_inventory(
         &prepared.auxiliaries,
-        if part == "inputs" {
+        if ["inputs", "fixtures"].contains(&part) {
             "none"
         } else {
             &prepared.identity.host
@@ -937,32 +966,38 @@ fn validate_preparation(prepared: &Prepared, part: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-fn combine_parts(inputs: Prepared, tests: Prepared, expected: &Identity) -> Result<Prepared> {
-    combine_origins(inputs, tests, expected, expected, expected)
+fn combine_parts(parts: [Prepared; 3], expected: &Identity) -> Result<Prepared> {
+    combine_origins(parts, expected, [expected; 3])
 }
 
 fn combine_origins(
-    mut inputs: Prepared,
-    tests: Prepared,
+    parts: [Prepared; 3],
     combined: &Identity,
-    input_origin: &Identity,
-    test_origin: &Identity,
+    origins: [&Identity; 3],
 ) -> Result<Prepared> {
-    ensure!(
-        inputs.identity == *input_origin && tests.identity == *test_origin,
-        "preparation parts belong to another checkout, run, attempt or host"
-    );
-    validate_preparation(&inputs, "inputs")?;
-    validate_preparation(&tests, "tests")?;
-    ensure!(
-        inputs.passed.is_disjoint(&tests.passed),
-        "preparation effects must be disjoint"
-    );
+    let mut passed = BTreeSet::new();
+    let mut fixtures = BTreeSet::new();
+    for ((part, name), origin) in parts.iter().zip(PARTS).zip(origins) {
+        ensure!(
+            part.identity == *origin,
+            "preparation part belongs to another checkout, run, attempt or host"
+        );
+        validate_preparation(part, name)?;
+        ensure!(
+            part.passed.iter().all(|step| passed.insert(step.clone()))
+                && part.fixtures.keys().all(|name| fixtures.insert(name.clone())),
+            "preparation effects and fixtures must be disjoint"
+        );
+    }
+    let [mut inputs, fixtures, tests] = parts;
+    inputs.fixtures.extend(fixtures.fixtures);
     inputs.binaries = tests.binaries;
     inputs.programs = tests.programs;
     inputs.auxiliaries = tests.auxiliaries;
     inputs.passed.extend(tests.passed);
+    inputs.passed.extend(fixtures.passed);
     inputs.timings_ms.extend(tests.timings_ms);
+    inputs.timings_ms.extend(fixtures.timings_ms);
     // This identity describes the join. The original part receipts retain their
     // producer identities, and the authenticated selection is retained at compose.
     inputs.identity = combined.clone();
@@ -976,22 +1011,27 @@ pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
     )?)?;
     let tests: Prepared =
         day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
+    let fixtures: Prepared = day2::json::decode(&fs::read(
+        root.join("artifacts/ci-preparation-fixtures.json"),
+    )?)?;
     let current = identity(root, snapshot)?;
     let selected = artifacts::read(&current)?;
     artifacts::refresh(root, &selected)?;
     let prepared = combine_origins(
-        inputs,
-        tests,
+        [inputs, fixtures, tests],
         &current,
-        &artifacts::origin(&current, &selected, artifacts::Role::Inputs)?,
-        &artifacts::origin(&current, &selected, artifacts::Role::Tests)?,
+        [
+            &artifacts::origin(&current, &selected, artifacts::Role::Inputs)?,
+            &artifacts::origin(&current, &selected, artifacts::Role::Fixtures)?,
+            &artifacts::origin(&current, &selected, artifacts::Role::Tests)?,
+        ],
     )?;
     fs::write(root.join(PREPARED), serde_json::to_vec_pretty(&prepared)?)?;
     // Admit all transported executable bytes and every native fixture before
     // the workflow can publish the complete workspace to runtime campaigns.
     let prepared = load(root, snapshot, None)?;
     fixtures(root, &prepared)?;
-    println!("Joined both preparation parts with all fixtures and test executables");
+    println!("Joined all three preparation parts with all fixtures and test executables");
     Ok(())
 }
 
@@ -1449,120 +1489,104 @@ mod tests {
         })
     }
 
+    pub(super) fn sample_parts() -> Result<[Prepared; 3]> {
+        Ok([sample_part("inputs")?, sample_part("fixtures")?, sample_part("tests")?])
+    }
+
     #[test]
     fn mixed_attempt_parts_require_exact_authenticated_origins_and_keep_original_receipts()
     -> Result<()> {
-        let inputs = sample_part("inputs")?;
-        let mut tests = sample_part("tests")?;
-        tests.identity.attempt = "2".into();
-        let input_origin = inputs.identity.clone();
-        let test_origin = tests.identity.clone();
-        let mut consumer = input_origin.clone();
-        consumer.attempt = "3".into();
-        let mixed = combine_origins(inputs, tests, &consumer, &input_origin, &test_origin)?;
+        let mut parts = sample_parts()?;
+        for (index, part) in parts.iter_mut().enumerate() {
+            part.identity.attempt = (index + 1).to_string();
+        }
+        let origins: [Identity; 3] = std::array::from_fn(|index| parts[index].identity.clone());
+        let mut consumer = sample_identity();
+        consumer.attempt = "4".into();
+        let mixed = combine_origins(parts, &consumer, [&origins[0], &origins[1], &origins[2]])?;
         assert_eq!(mixed.identity, consumer);
-        assert_eq!(input_origin.attempt, "1");
-        assert_eq!(test_origin.attempt, "2");
-        for field in [
-            "run",
-            "checkout",
-            "tree",
-            "source_identity",
-            "workflow",
-            "snapshot",
-            "attempt",
-        ] {
-            let mut forged = serde_json::to_value(sample_part("inputs")?)?;
-            forged["identity"][field] = json!("foreign");
-            assert!(
-                combine_origins(
-                    serde_json::from_value(forged)?,
-                    sample_part("tests")?,
-                    &consumer,
-                    &input_origin,
-                    &input_origin
-                )
-                .is_err(),
-                "{field}"
-            );
+        for field in ["run", "checkout", "tree", "source_identity", "workflow", "snapshot", "attempt"] {
+            for index in 0..3 {
+                let mut parts = sample_parts()?;
+                for (part, origin) in parts.iter_mut().zip(&origins) {
+                    part.identity = origin.clone();
+                }
+                let mut forged = serde_json::to_value(&parts[index])?;
+                forged["identity"][field] = json!("foreign");
+                parts[index] = serde_json::from_value(forged)?;
+                assert!(combine_origins(
+                    parts, &consumer, [&origins[0], &origins[1], &origins[2]]
+                ).is_err(), "{field} / {index}");
+            }
         }
         Ok(())
     }
 
     #[test]
     fn preparation_join_rejects_foreign_identity_and_incomplete_or_swapped_parts() -> Result<()> {
-        let complete = combine_parts(
-            sample_part("inputs")?,
-            sample_part("tests")?,
-            &sample_identity(),
-        )?;
+        let complete = combine_parts(sample_parts()?, &sample_identity())?;
         assert_eq!(complete.passed, preparation_steps()?);
         assert_eq!(complete.fixtures.len(), 26);
-        for fixture in [
-            "lifecycle",
-            "verification-actors",
-            "verification-setup",
-            "chart-live",
-            "credential-selectable",
-        ] {
-            assert!(complete.fixtures.contains_key(fixture));
-            let mut incomplete = sample_part("inputs")?;
-            incomplete.fixtures.remove(fixture);
-            assert!(combine_parts(incomplete, sample_part("tests")?, &sample_identity()).is_err());
+        for fixture in complete.fixtures.keys() {
+            let mut parts = sample_parts()?;
+            let removed: usize = parts.iter_mut()
+                .map(|part| usize::from(part.fixtures.remove(fixture).is_some()))
+                .sum();
+            assert_eq!(removed, 1, "{fixture}");
+            assert!(combine_parts(parts, &sample_identity()).is_err(), "{fixture}");
         }
         for field in [
-            "checkout",
-            "tree",
-            "source_identity",
-            "workspace",
-            "run",
-            "attempt",
-            "host",
-            "architecture",
-            "workflow",
-            "snapshot",
+            "checkout", "tree", "source_identity", "workspace", "run", "attempt",
+            "host", "architecture", "workflow", "snapshot",
         ] {
-            for part in ["inputs", "tests"] {
-                let mut value = serde_json::to_value(sample_part(part)?)?;
-                value["identity"][field] = json!("foreign");
-                let invalid = serde_json::from_value(value)?;
-                let (inputs, tests) = if part == "inputs" {
-                    (invalid, sample_part("tests")?)
-                } else {
-                    (sample_part("inputs")?, invalid)
-                };
-                assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+            for index in 0..3 {
+                let mut parts = sample_parts()?;
+                let mut invalid = serde_json::to_value(&parts[index])?;
+                invalid["identity"][field] = json!("foreign");
+                parts[index] = serde_json::from_value(invalid)?;
+                assert!(combine_parts(parts, &sample_identity()).is_err(), "{field} / {index}");
             }
         }
-        for (part, field) in [
-            ("inputs", "fixtures"),
-            ("inputs", "passed"),
-            ("tests", "binaries"),
-            ("tests", "timings_ms"),
+        for (index, field) in [
+            (0, "fixtures"), (0, "passed"), (1, "fixtures"), (1, "passed"),
+            (1, "timings_ms"), (2, "binaries"), (2, "timings_ms"),
         ] {
-            let mut value = serde_json::to_value(sample_part(part)?)?;
-            value[field] = if ["fixtures", "timings_ms"].contains(&field) {
+            let mut parts = sample_parts()?;
+            let mut invalid = serde_json::to_value(&parts[index])?;
+            invalid[field] = if ["fixtures", "timings_ms"].contains(&field) {
                 json!({})
             } else {
                 json!([])
             };
-            let invalid = serde_json::from_value(value)?;
-            let (inputs, tests) = if part == "inputs" {
-                (invalid, sample_part("tests")?)
-            } else {
-                (sample_part("inputs")?, invalid)
-            };
-            assert!(combine_parts(inputs, tests, &sample_identity()).is_err());
+            parts[index] = serde_json::from_value(invalid)?;
+            assert!(combine_parts(parts, &sample_identity()).is_err(), "{field} / {index}");
         }
-        assert!(
-            combine_parts(
-                sample_part("tests")?,
-                sample_part("inputs")?,
-                &sample_identity()
-            )
-            .is_err()
-        );
+        for pair in [(0, 1), (1, 2), (0, 2)] {
+            let mut parts = sample_parts()?;
+            parts.swap(pair.0, pair.1);
+            assert!(combine_parts(parts, &sample_identity()).is_err());
+        }
         assert!(part_steps("unknown").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_partitions_keep_all_effects_and_imported_fixture_pairs() -> Result<()> {
+        let mut union = BTreeSet::new();
+        for part in PARTS {
+            let steps = part_steps(part)?;
+            assert!(union.is_disjoint(&steps));
+            union.extend(steps);
+        }
+        assert_eq!(union, preparation_steps()?);
+        for pair in [
+            ["build-delegation-peer", "build-delegation"],
+            ["build-stock-ledger", "build-request-desk"],
+            ["build-app-ownership", "build-notifications"],
+        ] {
+            assert!(pair.into_iter().all(|step| part_steps("inputs").unwrap().contains(step)));
+        }
+        assert_eq!(part_steps("fixtures")?.len(), 18);
         Ok(())
     }
 
@@ -1970,7 +1994,7 @@ mod tests {
             });
             Ok(tests)
         };
-        let complete = combine_parts(sample_part("inputs")?, make_tests()?, &sample_identity())?;
+        let complete = combine_parts([sample_part("inputs")?, sample_part("fixtures")?, make_tests()?], &sample_identity())?;
         assert_eq!(complete.programs.len(), 1);
         assert!(!expected_binaries(&complete, "workspace-day2").contains(&program_output("day2")));
         for field in ["programs", "executable", "target", "kind", "directory"] {
@@ -1985,7 +2009,7 @@ mod tests {
                 };
             }
             let invalid = serde_json::from_value(value)?;
-            assert!(combine_parts(sample_part("inputs")?, invalid, &sample_identity()).is_err());
+            assert!(combine_parts([sample_part("inputs")?, sample_part("fixtures")?, invalid], &sample_identity()).is_err());
         }
         Ok(())
     }

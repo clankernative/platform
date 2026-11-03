@@ -17,6 +17,7 @@ const PLAN: &str = "/tmp/day2-ci-artifact-selection.json";
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Role {
     Inputs,
+    Fixtures,
     Tests,
     Common,
     Day2,
@@ -35,6 +36,7 @@ impl Role {
     fn prefix(self) -> &'static str {
         match self {
             Self::Inputs => "day2-preparation-inputs",
+            Self::Fixtures => "day2-preparation-fixtures",
             Self::Tests => "day2-preparation-tests",
             Self::Common => "day2-verify-common",
             Self::Day2 => "day2-verify-workspace-day2",
@@ -53,6 +55,7 @@ impl Role {
     fn job(self) -> &'static str {
         match self {
             Self::Inputs => "verify-prepare-parts (inputs)",
+            Self::Fixtures => "verify-prepare-parts (fixtures)",
             Self::Tests => "verify-prepare-parts (tests)",
             Self::Common | Self::Day2 | Self::Control | Self::Other => "verify-prepare",
             Self::Day2Result => "verify-shards (workspace-day2)",
@@ -100,7 +103,7 @@ fn sha(value: &str) -> bool {
 fn roles(phase: &str) -> Result<Vec<Role>> {
     use Role::*;
     Ok(match phase {
-        "preparation" => vec![Inputs, Tests],
+        "preparation" => vec![Inputs, Fixtures, Tests],
         "reuse" => vec![Reused],
         "workspace-day2" => vec![Common, Day2],
         "workspace-control" => vec![Common, Control],
@@ -109,6 +112,7 @@ fn roles(phase: &str) -> Result<Vec<Role>> {
         "parallel-runtime" => vec![Common, Day2, Control, Other],
         "compose" => vec![
             Inputs,
+            Fixtures,
             Tests,
             Common,
             Day2,
@@ -471,6 +475,7 @@ pub(in crate::verification) fn plan(root: &Path, snapshot: &str, phase: &str) ->
     };
     for (name, wanted) in [
         ("inputs", vec![Role::Inputs]),
+        ("fixtures", vec![Role::Fixtures]),
         ("tests", vec![Role::Tests]),
         ("common", vec![Role::Common]),
         ("binaries", vec![Role::Day2, Role::Control, Role::Other]),

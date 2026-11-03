@@ -473,6 +473,12 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
     let mut simulation_started = None;
     let mut timings = Timings::new();
     let mut cache = load_cache(root, scope, &snapshot)?;
+    let mut fixture_ui = if recipe == "verify-prepare-part-fixtures" {
+        Some(crate::ui_dependency::Session::new(root)?)
+    } else {
+        None
+    };
+    let mut fixture_ui_ready = false;
     let mut prepared = if recipe.starts_with("verify-shard-") || recipe == "verify-compose" {
         // A runtime shard admits exactly the programs it will execute. The
         // producer and final join still independently admit every output.
@@ -490,6 +496,15 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
             .map_or_else(|| vec![recipe], |shard| vec!["verify-shard", shard])
     };
     day2::automation::run(&runner, &arguments, |request| {
+        if request.action.starts_with("ui-dependency-") {
+            let receipt = request.action == "ui-dependency-receipt";
+            let result = fixture_ui
+                .as_mut()
+                .context("UI installation is only available to the fixture part")?
+                .effect(request)?;
+            fixture_ui_ready |= receipt;
+            return Ok(result);
+        }
         if request.action.starts_with("simulation-") {
             if simulation.is_none() {
                 ensure!(
@@ -666,6 +681,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                     recipe == format!("verify-prepare-part-{part}"),
                     "preparation receipt must match the selected part"
                 );
+                ensure!(part != "fixtures" || fixture_ui_ready, "fixture UI admission required");
                 ensure_stable(root, recipe, &snapshot)?;
                 shards::save(root, &snapshot, &fixtures, &passed, &timings.steps_ms, part)?;
                 return Ok(json!({}));
@@ -723,6 +739,7 @@ pub fn execute(root: &Path, recipe: &str) -> Result<()> {
                 "cli".into()
             }
             "verify-build" => {
+                ensure!(recipe != "verify-prepare-part-fixtures" || fixture_ui_ready, "fixture UI admission required");
                 let fixture = value("fixture")?;
                 ensure!(!fixtures.contains_key(fixture), "duplicate fixture");
                 let build = fixture_build(root, fixture, &fixtures)?;
@@ -1041,6 +1058,7 @@ fn recipe_scope(recipe: &str) -> Result<&'static str> {
         | "verify-mac"
         | "verify-private-build-probe"
         | "verify-prepare-part-inputs"
+        | "verify-prepare-part-fixtures"
         | "verify-prepare-part-tests" => Ok("all"),
         shard
             if shard
