@@ -2215,30 +2215,56 @@ fn consumer_progress_requires_complete_known_reference_observations() -> Result<
     let mut changed = original.clone();
     changed["shell_reference"]["failed"] = json!(true);
     changed["native"]["serving"]["failed"] = json!(true);
-    ensure!(!shell_reference_matches(&changed), "two failed worlds compared equal");
+    ensure!(
+        !shell_reference_matches(&changed),
+        "two failed worlds compared equal"
+    );
     Ok(())
 }
 
 #[test]
 fn shell_batch_bounds_and_overlapping_begin_preserve_the_pending_original() -> Result<()> {
-    let mut actual = ConsumerLifecycle::new(71, &AuthorityScope {
-        installation: "company".to_owned().try_into()?,
-        environment: "production".to_owned().try_into()?,
-        app: "workspace".to_owned().try_into()?,
-    })?;
+    let mut actual = ConsumerLifecycle::new(
+        71,
+        &AuthorityScope {
+            installation: "company".to_owned().try_into()?,
+            environment: "production".to_owned().try_into()?,
+            app: "workspace".to_owned().try_into()?,
+        },
+    )?;
     let mut reference = ConsumerShellReference::new(71)?;
     actual.step(ConsumerEvent::BeginShell { death_cut: None })?;
     reference.begin(None)?;
     let before = actual.observation()?;
     let expected = reference.observation();
     for events in [0, 65, u8::MAX] {
-        ensure!(actual.step(ConsumerEvent::AdvanceShell { events }).is_err(), "invalid batch admitted");
-        ensure!(reference.advance(events).is_err(), "invalid reference batch admitted");
-        ensure!(actual.observation()? == before && reference.observation() == expected, "invalid batch changed original");
+        ensure!(
+            actual.step(ConsumerEvent::AdvanceShell { events }).is_err(),
+            "invalid batch admitted"
+        );
+        ensure!(
+            reference.advance(events).is_err(),
+            "invalid reference batch admitted"
+        );
+        ensure!(
+            actual.observation()? == before && reference.observation() == expected,
+            "invalid batch changed original"
+        );
     }
-    ensure!(actual.step(ConsumerEvent::BeginShell { death_cut: None }).is_err(), "overlap replaced original");
-    ensure!(reference.begin(None).is_err(), "reference overlap replaced original");
-    ensure!(actual.observation()? == before && reference.observation() == expected, "overlap changed original");
+    ensure!(
+        actual
+            .step(ConsumerEvent::BeginShell { death_cut: None })
+            .is_err(),
+        "overlap replaced original"
+    );
+    ensure!(
+        reference.begin(None).is_err(),
+        "reference overlap replaced original"
+    );
+    ensure!(
+        actual.observation()? == before && reference.observation() == expected,
+        "overlap changed original"
+    );
     Ok(())
 }
 
