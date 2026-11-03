@@ -1055,9 +1055,7 @@ fn run(program: &Program, control: OracleControl) -> Result<Vec<Value>> {
         };
         let category = if panicked {
             Some("adapter_panic")
-        } else if native_divergence {
-            Some("native_model")
-        } else if !shell_reference_matches(&record) {
+        } else if native_divergence || !shell_reference_matches(&record) {
             Some("native_model")
         } else if actual != expected {
             Some("acceptance")
