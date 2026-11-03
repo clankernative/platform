@@ -18,6 +18,15 @@ again after disconnect. A closed schedule can interleave App, Shell or Controlle
 death, an identical-value epoch rewrite, SQLite reopen, restored observations and
 loss of the test executor registry.
 
+Serving progress can also be interleaved with actual OAuth decisions. A closed
+`BeginShell` queues one conversation; bounded `AdvanceShell` batches resume its
+existing events without starting another stage or clock. Each batch contains
+one to 64 events and the whole history retains its 64-step limit. Applying an
+input is distinct from completing the protocol: the complete observation labels
+pending, completed or refused progress. The existing selected-role hook still
+checks storage/enrollment and the actual Shell transcript before approval.
+No progress label becomes a permission or genuine-owner constructor.
+
 ## Independent expectations and fault boundaries
 
 The OAuth oracle consumes only the schedule. It independently specifies pending,
@@ -31,6 +40,20 @@ storage phase's pessimistic refusal handling. A negative control deliberately
 disagrees only in the reference transcript: even when peer death produces the
 expected denial and the complete outer storage state still matches, the model
 error must fail the composition.
+
+A separate reference-only serving world consumes the seed and explicit
+begin/advance/death inputs. It never reads the consumer transcript, SQL, hook
+results or provider journal to predict progress or approval. Every consumer step
+compares its complete reference endpoint world, schedule, clocks, queues and
+failure state; absent or unknown progress is a disagreement. Generated pauses
+before the first event, during the conversation and after completion exercise
+the real approval and App read/refresh calls. Approval while pending permanently
+refuses that selected Shell owner. Later transcript completion, restored
+observations or reopening SQLite cannot revive it; independently admitted App
+reads remain distinct. Peer death and executor restart retain the same refusal
+rules. A deliberately false completion expectation is saved and replayed as a
+real consumer disagreement, and a corrupt transcript oracle cannot be hidden
+behind an expected pending denial.
 
 Four successful seeds and fifty-six owner/prefix schedules replay twice.
 Coverage requires the scheduled owner actually to become unavailable. Directed

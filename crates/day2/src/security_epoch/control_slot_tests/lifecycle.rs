@@ -1409,7 +1409,9 @@ pub(crate) struct ConsumerShellReference {
 
 impl ConsumerShellReference {
     pub(crate) fn new(seed: u64) -> Result<Self> {
-        Ok(Self { handshake: LifecycleReference::serving(seed)? })
+        Ok(Self {
+            handshake: LifecycleReference::serving(seed)?,
+        })
     }
 
     pub(crate) fn begin(&mut self, death_cut: Option<usize>) -> Result<()> {
@@ -1463,7 +1465,9 @@ pub(crate) enum ConsumerEvent {
     BeginShell {
         death_cut: Option<usize>,
     },
-    AdvanceShell { events: u8 },
+    AdvanceShell {
+        events: u8,
+    },
     Reserve {
         activation: bool,
     },
@@ -1590,17 +1594,27 @@ impl ConsumerLifecycle {
     pub(crate) fn step(&mut self, event: ConsumerEvent) -> Result<serde_json::Value> {
         self.steps += 1;
         ensure!(self.steps <= MAX_EVENTS, "consumer lifecycle event bound");
-        if matches!(event, ConsumerEvent::Shell { .. } | ConsumerEvent::BeginShell { .. } | ConsumerEvent::AdvanceShell { .. }) {
+        if matches!(
+            event,
+            ConsumerEvent::Shell { .. }
+                | ConsumerEvent::BeginShell { .. }
+                | ConsumerEvent::AdvanceShell { .. }
+        ) {
             let accepted = match event {
                 ConsumerEvent::Shell { death_cut } => self.shell.exchange(death_cut),
-                ConsumerEvent::BeginShell { death_cut } => self.shell.begin_exchange(death_cut, 0).map(|()| true),
+                ConsumerEvent::BeginShell { death_cut } => {
+                    self.shell.begin_exchange(death_cut, 0).map(|()| true)
+                }
                 ConsumerEvent::AdvanceShell { events } => (|| {
                     ensure!((1..=64).contains(&events), ConsumerModelError);
-                    for _ in 0..events { self.shell.advance_exchange()?; }
+                    for _ in 0..events {
+                        self.shell.advance_exchange()?;
+                    }
                     Ok(true)
                 })(),
                 _ => unreachable!(),
-            }.map_err(|_| ConsumerModelError)?;
+            }
+            .map_err(|_| ConsumerModelError)?;
             let record = self.world.record(
                 accepted,
                 counter_fixture::snapshot(&self.world.port.counter),
@@ -1610,7 +1624,9 @@ impl ConsumerLifecycle {
         let endpoint = usize::from(matches!(event, ConsumerEvent::ControllerDeath { .. }));
         let event = match event {
             ConsumerEvent::FirstHolder { death_cut } => Event::FirstHolder { death_cut },
-            ConsumerEvent::Shell { .. } | ConsumerEvent::BeginShell { .. } | ConsumerEvent::AdvanceShell { .. } => unreachable!(),
+            ConsumerEvent::Shell { .. }
+            | ConsumerEvent::BeginShell { .. }
+            | ConsumerEvent::AdvanceShell { .. } => unreachable!(),
             ConsumerEvent::Reserve { activation } => Event::Bootstrap {
                 stage: usize::from(activation),
                 operation: Operation::Reserve,
