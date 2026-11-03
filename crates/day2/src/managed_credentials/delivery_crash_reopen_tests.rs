@@ -113,6 +113,12 @@ fn unchanged_material(before: &Snapshot, after: &Snapshot) -> Result<()> {
             ensure!(after.private.0.get(table) == Some(rows), "delivery changed immutable private or product state");
         }
     }
+    let before_delivery = &before.private.0["day2_credential_deliveries"];
+    let after_delivery = &after.private.0["day2_credential_deliveries"];
+    ensure!(before_delivery.len() == 1 && after_delivery.len() == 1
+        && before_delivery[0].len() == 6 && after_delivery[0].len() == 6
+        && before_delivery[0][..4] == after_delivery[0][..4],
+        "delivery changed recipient, session, version or expiry");
     ensure!(before.public == after.public, "delivery changed public issuance outcome");
     Ok(())
 }
@@ -205,6 +211,21 @@ fn denied_bindings(db: &mut Connection, e: &Expected, version: &str) -> Result<(
     Ok(())
 }
 
+fn extra_authorization_control(db: &mut Connection, e: &Expected, model: &Model, authorizations: u64) -> Result<()> {
+    if model.closed { return Ok(()); }
+    let before = private_image(db)?;
+    let tx = crate::write_queue::immediate(db)?;
+    let pending = store::authorize_reveal_in(&tx, post(e,
+        &head(&capture_delivery(&tx, e)?.snapshot)?, "retry-two"))?
+        .context("authorization count control did not stage")?;
+    ensure!(check_image(&capture_delivery(&tx, e)?, model, authorizations).is_err(),
+        "independent oracle accepted extra authorization");
+    drop(pending);
+    tx.rollback()?;
+    ensure!(private_image(db)? == before, "authorization control escaped rollback");
+    Ok(())
+}
+
 async fn history(case: Case) -> Result<Observation> {
     let fixture = issued_fixture(case)?;
     let before = effects::scope(Ports::new(case.seed.wrapping_add(0x3000)), || -> Result<Snapshot> {
@@ -228,6 +249,7 @@ async fn history(case: Case) -> Result<Observation> {
         check_image(&reopened, &model, authorizations)?;
         unchanged_material(&before, &reopened.snapshot)?;
         denied_bindings(&mut db, &e, &head(&reopened.snapshot)?)?;
+        extra_authorization_control(&mut db, &e, &model, authorizations)?;
         let version = head(&reopened.snapshot)?;
         // The dead process's permit/body cannot be reconstructed from a receipt.
         // A retry calls the actual authorization API with a new verified fixture
