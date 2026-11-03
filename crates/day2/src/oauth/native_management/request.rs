@@ -1191,4 +1191,1329 @@ mod tests {
         assert!(slot.install(18).is_err());
         assert!(slot.take().is_err());
     }
+
+    // This fixture cannot pass Original::require or produce a native Lease.
+    // It schedules the actual generic move/Drop decisions alongside the
+    // independently checked real SQLite storage fixture.
+    mod slot_lifecycle {
+        use super::*;
+        use crate::security_epoch::{ConsumerEvent, ConsumerLifecycle, ConsumerModelError};
+        use serde::{Deserialize, Serialize};
+        use serde_json::{Value, json};
+
+        // Complete original and reduced observations share the existing 4 MiB
+        // evidence contract. Reject larger programs before creating a world;
+        // the longest-prefix control pins this declared supported limit.
+        const MAX_EVENTS: usize = 12;
+        const MAX_BUNDLE: usize = 4 * 1024 * 1024;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+        enum Event {
+            Capture { request: u8 },
+            FailedCapture { request: u8 },
+            Lease { request: u8 },
+            Check { request: u8 },
+            Finish { request: u8 },
+            Cancel { request: u8, contended: bool },
+            Refuse { request: u8 },
+            NativeProbe { request: u8 },
+            ForeignClock { request: u8 },
+            Advance { millis: u64 },
+            Rewind { millis: u64 },
+            RevokeStorage {},
+            ReopenAndRestoreClock {},
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Control {
+            None,
+            SlotOracle,
+            StorageOracle,
+        }
+
+        fn source() -> String {
+            source_with(ConsumerLifecycle::source())
+        }
+
+        fn source_with(storage: day2_capabilities::Digest) -> String {
+            day2_capabilities::Digest::of(&(
+                "request-slot-lifecycle-v1",
+                crate::oauth::simulation::implementation(),
+                storage,
+            ))
+            .unwrap()
+            .as_str()
+            .to_owned()
+        }
+
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Program {
+            version: u32,
+            seed: u64,
+            events: Vec<Event>,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Phase {
+            Empty,
+            Capturing,
+            Live,
+            Leased,
+            Complete,
+            Refused,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Clock {
+            domain: u64,
+            origin: u64,
+            latest: u64,
+            refused: bool,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RequestState {
+            phase: Phase,
+            refused: bool,
+            held: bool,
+            current: Option<Clock>,
+            captured: Option<(u64, u64)>,
+            routing_clones_share_slot_and_latch: bool,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct State {
+            requests: [RequestState; 2],
+            distinct_slots: bool,
+            storage_live: bool,
+            now: u64,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Record {
+            accepted: bool,
+            state: State,
+            storage: Value,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FailedStep {
+            index: usize,
+            actual_outcome: Option<bool>,
+            observation: Record,
+            independently_predicted: Value,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Divergence {
+            category: String,
+            index: usize,
+            records: Vec<Record>,
+            expected: Value,
+            failed_step: Option<Box<FailedStep>>,
+        }
+
+        struct World {
+            requests: [Request; 2],
+            held: [Option<Held<Original, ModelOriginal>>; 2],
+            captured: [Option<(u64, u64)>; 2],
+            time: Arc<Time>,
+            scope: AuthorityScope,
+            storage: ConsumerLifecycle,
+        }
+
+        fn clock(value: &ModelOriginal) -> Result<Clock> {
+            let effects::Instant::Simulated {
+                domain,
+                ticks: origin,
+            } = value.origin
+            else {
+                anyhow::bail!("request history requires controlled original");
+            };
+            let effects::Instant::Simulated {
+                domain: latest_domain,
+                ticks: latest,
+            } = value.latest
+            else {
+                anyhow::bail!("request history requires controlled latest sample");
+            };
+            ensure!(
+                domain == latest_domain,
+                "original domain changed in retained material"
+            );
+            Ok(Clock {
+                domain,
+                origin: origin.as_millis().try_into()?,
+                latest: latest.as_millis().try_into()?,
+                refused: value.refused,
+            })
+        }
+
+        impl World {
+            fn new(seed: u64) -> Result<Self> {
+                let scope = absent_scope();
+                let mut storage = ConsumerLifecycle::new(seed, &scope)?;
+                storage.step(ConsumerEvent::FirstHolder { death_cut: None })?;
+                for activation in [false, true] {
+                    storage.step(ConsumerEvent::Reserve { activation })?;
+                    storage.step(ConsumerEvent::Dispatch { activation })?;
+                    storage.step(ConsumerEvent::Settle { activation })?;
+                }
+                storage.step(ConsumerEvent::Current {
+                    death_cut: None,
+                    rewrite_provider: false,
+                })?;
+                Ok(Self {
+                    requests: [Request::new(), Request::new()],
+                    held: [None, None],
+                    captured: [None, None],
+                    time: Arc::new(Time {
+                        domain: seed.wrapping_add(700_000),
+                        millis: AtomicU64::new(10_000),
+                    }),
+                    scope,
+                    storage,
+                })
+            }
+
+            fn check(&mut self, index: usize, finish: bool) -> Result<()> {
+                let held = self.held[index]
+                    .as_mut()
+                    .context("request value not held")?;
+                let result = (|| {
+                    held.check()?;
+                    held.current
+                        .as_mut()
+                        .context("request material consumed")?
+                        .check()?;
+                    let requested = self.storage.check(&self.scope, false);
+                    // Evaluate the same original after the real storage I/O,
+                    // even on refusal. Never replace the primary error.
+                    let checked = held
+                        .current
+                        .as_mut()
+                        .context("request material consumed")?
+                        .check();
+                    requested?;
+                    checked?;
+                    held.check()?;
+                    if finish {
+                        let _ = held.current.take().context("request material consumed")?;
+                        held.complete()?;
+                    }
+                    Ok(())
+                })();
+                if result.is_err() || finish {
+                    drop(self.held[index].take());
+                }
+                result
+            }
+
+            fn step(&mut self, event: Event) -> Result<Record> {
+                let result = match event {
+                    Event::Capture { request } => {
+                        let i = usize::from(request);
+                        self.requests[i].capture_model().and_then(|()| {
+                            let slot = self.requests[i].slot.borrow();
+                            let Slot::Live(Original::Model(value)) = &*slot else {
+                                anyhow::bail!("captured non-model material");
+                            };
+                            let value = clock(value)?;
+                            self.captured[i] = Some((value.domain, value.origin));
+                            Ok(())
+                        })
+                    }
+                    Event::FailedCapture { request } => {
+                        self.requests[usize::from(request)].capture_app(&self.scope)
+                    }
+                    Event::Lease { request } => {
+                        let i = usize::from(request);
+                        (|| {
+                            ensure!(
+                                !self.requests[i].refused.get(),
+                                "request permanently refused"
+                            );
+                            let original = self.requests[i].slot.try_borrow_mut()?.take()?;
+                            let Original::Model(value) = original else {
+                                anyhow::bail!("non-model authority entered request history");
+                            };
+                            ensure!(self.held[i].is_none(), "duplicate held request value");
+                            self.held[i] = Some(Held {
+                                slot: self.requests[i].slot.clone(),
+                                refused: self.requests[i].refused.clone(),
+                                current: Some(value),
+                            });
+                            Ok(())
+                        })()
+                    }
+                    Event::Check { request } => self.check(usize::from(request), false),
+                    Event::Finish { request } => self.check(usize::from(request), true),
+                    Event::Cancel { request, contended } => {
+                        let i = usize::from(request);
+                        if let Some(held) = self.held[i].take() {
+                            if contended {
+                                let borrowed = self.requests[i].slot.borrow_mut();
+                                drop(held);
+                                drop(borrowed);
+                            } else {
+                                drop(held);
+                            }
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!("no held response to cancel"))
+                        }
+                    }
+                    Event::Refuse { request } => {
+                        self.requests[usize::from(request)].refuse();
+                        Ok(())
+                    }
+                    Event::NativeProbe { request } => self.requests[usize::from(request)]
+                        .take(&self.scope, NativeRole::AppHost)
+                        .map(drop),
+                    Event::ForeignClock { request } => {
+                        let other = Arc::new(Time {
+                            domain: self.time.domain.wrapping_add(1),
+                            millis: AtomicU64::new(self.time.millis.load(Ordering::SeqCst)),
+                        });
+                        effects::scope(other, || self.check(usize::from(request), false))
+                    }
+                    Event::Advance { millis } => {
+                        let now = self
+                            .time
+                            .millis
+                            .load(Ordering::SeqCst)
+                            .checked_add(millis)
+                            .context("history clock overflow")?;
+                        self.time.millis.store(now, Ordering::SeqCst);
+                        Ok(())
+                    }
+                    Event::Rewind { millis } => {
+                        let now = self
+                            .time
+                            .millis
+                            .load(Ordering::SeqCst)
+                            .checked_sub(millis)
+                            .context("history clock underflow")?;
+                        self.time.millis.store(now, Ordering::SeqCst);
+                        Ok(())
+                    }
+                    Event::RevokeStorage {} => self
+                        .storage
+                        .step(ConsumerEvent::Current {
+                            death_cut: None,
+                            rewrite_provider: true,
+                        })
+                        .map(|_| ()),
+                    Event::ReopenAndRestoreClock {} => {
+                        self.storage.step(ConsumerEvent::Reopen)?;
+                        self.storage.step(ConsumerEvent::RestoreClock).map(|_| ())
+                    }
+                };
+                let accepted = match result {
+                    Ok(()) => true,
+                    Err(error) if error.is::<ConsumerModelError>() => return Err(error),
+                    Err(_) => false,
+                };
+                self.record(accepted)
+            }
+
+            fn record(&self, accepted: bool) -> Result<Record> {
+                let mut states = Vec::new();
+                for i in 0..2 {
+                    let slot = self.requests[i].slot.try_borrow()?;
+                    let (phase, live) = match &*slot {
+                        Slot::Empty => (Phase::Empty, None),
+                        Slot::Capturing => (Phase::Capturing, None),
+                        Slot::Live(Original::Model(value)) => (Phase::Live, Some(clock(value)?)),
+                        Slot::Live(_) => anyhow::bail!("non-model request history state"),
+                        Slot::Leased => (Phase::Leased, None),
+                        Slot::Complete => (Phase::Complete, None),
+                        Slot::Refused => (Phase::Refused, None),
+                    };
+                    let current = self.held[i]
+                        .as_ref()
+                        .and_then(|held| held.current.as_ref())
+                        .map(clock)
+                        .transpose()?
+                        .or(live);
+                    let cloned = self.requests[i].clone();
+                    states.push(RequestState {
+                        phase,
+                        refused: self.requests[i].refused.get(),
+                        held: self.held[i].is_some(),
+                        current,
+                        captured: self.captured[i],
+                        routing_clones_share_slot_and_latch: Rc::ptr_eq(
+                            &cloned.slot,
+                            &self.requests[i].slot,
+                        ) && Rc::ptr_eq(
+                            &cloned.refused,
+                            &self.requests[i].refused,
+                        ),
+                    });
+                }
+                let storage = self.storage.observation()?;
+                let state = &storage["storage"]["state"];
+                let storage_live = state["continuation"] == true && state["first_holder"] == true;
+                Ok(Record {
+                    accepted,
+                    state: State {
+                        requests: states
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("request history slot count"))?,
+                        distinct_slots: !Rc::ptr_eq(&self.requests[0].slot, &self.requests[1].slot),
+                        storage_live,
+                        now: self.time.millis.load(Ordering::SeqCst),
+                    },
+                    storage,
+                })
+            }
+        }
+
+        // Independent scalar model: it never calls Slot/Held/ModelOriginal,
+        // reads their state, or predicts readiness from actual storage DATA.
+        #[derive(Clone)]
+        struct Reference {
+            state: State,
+            domain: u64,
+        }
+        impl Reference {
+            fn new(seed: u64) -> Self {
+                let empty = RequestState {
+                    phase: Phase::Empty,
+                    refused: false,
+                    held: false,
+                    current: None,
+                    captured: None,
+                    routing_clones_share_slot_and_latch: true,
+                };
+                Self {
+                    state: State {
+                        requests: [empty.clone(), empty],
+                        distinct_slots: true,
+                        storage_live: true,
+                        now: 10_000,
+                    },
+                    domain: seed.wrapping_add(700_000),
+                }
+            }
+            fn step(&mut self, event: Event) -> Result<bool> {
+                let id = match event {
+                    Event::Capture { request }
+                    | Event::FailedCapture { request }
+                    | Event::Lease { request }
+                    | Event::Check { request }
+                    | Event::Finish { request }
+                    | Event::Cancel { request, .. }
+                    | Event::Refuse { request }
+                    | Event::NativeProbe { request }
+                    | Event::ForeignClock { request } => Some(usize::from(request)),
+                    _ => None,
+                };
+                let now = self.state.now;
+                let storage = self.state.storage_live;
+                let accepted = if let Some(i) = id {
+                    let s = &mut self.state.requests[i];
+                    match event {
+                        Event::Capture { .. } if !s.refused && s.phase == Phase::Empty => {
+                            s.phase = Phase::Live;
+                            s.current = Some(Clock {
+                                domain: self.domain,
+                                origin: now,
+                                latest: now,
+                                refused: false,
+                            });
+                            s.captured = Some((self.domain, now));
+                            true
+                        }
+                        Event::FailedCapture { .. } if !s.refused && s.phase == Phase::Empty => {
+                            s.phase = Phase::Refused;
+                            false
+                        }
+                        Event::Lease { .. } if !s.refused && s.phase == Phase::Live => {
+                            s.phase = Phase::Leased;
+                            s.held = true;
+                            true
+                        }
+                        Event::Check { .. } | Event::Finish { .. } if s.held => {
+                            let valid = !s.refused
+                                && s.phase == Phase::Leased
+                                && s.current.as_ref().is_some_and(|c| {
+                                    !c.refused
+                                        && now >= c.latest
+                                        && now
+                                            .checked_sub(c.origin)
+                                            .is_some_and(|elapsed| elapsed < 5_000)
+                                })
+                                && storage;
+                            if valid {
+                                s.current.as_mut().unwrap().latest = now;
+                                if matches!(event, Event::Finish { .. }) {
+                                    s.current = None;
+                                    s.held = false;
+                                    s.phase = Phase::Complete;
+                                }
+                            } else {
+                                s.refused = true;
+                                s.phase = Phase::Refused;
+                                s.held = false;
+                                s.current = None;
+                            }
+                            valid
+                        }
+                        Event::Cancel { contended, .. } if s.held => {
+                            s.refused = true;
+                            if !contended && s.phase != Phase::Complete {
+                                s.phase = Phase::Refused;
+                            }
+                            s.held = false;
+                            s.current = None;
+                            true
+                        }
+                        Event::ForeignClock { .. } if s.held => {
+                            s.refused = true;
+                            s.phase = Phase::Refused;
+                            s.held = false;
+                            s.current = None;
+                            false
+                        }
+                        Event::Refuse { .. } => {
+                            s.refused = true;
+                            if s.phase != Phase::Complete {
+                                s.phase = Phase::Refused;
+                                if !s.held {
+                                    s.current = None;
+                                }
+                            }
+                            true
+                        }
+                        _ => false,
+                    }
+                } else {
+                    match event {
+                        Event::Advance { millis } => {
+                            self.state.now = now
+                                .checked_add(millis)
+                                .context("reference clock overflow")?;
+                            true
+                        }
+                        Event::Rewind { millis } => {
+                            self.state.now = now
+                                .checked_sub(millis)
+                                .context("reference clock underflow")?;
+                            true
+                        }
+                        Event::RevokeStorage {} => {
+                            self.state.storage_live = false;
+                            true
+                        }
+                        Event::ReopenAndRestoreClock {} => true,
+                        _ => unreachable!(),
+                    }
+                };
+                Ok(accepted)
+            }
+        }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Bundle {
+            version: u32,
+            source: String,
+            original: Program,
+            reduced: Program,
+            records: Vec<Record>,
+            category: String,
+            index: usize,
+            expected: Value,
+            oracle_control: Control,
+            failed_step: Option<Box<FailedStep>>,
+            reduced_observation: Option<Divergence>,
+        }
+
+        fn run(
+            program: &Program,
+            control: Control,
+        ) -> std::result::Result<Vec<Record>, Divergence> {
+            let mut records = Vec::new();
+            let mut index = 0;
+            let mut category = "input";
+            let mut expected = json!({"rule":"valid bounded input"});
+            let mut failed_step = None;
+            let execute = (|| -> Result<Vec<Record>> {
+                ensure!(
+                    program.version == 1
+                        && !program.events.is_empty()
+                        && program.events.len() <= MAX_EVENTS,
+                    "request history input bound"
+                );
+                for event in &program.events {
+                    match *event {
+                        Event::Capture { request }
+                        | Event::FailedCapture { request }
+                        | Event::Lease { request }
+                        | Event::Check { request }
+                        | Event::Finish { request }
+                        | Event::Cancel { request, .. }
+                        | Event::Refuse { request }
+                        | Event::NativeProbe { request }
+                        | Event::ForeignClock { request } => {
+                            ensure!(request < 2, "request history identity bound")
+                        }
+                        _ => {}
+                    }
+                }
+                category = "setup";
+                let mut world = World::new(program.seed)?;
+                let time = world.time.clone();
+                let mut reference = Reference::new(program.seed);
+                effects::scope(time, || -> Result<Vec<Record>> {
+                    for (at, &event) in program.events.iter().enumerate() {
+                        index = at;
+                        category = "execution";
+                        if control == Control::StorageOracle && matches!(event, Event::Check { .. })
+                        {
+                            world
+                                .storage
+                                .corrupt_enrollment_reference_for_slot_control();
+                        }
+                        let actual = match world.step(event) {
+                            Ok(actual) => actual,
+                            Err(error) => {
+                                let mut prediction = reference.clone();
+                                expected = match prediction.step(event) {
+                                    Ok(accepted) => {
+                                        json!({"accepted":accepted,"state":prediction.state})
+                                    }
+                                    Err(_) => {
+                                        json!({"observation":"independent prediction unavailable"})
+                                    }
+                                };
+                                if let Ok(observation) = world.record(false) {
+                                    failed_step = Some(Box::new(FailedStep {
+                                        index: at,
+                                        actual_outcome: None,
+                                        observation,
+                                        independently_predicted: expected.clone(),
+                                    }));
+                                }
+                                return Err(error);
+                            }
+                        };
+                        records.push(actual.clone());
+                        category = "oracle";
+                        let accepted = reference.step(event)?;
+                        if control == Control::SlotOracle
+                            && matches!(event, Event::Cancel { request: 0, .. })
+                            && accepted
+                        {
+                            // Negative harness control only. The actual path
+                            // never receives this parameter or altered model.
+                            reference.state.requests[0].refused = false;
+                        }
+                        category = "model";
+                        expected = json!({"accepted":accepted,"state":reference.state});
+                        ensure!(
+                            (actual.accepted, &actual.state) == (accepted, &reference.state),
+                            "request history model disagreement"
+                        );
+                    }
+                    Ok(records.clone())
+                })
+            })();
+            execute.map_err(|error| Divergence {
+                category: if error.is::<ConsumerModelError>() {
+                    "storage_oracle".to_owned()
+                } else {
+                    category.to_owned()
+                },
+                index,
+                records,
+                expected,
+                failed_step,
+            })
+        }
+
+        fn replayed(
+            program: &Program,
+            control: Control,
+        ) -> std::result::Result<Vec<Record>, Divergence> {
+            let first = run(program, control);
+            let second = run(program, control);
+            match (first, second) {
+                (Ok(first), Ok(second)) if first == second => Ok(first),
+                (Err(first), Err(second)) if first == second => Err(first),
+                (first, second) => {
+                    let (records, failed_step) = match &first {
+                        Ok(records) => (records.clone(), None),
+                        Err(failure) => (failure.records.clone(), failure.failed_step.clone()),
+                    };
+                    Err(Divergence {
+                        category: "replay".to_owned(),
+                        index: 0,
+                        records,
+                        failed_step,
+                        expected: json!({"first":first,"second":second}),
+                    })
+                }
+            }
+        }
+
+        fn retain_at(
+            root: &std::path::Path,
+            program: &Program,
+            failure: Divergence,
+            oracle_control: Control,
+        ) -> Result<std::path::PathBuf> {
+            let category = failure.category.clone();
+            let (events, observed) = crate::oauth::simulation::reduce_steps(
+                &program.events,
+                96,
+                &category,
+                |error| {
+                    error
+                        .downcast_ref::<RetainedFailure>()
+                        .map_or("execution", |e| e.0.category.as_str())
+                        .to_owned()
+                },
+                |events| {
+                    replayed(
+                        &Program {
+                            events: events.to_vec(),
+                            ..program.clone()
+                        },
+                        oracle_control,
+                    )
+                    .map(|_| ())
+                    .map_err(|e| anyhow::Error::new(RetainedFailure(e)))
+                },
+            );
+            let reduced_observation = observed.and_then(|error| {
+                error
+                    .downcast::<RetainedFailure>()
+                    .ok()
+                    .map(|failure| failure.0)
+            });
+            let bundle = Bundle {
+                version: 1,
+                source: source(),
+                original: program.clone(),
+                reduced: Program {
+                    events,
+                    ..program.clone()
+                },
+                records: failure.records,
+                category,
+                index: failure.index,
+                expected: failure.expected,
+                oracle_control,
+                failed_step: failure.failed_step,
+                reduced_observation,
+            };
+            let bytes = serde_json::to_vec(&bundle)?;
+            ensure!(bytes.len() <= MAX_BUNDLE, "request history evidence bound");
+            // Writer and reader share the existing evidence byte/node/depth
+            // budgets and duplicate-key checks. Never persist unreadable DATA.
+            let _: Bundle = crate::json::decode_evidence(&bytes)?;
+            std::fs::create_dir_all(root)?;
+            let directory = tempfile::Builder::new()
+                .prefix("failure-")
+                .tempdir_in(root)?
+                .keep();
+            let path = directory.join("failure.json");
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(path)
+        }
+
+        #[derive(Debug)]
+        struct RetainedFailure(Divergence);
+        impl std::fmt::Display for RetainedFailure {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0.category)
+            }
+        }
+        impl std::error::Error for RetainedFailure {}
+
+        fn verify(program: &Program) -> Result<Vec<Record>> {
+            match replayed(program, Control::None) {
+                Ok(records) => Ok(records),
+                Err(failure) => {
+                    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../artifacts/request-slot-lifecycle");
+                    let path = retain_at(&root, program, failure, Control::None)?;
+                    anyhow::bail!(
+                        "request history disagreed; retained bounded DATA at {}",
+                        path.display()
+                    )
+                }
+            }
+        }
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+            let mut value = *seed;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+            value ^ (value >> 31)
+        }
+
+        #[test]
+        fn generated_request_slots_replay_actual_moves_latches_and_storage_reads() -> Result<()> {
+            for seed in 0..32 {
+                let mut random = seed;
+                let mut events = vec![
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Check { request: 0 },
+                    Event::NativeProbe { request: 0 },
+                    Event::Capture { request: 1 },
+                    Event::Lease { request: 1 },
+                    Event::Finish { request: 1 },
+                ];
+                for _ in 0..MAX_EVENTS - events.len() {
+                    let request = (next(&mut random) % 2) as u8;
+                    events.push(match next(&mut random) % 13 {
+                        0 => Event::Capture { request },
+                        1 => Event::Lease { request },
+                        2 => Event::Check { request },
+                        3 => Event::Finish { request },
+                        4 => Event::Cancel {
+                            request,
+                            contended: false,
+                        },
+                        5 => Event::Cancel {
+                            request,
+                            contended: true,
+                        },
+                        6 => Event::Refuse { request },
+                        7 => Event::NativeProbe { request },
+                        8 => Event::Advance {
+                            millis: if seed % 2 == 0 { 5_000 } else { 1 },
+                        },
+                        9 => Event::ForeignClock { request },
+                        10 => Event::RevokeStorage {},
+                        11 => Event::ReopenAndRestoreClock {},
+                        _ => Event::FailedCapture { request },
+                    });
+                }
+                let records = verify(&Program {
+                    version: 1,
+                    seed,
+                    events,
+                })?;
+                assert!(records[2].accepted && !records[3].accepted);
+                assert_eq!(records[6].state.requests[1].phase, Phase::Complete);
+                assert!(records.iter().all(|record| {
+                    record.state.distinct_slots
+                        && record
+                            .state
+                            .requests
+                            .iter()
+                            .all(|request| request.routing_clones_share_slot_and_latch)
+                }));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn failed_native_capture_stays_refused_after_storage_restore_and_other_completion()
+        -> Result<()> {
+            let records = verify(&Program {
+                version: 1,
+                seed: 71,
+                events: vec![
+                    Event::FailedCapture { request: 0 },
+                    Event::ReopenAndRestoreClock {},
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Finish { request: 0 },
+                    Event::NativeProbe { request: 0 },
+                    Event::Capture { request: 1 },
+                    Event::Lease { request: 1 },
+                    Event::Finish { request: 1 },
+                ],
+            })?;
+            assert!(!records[0].accepted);
+            assert!(records.iter().all(|record| {
+                let request = &record.state.requests[0];
+                request.phase == Phase::Refused
+                    && !request.held
+                    && request.current.is_none()
+                    && request.captured.is_none()
+            }));
+            assert!(records[2..6].iter().all(|record| !record.accepted));
+            let last = records.last().unwrap();
+            assert!(last.accepted && last.state.storage_live && last.state.distinct_slots);
+            assert_eq!(last.state.requests[1].phase, Phase::Complete);
+            Ok(())
+        }
+
+        #[test]
+        fn cancelling_an_empty_or_completed_slot_is_an_observed_refusal() -> Result<()> {
+            for mut events in [
+                Vec::new(),
+                vec![
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Finish { request: 0 },
+                ],
+            ] {
+                events.push(Event::Cancel {
+                    request: 0,
+                    contended: false,
+                });
+                let records = verify(&Program {
+                    version: 1,
+                    seed: 71,
+                    events,
+                })?;
+                let last = records.last().unwrap();
+                assert!(!last.accepted);
+                assert!(matches!(
+                    last.state.requests[0].phase,
+                    Phase::Empty | Phase::Complete
+                ));
+                assert!(!last.state.requests[0].refused);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn one_cancelled_request_cannot_be_settled_by_another_completed_slot() -> Result<()> {
+            for contended in [false, true] {
+                let program = Program {
+                    version: 1,
+                    seed: 71,
+                    events: vec![
+                        Event::Capture { request: 0 },
+                        Event::Lease { request: 0 },
+                        Event::Check { request: 0 },
+                        Event::Lease { request: 0 },
+                        Event::Cancel {
+                            request: 0,
+                            contended,
+                        },
+                        Event::Capture { request: 1 },
+                        Event::Lease { request: 1 },
+                        Event::Finish { request: 1 },
+                        Event::ReopenAndRestoreClock {},
+                        Event::Capture { request: 0 },
+                        Event::Finish { request: 0 },
+                        Event::NativeProbe { request: 0 },
+                    ],
+                };
+                let records = verify(&program)?;
+                let final_state = &records.last().unwrap().state;
+                assert!(final_state.requests[0].refused && !final_state.requests[0].held);
+                assert_eq!(final_state.requests[1].phase, Phase::Complete);
+                assert!(final_state.storage_live && final_state.distinct_slots);
+                assert!(
+                    records[3].state.requests[0].held,
+                    "failed second take poisoned the winner"
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn original_expiry_rewind_and_storage_refusal_do_not_rearm_after_restore() -> Result<()> {
+            for cut in [
+                Event::Advance { millis: 5_000 },
+                Event::Rewind { millis: 1 },
+                Event::ForeignClock { request: 0 },
+                Event::RevokeStorage {},
+            ] {
+                let mut events = vec![
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Check { request: 0 },
+                    cut,
+                    Event::Check { request: 0 },
+                ];
+                if matches!(cut, Event::Advance { .. }) {
+                    events.push(Event::Rewind { millis: 5_000 });
+                }
+                if matches!(cut, Event::Rewind { .. }) {
+                    events.push(Event::Advance { millis: 1 });
+                }
+                events.extend([
+                    Event::ReopenAndRestoreClock {},
+                    Event::Capture { request: 0 },
+                    Event::Finish { request: 0 },
+                ]);
+                let records = verify(&Program {
+                    version: 1,
+                    seed: 17,
+                    events,
+                })?;
+                assert!(records.last().unwrap().state.requests[0].refused);
+                assert_ne!(
+                    records.last().unwrap().state.requests[0].phase,
+                    Phase::Complete
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn slot_oracle_divergence_is_not_an_expected_cancelled_response() {
+            let program = Program {
+                version: 1,
+                seed: 17,
+                events: vec![
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Cancel {
+                        request: 0,
+                        contended: true,
+                    },
+                ],
+            };
+            assert!(replayed(&program, Control::None).is_ok());
+            let failure = replayed(&program, Control::SlotOracle)
+                .expect_err("corrupt slot oracle became ordinary refusal");
+            assert_eq!(failure.category, "model");
+            assert_eq!(failure.index, 2);
+            assert_eq!(failure.records.len(), 3);
+        }
+
+        fn fields(value: &Value, names: &[&str]) -> Result<()> {
+            let object = value
+                .as_object()
+                .context("request evidence object required")?;
+            ensure!(
+                object.len() == names.len() && names.iter().all(|name| object.contains_key(*name)),
+                "incomplete request evidence object"
+            );
+            Ok(())
+        }
+
+        fn record_shape(value: &Value) -> Result<()> {
+            fields(value, &["accepted", "state", "storage"])?;
+            let state = &value["state"];
+            fields(
+                state,
+                &["requests", "distinct_slots", "storage_live", "now"],
+            )?;
+            for request in state["requests"]
+                .as_array()
+                .context("request array required")?
+            {
+                fields(
+                    request,
+                    &[
+                        "phase",
+                        "refused",
+                        "held",
+                        "current",
+                        "captured",
+                        "routing_clones_share_slot_and_latch",
+                    ],
+                )?;
+                if !request["current"].is_null() {
+                    fields(
+                        &request["current"],
+                        &["domain", "origin", "latest", "refused"],
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
+        fn failure_shape(value: &Value) -> Result<()> {
+            fields(
+                value,
+                &["category", "index", "records", "expected", "failed_step"],
+            )?;
+            for record in value["records"]
+                .as_array()
+                .context("request records required")?
+            {
+                record_shape(record)?;
+            }
+            if !value["failed_step"].is_null() {
+                fields(
+                    &value["failed_step"],
+                    &[
+                        "index",
+                        "actual_outcome",
+                        "observation",
+                        "independently_predicted",
+                    ],
+                )?;
+                record_shape(&value["failed_step"]["observation"])?;
+            }
+            Ok(())
+        }
+
+        fn replay_retained(path: &std::path::Path) -> Result<()> {
+            use std::io::Read;
+            let file = std::fs::File::open(path)?;
+            ensure!(
+                file.metadata()?.len() <= MAX_BUNDLE as u64,
+                "request bundle byte bound"
+            );
+            let mut bytes = Vec::new();
+            file.take((MAX_BUNDLE as u64) + 1).read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= MAX_BUNDLE,
+                "request bundle grew beyond bound"
+            );
+            let value: Value = crate::json::decode_evidence(&bytes)?;
+            fields(
+                &value,
+                &[
+                    "version",
+                    "source",
+                    "original",
+                    "reduced",
+                    "records",
+                    "category",
+                    "index",
+                    "expected",
+                    "oracle_control",
+                    "failed_step",
+                    "reduced_observation",
+                ],
+            )?;
+            for program in [&value["original"], &value["reduced"]] {
+                fields(program, &["version", "seed", "events"])?;
+                ensure!(
+                    program["events"]
+                        .as_array()
+                        .is_some_and(|events| events.iter().all(Value::is_object)),
+                    "request events require objects"
+                );
+            }
+            failure_shape(&json!({
+                "category":value["category"], "index":value["index"], "records":value["records"],
+                "expected":value["expected"], "failed_step":value["failed_step"],
+            }))?;
+            if !value["reduced_observation"].is_null() {
+                failure_shape(&value["reduced_observation"])?;
+            }
+            let bundle: Bundle = serde_json::from_value(value)?;
+            ensure!(
+                bundle.version == 1 && bundle.source == source(),
+                "request bundle source changed"
+            );
+            ensure!(
+                bundle.original.seed == bundle.reduced.seed
+                    && bundle.original.version == bundle.reduced.version,
+                "reduced request input changed"
+            );
+            let mut after = 0;
+            for event in &bundle.reduced.events {
+                let found = bundle.original.events[after..]
+                    .iter()
+                    .position(|old| {
+                        serde_json::to_value(old).unwrap() == serde_json::to_value(event).unwrap()
+                    })
+                    .context("reduction is not deletion-only")?;
+                after += found + 1;
+            }
+            let original = replayed(&bundle.original, bundle.oracle_control)
+                .err()
+                .context("saved disagreement no longer reproduced")?;
+            ensure!(
+                original.category == bundle.category
+                    && original.index == bundle.index
+                    && original.records == bundle.records
+                    && original.expected == bundle.expected
+                    && serde_json::to_value(&original.failed_step)?
+                        == serde_json::to_value(&bundle.failed_step)?,
+                "saved request observations changed"
+            );
+            if let Some(expected) = bundle.reduced_observation {
+                let actual = replayed(&bundle.reduced, bundle.oracle_control)
+                    .err()
+                    .context("reduced disagreement did not reproduce")?;
+                ensure!(
+                    actual.category == expected.category
+                        && actual.index == expected.index
+                        && actual.records == expected.records
+                        && actual.expected == expected.expected
+                        && serde_json::to_value(&actual.failed_step)?
+                            == serde_json::to_value(&expected.failed_step)?,
+                    "reduced request observations changed"
+                );
+            } else {
+                ensure!(
+                    bundle.original.events.len() == bundle.reduced.events.len(),
+                    "unobserved request reduction"
+                );
+            }
+            Ok(())
+        }
+
+        fn replay_selected(path: &std::path::Path) -> Result<()> {
+            replay_retained(path).map_err(|_| anyhow::anyhow!("request slot replay refused"))
+        }
+
+        #[test]
+        fn replay_saved_request_slot_history() -> Result<()> {
+            let Some(path) = std::env::var_os("DAY2_REQUEST_SLOT_REPLAY") else {
+                return Ok(());
+            };
+            replay_selected(std::path::Path::new(&path))
+        }
+
+        #[test]
+        fn retained_request_slot_counterexample_replays_whole_observations_and_source() -> Result<()>
+        {
+            let program = Program {
+                version: 1,
+                seed: 17,
+                events: vec![
+                    Event::Advance { millis: 1 },
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Cancel {
+                        request: 0,
+                        contended: true,
+                    },
+                    Event::ReopenAndRestoreClock {},
+                ],
+            };
+            let failure = replayed(&program, Control::SlotOracle)
+                .expect_err("negative model control did not fail");
+            let directory = tempfile::tempdir()?;
+            let path = retain_at(directory.path(), &program, failure, Control::SlotOracle)?;
+            replay_selected(&path)?;
+            let original = std::fs::read(&path)?;
+            let mut value: Value = crate::json::decode_evidence(&original)?;
+            value["source"] = json!("different-source");
+            let changed = directory.path().join("changed.json");
+            std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+            assert!(replay_retained(&changed).is_err());
+            let mut value: Value = crate::json::decode_evidence(&original)?;
+            let changed_storage =
+                source_with(day2_capabilities::Digest::new(b"changed-storage-only"));
+            assert_ne!(changed_storage, source());
+            value["source"] = json!(changed_storage);
+            std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+            assert!(replay_retained(&changed).is_err());
+            let mut value: Value = crate::json::decode_evidence(&original)?;
+            value["records"].as_array_mut().unwrap().pop();
+            std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+            assert!(replay_retained(&changed).is_err());
+            let mut value: Value = crate::json::decode_evidence(&original)?;
+            value["reduced"]["seed"] = json!(18);
+            std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+            assert!(replay_retained(&changed).is_err());
+            for pointer in [
+                "/failed_step",
+                "/records/0/state/requests/1/current",
+                "/records/0/state/requests/1/captured",
+            ] {
+                let mut value: Value = crate::json::decode_evidence(&original)?;
+                let (parent, key) = pointer.rsplit_once('/').unwrap();
+                assert!(
+                    value
+                        .pointer_mut(parent)
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(key)
+                        .is_some()
+                );
+                std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+                assert!(
+                    replay_retained(&changed).is_err(),
+                    "missing field accepted: {pointer}"
+                );
+            }
+            let duplicate = String::from_utf8(original.clone())?.replacen(
+                "\"version\":1",
+                "\"version\":1,\"version\":1",
+                1,
+            );
+            assert_ne!(duplicate.as_bytes(), original.as_slice());
+            std::fs::write(&changed, duplicate)?;
+            assert!(replay_retained(&changed).is_err());
+            std::fs::write(&changed, vec![b' '; MAX_BUNDLE + 1])?;
+            assert!(replay_retained(&changed).is_err());
+            let mut value: Value = crate::json::decode_evidence(&original)?;
+            value["original"]["events"][0] = json!({"event":"PRIVATE-INVALID-EVENT"});
+            std::fs::write(&changed, serde_json::to_vec(&value)?)?;
+            let refused = replay_selected(&changed).unwrap_err();
+            assert_eq!(refused.chain().count(), 1);
+            assert_eq!(refused.to_string(), "request slot replay refused");
+            Ok(())
+        }
+
+        #[test]
+        fn nested_storage_oracle_failure_keeps_the_actual_failed_step_separate() -> Result<()> {
+            let program = Program {
+                version: 1,
+                seed: 17,
+                events: vec![
+                    Event::Capture { request: 0 },
+                    Event::Lease { request: 0 },
+                    Event::Check { request: 0 },
+                ],
+            };
+            let failure = replayed(&program, Control::StorageOracle)
+                .expect_err("storage model corruption became refusal");
+            assert_eq!(failure.category, "storage_oracle");
+            assert_eq!(failure.records.len(), 2);
+            let actual = failure
+                .failed_step
+                .as_ref()
+                .expect("actual failed-step observation lost");
+            assert_eq!(actual.index, 2);
+            assert_eq!(actual.actual_outcome, None);
+            assert!(actual.observation.state.requests[0].refused);
+            assert_eq!(actual.independently_predicted["accepted"], true);
+            let root = tempfile::tempdir()?;
+            let path = retain_at(root.path(), &program, failure, Control::StorageOracle)?;
+            replay_retained(&path)?;
+            Ok(())
+        }
+
+        #[test]
+        fn longest_supported_request_prefix_writes_evidence_the_reader_accepts() -> Result<()> {
+            let mut events = vec![Event::Capture { request: 0 }, Event::Lease { request: 0 }];
+            events.extend((0..MAX_EVENTS - 3).map(|_| Event::Check { request: 0 }));
+            events.push(Event::Cancel {
+                request: 0,
+                contended: true,
+            });
+            assert_eq!(events.len(), MAX_EVENTS);
+            let program = Program {
+                version: 1,
+                seed: 71,
+                events,
+            };
+            let failure = replayed(&program, Control::SlotOracle)
+                .expect_err("long-prefix control did not diverge");
+            assert_eq!(failure.records.len(), MAX_EVENTS);
+            let root = tempfile::tempdir()?;
+            let path = retain_at(root.path(), &program, failure, Control::SlotOracle)?;
+            assert!(std::fs::metadata(&path)?.len() <= MAX_BUNDLE as u64);
+            replay_retained(&path)?;
+            let mut invalid = program.clone();
+            invalid.events.push(Event::ReopenAndRestoreClock {});
+            assert_eq!(run(&invalid, Control::None).unwrap_err().category, "input");
+            Ok(())
+        }
+    }
 }
