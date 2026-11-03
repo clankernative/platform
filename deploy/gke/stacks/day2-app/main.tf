@@ -1113,7 +1113,7 @@ resource "kubernetes_cron_job_v1" "backup" {
 
               resources {
                 requests = {
-                  cpu               = "100m"
+                  cpu               = "${var.backup_cpu_request_millis}m"
                   memory            = "256Mi"
                   ephemeral-storage = "64Mi"
                 }
