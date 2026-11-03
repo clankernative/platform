@@ -1011,14 +1011,14 @@ pub(super) fn combine(root: &Path, snapshot: &str) -> Result<()> {
     )?)?;
     let tests: Prepared =
         day2::json::decode(&fs::read(root.join("artifacts/ci-preparation-tests.json"))?)?;
-    let fixtures: Prepared = day2::json::decode(&fs::read(
+    let fixture_part: Prepared = day2::json::decode(&fs::read(
         root.join("artifacts/ci-preparation-fixtures.json"),
     )?)?;
     let current = identity(root, snapshot)?;
     let selected = artifacts::read(&current)?;
     artifacts::refresh(root, &selected)?;
     let prepared = combine_origins(
-        [inputs, fixtures, tests],
+        [inputs, fixture_part, tests],
         &current,
         [
             &artifacts::origin(&current, &selected, artifacts::Role::Inputs)?,
