@@ -56,8 +56,8 @@ CLI compilation, all required fixture builds and lint checks in their existing
 Roc order. Tests builds the complete selected normal-program/harness graph once,
 then executes documentation tests. The join requires exact current-run
 identities, disjoint and exhaustive effects, admitted fixtures and a complete
-executable inventory. Permission-preserving transport belongs to that run and
-attempt; it is separate from persistent build caches.
+executable inventory. Permission-preserving transport records its original run
+and producer attempt; it is separate from persistent build caches.
 
 Five Linux campaigns execute the disjoint day2, control and remaining-package
 suites, control simulation and the reviewed parallel compiler probes. The three
@@ -82,8 +82,47 @@ from the production Mac private builder; no Linux production builder is added.
 The native join binds checkout/tree, source catalog, workflow, run/attempt and
 all required Linux and Mac evidence. Snapshots, compiler/configuration identities,
 workspace paths and executable digests remain host-specific. The original
-campaign budgets and coverage remain required. A retry cannot mix preparation
-or outcomes from different attempts.
+campaign budgets and coverage remain required. Retried jobs can consume successful
+outputs from earlier attempts of the same run and exact source. They never consume
+another run's preparation or substitute a different prepared executable set.
+
+A Mac allocation rescued by `retry-mac-compatibility` retains that actual
+producer's job and check IDs. Selection admits it only when the unique original
+Mac job in that same run/attempt/head was cancelled without a runner or steps,
+and the unique retry succeeded on `macos-15`. An executed failure, failed latest
+retry, foreign original or retry, duplicate producer or original-job check cannot
+supply its artifact. The complete native Mac receipt remains mandatory.
+
+### Rerunning sharded verification
+
+GitHub's **Re-run failed jobs**, individual job reruns and **Re-run all jobs** are
+supported. The preparation join, runtime shards and final `verify` job select the
+latest successful producer artifact for each required role across attempts of
+that same run. Download still has a two-minute deadline and one automatic retry.
+
+The selector authenticates the repository, workflow, run ID, head SHA and latest
+attempt, including the actual merge checkout for a pull request. Each immutable
+artifact ID must belong to a successful producer job with a matching GitHub
+Actions check. Missing, expired, duplicate or foreign artifacts fail admission;
+an earlier success cannot hide a newer failed producer. Common metadata and
+binary partitions must share their preparation origin, and every Linux receipt
+must match the exact prepared-output digest.
+
+Inventory reads require complete bounded pages with unique positive IDs. If a
+count and its entries disagree or the count changes between pages, the selector
+discards that entire snapshot and restarts from page one, at most three times.
+It never truncates extra entries or combines pages from different snapshots.
+Malformed identities, duplicates and budget overruns refuse immediately;
+persistent inconsistency also refuses. Diagnostics identify only the closed
+inventory endpoint and numeric run/attempt, without process arguments or
+environment values.
+
+`ci-artifact-selection.json` in the final verification receipt records the current
+consumer and each original producer attempt, job, check, artifact ID and digest.
+Earlier receipts retain their execution identity; a retry does not claim that
+successful campaigns executed again. The selector rechecks live metadata before
+joining all unchanged Linux and Mac obligations. If a required artifact has
+expired, use **Re-run all jobs** to regenerate the complete run.
 
 ### Mac runner acquisition
 
@@ -104,27 +143,6 @@ It cannot reserve GitHub capacity or guarantee that the second request succeeds.
 The existing exact-success queue-reuse guard remains conservative: a rescued
 run with a cancelled original Mac job does not qualify for main's receipt reuse,
 so main executes ordinary verification instead.
-
-### Rerunning sharded verification
-
-Use **Re-run all jobs** for a failed Platform CI verification run. From the CLI:
-
-```console
-gh run rerun RUN_ID --repo clankernative/platform
-```
-
-Failed-jobs-only (`--failed`) and individual-job retries are not supported for
-rerunning the sharded verification pipeline. Artifact names include the producing
-`github.run_attempt`, and consumers request their own attempt's artifacts. A
-retry can retain green producer jobs from an earlier attempt without producing
-the new Linux verifier, prepared outputs or shard receipts that consumers need.
-The final `verify` job then fails despite those earlier green results.
-
-For ordinary sharded verification, a full rerun executes the campaigns and
-produces a complete set of artifacts for one attempt. Keep earlier artifacts
-under their original identities.
-Admitted compilation caches can still speed the rerun; runtime outcomes remain
-fresh, and the complete verification receipt is required before handoff.
 
 ## Completed build outputs
 
